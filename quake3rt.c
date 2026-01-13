@@ -382,16 +382,91 @@ VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR|VK_BUFFER_U
 VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT|VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
 upBuf(dev,ib,bsp.idx,sizeof(uint32_t)*bsp.ni);
 
-printf("Uploaded geometry to GPU\n");
+PFN_vkGetAccelerationStructureBuildSizesKHR vkGetAccelerationStructureBuildSizesKHR=
+(PFN_vkGetAccelerationStructureBuildSizesKHR)vkGetDeviceProcAddr(dev,"vkGetAccelerationStructureBuildSizesKHR");
+PFN_vkCreateAccelerationStructureKHR vkCreateAccelerationStructureKHR=
+(PFN_vkCreateAccelerationStructureKHR)vkGetDeviceProcAddr(dev,"vkCreateAccelerationStructureKHR");
+PFN_vkCmdBuildAccelerationStructuresKHR vkCmdBuildAccelerationStructuresKHR=
+(PFN_vkCmdBuildAccelerationStructuresKHR)vkGetDeviceProcAddr(dev,"vkCmdBuildAccelerationStructuresKHR");
+PFN_vkGetAccelerationStructureDeviceAddressKHR vkGetAccelerationStructureDeviceAddressKHR=
+(PFN_vkGetAccelerationStructureDeviceAddressKHR)vkGetDeviceProcAddr(dev,"vkGetAccelerationStructureDeviceAddressKHR");
+
+VkAccelerationStructureGeometryKHR geom={VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR,0,
+VK_GEOMETRY_TYPE_TRIANGLES_KHR,{.triangles={VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_TRIANGLES_DATA_KHR,0,
+VK_FORMAT_R32G32B32_SFLOAT,{.deviceAddress=vb.a},sizeof(BSPVert),bsp.nv-1,VK_INDEX_TYPE_UINT32,{.deviceAddress=ib.a},
+{.deviceAddress=0}}},VK_GEOMETRY_OPAQUE_BIT_KHR};
+VkAccelerationStructureBuildGeometryInfoKHR bgi={VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR,0,
+VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR,VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR,
+VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR,0,0,1,&geom};
+VkAccelerationStructureBuildSizesInfoKHR szi={VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR};
+uint32_t primCnt=bsp.ni/3;
+vkGetAccelerationStructureBuildSizesKHR(dev,VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR,&bgi,&primCnt,&szi);
+
+Buf asBuf=mkBuf(dev,pd,szi.accelerationStructureSize,VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR|
+VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+VkAccelerationStructureCreateInfoKHR asci={VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_CREATE_INFO_KHR,0,0,asBuf.b,0,
+szi.accelerationStructureSize,VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR,0};
+VkAccelerationStructureKHR blas;VK(vkCreateAccelerationStructureKHR(dev,&asci,0,&blas));
+
+Buf scratchBuf=mkBuf(dev,pd,szi.buildScratchSize,VK_BUFFER_USAGE_STORAGE_BUFFER_BIT|VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
+VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+bgi.dstAccelerationStructure=blas;
+bgi.scratchData.deviceAddress=scratchBuf.a;
 
 VkCommandPoolCreateInfo pci={VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,0,0,qf};
 VkCommandPool pool;VK(vkCreateCommandPool(dev,&pci,0,&pool));
-
 VkCommandBufferAllocateInfo cai={VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,0,pool,VK_COMMAND_BUFFER_LEVEL_PRIMARY,1};
 VkCommandBuffer cmd;VK(vkAllocateCommandBuffers(dev,&cai,&cmd));
 
-printf("Vulkan RT initialized\n");
-printf("Next: Build BLAS, compile shaders, render frame\n");
+VkCommandBufferBeginInfo cbi={VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,0,VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT};
+VK(vkBeginCommandBuffer(cmd,&cbi));
+VkAccelerationStructureBuildRangeInfoKHR bri={primCnt,0,0,0};
+VkAccelerationStructureBuildRangeInfoKHR*bris=&bri;
+vkCmdBuildAccelerationStructuresKHR(cmd,1,&bgi,&bris);
+VK(vkEndCommandBuffer(cmd));
+
+VkSubmitInfo si={VK_STRUCTURE_TYPE_SUBMIT_INFO,0,0,0,0,1,&cmd};
+VK(vkQueueSubmit(q,1,&si,0));
+VK(vkQueueWaitIdle(q));
+
+VkAccelerationStructureDeviceAddressInfoKHR dai={VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_DEVICE_ADDRESS_INFO_KHR,0,blas};
+VkDeviceAddress blasAddr=vkGetAccelerationStructureDeviceAddressKHR(dev,&dai);
+
+VkAccelerationStructureInstanceKHR inst={{1,0,0,0,0,1,0,0,0,0,1,0},0,0xff,0,VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR,
+blasAddr};
+Buf instBuf=mkBuf(dev,pd,sizeof(inst),VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR|
+VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT|VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+upBuf(dev,instBuf,&inst,sizeof(inst));
+
+VkAccelerationStructureGeometryKHR tlGeom={VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR,0,VK_GEOMETRY_TYPE_INSTANCES_KHR,
+{.instances={VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_INSTANCES_DATA_KHR,0,VK_FALSE,{.deviceAddress=instBuf.a}}},0};
+VkAccelerationStructureBuildGeometryInfoKHR tlBgi={VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR,0,
+VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR,VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR,
+VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR,0,0,1,&tlGeom};
+uint32_t instCnt=1;
+vkGetAccelerationStructureBuildSizesKHR(dev,VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR,&tlBgi,&instCnt,&szi);
+
+Buf tlasBuf=mkBuf(dev,pd,szi.accelerationStructureSize,VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR,
+VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+VkAccelerationStructureCreateInfoKHR tlAsci={VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_CREATE_INFO_KHR,0,0,tlasBuf.b,0,
+szi.accelerationStructureSize,VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR,0};
+VkAccelerationStructureKHR tlas;VK(vkCreateAccelerationStructureKHR(dev,&tlAsci,0,&tlas));
+
+Buf tlScratch=mkBuf(dev,pd,szi.buildScratchSize,VK_BUFFER_USAGE_STORAGE_BUFFER_BIT|VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
+VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+tlBgi.dstAccelerationStructure=tlas;
+tlBgi.scratchData.deviceAddress=tlScratch.a;
+
+VK(vkResetCommandBuffer(cmd,0));
+VK(vkBeginCommandBuffer(cmd,&cbi));
+VkAccelerationStructureBuildRangeInfoKHR tlBri={1,0,0,0};
+VkAccelerationStructureBuildRangeInfoKHR*tlBris=&tlBri;
+vkCmdBuildAccelerationStructuresKHR(cmd,1,&tlBgi,&tlBris);
+VK(vkEndCommandBuffer(cmd));
+VK(vkQueueSubmit(q,1,&si,0));
+VK(vkQueueWaitIdle(q));
+
+printf("Built BLAS (%u tris) + TLAS\n",primCnt);
 
 SDL_DestroyWindow(win);
 SDL_Quit();

@@ -1,6 +1,7 @@
 #version 460
 #extension GL_EXT_ray_query:require
 #extension GL_EXT_scalar_block_layout:require
+layout(local_size_x=16,local_size_y=16)in;
 
 layout(binding=0,set=0)uniform accelerationStructureEXT tlas;
 layout(binding=1,set=0,rgba8)uniform image2D img;
@@ -8,12 +9,14 @@ layout(binding=2,set=0,scalar)readonly buffer Verts{float data[];}verts;
 layout(binding=3,set=0)readonly buffer Idx{uint i[];}idx;
 layout(push_constant)uniform PC{mat4 invVP;vec3 camPos;}pc;
 
-vec3 getPos(uint i){return vec3(verts.data[i*14],verts.data[i*14+1],verts.data[i*14+2]);}
-vec3 getNorm(uint i){return vec3(verts.data[i*14+6],verts.data[i*14+7],verts.data[i*14+8]);}
+vec3 getPos(uint i){uint o=i*14;return vec3(verts.data[o],verts.data[o+1],verts.data[o+2]);}
+vec3 getNorm(uint i){uint o=i*14+6;return vec3(verts.data[o],verts.data[o+1],verts.data[o+2]);}
 
 void main(){
 ivec2 px=ivec2(gl_GlobalInvocationID.xy);
-vec2 uv=(vec2(px)+.5)/vec2(gl_LaunchSizeEXT.xy)*2-1;
+ivec2 sz=imageSize(img);
+if(px.x>=sz.x||px.y>=sz.y)return;
+vec2 uv=(vec2(px)+.5)/vec2(sz)*2-1;
 vec4 t=pc.invVP*vec4(uv,1,1);
 vec3 d=normalize(t.xyz/t.w-pc.camPos);
 
