@@ -7,9 +7,14 @@ layout(binding=0,set=0)uniform accelerationStructureEXT tlas;
 layout(binding=1,set=0,rgba8)uniform image2D img;
 layout(binding=2,set=0,scalar)readonly buffer Verts{float data[];}verts;
 layout(binding=3,set=0)readonly buffer Idx{uint i[];}idx;
-layout(push_constant)uniform PC{mat4 invVP;vec3 camPos;}pc;
+layout(binding=4,set=0)readonly buffer TriSurf{uint ts[];}trisurf;
+layout(binding=5,set=0)readonly buffer Surfs{uint data[];}surfs;
+layout(binding=6,set=0)readonly buffer Shaders{uint fl[];}shaders;
+layout(binding=7,set=0)uniform sampler2DArray lmaps;
+layout(push_constant)uniform PC{mat4 invVP;vec3 camPos;uint nlm;}pc;
 
 vec3 getPos(uint i){uint o=i*11;return vec3(verts.data[o],verts.data[o+1],verts.data[o+2]);}
+vec2 getLmUV(uint i){uint o=i*11+5;return vec2(verts.data[o],verts.data[o+1]);}
 vec3 getNorm(uint i){uint o=i*11+7;return vec3(verts.data[o],verts.data[o+1],verts.data[o+2]);}
 
 void main(){
@@ -24,15 +29,31 @@ rayQueryEXT rq;
 rayQueryInitializeEXT(rq,tlas,0,0xFF,pc.camPos,.01,d,1e4);
 while(rayQueryProceedEXT(rq));
 
-vec3 c=vec3(.2,.2,.3);
+vec3 c=vec3(135./255.,206./255.,235./255.);
 if(rayQueryGetIntersectionTypeEXT(rq,true)==gl_RayQueryCommittedIntersectionTriangleEXT){
 vec2 b=rayQueryGetIntersectionBarycentricsEXT(rq,true);
-uint tri=rayQueryGetIntersectionPrimitiveIndexEXT(rq,true)*3;
-vec3 n0=getNorm(idx.i[tri]),n1=getNorm(idx.i[tri+1]),n2=getNorm(idx.i[tri+2]);
+uint tri=rayQueryGetIntersectionPrimitiveIndexEXT(rq,true);
+uint si=trisurf.ts[tri];
+uint so=si*19;
+int sh=int(surfs.data[so]);
+int lm=int(surfs.data[so+16]);
+
+if(sh>=0&&(shaders.fl[sh]&4)!=0){
+c=vec3(135./255.,206./255.,235./255.);
+}else{
+uint t0=idx.i[tri*3],t1=idx.i[tri*3+1],t2=idx.i[tri*3+2];
+vec2 uv0=getLmUV(t0),uv1=getLmUV(t1),uv2=getLmUV(t2);
+vec2 lmuv=uv0*(1-b.x-b.y)+uv1*b.x+uv2*b.y;
+vec3 lm_c=vec3(1);
+if(lm>=0&&lm<pc.nlm){
+lm_c=texture(lmaps,vec3(lmuv,float(lm))).rgb;
+}
+vec3 n0=getNorm(t0),n1=getNorm(t1),n2=getNorm(t2);
 vec3 n=normalize(n0*(1-b.x-b.y)+n1*b.x+n2*b.y);
 vec3 l=normalize(vec3(1,1,2));
-float diff=max(0,dot(n,l))*.8+.2;
-c=vec3(diff);
+float diff=max(0,dot(n,l))*.5+.5;
+c=lm_c*diff;
+}
 }
 imageStore(img,px,vec4(c,1));
 }
