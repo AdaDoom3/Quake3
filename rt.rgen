@@ -8,8 +8,8 @@ layout(binding=2,set=0,scalar)readonly buffer Verts{float data[];}verts;
 layout(binding=3,set=0)readonly buffer Idx{uint i[];}idx;
 layout(push_constant)uniform PC{mat4 invVP;vec3 camPos;}pc;
 
-vec3 getPos(uint i){return vec3(verts.data[i*14],verts.data[i*14+1],verts.data[i*14+2]);}
-vec3 getNorm(uint i){return vec3(verts.data[i*14+6],verts.data[i*14+7],verts.data[i*14+8]);}
+vec3 getPos(uint i){return vec3(verts.data[i*11],verts.data[i*11+1],verts.data[i*11+2]);}
+vec3 getNorm(uint i){return vec3(verts.data[i*11+7],verts.data[i*11+8],verts.data[i*11+9]);}
 
 void main(){
 ivec2 px=ivec2(gl_GlobalInvocationID.xy);
