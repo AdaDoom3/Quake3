@@ -5,7 +5,7 @@ models/weapons2/shotgun/skinoa
         rgbGen lightingDiffuse
     }
     {
-        map models/weapons2/shotgun/shotgun_spec.jpg
+        map models/weapons2/shotgun/shotgun_spec.tga
         blendFunc GL_SRC_ALPHA GL_ONE
         detail
         alphaGen lightingSpecular

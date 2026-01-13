@@ -72,7 +72,7 @@ textures/sfx/beam
 	cull none
 	
 	{
-		map textures/sfx/beam.jpg
+		map textures/sfx/beam.tga
                 tcMod Scroll .3 0
                 blendFunc GL_ONE GL_ONE
         }
@@ -80,7 +80,7 @@ textures/sfx/beam
 
 textures/sfx/beam_dusty2
 {
-	qer_editorimage textures/sfx/beam_1.jpg
+	qer_editorimage textures/sfx/beam_1.tga
         surfaceparm trans	
         surfaceparm nomarks	
         surfaceparm nonsolid
@@ -88,12 +88,12 @@ textures/sfx/beam_dusty2
 	cull none
 	
 	{
-		map textures/sfx/beam.jpg
+		map textures/sfx/beam.tga
 		tcMod Scroll .3 0
 		blendFunc GL_ONE GL_ONE
 	}
 	{
-		map textures/sfx/beam.jpg
+		map textures/sfx/beam.tga
 		tcMod Scroll -10 0
 		blendFunc GL_ONE GL_ONE
 	}
@@ -101,7 +101,7 @@ textures/sfx/beam_dusty2
 
 textures/sfx/beam_blue
 {
-	qer_editorimage textures/sfx/beam_blue4.jpg
+	qer_editorimage textures/sfx/beam_blue4.tga
 	surfaceparm trans	
         surfaceparm nomarks	
         surfaceparm nonsolid
@@ -109,7 +109,7 @@ textures/sfx/beam_blue
 	cull none
 	
 	{
-		map textures/sfx/beam_blue4.jpg
+		map textures/sfx/beam_blue4.tga
                 tcMod Scroll .3 0
                 blendFunc GL_ONE GL_ONE
         }
@@ -117,7 +117,7 @@ textures/sfx/beam_blue
 
 textures/sfx/beam_red
 {
-	qer_editorimage textures/sfx/beam_red.jpg
+	qer_editorimage textures/sfx/beam_red.tga
 	surfaceparm trans	
         surfaceparm nomarks	
         surfaceparm nonsolid
@@ -125,7 +125,7 @@ textures/sfx/beam_red
 	cull none
 	
 	{
-		map textures/sfx/beam_red.jpg
+		map textures/sfx/beam_red.tga
                 tcMod Scroll .3 0
                 blendFunc GL_ONE GL_ONE
         }
@@ -134,7 +134,7 @@ textures/sfx/beam_red
 textures/sfx/beam_waterlight2
 
 {
-	qer_editorimage textures/sfx/beam_waterlight.jpg
+	qer_editorimage textures/sfx/beam_waterlight.tga
 	surfaceparm trans	
         surfaceparm nomarks	
         surfaceparm nonsolid
@@ -142,7 +142,7 @@ textures/sfx/beam_waterlight2
 	cull none
 	
 	{
-		map textures/sfx/beam_waterlight.jpg
+		map textures/sfx/beam_waterlight.tga
                 tcMod Scroll .3 0
                 blendFunc GL_ONE GL_ONE
         }
@@ -152,7 +152,7 @@ textures/sfx/beam_waterlight2
 textures/sfx/lavabeam
 
 {
-	qer_editorimage textures/sfx/lavabeam.jpg
+	qer_editorimage textures/sfx/lavabeam.tga
 	surfaceparm trans	
         surfaceparm nomarks	
         surfaceparm nonsolid
@@ -160,7 +160,7 @@ textures/sfx/lavabeam
 	cull none
 	
 	{
-		map textures/sfx/lavabeam.jpg
+		map textures/sfx/lavabeam.tga
                 tcMod Scroll 5 0
                 blendFunc GL_ONE GL_ONE
         }
@@ -187,7 +187,7 @@ textures/sfx/portal_sfx
 		tcmod scroll .04 .01
 	}
 	{
-		map textures/acc_dm3/fx_tintedportal.jpg
+		map textures/acc_dm3/fx_tintedportal.tga
 		rgbgen identity
 		blendFunc filter
 	}
@@ -195,8 +195,8 @@ textures/sfx/portal_sfx
 
 textures/sfx/teslacoil
 {
-	qer_editorimage textures/sfx/tesla1.jpg
-	q3map_lightimage textures/sfx/tesla1.jpg
+	qer_editorimage textures/sfx/tesla1.tga
+	q3map_lightimage textures/sfx/tesla1.tga
 	q3map_surfacelight 25
 	cull none
 	{
@@ -205,7 +205,7 @@ textures/sfx/teslacoil
 		blendfunc filter
 	}
 	{
-		map textures/sfx/tesla1.jpg
+		map textures/sfx/tesla1.tga
 		blendfunc add
 		rgbgen wave sawtooth 0 1 0 5
 		tcmod scale 4 .5
@@ -213,7 +213,7 @@ textures/sfx/teslacoil
 		tcmod scroll -1 1
 	}
 	{
-		map textures/sfx/tesla1b.jpg
+		map textures/sfx/tesla1b.tga
 		blendfunc add
 		rgbgen wave square 0.5 0.5 0.5 2.5
 		tcmod rotate 90
@@ -221,7 +221,7 @@ textures/sfx/teslacoil
 		tcmod scroll -2 2
 	}
 	{
-		map textures/sfx/electricslime.jpg
+		map textures/sfx/electricslime.tga
 		blendfunc add
 		rgbgen wave sawtooth .25 1 0 5
 		tcmod scale 4 .5
@@ -236,8 +236,8 @@ textures/sfx/teslacoil
 
 textures/sfx/teslacoil3
 {
-	qer_editorimage textures/sfx/tesla1b.jpg
-	q3map_lightimage textures/sfx/electricslime.jpg
+	qer_editorimage textures/sfx/tesla1b.tga
+	q3map_lightimage textures/sfx/electricslime.tga
 	q3map_surfacelight 25
 	cull none
 	{
@@ -246,7 +246,7 @@ textures/sfx/teslacoil3
 		blendfunc filter
 	}
 	{
-		map textures/sfx/tesla1.jpg
+		map textures/sfx/tesla1.tga
 		blendfunc add
 		rgbgen wave sawtooth 0 1 0 5
 		tcmod scale 1 2
@@ -254,7 +254,7 @@ textures/sfx/teslacoil3
 		tcmod scroll 2 -2
 	}
 	{
-		map textures/sfx/electricslime.jpg
+		map textures/sfx/electricslime.tga
 		blendfunc add
 		rgbgen wave sawtooth .25 1 0 5
 		tcmod scale 1 2
@@ -291,14 +291,14 @@ textures/sfx/proto_zzztblu3
 
 textures/sfx/xian_dm3padwall
 {
-	qer_editorimage textures/sfx/xian_dm3padwall.jpg
-	q3map_lightimage textures/sfx/xian_dm3padwallglow.jpg
+	qer_editorimage textures/sfx/xian_dm3padwall.tga
+	q3map_lightimage textures/sfx/xian_dm3padwallglow.tga
 	surfaceparm nomarks
 	surfaceparm metalsteps
 	q3map_surfacelight 25
 		
 	{
-		map textures/sfx/xian_dm3padwall.jpg
+		map textures/sfx/xian_dm3padwall.tga
 		rgbgen identity
 		
 	}
@@ -309,7 +309,7 @@ textures/sfx/xian_dm3padwall
 		
 	}
 	{
-		map textures/sfx/xian_dm3padwallglow.jpg
+		map textures/sfx/xian_dm3padwallglow.tga
 		tcmod scroll 0 1
 		rgbGen wave sin 0 2 .5 2
 		blendfunc add
@@ -688,7 +688,7 @@ textures/sfx/flameanim_red_pj
 
 textures/sfx/clangdark_bounce
 {
-	qer_editorimage textures/sfx/clangdark_bounce.jpg
+	qer_editorimage textures/sfx/clangdark_bounce.tga
 	q3map_lightimage textures/clown/circ4glow.tga
 	q3map_surfacelight 100
 	{
@@ -696,7 +696,7 @@ textures/sfx/clangdark_bounce
 		rgbGen identity
 	}
 	{
-		map textures/sfx/clangdark_bounce.jpg
+		map textures/sfx/clangdark_bounce.tga
 		blendFunc filter
 		rgbGen identity
 	}
@@ -709,7 +709,7 @@ textures/sfx/clangdark_bounce
 
 textures/sfx/bounce_concrete
 {
-	qer_editorimage textures/sfx/bounce_concrete.jpg
+	qer_editorimage textures/sfx/bounce_concrete.tga
 	q3map_lightimage textures/clown/circ4glow.tga
 	q3map_surfacelight 100
 	{
@@ -717,7 +717,7 @@ textures/sfx/bounce_concrete
 		rgbGen identity
 	}
 	{
-		map textures/sfx/bounce_concrete.jpg
+		map textures/sfx/bounce_concrete.tga
 		blendFunc filter
 		rgbGen identity
 	}
@@ -730,7 +730,7 @@ textures/sfx/bounce_concrete
 
 textures/sfx/bouncepad01_block17
 {
-	qer_editorimage textures/sfx/bouncepad01_block17.jpg
+	qer_editorimage textures/sfx/bouncepad01_block17.tga
 	q3map_lightimage textures/clown/circ4glow.tga
 	q3map_surfacelight 100
 	{
@@ -738,7 +738,7 @@ textures/sfx/bouncepad01_block17
 		rgbGen identity
 	}
 	{
-		map textures/sfx/bouncepad01_block17.jpg
+		map textures/sfx/bouncepad01_block17.tga
 		blendFunc filter
 		rgbGen identity
 	}
@@ -751,7 +751,7 @@ textures/sfx/bouncepad01_block17
 
 textures/sfx/bouncepad01block18b
 {
-	qer_editorimage textures/sfx/bouncepad01_block18b.jpg
+	qer_editorimage textures/sfx/bouncepad01_block18b.tga
 	q3map_lightimage textures/clown/circ4glow.tga
 	q3map_surfacelight 100
 	{
@@ -759,7 +759,7 @@ textures/sfx/bouncepad01block18b
 		rgbGen identity
 	}
 	{
-		map textures/sfx/bouncepad01_block18b.jpg
+		map textures/sfx/bouncepad01_block18b.tga
 		blendFunc filter
 		rgbGen identity
 	}
@@ -772,7 +772,7 @@ textures/sfx/bouncepad01block18b
 
 textures/sfx/bouncepad1q1metal7_99
 {
-	qer_editorimage textures/sfx/bouncepad1q1metal7_99.jpg
+	qer_editorimage textures/sfx/bouncepad1q1metal7_99.tga
 	q3map_lightimage textures/clown/circ4glow.tga
 	q3map_surfacelight 100
 	{
@@ -780,7 +780,7 @@ textures/sfx/bouncepad1q1metal7_99
 		rgbGen identity
 	}
 	{
-		map textures/sfx/bouncepad1q1metal7_99.jpg
+		map textures/sfx/bouncepad1q1metal7_99.tga
 		blendFunc filter
 		rgbGen identity
 	}
@@ -793,7 +793,7 @@ textures/sfx/bouncepad1q1metal7_99
 
 textures/sfx/bounce_largeblock3b
 {
-	qer_editorimage textures/sfx/bounce_largeblock3b.jpg
+	qer_editorimage textures/sfx/bounce_largeblock3b.tga
 	q3map_lightimage textures/clown/circ4glow.tga
 	q3map_surfacelight 100
 	{
@@ -801,7 +801,7 @@ textures/sfx/bounce_largeblock3b
 		rgbGen identity
 	}
 	{
-		map textures/sfx/bounce_largeblock3b.jpg
+		map textures/sfx/bounce_largeblock3b.tga
 		blendFunc filter
 		rgbGen identity
 	}
@@ -814,7 +814,7 @@ textures/sfx/bounce_largeblock3b
 
 textures/sfx/metalbridge06_bounce
 {
-	qer_editorimage textures/sfx/metalbridge06_bounce.jpg
+	qer_editorimage textures/sfx/metalbridge06_bounce.tga
 	q3map_lightimage textures/clown/circ4glow.tga
 	q3map_surfacelight 466
 	{
@@ -822,7 +822,7 @@ textures/sfx/metalbridge06_bounce
 		rgbGen identity
 	}
 	{
-		map textures/sfx/metalbridge06_bounce.jpg
+		map textures/sfx/metalbridge06_bounce.tga
 		blendfunc filter
 		rgbGen identity
 	}
@@ -835,7 +835,7 @@ textures/sfx/metalbridge06_bounce
 
 textures/sfx/diamond2cjumppad
 {
-	qer_editorimage textures/sfx/bouncepad01_diamond2cTGA.jpg
+	qer_editorimage textures/sfx/bouncepad01_diamond2cTGA.tga
 	q3map_lightimage textures/clown/circ4glow.tga
 	q3map_surfacelight 100
 	{
@@ -843,7 +843,7 @@ textures/sfx/diamond2cjumppad
 		rgbGen identity
 	}
 	{
-		map textures/sfx/bouncepad01_diamond2cTGA.jpg
+		map textures/sfx/bouncepad01_diamond2cTGA.tga
 		blendFunc filter
 		rgbGen identity
 	}
@@ -963,7 +963,7 @@ textures/sfx/xmetalfloor_wall_14b
 		rgbgen identity
 	}
 	{
-		map textures/sfx/mfw14b_glow.jpg
+		map textures/sfx/mfw14b_glow.tga
 		tcmod scale .5 .5
 		tcmod scroll 0 1
 		rgbgen identity
@@ -989,7 +989,7 @@ textures/sfx/xmetalfloor_wall_5b
 		rgbgen identity
 	}
 	{
-		map textures/sfx/mfw7b_glow.jpg
+		map textures/sfx/mfw7b_glow.tga
 		tcmod scale .5 .5
 		tcmod scroll 0 1
 		rgbgen identity
@@ -1015,7 +1015,7 @@ textures/sfx/xmetalfloor_wall_9b
 		rgbgen identity
 	}
 	{
-		map textures/sfx/mfw9b_glow.jpg
+		map textures/sfx/mfw9b_glow.tga
 		tcmod scale .5 .5
 		tcmod scroll 0 1
 		rgbgen identity
@@ -1057,12 +1057,12 @@ textures/sfx/launchpad_blocks17
 	qer_editorimage textures/sfx/launchpad03.tga
 	surfaceparm nomarks
 	{
-		map textures/sfx/tread.jpg
+		map textures/sfx/tread.tga
 		tcmod scroll 0 1
 		rgbgen identity
 	}
 	{
-		map textures/sfx/nlaunch.jpg
+		map textures/sfx/nlaunch.tga
 		blendfunc add
 		tcmod scroll 0 4
 		rgbgen wave square 0 .7 0 1.4
@@ -1078,7 +1078,7 @@ textures/sfx/launchpad_blocks17
 		rgbgen identity
 	}
 	{
-		map textures/sfx/nlaunch2.jpg
+		map textures/sfx/nlaunch2.tga
 		blendfunc add
 		rgbgen wave square 0 .7 0 1.4
 	}
@@ -1089,12 +1089,12 @@ textures/sfx/launchpad_blocks18d
 	qer_editorimage textures/sfx/launchpad03.tga
 	surfaceparm nomarks
 	{
-		map textures/sfx/tread.jpg
+		map textures/sfx/tread.tga
 		tcmod scroll 0 1
 		rgbgen identity
 	}
 	{
-		map textures/sfx/nlaunch.jpg
+		map textures/sfx/nlaunch.tga
 		blendfunc add
 		tcmod scroll 0 4
 		rgbgen wave square 0 .7 0 1.4
@@ -1110,7 +1110,7 @@ textures/sfx/launchpad_blocks18d
 		rgbgen identity
 	}
 	{
-		map textures/sfx/nlaunch2.jpg
+		map textures/sfx/nlaunch2.tga
 		blendfunc add
 		rgbgen wave square 0 .7 0 1.4
 	}
@@ -1121,12 +1121,12 @@ textures/sfx/launchpad_diamond
 	qer_editorimage textures/sfx/launchpad03.tga
 	surfaceparm nomarks
 	{
-		map textures/sfx/tread.jpg
+		map textures/sfx/tread.tga
 		tcmod scroll 0 1
 		rgbgen identity
 	}
 	{
-		map textures/sfx/nlaunch.jpg
+		map textures/sfx/nlaunch.tga
 		blendfunc add
 		tcmod scroll 0 4
 		rgbgen wave square 0 .7 0 1.4
@@ -1142,7 +1142,7 @@ textures/sfx/launchpad_diamond
 		rgbgen identity
 	}
 	{
-		map textures/sfx/nlaunch2.jpg
+		map textures/sfx/nlaunch2.tga
 		blendfunc add
 		rgbgen wave square 0 .7 0 1.4
 	}
@@ -1154,12 +1154,12 @@ textures/sfx/launchpad_metalbridge04d
 	qer_editorimage textures/sfx/launchpad03.tga
 	surfaceparm nomarks
 	{
-		map textures/sfx/tread.jpg
+		map textures/sfx/tread.tga
 		tcmod scroll 0 1
 		rgbgen identity
 	}
 	{
-		map textures/sfx/nlaunch.jpg
+		map textures/sfx/nlaunch.tga
 		blendfunc add
 		tcmod scroll 0 4
 		rgbgen wave square 0 .7 0 1.4
@@ -1175,7 +1175,7 @@ textures/sfx/launchpad_metalbridge04d
 		rgbgen identity
 	}
 	{
-		map textures/sfx/nlaunch2.jpg
+		map textures/sfx/nlaunch2.tga
 		blendfunc add
 		rgbgen wave square 0 .7 0 1.4
 	}
@@ -1186,12 +1186,12 @@ textures/sfx2/ntrl_launchpad
 	qer_editorimage textures/sfx/launchpad03.tga
 	surfaceparm nomarks
 	{
-		map textures/sfx/tread.jpg
+		map textures/sfx/tread.tga
 		tcmod scroll 0 1
 		rgbgen identity
 	}
 	{
-		map textures/sfx/nlaunch.jpg
+		map textures/sfx/nlaunch.tga
 		blendfunc add
 		tcmod scroll 0 4
 		rgbgen wave square 0 .7 0 1.4
@@ -1207,7 +1207,7 @@ textures/sfx2/ntrl_launchpad
 		rgbgen identity
 	}
 	{
-		map textures/sfx/nlaunch2.jpg
+		map textures/sfx/nlaunch2.tga
 		blendfunc add
 		rgbgen wave square 0 .7 0 1.4
 	}
@@ -1218,12 +1218,12 @@ textures/sfx2/blue_launchpad
 	qer_editorimage textures/sfx/launchpad03.tga
 	surfaceparm nomarks
 	{
-		map textures/sfx/tread.jpg
+		map textures/sfx/tread.tga
 		tcmod scroll 0 1
 		rgbgen identity
 	}
 	{
-		map textures/sfx/blaunch.jpg
+		map textures/sfx/blaunch.tga
 		blendfunc add
 		tcmod scroll 0 4
 		rgbgen wave square 0 .7 0 1.4
@@ -1239,7 +1239,7 @@ textures/sfx2/blue_launchpad
 		rgbgen identity
 	}
 	{
-		map textures/sfx/blaunch2.jpg
+		map textures/sfx/blaunch2.tga
 		blendfunc add
 		rgbgen wave square 0 .7 0 1.4
 	}
@@ -1250,12 +1250,12 @@ textures/sfx2/red_launchpad
 	qer_editorimage textures/sfx/launchpad03.tga
 	surfaceparm nomarks
 	{
-		map textures/sfx/tread.jpg
+		map textures/sfx/tread.tga
 		tcmod scroll 0 1
 		rgbgen identity
 	}
 	{
-		map textures/sfx/rlaunch.jpg
+		map textures/sfx/rlaunch.tga
 		blendfunc add
 		tcmod scroll 0 4
 		rgbgen wave square 0 .7 0 1.4
@@ -1271,7 +1271,7 @@ textures/sfx2/red_launchpad
 		rgbgen identity
 	}
 	{
-		map textures/sfx/rlaunch2.jpg
+		map textures/sfx/rlaunch2.tga
 		blendfunc add
 		rgbgen wave square 0 .7 0 1.4
 	}

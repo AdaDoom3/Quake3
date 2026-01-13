@@ -26,7 +26,7 @@ models/players/merman/brac
 		rgbGen lightingDiffuse
 	}
 	// {
-		// map /textures/effects/tinfx.jpg
+		// map /textures/effects/tinfx.tga
 		// blendfunc add
 		// rgbGen lightingDiffuse
 		// tcGen environment 

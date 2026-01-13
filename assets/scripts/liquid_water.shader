@@ -206,19 +206,19 @@ textures/liquids/waveywater
 	surfaceparm water
 	cull disable
 	{
-		map textures/liquids/pool2.jpg
+		map textures/liquids/pool2.tga
 		blendfunc filter
 		rgbGen const ( 1 1 1 )
 		tcMod scroll 0.05 0.05
 	}
 	{
-		map textures/liquids/ripple.jpg
+		map textures/liquids/ripple.tga
 		blendfunc gl_dst_color gl_one
 		rgbGen const ( 1 1 1 )
 		tcMod scroll -0.03 -0.06
 	}
 	{
-		map textures/liquids/ripple.jpg
+		map textures/liquids/ripple.tga
 		blendfunc gl_dst_color gl_one
 		rgbGen const ( 1 1 1 )
 		tcMod scroll -0.02 -0.08
@@ -232,14 +232,14 @@ textures/liquids/justwater
 	surfaceparm water
 	cull disable
 	{
-		map textures/liquids/pool3d_4b2.jpg
+		map textures/liquids/pool3d_4b2.tga
 		blendfunc blend
 		rgbGen const ( 0.384314 0.501961 0.568627 )
 		tcMod scroll 0.05 -0.05
 		alphaGen wave inversesawtooth 0.5 0 0 1 
 	}
 	{
-		map textures/liquids/pool3d_3.jpg
+		map textures/liquids/pool3d_3.tga
 		blendfunc gl_dst_color gl_one
 		rgbGen const ( 1 1 1 )
 		tcMod scroll 0.09 0.06
@@ -260,12 +260,12 @@ textures/liquids/rapidwater
 	surfaceparm water
 	cull disable
 	{
-		map textures/liquids/ripple.jpg
+		map textures/liquids/ripple.tga
 		blendfunc gl_dst_color gl_src_color
 		tcMod scroll -0.2 -0.4
 	}
 	{
-		map textures/liquids/ripple.jpg
+		map textures/liquids/ripple.tga
 		blendfunc gl_dst_color gl_src_color
 		tcMod scroll -0.2 -0.5
 	}
@@ -301,7 +301,7 @@ textures/liquids/softwater
 
 textures/liquids/clear_ripple3
 {
-	qer_editorimage textures/liquids/pool3d_3.jpg
+	qer_editorimage textures/liquids/pool3d_3.tga
 	surfaceparm trans
 	surfaceparm nonsolid
 	surfaceparm water
@@ -309,20 +309,20 @@ textures/liquids/clear_ripple3
 	deformVertexes wave 64 sin .25 .25 0 .5	
 		
 	{ 
-		map textures/liquids/pool3d_5.jpg
+		map textures/liquids/pool3d_5.tga
 		blendFunc gl_dst_color gl_one
 		rgbgen identity
 		tcmod scroll -.05 .001
 	}
 
 	{ 
-		map textures/liquids/pool3d_6.jpg
+		map textures/liquids/pool3d_6.tga
 		blendFunc gl_dst_color gl_one
 		rgbgen identity
 		tcmod scroll .025 -.001
 	}
 	{ 
-		map textures/liquids/pool3d_5e.jpg
+		map textures/liquids/pool3d_5e.tga
 		blendFunc gl_dst_color gl_one
 		rgbgen identity
 		tcmod scroll .001 .025
@@ -338,7 +338,7 @@ textures/liquids/clear_ripple3
 
 textures/liquids/clear_ripple1
 {
-	qer_editorimage textures/liquids/pool3d_3.jpg
+	qer_editorimage textures/liquids/pool3d_3.tga
 	surfaceparm trans
 	surfaceparm nonsolid
 	surfaceparm water
@@ -346,14 +346,14 @@ textures/liquids/clear_ripple1
 	deformVertexes wave 64 sin .5 .5 0 .5	
 		
 	{ 
-		map textures/liquids/pool3d_5.jpg
+		map textures/liquids/pool3d_5.tga
 		blendFunc gl_dst_color gl_one
 		rgbgen identity
 		tcmod scroll -.05 .001
 	}
 
 	{ 
-		map textures/liquids/pool3d_6.jpg
+		map textures/liquids/pool3d_6.tga
 		blendFunc gl_dst_color gl_one
 		rgbgen identity
 		tcmod scroll .025 -.001
@@ -369,7 +369,7 @@ textures/liquids/clear_ripple1
 
 textures/liquids/clear_ripple2
 {
-	qer_editorimage textures/liquids/pool3d_3.jpg
+	qer_editorimage textures/liquids/pool3d_3.tga
 	surfaceparm trans
 	surfaceparm nonsolid
 	surfaceparm water
@@ -377,20 +377,20 @@ textures/liquids/clear_ripple2
 	deformVertexes wave 64 sin .25 .25 0 .5	
 		
 	{ 
-		map textures/liquids/pool3d_5.jpg
+		map textures/liquids/pool3d_5.tga
 		blendFunc gl_dst_color gl_one
 		rgbgen identity
 		tcmod scroll -.025 .001
 	}
 
 	{ 
-		map textures/liquids/pool3d_6.jpg
+		map textures/liquids/pool3d_6.tga
 		blendFunc gl_dst_color gl_one
 		rgbgen identity
 		tcmod scroll .03 -.001
 	}
 	{ 
-		map textures/liquids/pool3d_5e.jpg
+		map textures/liquids/pool3d_5e.tga
 		blendFunc gl_dst_color gl_one
 		rgbgen identity
 		tcmod scroll .001 .025
@@ -406,7 +406,7 @@ textures/liquids/clear_ripple2
 
 textures/liquids/clear_calm1
 {
-	qer_editorimage textures/liquids/pool3d_5e.jpg
+	qer_editorimage textures/liquids/pool3d_5e.tga
 	surfaceparm trans
 	surfaceparm nonsolid
 	surfaceparm water
@@ -414,20 +414,20 @@ textures/liquids/clear_calm1
 	
 		
 	{ 
-		map textures/liquids/pool3d_5e.jpg
+		map textures/liquids/pool3d_5e.tga
 		blendFunc gl_dst_color gl_one
 		rgbgen identity
 		tcmod turb .04 .01 .5 .03
 	}
 
 	{ 
-		map textures/liquids/pool3d_6.jpg
+		map textures/liquids/pool3d_6.tga
 		blendFunc gl_dst_color gl_one
 		rgbgen identity
 		tcmod scroll .025 -.001
 	}
 	{ 
-		map textures/liquids/pool3d_5.jpg
+		map textures/liquids/pool3d_5.tga
 		blendFunc gl_dst_color gl_one
 		rgbgen identity
 		tcmod scroll .001 .025
@@ -443,7 +443,7 @@ textures/liquids/clear_calm1
 
 textures/liquids/calm_poollight
 {
-	qer_editorimage textures/liquids/pool3d_3.jpg
+	qer_editorimage textures/liquids/pool3d_3.tga
 	surfaceparm trans
 	surfaceparm nonsolid
 	surfaceparm water
@@ -452,20 +452,20 @@ textures/liquids/calm_poollight
 	deformVertexes wave 64 sin .25 .25 0 .5	
 		
 	{ 
-		map textures/liquids/pool3d_5.jpg
+		map textures/liquids/pool3d_5.tga
 		blendFunc gl_dst_color gl_one
 		rgbgen identity
 		tcmod scroll -.05 .001
 	}
 
 	{ 
-		map textures/liquids/pool3d_6.jpg
+		map textures/liquids/pool3d_6.tga
 		blendFunc gl_dst_color gl_one
 		rgbgen identity
 		tcmod scroll .025 -.001
 	}
 	{ 
-		map textures/liquids/pool3d_5e.jpg
+		map textures/liquids/pool3d_5e.tga
 		blendFunc gl_dst_color gl_one
 		rgbgen identity
 		tcmod scroll .001 .025
@@ -481,20 +481,20 @@ textures/liquids/calm_poollight
 
 textures/liquids/clear_calm2
 {
-	qer_editorimage textures/liquids/pool3d_5e.jpg
+	qer_editorimage textures/liquids/pool3d_5e.tga
 	surfaceparm trans
 	surfaceparm nonsolid
 	surfaceparm water
 	cull none
 	
 	{ 
-		map textures/liquids/pool3d_6.jpg
+		map textures/liquids/pool3d_6.tga
 		blendFunc gl_dst_color gl_one
 		rgbgen identity
 		tcmod scroll .025 -.001
 	}
 	{ 
-		map textures/liquids/pool3d_5.jpg
+		map textures/liquids/pool3d_5.tga
 		blendFunc gl_dst_color gl_one
 		rgbgen identity
 		tcmod scroll .001 .025
@@ -505,7 +505,7 @@ textures/liquids/clear_calm2
 		rgbgen identity		
 	}
 	{
-		map textures/effects/sky.jpg
+		map textures/effects/sky.tga
 		tcgen environment
 		blendfunc add
 		rgbgen vertex
@@ -551,33 +551,33 @@ textures/liquids/hydrowater2
 
 textures/liquids2/clear_calm1v
 {
-	qer_editorimage textures/liquids/pool3d_5e.jpg
+	qer_editorimage textures/liquids/pool3d_5e.tga
 	surfaceparm trans
 	surfaceparm nonsolid
 	surfaceparm water
 	cull none
 	fogparms ( 0.215686 0.278431 0.333333 ) 512
 	{ 
-		map textures/liquids/pool3d_5e.jpg
+		map textures/liquids/pool3d_5e.tga
 		blendFunc gl_dst_color gl_one
 		rgbgen identity
 		tcmod turb .04 .01 .5 .03
 	}
 
 	{ 
-		map textures/liquids/pool3d_6.jpg
+		map textures/liquids/pool3d_6.tga
 		blendFunc gl_dst_color gl_one
 		rgbgen identity
 		tcmod scroll .025 -.001
 	}
 	{ 
-		map textures/liquids/pool3d_5.jpg
+		map textures/liquids/pool3d_5.tga
 		blendFunc gl_dst_color gl_one
 		rgbgen identity
 		tcmod scroll .001 .025
 	}
 	{ 
-		map textures/effects/sky.jpg
+		map textures/effects/sky.tga
 		blendFunc add
 		rgbgen const ( .5 .5 .5 )
 		tcgen environment
@@ -591,7 +591,7 @@ textures/liquids2/clear_calm1v
 
 textures/liquids2/clear_ripple1_q3dm1v
 {
-	qer_editorimage textures/liquids/pool3d_5e.jpg
+	qer_editorimage textures/liquids/pool3d_5e.tga
 	surfaceparm trans
 	surfaceparm nonsolid
 	surfaceparm water
@@ -599,26 +599,26 @@ textures/liquids2/clear_ripple1_q3dm1v
 	fogparms ( 0.215686 0.278431 0.333333 ) 512
 	deformvertexes wave 128 sin .5 .5 .5 .5
 	{ 
-		map textures/liquids/pool3d_5e.jpg
+		map textures/liquids/pool3d_5e.tga
 		blendFunc gl_dst_color gl_one
 		rgbgen identity
 		tcmod turb .04 .01 .5 .03
 	}
 
 	{ 
-		map textures/liquids/pool3d_6.jpg
+		map textures/liquids/pool3d_6.tga
 		blendFunc gl_dst_color gl_one
 		rgbgen identity
 		tcmod scroll .025 -.001
 	}
 	{ 
-		map textures/liquids/pool3d_5.jpg
+		map textures/liquids/pool3d_5.tga
 		blendFunc gl_dst_color gl_one
 		rgbgen identity
 		tcmod scroll .001 .025
 	}
 	{ 
-		map textures/effects/sky.jpg
+		map textures/effects/sky.tga
 		blendFunc add
 		rgbgen const ( .5 .5 .5 )
 		tcgen environment
@@ -632,7 +632,7 @@ textures/liquids2/clear_ripple1_q3dm1v
 
 textures/liquids2/clear_ripple1_q3dm1light
 {
-	qer_editorimage textures/liquids/pool3d_5e.jpg
+	qer_editorimage textures/liquids/pool3d_5e.tga
 	surfaceparm trans
 	surfaceparm nonsolid
 	surfaceparm water
@@ -641,26 +641,26 @@ textures/liquids2/clear_ripple1_q3dm1light
 	fogparms ( 0.215686 0.278431 0.333333 ) 1024
 	deformvertexes wave 256 sin .5 .5 .5 .5
 	{ 
-		map textures/liquids/pool3d_5e.jpg
+		map textures/liquids/pool3d_5e.tga
 		blendFunc gl_dst_color gl_one
 		rgbgen identity
 		tcmod turb .04 .01 .5 .03
 	}
 
 	{ 
-		map textures/liquids/pool3d_6.jpg
+		map textures/liquids/pool3d_6.tga
 		blendFunc gl_dst_color gl_one
 		rgbgen identity
 		tcmod scroll .025 -.001
 	}
 	{ 
-		map textures/liquids/pool3d_5.jpg
+		map textures/liquids/pool3d_5.tga
 		blendFunc gl_dst_color gl_one
 		rgbgen identity
 		tcmod scroll .001 .025
 	}
 	{ 
-		map textures/effects/sky.jpg
+		map textures/effects/sky.tga
 		blendFunc add
 		rgbgen const ( .5 .5 .5 )
 		tcgen environment
@@ -744,8 +744,8 @@ textures/liquids/oldacid
 
 textures/liquids/slime1
 {
-	qer_editorimage textures/liquids/slime8.jpg
-	q3map_lightimage textures/liquids/slime8.jpg
+	qer_editorimage textures/liquids/slime8.tga
+	q3map_lightimage textures/liquids/slime8.tga
 	surfaceparm noimpact
 	surfaceparm slime
 	surfaceparm nolightmap
@@ -753,12 +753,12 @@ textures/liquids/slime1
 	q3map_surfacelight 150
 	deformVertexes wave 64 sin .25 .25 0 .5	
 	{
-		map textures/liquids/slime8.jpg
+		map textures/liquids/slime8.tga
 		tcmod turb .05 -0.5 0 0.02
 		tcmod scroll .05 -.01
 	}
 	{
-		map textures/liquids/slime8.jpg
+		map textures/liquids/slime8.tga
 		blendfunc filter
 		tcmod turb .012 -0.1 0 0.04
 		tcmod scroll .003 -.008
@@ -767,8 +767,8 @@ textures/liquids/slime1
 
 textures/liquids/slime1_2000
 {
-	qer_editorimage textures/liquids/slime8.jpg
-	q3map_lightimage textures/liquids/slime8.jpg
+	qer_editorimage textures/liquids/slime8.tga
+	q3map_lightimage textures/liquids/slime8.tga
 	surfaceparm noimpact
 	surfaceparm slime
 	surfaceparm nolightmap
@@ -776,12 +776,12 @@ textures/liquids/slime1_2000
 	q3map_surfacelight 2000
 	deformVertexes wave 64 sin .25 .25 0 .5	
 	{
-		map textures/liquids/slime8.jpg
+		map textures/liquids/slime8.tga
 		tcmod turb .05 -0.5 0 0.02
 		tcmod scroll .05 -.01
 	}
 	{
-		map textures/liquids/slime8.jpg
+		map textures/liquids/slime8.tga
 		blendfunc filter
 		tcmod turb .012 -0.1 0 0.04
 		tcmod scroll .003 -.008
@@ -791,16 +791,16 @@ textures/liquids/slime1_2000
 textures/liquids/proto_poolpass
 {
 	q3map_globaltexture
-	qer_editorimage textures/liquids/proto_gruel3.jpg
+	qer_editorimage textures/liquids/proto_gruel3.tga
 	q3map_surfacelight 300
 	surfaceparm slime
 	surfaceparm trans
 	{
-		map textures/liquids/proto_gruel3.jpg
+		map textures/liquids/proto_gruel3.tga
 		tcmod turb .1 .3 .5 .1
 	}
 	{
-		map textures/liquids/proto_gruel2.jpg
+		map textures/liquids/proto_gruel2.tga
 		blendfunc add
 		tcmod turb 012 -0.1 0 0.04
 	}
@@ -810,7 +810,7 @@ textures/liquids/proto_poolpass
 		blendfunc filter
         }
 	{
-		map textures/sfx/kenelectric.jpg
+		map textures/sfx/kenelectric.tga
 		blendfunc add
 		tcmod scale .4 .4
 		tcmod scroll .4 -.4
@@ -820,8 +820,8 @@ textures/liquids/proto_poolpass
 
 textures/liquids/slime2
 {
-	qer_editorimage textures/liquids/slime10.jpg
-	q3map_lightimage textures/liquids/slime8.jpg
+	qer_editorimage textures/liquids/slime10.tga
+	q3map_lightimage textures/liquids/slime8.tga
 	surfaceparm noimpact
 	surfaceparm slime
 	surfaceparm nolightmap
@@ -829,19 +829,19 @@ textures/liquids/slime2
 	q3map_surfacelight 150
 	deformVertexes wave 64 sin .25 .25 0 .5	
 	{
-		map textures/liquids/slime8.jpg
+		map textures/liquids/slime8.tga
 		tcmod turb .05 -0.5 0 0.02
 		tcmod scroll .05 -.01
 	}
 	{
-		map textures/liquids/slime10.jpg
+		map textures/liquids/slime10.tga
 		blendfunc filter
 		tcmod scale .3 .3
 		tcmod turb .012 -0.1 0 0.04
 		tcmod scroll .003 -.008
 	}
 	{
-		map textures/liquids/proto_gruel3.jpg
+		map textures/liquids/proto_gruel3.tga
 		blendfunc add
 		tcmod scale .9 .9
 		tcmod turb 012 -0.1 0 0.04
@@ -850,8 +850,8 @@ textures/liquids/slime2
 
 textures/liquids/slime3
 {
-	qer_editorimage textures/liquids/slime9.jpg
-	q3map_lightimage textures/liquids/slime9.jpg
+	qer_editorimage textures/liquids/slime9.tga
+	q3map_lightimage textures/liquids/slime9.tga
 	surfaceparm noimpact
 	surfaceparm slime
 	surfaceparm nolightmap
@@ -859,13 +859,13 @@ textures/liquids/slime3
 	q3map_surfacelight 150
 	deformVertexes wave 64 sin .25 .25 0 .5	
 	{
-		map textures/liquids/slime9.jpg
+		map textures/liquids/slime9.tga
 		tcmod scale .5 .5
 		tcmod turb .05 -0.5 0 0.02
 		tcmod scroll .05 -.01
 	}
 	{
-		map textures/liquids/slime9.jpg
+		map textures/liquids/slime9.tga
 		blendfunc filter
 		tcmod scale .3 .3
 		tcmod turb .012 -0.1 0 0.04

@@ -1,7 +1,7 @@
 //modification of /skies/IndustrySky for islandctf
 textures/nki_shaders/tropicalsky
 {
-	qer_editorimage env/sky1/sky001_ft.jpg
+	qer_editorimage env/sky1/sky001_ft.tga
 	nopicmip
 	noMipMaps
 //	q3map_lightmapFilterRadius self other
@@ -47,7 +47,7 @@ textures/nki_shaders/tropicalwater
 		alphaGen wave inversesawtooth 0.5 0 0 1 
 	}
 	{
-		map textures/liquids/pool3d_3.jpg
+		map textures/liquids/pool3d_3.tga
 		blendfunc gl_dst_color gl_one
 		rgbGen const ( 1 1 1 )
 		tcMod scroll 0.09 0.06

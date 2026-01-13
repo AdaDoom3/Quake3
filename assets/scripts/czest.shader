@@ -43,7 +43,7 @@ textures/czest2ctf/sundownsky
 	q3map_sun 1 0.8 0.7 30 250 30
 	skyParms full 700 -
 	{
-		map textures/czest2ctf/redclouds.jpg
+		map textures/czest2ctf/redclouds.tga
 		tcMod scroll -0.013 0.04
 	}
 	{

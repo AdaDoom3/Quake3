@@ -47,7 +47,7 @@ textures/clown/bleeding-wall
 		rgbGen identity
 	}
 	{
-		map textures/evil8_base/e8crete03.jpg
+		map textures/evil8_base/e8crete03.tga
 		rgbGen identity
 		blendFunc GL_ONE GL_ZERO
 	}
@@ -75,7 +75,7 @@ textures/clown/portal
 		rgbGen identity
 	}
 	{
-		map textures/skies/topclouds.jpg
+		map textures/skies/topclouds.tga
 		rgbGen identity
 		blendFunc GL_ONE GL_ZERO
 	}
@@ -380,7 +380,7 @@ textures/clown/b_edge
 
 textures/clown/ankh_light
 {
-	qer_editorimage textures/clown/ankh_light.jpg
+	qer_editorimage textures/clown/ankh_light.tga
 	surfaceparm nomarks
 	q3map_surfacelight 3000
 	
@@ -390,12 +390,12 @@ textures/clown/ankh_light
 		rgbGen identity
 	}
 	{
-		map textures/clown/ankh_light.jpg
+		map textures/clown/ankh_light.tga
 		blendFunc GL_DST_COLOR GL_ZERO
 		rgbGen identity
 	}
 	{
-		map textures/clown/ankh_light.jpg
+		map textures/clown/ankh_light.tga
 		blendfunc GL_ONE GL_ONE
 	}
 }
@@ -441,17 +441,17 @@ textures/clown/grate_2
 
 textures/base_wall/main_q3abanner
 {
-	q3map_lightimage textures/base_wall/main_q3abanner.jpg
+	q3map_lightimage textures/base_wall/main_q3abanner.tga
         q3map_surfacelight 100
 
 
 	{
-		map textures/base_wall/main_q3abanner.jpg
+		map textures/base_wall/main_q3abanner.tga
 	        rgbGen wave square 0 1 0 .5
 	}
 
 	{
-		map textures/base_wall/comp3textb.jpg
+		map textures/base_wall/comp3textb.tga
 		blendfunc add
 	        rgbGen identity
 		tcmod scroll 2 2
@@ -459,7 +459,7 @@ textures/base_wall/main_q3abanner
 	}
 
 	{
-		map textures/base_wall/comp3text.jpg
+		map textures/base_wall/comp3text.tga
 		blendfunc add
 	        rgbGen identity
 		tcmod scroll 3 3
@@ -483,24 +483,24 @@ textures/base_wall/main_q3abanner
 
 textures/base_wall/main_q3abanner_r
 {
-	q3map_lightimage textures/base_wall/main_q3abanner.jpg
+	q3map_lightimage textures/base_wall/main_q3abanner.tga
         q3map_surfacelight 100
 
 
 	{
-		map textures/base_wall/main_q3abanner_r.jpg
+		map textures/base_wall/main_q3abanner_r.tga
 	        rgbGen wave square 0 1 0 .5
 	}
 
 	{
-		map textures/base_wall/comp3textb.jpg
+		map textures/base_wall/comp3textb.tga
 		blendfunc add
 	        rgbGen identity
 		tcmod scroll -2 2
 	}
 
 	{
-		map textures/base_wall/comp3text.jpg
+		map textures/base_wall/comp3text.tga
 		blendfunc add
 	        rgbGen identity
 		tcmod scroll 3 3
@@ -524,19 +524,19 @@ textures/base_wall/main_q3abanner_r
 
 textures/clown/steel_b_shine
 {
-	qer_editorimage textures/clown/steel_b.jpg
+	qer_editorimage textures/clown/steel_b.tga
 	{
-		map textures/clown/steel_b.jpg
+		map textures/clown/steel_b.tga
 		rgbGen identity
 	}
 	{
-		clampmap textures/base_wall/chrome_env.jpg
+		clampmap textures/base_wall/chrome_env.tga
 		blendfunc add
 		rgbGen const ( 0.188235 0.188235 0.407843 )
 		tcGen environment 
 	}
 	{
-		map textures/clown/steel_b.jpg
+		map textures/clown/steel_b.tga
 		blendfunc filter
 		
 	}
@@ -549,19 +549,19 @@ textures/clown/steel_b_shine
 
 textures/clown/steel_r_shine
 {
-	qer_editorimage textures/clown/steel_r.jpg
+	qer_editorimage textures/clown/steel_r.tga
 	{
-		map textures/clown/steel_r.jpg
+		map textures/clown/steel_r.tga
 		rgbGen identity
 	}
 	{
-		clampmap textures/base_wall/chrome_env.jpg
+		clampmap textures/base_wall/chrome_env.tga
 		blendfunc add
 		rgbGen const ( 0.188235 0.188235 0.407843 )
 		tcGen environment 
 	}
 	{
-		map textures/clown/steel_r.jpg
+		map textures/clown/steel_r.tga
 		blendfunc filter
 		
 	}
@@ -574,19 +574,19 @@ textures/clown/steel_r_shine
 
 textures/clown/steel_rust_shine
 {
-	qer_editorimage textures/clown/steel_rust.jpg
+	qer_editorimage textures/clown/steel_rust.tga
 	{
-		map textures/clown/steel_rust.jpg
+		map textures/clown/steel_rust.tga
 		rgbGen identity
 	}
 	{
-		clampmap textures/base_wall/chrome_env.jpg
+		clampmap textures/base_wall/chrome_env.tga
 		blendfunc add
 		rgbGen const ( 0.188235 0.188235 0.407843 )
 		tcGen environment 
 	}
 	{
-		map textures/clown/steel_r.jpg
+		map textures/clown/steel_r.tga
 		blendfunc filter
 		
 	}
@@ -624,80 +624,80 @@ textures/clown/burn_ow
 
 textures/gothic_block/mkc_evil_e3window
 {
-	qer_editorimage textures/gothic_block/windowevil2c_block18c.jpg
-	q3map_lightimage textures/gothic_block/evil2cglow.jpg
+	qer_editorimage textures/gothic_block/windowevil2c_block18c.tga
+	q3map_lightimage textures/gothic_block/evil2cglow.tga
 	q3map_surfacelight 200
 	{
 		map $lightmap
 		rgbGen identity
 	}
 	{
-		map textures/gothic_block/windowevil2c_block18c.jpg
+		map textures/gothic_block/windowevil2c_block18c.tga
 		blendFunc filter
 		rgbGen identity
 	}
 	{
-		map textures/gothic_block/evil2cglow.jpg
+		map textures/gothic_block/evil2cglow.tga
 		blendfunc add
 	}
 }
 
 textures/gothic_block/evil_e3bwindow
 {
-	qer_editorimage textures/gothic_block/windowevil2c_killblock.jpg
-	q3map_lightimage textures/gothic_block/evil2ckillblockglow.jpg
+	qer_editorimage textures/gothic_block/windowevil2c_killblock.tga
+	q3map_lightimage textures/gothic_block/evil2ckillblockglow.tga
 	q3map_surfacelight 200
 	{
 		map $lightmap
 		rgbGen identity
 	}
 	{
-		map textures/gothic_block/windowevil2c_killblock.jpg
+		map textures/gothic_block/windowevil2c_killblock.tga
 		blendFunc filter
 		rgbGen identity
 	}
 	{
-		map textures/gothic_block/evil2ckillblockglow.jpg
+		map textures/gothic_block/evil2ckillblockglow.tga
 		blendfunc add
 	}
 }
 
 textures/gothic_block/evil_e3window
 {
-	qer_editorimage textures/gothic_block/windowevil2c_block18c.jpg
-	q3map_lightimage textures/gothic_block/evil2cglow.jpg
+	qer_editorimage textures/gothic_block/windowevil2c_block18c.tga
+	q3map_lightimage textures/gothic_block/evil2cglow.tga
 	q3map_surfacelight 900
 	{
 		map $lightmap
 		rgbGen identity
 	}
 	{
-		map textures/gothic_block/windowevil2c_block18c.jpg
+		map textures/gothic_block/windowevil2c_block18c.tga
 		blendFunc filter
 		rgbGen identity
 	}
 	{
-		map textures/gothic_block/evil2cglow.jpg
+		map textures/gothic_block/evil2cglow.tga
 		blendfunc add
 	}
 }
 
 textures/gothic_block/evil_e3window_dark
 {
-	qer_editorimage textures/gothic_block/windowevil2c_block18c.jpg
-	q3map_lightimage textures/gothic_block/evil2cglow.jpg
+	qer_editorimage textures/gothic_block/windowevil2c_block18c.tga
+	q3map_lightimage textures/gothic_block/evil2cglow.tga
 	q3map_surfacelight 100
 	{
 		map $lightmap
 		rgbGen identity
 	}
 	{
-		map textures/gothic_block/windowevil2c_block18c.jpg
+		map textures/gothic_block/windowevil2c_block18c.tga
 		blendFunc filter
 		rgbGen identity
 	}
 	{
-		map textures/gothic_block/evil2cglow.jpg
+		map textures/gothic_block/evil2cglow.tga
 		blendfunc add
 	}
 }
@@ -793,7 +793,7 @@ textures/gothic_block/blocks18b_ow
 	surfaceparm nomarks
 	
 	{
-		map textures/sfx/fireswirl2.jpg
+		map textures/sfx/fireswirl2.tga
 		tcmod rotate 1
 		tcmod turb 1 .4 0 .5
 		blendfunc add
@@ -916,19 +916,19 @@ textures/base_floor/cybergrate3
 
 textures/base_trim/dark_tin2
 {
-	qer_editorimage textures/base_trim/dark_tin2.jpg
+	qer_editorimage textures/base_trim/dark_tin2.tga
 	{
 		//mapped first so it looks good while vertex lit
-		map textures/base_trim/dark_tin2.jpg
+		map textures/base_trim/dark_tin2.tga
 		rgbGen Identity
 	}
 	{
-		map textures/base_wall/chrome_metal.jpg
+		map textures/base_wall/chrome_metal.tga
 		tcGen environment 
 		rgbGen oneminusvertex
 	}
 	{
-		map textures/base_trim/dark_tin2.jpg
+		map textures/base_trim/dark_tin2.tga
 		blendfunc add
 	}
 	
@@ -941,19 +941,19 @@ textures/base_trim/dark_tin2
 
 textures/base_trim/pewter_shiney
 {
-	qer_editorimage textures/base_trim/pewter_shiney.jpg
+	qer_editorimage textures/base_trim/pewter_shiney.tga
 	{
 		//mapped first so it looks good while vertex lit
-		map textures/base_trim/pewter_shiney.jpg
+		map textures/base_trim/pewter_shiney.tga
 		rgbGen Identity
 	}
 	{
-		map textures/base_wall/chrome_env2.jpg
+		map textures/base_wall/chrome_env2.tga
 		tcGen environment 
 		rgbGen vertex
 	}
 	{
-		map textures/base_trim/pewter_shiney.jpg
+		map textures/base_trim/pewter_shiney.tga
 		blendfunc add
 	}
 	{
@@ -972,7 +972,7 @@ textures/base_trim/tin
 		rgbGen Identity
 	}
 	{
-		map textures/base_trim/tinfx.jpg
+		map textures/base_trim/tinfx.tga
 		tcGen environment 
 		rgbGen vertex
 	}
@@ -989,19 +989,19 @@ textures/base_trim/tin
 
 textures/base_floor/hfloor3
 {
-	qer_editorimage textures/base_floor/hfloor3.jpg
+	qer_editorimage textures/base_floor/hfloor3.tga
 	{
 		//mapped first so it looks good while vertex lit
-		map textures/base_floor/hfloor3.jpg
+		map textures/base_floor/hfloor3.tga
 		rgbGen Identity
 	}
 	{
-		map textures/base_trim/tinfx.jpg
+		map textures/base_trim/tinfx.tga
 		tcGen environment 
 		rgbGen oneminusvertex
 	}
 	{
-		map textures/base_floor/hfloor3.jpg
+		map textures/base_floor/hfloor3.tga
 		blendfunc add
 	}
 	{
@@ -1013,8 +1013,8 @@ textures/base_floor/hfloor3
 
 textures/base_wall/comp3b_dark
 {
-	qer_editorimage textures/base_wall/comp3b_dark.jpg
-	q3map_lightimage textures/base_wall/comp3env.jpg
+	qer_editorimage textures/base_wall/comp3b_dark.tga
+	q3map_lightimage textures/base_wall/comp3env.tga
         q3map_surfacelight 10
 
 
@@ -1024,13 +1024,13 @@ textures/base_wall/comp3b_dark
 		tcmod scroll -3 3
 	}
 	{
-		map textures/base_wall/comp3text.jpg
+		map textures/base_wall/comp3text.tga
 		blendfunc add
 	        rgbGen identity
 		tcmod scroll -3 3
 	}
 	{
-		map textures/base_wall/comp3env.jpg
+		map textures/base_wall/comp3env.tga
 		tcGen environment
 	        blendfunc add
 		rgbGen oneminusvertex
@@ -1059,7 +1059,7 @@ textures/base_wall/comp3b_dark
 textures/base_wall/comp3b
 {
 	qer_editorimage textures/base_wall/comp3b.tga
-	q3map_lightimage textures/base_wall/comp3env.jpg
+	q3map_lightimage textures/base_wall/comp3env.tga
         q3map_surfacelight 900
 
 	{
@@ -1068,12 +1068,12 @@ textures/base_wall/comp3b
 		
 	}
 	{
-		map textures/base_wall/comp3env.jpg
+		map textures/base_wall/comp3env.tga
 		tcGen environment
 		rgbGen identity
 	}
 	{
-		map textures/base_wall/comp3text.jpg
+		map textures/base_wall/comp3text.tga
 		blendfunc add
 	        rgbGen identity
 		tcmod scroll 3 3
@@ -1146,7 +1146,7 @@ textures/base_wall/bluemetal1b_chrome
 		rgbGen Identity
 	}
 	{
-		map textures/base_wall/chrome_env.jpg
+		map textures/base_wall/chrome_env.tga
 		tcGen environment 
 		rgbGen oneminusvertex
 	}
@@ -1185,7 +1185,7 @@ textures/base_wall/bluemetalsupport2fline
 		alphaGen lightingSpecular
 	}
 	{
-		map textures/base_wall/chrome_env.jpg
+		map textures/base_wall/chrome_env.tga
 		tcGen environment 
 		rgbGen oneminusvertex
 		tcmod scale .5 .5
@@ -1223,7 +1223,7 @@ textures/tim/redmetalsupport2fline
 		
 	}
 	{
-		map textures/base_wall/chrome_env.jpg
+		map textures/base_wall/chrome_env.tga
 		tcGen environment 
 		rgbGen oneminusvertex
 		tcmod scale .5 .5
@@ -1248,7 +1248,7 @@ textures/base_wall/bluemetalsupport2ftv
 		
 	}
 	{
-		map textures/base_wall/chrome_env.jpg
+		map textures/base_wall/chrome_env.tga
 		tcGen environment 
 		rgbGen oneminusvertex
 		tcmod scale .5 .5
@@ -1281,7 +1281,7 @@ textures/base_wall/bluemetalsupport2e
 		
 	}
 	{
-		map textures/base_wall/chrome_env.jpg
+		map textures/base_wall/chrome_env.tga
 		tcGen environment 
 		rgbGen oneminusvertex
 		tcmod scale .5 .5
@@ -1309,7 +1309,7 @@ textures/base_wall/bluemetalsupport2e2
 		
 	}
 	{
-		map textures/base_wall/chrome_env.jpg
+		map textures/base_wall/chrome_env.tga
 		tcGen environment 
 		rgbGen oneminusvertex
 		tcmod scale .5 .5
@@ -1329,21 +1329,21 @@ textures/base_wall/bluemetalsupport2e2
 
 textures/base_wall/bluemetalsupport2c_1
 {
-	qer_editorimage textures/base_wall/bluemetalsupport2c_1.jpg
+	qer_editorimage textures/base_wall/bluemetalsupport2c_1.tga
 		
 	{
-		map textures/base_wall/bluemetalsupport2c_1.jpg
+		map textures/base_wall/bluemetalsupport2c_1.tga
 		rgbGen identity
 		
 	}
 	{
-		map textures/base_wall/chrome_env.jpg
+		map textures/base_wall/chrome_env.tga
 		tcGen environment 
 		rgbGen oneminusvertex
 		tcmod scale .5 .5
 	}
 	{
-		map textures/base_wall/bluemetalsupport2c_1.jpg
+		map textures/base_wall/bluemetalsupport2c_1.tga
 		blendFunc add
 		rgbGen identity
 		
@@ -1357,21 +1357,21 @@ textures/base_wall/bluemetalsupport2c_1
 
 textures/base_wall/bluemetalsupport2c
 {
-	qer_editorimage textures/base_wall/bluemetalsupport2c.jpg
+	qer_editorimage textures/base_wall/bluemetalsupport2c.tga
 		
 	{
-		map textures/base_wall/bluemetalsupport2c.jpg
+		map textures/base_wall/bluemetalsupport2c.tga
 		rgbGen identity
 		
 	}
 	{
-		map textures/base_wall/chrome_env.jpg
+		map textures/base_wall/chrome_env.tga
 		tcGen environment 
 		rgbGen oneminusvertex
 		tcmod scale .5 .5
 	}
 	{
-		map textures/base_wall/bluemetalsupport2c.jpg
+		map textures/base_wall/bluemetalsupport2c.tga
 		blendFunc add
 		rgbGen identity
 		
@@ -1393,7 +1393,7 @@ textures/base_floor/clangdark_spot
 		rgbGen identity
 	}
 	{
-		map textures/liquids/proto_gruel2.jpg
+		map textures/liquids/proto_gruel2.tga
 		blendfunc gl_one gl_zero
 		tcmod scroll .01 .01
 		tcmod turb 0 0.01 0 .1
@@ -1421,7 +1421,7 @@ textures/base_floor/diamond2cspot
 		rgbGen identity
 	}
 	{
-		map textures/liquids/proto_gruel3.jpg
+		map textures/liquids/proto_gruel3.tga
 		blendfunc gl_one gl_zero
 		tcmod scroll .01 .01
 		tcmod turb 0 0.01 0 .1
@@ -1449,7 +1449,7 @@ textures/gothic_floor/q1metal7_99spot
 		rgbGen identity
 	}
 	{
-		map textures/liquids/proto_gruel3.jpg
+		map textures/liquids/proto_gruel3.tga
 		blendfunc gl_one gl_zero
 		tcmod scroll .01 .01
 		tcmod turb 0 0.01 0 .1
@@ -1469,21 +1469,21 @@ textures/gothic_floor/q1metal7_99spot
 
 textures/base_wall/patch10shiny
 {
-	qer_editorimage textures/base_wall/patch10.jpg
+	qer_editorimage textures/base_wall/patch10.tga
 		
 	{
-		map textures/base_wall/patch10.jpg
+		map textures/base_wall/patch10.tga
 		rgbGen identity
 		
 	}
 	{
-		map textures/base_wall/chrome_env.jpg
+		map textures/base_wall/chrome_env.tga
 		tcGen environment 
 		rgbGen oneminusvertex
 		tcmod scale .5 .5
 	}
 	{
-		map textures/base_wall/patch10.jpg
+		map textures/base_wall/patch10.tga
 		blendFunc add
 		rgbGen identity
 		
@@ -1497,8 +1497,8 @@ textures/base_wall/patch10shiny
 
 textures/base_wall/comp3
 {
-	qer_editorimage textures/base_wall/comp3.jpg
-	q3map_lightimage textures/base_wall/comp3env.jpg
+	qer_editorimage textures/base_wall/comp3.tga
+	q3map_lightimage textures/base_wall/comp3env.tga
         q3map_surfacelight 100
 
 	{
@@ -1519,7 +1519,7 @@ textures/base_wall/comp3
 		tcMod scroll 0 0.5 
 	}
 	{
-		map textures/base_wall/comp3env.jpg
+		map textures/base_wall/comp3env.tga
 		tcGen environment
 	        blendfunc add
 		rgbGen oneminusvertex
@@ -1549,7 +1549,7 @@ textures/base_wall/concrete_ow
 	qer_editorimage textures/base_wall/concrete_ow.tga
 
 	{
-		map textures/sfx/proto_zzztblu3.jpg
+		map textures/sfx/proto_zzztblu3.tga
 		tcmod scale 1.5 1.5
 		tcmod rotate 1
 		tcmod turb 8 4 0 5
@@ -1572,7 +1572,7 @@ textures/tim/rconcrete_ow
 	qer_editorimage textures/tim/rconcrete_ow.tga
 
 	{
-		map textures/sfx/fireswirl2.jpg
+		map textures/sfx/fireswirl2.tga
 		tcmod scale 1.5 1.5
 		tcmod rotate 1
 		tcmod turb 8 4 0 5
@@ -1597,7 +1597,7 @@ textures/gothic_block/blocks17bloody
 		map textures/gothic_block/blocks17bloody.tga
 	}
 	{
-		map textures/liquids/proto_gruel3.jpg
+		map textures/liquids/proto_gruel3.tga
 		tcmod scroll .01 .01
 		tcmod turb 0 0.01 0 .1
 		alphagen lightingspecular
@@ -1621,7 +1621,7 @@ textures/gothic_block/largerblock3blood
 		map textures/gothic_block/largerblock3blood.tga
 	}
 	{
-		map textures/liquids/proto_gruel3.jpg
+		map textures/liquids/proto_gruel3.tga
 		tcmod scroll .01 .01
 		tcmod turb 0 0.01 0 .1
 		alphagen lightingspecular
@@ -1646,7 +1646,7 @@ textures/gothic_floor/metalbridge06brokeb
 		rgbgen identity
 	}
 	{
-		map textures/sfx/proto_zzztblu3.jpg
+		map textures/sfx/proto_zzztblu3.tga
 		tcmod scale 1.5 1.5
 		tcmod rotate 1
 		tcmod turb 8 4 0 5
@@ -1699,7 +1699,7 @@ textures/gothic_floor/largerblock3b_ow
 		rgbgen identity
 	}
 	{
-		map textures/sfx/fireswirl2.jpg
+		map textures/sfx/fireswirl2.tga
 		tcmod scale 1.5 1.5
 		tcmod rotate 1
 		tcmod turb 8 4 0 5
@@ -1739,7 +1739,7 @@ textures/base_trim/proto_fence
 
 textures/skin/skin6move
 {
-	qer_editorimage textures/skin/skin6move.jpg
+	qer_editorimage textures/skin/skin6move.tga
 	surfaceparm flesh
 	tesssize 64
 	deformVertexes wave 80 sin 3 2 .5 .9
@@ -1749,7 +1749,7 @@ textures/skin/skin6move
 	}
 	
 	{
-		map textures/skin/skin6move.jpg
+		map textures/skin/skin6move.tga
 		blendfunc filter
 		rgbgen identity
 	}
@@ -1758,17 +1758,17 @@ textures/skin/skin6move
 
 textures/skin/chapthroatooz
 {
-	qer_editorimage textures/skin/chapthroatooz.jpg
+	qer_editorimage textures/skin/chapthroatooz.tga
 	
 	{
-		map textures/liquids/proto_gruel2.jpg
+		map textures/liquids/proto_gruel2.tga
 		
 		tcmod scale .5 .5
 		tcmod scroll .01 .1
 		rgbgen identity
 	}
 	{
-		map textures/skin/chapthroatooz.jpg
+		map textures/skin/chapthroatooz.tga
 		blendfunc add
 		rgbgen identity
 	}
@@ -1851,19 +1851,19 @@ textures/gothic_trim/metlsupport4i_shiney
 
 textures/base_wall/shinybluemetal1
 {
-	qer_editorimage textures/base_wall/shinybluemetal1.jpg
+	qer_editorimage textures/base_wall/shinybluemetal1.tga
 	{
 		//mapped first so it looks good while vertex lit
-		map textures/base_wall/shinybluemetal1.jpg
+		map textures/base_wall/shinybluemetal1.tga
 		rgbGen Identity
 	}
 	{
-		map textures/base_wall/chrome_env.jpg
+		map textures/base_wall/chrome_env.tga
 		tcGen environment 
 		rgbGen oneminusvertex
 	}
 	{
-		map textures/base_wall/shinybluemetal1.jpg
+		map textures/base_wall/shinybluemetal1.tga
 		blendfunc add
 	}
 	{
@@ -1875,9 +1875,9 @@ textures/base_wall/shinybluemetal1
 
 textures/base_wall/metalfloor_wall_14
 {
-	qer_editorimage textures/base_wall/metalfloor_wall_14.jpg
+	qer_editorimage textures/base_wall/metalfloor_wall_14.tga
 	{
-		map textures/base_wall/metalfloor_wall_14.jpg
+		map textures/base_wall/metalfloor_wall_14.tga
 		rgbgen identity
 	}
 	{
@@ -1886,7 +1886,7 @@ textures/base_wall/metalfloor_wall_14
 		rgbgen vertex
 	}
 	{
-		map textures/base_wall/metalfloor_wall_14.jpg
+		map textures/base_wall/metalfloor_wall_14.tga
 		blendfunc add
 		rgbgen identity
 	}

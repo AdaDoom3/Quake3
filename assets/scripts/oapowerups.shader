@@ -63,7 +63,7 @@ quadAura
 models/powerups/holdable/medkit_base
 {	
 	{
-		map textures/base_wall/chrome_env.jpg
+		map textures/base_wall/chrome_env.tga
 		tcGen environment 
 		rgbGen lightingdiffuse
 		tcmod scale .5 .5
@@ -73,7 +73,7 @@ models/powerups/holdable/medkit_base
 models/powerups/holdable/medkit_plunger
 {
 	{
-		map textures/effects/envmapdimb.jpg
+		map textures/effects/envmapdimb.tga
 		tcgen environment
 		blendfunc add
 	}
@@ -83,7 +83,7 @@ models/powerups/holdable/medkit_slime
 {	
 
 	{
-		map textures/liquids/slime9.jpg
+		map textures/liquids/slime9.tga
 		tcmod scroll 1 1
 		blendfunc add
 	}
@@ -93,7 +93,7 @@ models/powerups/holdable/medkit_slime
 models/powerups/holdable/teleport_center
 {
 	{
-		map textures/base_wall/chrome_env.jpg
+		map textures/base_wall/chrome_env.tga
 		tcgen environment
 		rgbGen lightingdiffuse
 		tcmod scale .5 .5
@@ -103,7 +103,7 @@ models/powerups/holdable/teleport_center
 models/powerups/holdable/teleport_outer
 {
 	{
-		map textures/liquids/lavafloor.jpg
+		map textures/liquids/lavafloor.tga
 		tcmod scroll .5 .5
 		blendfunc add
 	}
@@ -113,7 +113,7 @@ models/powerups/holdable/teleport_outer
 models/powerups/instant/ebase
 {
 	{
-		map textures/effects/envmapgold.jpg
+		map textures/effects/envmapgold.tga
 		tcgen environment
 		rgbGen vertex
 	}
@@ -122,7 +122,7 @@ models/powerups/instant/ebase
 models/powerups/instant/ering
 {
 	{
-		map textures/effects/envmapgold.jpg
+		map textures/effects/envmapgold.tga
 		tcgen environment
 		rgbgen vertex
 	}
@@ -131,7 +131,7 @@ models/powerups/instant/ering
 rcad
 {
 	{
-		map textures/effects/regenmap2.jpg
+		map textures/effects/regenmap2.tga
 		tcgen environment
 		rgbgen vertex
 	}
@@ -140,7 +140,7 @@ rcad
 rring
 {
 	{
-		map textures/effects/regenmap2.jpg
+		map textures/effects/regenmap2.tga
 		tcgen environment
 		rgbgen vertex
 	}
@@ -150,7 +150,7 @@ rring
 models/powerups/instant/h_center
 {
 	{
-		map textures/effects/hastenv.jpg
+		map textures/effects/hastenv.tga
 		tcgen environment
 		rgbgen vertex
 	}
@@ -159,7 +159,7 @@ models/powerups/instant/h_center
 models/powerups/instant/h_ring
 {
 	{
-		map textures/effects/hastenv.jpg
+		map textures/effects/hastenv.tga
 		tcgen environment
 		rgbgen vertex
 	}
@@ -169,7 +169,7 @@ models/powerups/instant/h_ring
 models/powerups/instant/flight_body
 {
 	{
-		map textures/effects/flightenv.jpg
+		map textures/effects/flightenv.tga
 		tcgen environment
 		rgbgen vertex
 	}
@@ -178,7 +178,7 @@ models/powerups/instant/flight_body
 models/powerups/instant/flight_ring
 {
 	{
-		map textures/effects/flightenv.jpg
+		map textures/effects/flightenv.tga
 		tcgen environment
 		rgbgen vertex
 	}
@@ -187,7 +187,7 @@ models/powerups/instant/flight_ring
 models/powerups/armor/shard
 {
 	{
-		map models/powerups/armor/shard_env.jpg
+		map models/powerups/armor/shard_env.tga
 		tcgen environment
 	}
 }
@@ -195,7 +195,7 @@ models/powerups/armor/shard
 models/powerups/armor/shard_env
 {
 	{
-		map models/powerups/armor/shard_env.jpg
+		map models/powerups/armor/shard_env.tga
 		blendfunc add
 		rgbgen wave sin .2 .5 0 .5
 		tcgen environment

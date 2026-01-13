@@ -2,7 +2,7 @@ textures/acc_dm3/comptop
 {
 	surfaceparm metalsteps
 	{
-		map textures/acc_dm3/comptop.jpg
+		map textures/acc_dm3/comptop.tga
 	}
 	{
 		map $lightmap
@@ -16,7 +16,7 @@ textures/acc_dm3/cop
 {
 	surfaceparm metalsteps
 	{
-		map textures/acc_dm3/cop.jpg
+		map textures/acc_dm3/cop.tga
 	}
 	{
 		map $lightmap
@@ -28,10 +28,10 @@ textures/acc_dm3/cop
 
 textures/acc_dm3/stripes_nonsolid
 {
-	qer_editorimage textures/acc_dm3/stripes.jpg
+	qer_editorimage textures/acc_dm3/stripes.tga
 	surfaceparm nonsolid
 	{
-		map textures/acc_dm3/stripes.jpg
+		map textures/acc_dm3/stripes.tga
 	}
 	{
 		map $lightmap
@@ -70,7 +70,7 @@ textures/acc_dm3/chrome
 	q3map_shadeAngle 150
 	surfaceparm nonsolid
 	{
-		map textures/acc_dm3/chrome.jpg
+		map textures/acc_dm3/chrome.tga
 	}
 	{
 		map $lightmap
@@ -82,10 +82,10 @@ textures/acc_dm3/chrome
 
 textures/acc_dm3/transrumbles
 {
-	qer_editorimage textures/acc_dm3/wallbotcracksb.jpg
+	qer_editorimage textures/acc_dm3/wallbotcracksb.tga
 	surfaceparm nonsolid
 	{
-		map textures/acc_dm3/wallbotcracksb.jpg
+		map textures/acc_dm3/wallbotcracksb.tga
 	}
 	{
 		map $lightmap
@@ -106,7 +106,7 @@ textures/acc_dm3/fx_dm3sky
 	q3map_surfacelight 70
 	skyparms full 512 -
 	{
-		map textures/acc_dm3/sp_flatsky.jpg
+		map textures/acc_dm3/sp_flatsky.tga
 	}
 	{
 		map textures/acc_dm3/sp_flatsky2.tga
@@ -123,7 +123,7 @@ textures/acc_dm3/sp_ground
 	q3map_shadeAngle 70
 	surfaceparm nonsolid
 	{
-		map textures/acc_dm3/sp_ground.jpg
+		map textures/acc_dm3/sp_ground.tga
 	}
 	{
 		map $lightmap
@@ -154,7 +154,7 @@ textures/acc_dm3/brwnwater
 
 textures/acc_dm3/fx_portal
 {
-	qer_editorimage textures/acc_dm3/fx_portal.jpg
+	qer_editorimage textures/acc_dm3/fx_portal.tga
 	portal
 	surfaceparm nolightmap
 	surfaceparm nomarks
@@ -164,7 +164,7 @@ textures/acc_dm3/fx_portal
 		depthWrite
 	}
 	{
-		map textures/acc_dm3/portal_fog.jpg
+		map textures/acc_dm3/portal_fog.tga
 		blendfunc gl_src_alpha gl_one_minus_src_alpha
 		alphagen portal 1024
 		rgbGen identity	
@@ -172,7 +172,7 @@ textures/acc_dm3/fx_portal
 		tcmod scroll .04 .01
 	}
 	{
-		map textures/acc_dm3/fx_tintedportal.jpg
+		map textures/acc_dm3/fx_tintedportal.tga
 		rgbgen identity
 		blendFunc filter
 	}
@@ -182,7 +182,7 @@ textures/acc_dm3/rustpipes
 {
 	surfaceparm nonsolid
 	{
-		map textures/acc_dm3/rustpipes.jpg
+		map textures/acc_dm3/rustpipes.tga
 	}
 	{
 		map $lightmap
@@ -196,7 +196,7 @@ textures/acc_dm3/sqrlight
 {
 	surfaceparm nomarks
 	{
-		map textures/acc_dm3/sqrlight_dn.jpg
+		map textures/acc_dm3/SQRlight_dn.tga
 	}
 	{
 		map textures/acc_dm3/fx_window.tga
@@ -217,7 +217,7 @@ textures/acc_dm3/comp
 	surfaceparm nomarks
 	surfaceparm metalsteps
 	{
-		map textures/acc_dm3/comp.jpg
+		map textures/acc_dm3/comp.tga
 	}
 	{
 		map textures/acc_dm3/fx_window.tga
@@ -378,7 +378,7 @@ textures/acc_dm5/flame
 
 textures/acc_dm5/fx_waterfall
 {
-	qer_editorimage textures/acc_dm5/fx_waterfall.jpg
+	qer_editorimage textures/acc_dm5/fx_waterfall.tga
 	surfaceparm noimpact
 	surfaceparm nonsolid
 	surfaceparm trans
@@ -427,7 +427,7 @@ textures/acc_dm5/brwnwater
 
 textures/acc_dm5/fx_portal
 {
-	qer_editorimage textures/acc_dm5/fx_portal.jpg
+	qer_editorimage textures/acc_dm5/fx_portal.tga
 	portal
 	surfaceparm nolightmap
 	surfaceparm noimpact
@@ -437,7 +437,7 @@ textures/acc_dm5/fx_portal
 		depthWrite
 	}
 	{
-		map textures/acc_dm5/portal_fog.jpg
+		map textures/acc_dm5/portal_fog.tga
 		blendfunc gl_src_alpha gl_one_minus_src_alpha
 		alphagen portal 1024
 		rgbGen identity	
@@ -448,7 +448,7 @@ textures/acc_dm5/fx_portal
 
 textures/acc_dm5/fx_sky
 {
-	qer_editorimage textures/acc_dm5/fx_sky.jpg
+	qer_editorimage textures/acc_dm5/fx_sky.tga
 	q3map_sun 0.176 0.494 0.694 30 160 80
 	surfaceparm noimpact
 	surfaceparm nomarks
@@ -465,7 +465,7 @@ textures/acc_dm5/fx_sky
 
 textures/acc_dm5/fx_lums
 {
-	qer_editorimage textures/acc_dm5/fx_lums.jpg
+	qer_editorimage textures/acc_dm5/fx_lums.tga
 	surfaceparm trans
 	surfaceparm nonsolid
 	surfaceparm noimpact
@@ -505,11 +505,11 @@ textures/acc_dm5/fx_lums
 
 textures/acc_dm5/mud_trans
 {
-	qer_editorimage textures/acc_dm5/mud02.jpg
+	qer_editorimage textures/acc_dm5/mud02.tga
 	surfaceparm nonsolid
 	cull none
 	{
-		map textures/acc_dm5/mud02.jpg
+		map textures/acc_dm5/mud02.tga
 	}
 	{
 		map $lightmap
@@ -520,11 +520,11 @@ textures/acc_dm5/mud_trans
 
 textures/acc_dm5/roots_moss
 {
-	qer_editorimage textures/acc_dm5/roots_moss.jpg
+	qer_editorimage textures/acc_dm5/roots_moss.tga
 	surfaceparm nonsolid
 	cull none
 	{
-		map textures/acc_dm5/roots_moss.jpg
+		map textures/acc_dm5/roots_moss.tga
 	}
 	{
 		map $lightmap

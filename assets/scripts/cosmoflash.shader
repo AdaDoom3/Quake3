@@ -87,7 +87,7 @@ textures/cosmo_sfx/flag_oa_blue1
 
 textures/cosmo_skies/killsky_r
 {
-	qer_editorimage textures/skies/killsky_1.jpg
+	qer_editorimage textures/skies/killsky_1.tga
 	q3map_lightimage textures/skies/skywater.tga
 	surfaceparm nomarks
 	surfaceparm noimpact
@@ -98,12 +98,12 @@ textures/cosmo_skies/killsky_r
 	q3map_sun	1 1 1  200  305  70
 	skyParms full 512 -
 	{
-		map textures/skies/intelredclouds.jpg
+		map textures/skies/intelredclouds.tga
 		tcmod scale 2 3
 		tcmod scroll -.01 .02
 	}
 	{
-		map textures/skies/killsky_1.jpg
+		map textures/skies/killsky_1.tga
 		blendfunc filter
 		tcmod scale 3 2
 		tcmod scroll 0.05 0.03
@@ -112,7 +112,7 @@ textures/cosmo_skies/killsky_r
 
 textures/cosmo_skies/foghullsky1
 {
-	qer_editorimage textures/cosmo_sfx/fog_or.jpg
+	qer_editorimage textures/cosmo_sfx/fog_or.tga
 	surfaceparm noimpact
 	surfaceparm nomarks
 	surfaceparm nolightmap
@@ -123,14 +123,14 @@ textures/cosmo_skies/foghullsky1
 	skyparms - 512 -
 
 	{
-		map textures/cosmo_sfx/fog_or.jpg
+		map textures/cosmo_sfx/fog_or.tga
 		depthWrite
 	}
 }
 
 textures/cosmo_skies/foghull_or
 {
-    qer_editorimage textures/cosmo_sfx/fog_or.jpg
+    qer_editorimage textures/cosmo_sfx/fog_or.tga
     qer_nocarve
     surfaceparm	trans
     surfaceparm	nonsolid
@@ -140,7 +140,10 @@ textures/cosmo_skies/foghull_or
 
 }
 
-textures/cosmo_sfx/blood1_decal{	qer_editorimage textures/cosmo_sfx/blood1.tga	nopicmip
+textures/cosmo_sfx/blood1_decal
+{
+	qer_editorimage textures/cosmo_sfx/blood1.tga
+	nopicmip
     qer_trans 0.75
     q3map_nonplanar 
     q3map_shadeAngle 179 
@@ -158,7 +161,10 @@ textures/cosmo_sfx/blood1_decal{	qer_editorimage textures/cosmo_sfx/blood1.tga
 	}
 }
 
-textures/cosmo_sfx/blood2_decal{	qer_editorimage textures/cosmo_sfx/blood2.tga	nopicmip
+textures/cosmo_sfx/blood2_decal
+{
+	qer_editorimage textures/cosmo_sfx/blood2.tga
+	nopicmip
     qer_trans 0.75
     q3map_nonplanar 
     q3map_shadeAngle 179 
@@ -282,20 +288,27 @@ textures/cosmo_floor/sand01
     surfaceparm nosteps
     surfaceparm dust
     q3map_lightmapsamplesize 0.1
-    q3map_nonplanar    q3map_shadeangle 80
+    q3map_nonplanar
+    q3map_shadeangle 80
 
-    {        map $lightmap        rgbGen identity    }
-    {        map textures/cosmo_floor/sand01.jpg
-        blendFunc GL_DST_COLOR GL_ZERO        rgbGen identity    }
+    {
+        map $lightmap
+        rgbGen identity
+    }
+    {
+        map textures/cosmo_floor/sand01.tga
+        blendFunc GL_DST_COLOR GL_ZERO
+        rgbGen identity
+    }
 
 }
 
 textures/cosmo_trim/ctf_wall_red1
 {
-	qer_editorimage textures/cosmo_trim/ctf_wall_red1.jpg
+	qer_editorimage textures/cosmo_trim/ctf_wall_red1.tga
 	surfaceparm nomarks
 	{
-		map textures/cosmo_trim/ctf_wall_red1.jpg
+		map textures/cosmo_trim/ctf_wall_red1.tga
 		rgbgen identity
 	}
     {
@@ -304,7 +317,7 @@ textures/cosmo_trim/ctf_wall_red1
 		rgbGen identity
     }
 	{
-		map textures/cosmo_trim/flashyspots1.jpg
+		map textures/cosmo_trim/flashyspots1.tga
 		blendfunc add
 		rgbGen wave sin 0.25 0.25 0 .05
 	}
@@ -313,10 +326,10 @@ textures/cosmo_trim/ctf_wall_red1
 
 textures/cosmo_trim/ctf_wall_blue1
 {
-	qer_editorimage textures/cosmo_trim/ctf_wall_blue1.jpg
+	qer_editorimage textures/cosmo_trim/ctf_wall_blue1.tga
 	surfaceparm nomarks
 	{
-		map textures/cosmo_trim/ctf_wall_blue1.jpg
+		map textures/cosmo_trim/ctf_wall_blue1.tga
 		rgbgen identity
 	}
     {
@@ -325,7 +338,7 @@ textures/cosmo_trim/ctf_wall_blue1
 		rgbGen identity
     }
 	{
-		map textures/cosmo_trim/flashyspots1.jpg
+		map textures/cosmo_trim/flashyspots1.tga
 		blendfunc add
 		rgbGen wave sin 0.25 0.25 0 .05
 	}
@@ -349,7 +362,7 @@ textures/cosmo_liquids/plasma_red
 	deformVertexes wave 100 sin 3 2 .1 0.1
 	
     {
-        map textures/cosmo_liquids/plasma_red.jpg
+        map textures/cosmo_liquids/plasma_red.tga
         rgbGen identity
 	}
 
@@ -380,11 +393,11 @@ textures/cosmo_trim/darkgreen02
 
 textures/cosmo_light/lightyel02_12k
 {
-	qer_editorimage textures/cosmo_light/lightyel02.jpg
+	qer_editorimage textures/cosmo_light/lightyel02.tga
 	surfaceparm nomarks
 	q3map_surfacelight 12000
 	{
-		map textures/cosmo_light/lightyel02.jpg
+		map textures/cosmo_light/lightyel02.tga
 		rgbgen identity
 	}
 	{
@@ -396,22 +409,22 @@ textures/cosmo_light/lightyel02_12k
 
 textures/cosmo_light/lightyel03_5k
 {
-	qer_editorimage textures/cosmo_light/lightyel03.jpg
+	qer_editorimage textures/cosmo_light/lightyel03.tga
 	surfaceparm nomarks
 	q3map_surfacelight 5000
 	{
-		map textures/cosmo_light/lightyel03_f.jpg
+		map textures/cosmo_light/lightyel03_f.tga
 		tcMod scroll 0 0.1
 		rgbgen identity
 	}
 	{
-		map textures/cosmo_sfx/stoerung.jpg
+		map textures/cosmo_sfx/stoerung.tga
 		blendFunc GL_ONE GL_ONE
                 rgbgen wave sin .25 0.1 0 0.1
                 tcMod scroll 0 10
 	}	
     {
-		map textures/cosmo_sfx/stoerung.jpg
+		map textures/cosmo_sfx/stoerung.tga
 		blendFunc GL_ONE GL_ONE
                 rgbgen wave sin 0.25 0.1 0 0.1
                 tcMod scale  -1 1
@@ -435,7 +448,7 @@ textures/cosmo_wall/grgr_wall2
 //	surfaceparm nomarks
 	q3map_surfacelight 175
 	{
-		map textures/cosmo_sfx/pulse.jpg
+		map textures/cosmo_sfx/pulse.tga
 		tcMod scroll 0 -0.65
 		rgbgen identity
 	}
@@ -455,11 +468,11 @@ textures/cosmo_wall/grgr_wall2
 
 textures/cosmo_light/wall_light1
 {
-	qer_editorimage textures/cosmo_light/wall_light1.jpg
-    q3map_lightimage textures/cosmo_light/wall_light1_m.jpg
+	qer_editorimage textures/cosmo_light/wall_light1.tga
+    q3map_lightimage textures/cosmo_light/wall_light1_m.tga
 	q3map_surfacelight 1600
 	{
-		map textures/cosmo_light/wall_light1.jpg
+		map textures/cosmo_light/wall_light1.tga
         blendFunc GL_ONE GL_ZERO
 		rgbgen identity
 	}
@@ -472,10 +485,10 @@ textures/cosmo_light/wall_light1
 
 textures/cosmo_light/wall_light2
 {
-	qer_editorimage textures/cosmo_light/wall_light2.jpg
+	qer_editorimage textures/cosmo_light/wall_light2.tga
 	q3map_surfacelight 1600
 	{
-		map textures/cosmo_light/wall_light2.jpg
+		map textures/cosmo_light/wall_light2.tga
         blendFunc GL_ONE GL_ZERO
 		rgbgen identity
 	}
@@ -523,7 +536,7 @@ textures/cosmo_sfx/jumppad
 		tcgen lightmap
 	}
 	{
-		map textures/cosmo_sfx/jumppad_b.jpg
+		map textures/cosmo_sfx/jumppad_b.tga
 		blendfunc add
 		rgbGen wave sin 0.25 0.25 0 .25
 	}
@@ -532,7 +545,7 @@ textures/cosmo_sfx/jumppad
 textures/cosmo_sfx/jumppad2
 {
 	qer_editorimage textures/cosmo_sfx/jumppad2.tga
-    q3map_lightimage textures/cosmo_sfx/jumppad2_b.jpg
+    q3map_lightimage textures/cosmo_sfx/jumppad2_b.tga
 	q3map_surfacelight 600
 
 	{
@@ -540,7 +553,7 @@ textures/cosmo_sfx/jumppad2
 		rgbgen identity
 	}
 	{
-		map textures/cosmo_sfx/jumppad2_b.jpg
+		map textures/cosmo_sfx/jumppad2_b.tga
 		blendfunc GL_ONE GL_ONE
 		tcMod stretch triangle 2 1 0 0.7
 		rgbGen wave sin 0.25 0.25 0 0.7
@@ -560,18 +573,18 @@ textures/cosmo_sfx/jumppad2
 
 textures/cosmo_sfx/teleporter
 {
-    qer_editorimage textures/cosmo_sfx/teleporter.jpg
+    qer_editorimage textures/cosmo_sfx/teleporter.tga
     surfaceparm nomarks
     surfaceparm alphashadow
     deformVertexes normal 0.1 1
         
     {
-        map textures/cosmo_sfx/teleporter.jpg
+        map textures/cosmo_sfx/teleporter.tga
         tcGen environment
         rgbGen identity
     }
     {
-		map textures/cosmo_sfx/pulse.jpg
+		map textures/cosmo_sfx/pulse.tga
 		tcMod scroll 0 -0.65
 		blendfunc GL_ONE GL_ONE
 		rgbgen identity
@@ -580,7 +593,10 @@ textures/cosmo_sfx/teleporter
     
 }
 
-textures/cosmo_sfx/decal1{	qer_editorimage textures/cosmo_sfx/decal1.tga	nopicmip
+textures/cosmo_sfx/decal1
+{
+	qer_editorimage textures/cosmo_sfx/decal1.tga
+	nopicmip
     polygonOffset
 
     {
@@ -590,7 +606,10 @@ textures/cosmo_sfx/decal1{	qer_editorimage textures/cosmo_sfx/decal1.tga	nopi
 	}
 }
 
-textures/cosmo_sfx/decal2{	qer_editorimage textures/cosmo_sfx/decal2.tga	nopicmip
+textures/cosmo_sfx/decal2
+{
+	qer_editorimage textures/cosmo_sfx/decal2.tga
+	nopicmip
     polygonOffset
 
     {
@@ -600,7 +619,10 @@ textures/cosmo_sfx/decal2{	qer_editorimage textures/cosmo_sfx/decal2.tga	nopi
 	}
 }
 
-textures/cosmo_sfx/decal3{	qer_editorimage textures/cosmo_sfx/decal3.tga	nopicmip
+textures/cosmo_sfx/decal3
+{
+	qer_editorimage textures/cosmo_sfx/decal3.tga
+	nopicmip
     polygonOffset
 
     {
@@ -610,7 +632,10 @@ textures/cosmo_sfx/decal3{	qer_editorimage textures/cosmo_sfx/decal3.tga	nopi
 	}
 }
 
-textures/cosmo_sfx/decal4{	qer_editorimage textures/cosmo_sfx/decal4.tga	nopicmip
+textures/cosmo_sfx/decal4
+{
+	qer_editorimage textures/cosmo_sfx/decal4.tga
+	nopicmip
     polygonOffset
 
     {
@@ -644,7 +669,9 @@ textures/cosmo_skies/tim_tourney2
 	}
 }
 
-textures/cosmo_liquids/greenliqu1{	qer_editorimage textures/cosmo_liquids/greenliqu1.jpg
+textures/cosmo_liquids/greenliqu1
+{
+	qer_editorimage textures/cosmo_liquids/greenliqu1.tga
 	surfaceparm noimpact
 	surfaceparm nolightmap
 	surfaceparm nomarks
@@ -653,7 +680,7 @@ textures/cosmo_liquids/greenliqu1{	qer_editorimage textures/cosmo_liquids/gree
 	deformVertexes bulge 4 2 0.75
 
     {
-        map textures/cosmo_liquids/greenliqu1.jpg
+        map textures/cosmo_liquids/greenliqu1.tga
 		rgbGen identity
 		tcmod scroll 0.03 0.25
 	}
@@ -663,28 +690,49 @@ textures/cosmo_sfx/dm17_jpad
 {
         qer_editorimage textures/cosmo_sfx/e8jumpspawn02red.tga
         surfaceparm nomarks
-        surfaceparm metalsteps        q3map_surfacelight 15000
-//        q3map_lightimage textures/sfx/jc2.jpg
-	{		clampmap textures/sfx/jc2.jpg		tcMod stretch sin 1.2 .8 0 1.5
+        surfaceparm metalsteps
+        q3map_surfacelight 15000
+//        q3map_lightimage textures/sfx/jc2.tga
+
+	{
+		clampmap textures/sfx/jc2.tga
+		tcMod stretch sin 1.2 .8 0 1.5
 		rgbGen wave square .5 .5 .25 1.5
-	}    {
+	}
+    {
         map textures/cosmo_sfx/e8jumpspawn02red.tga
 		blendfunc blend
-		rgbGen identity	}	{		map $lightmap 		blendfunc gl_dst_color gl_one_minus_dst_alpha		rgbGen identity		tcGen lightmap 	}
+		rgbGen identity
+	}
+	{
+		map $lightmap 
+		blendfunc gl_dst_color gl_one_minus_dst_alpha
+		rgbGen identity
+		tcGen lightmap 
+	}
 }
 
-textures/base_floor/clang_floor_s2{	qer_editorimage textures/base_floor/clang_floor_s2.jpg
+textures/base_floor/clang_floor_s2
+{
+	qer_editorimage textures/base_floor/clang_floor_s2.tga
     surfaceparm metalsteps
 
     {
-        map textures/base_floor/clang_floor_s2.jpg
+        map textures/base_floor/clang_floor_s2.tga
 		rgbGen identity
 	}
 	
-	{		map $lightmap 		blendfunc filter		rgbGen identity	}
+	{
+		map $lightmap 
+		blendfunc filter
+		rgbGen identity
+	}
 }
 
-textures/base_floor/clang_decal2{	qer_editorimage textures/base_floor/clang_decal2.tga	nopicmip
+textures/base_floor/clang_decal2
+{
+	qer_editorimage textures/base_floor/clang_decal2.tga
+	nopicmip
     polygonOffset
     surfaceparm metalsteps
 
@@ -696,12 +744,14 @@ textures/base_floor/clang_decal2{	qer_editorimage textures/base_floor/clang_de
 }
 
 
-textures/evil6_lights/e6v_light_s_3k{	qer_editorimage textures/evil6_lights/e6v_light_s_nolight.jpg
+textures/evil6_lights/e6v_light_s_3k
+{
+	qer_editorimage textures/evil6_lights/e6v_light_s_nolight.tga
     surfaceparm nomarks
     q3map_surfacelight 13000
 	
     {
-        map textures/evil6_lights/e6v_light_s_nolight.jpg
+        map textures/evil6_lights/e6v_light_s_nolight.tga
 		rgbgen identity
 	}
     {
@@ -712,12 +762,14 @@ textures/evil6_lights/e6v_light_s_3k{	qer_editorimage textures/evil6_lights/e6
     }
 }
 
-textures/cosmo_light/border7_ceil39_6k{	qer_editorimage textures/gothic_light/border7_ceil39.jpg
-    q3map_lightimage textures/gothic_light/border7_ceil39blend.jpg
+textures/cosmo_light/border7_ceil39_6k
+{
+	qer_editorimage textures/gothic_light/border7_ceil39.tga
+    q3map_lightimage textures/gothic_light/border7_ceil39blend.tga
     q3map_surfacelight 6000
 	
     {
-        map textures/gothic_light/border7_ceil39.jpg
+        map textures/gothic_light/border7_ceil39.tga
 		rgbgen identity
 	}
     {
@@ -739,7 +791,7 @@ textures/cosmo_sfx/diamond_blue
 		blendFunc GL_ONE GL_ZERO
 	}
     {
-		map textures/base_trim/tinfx.jpg
+		map textures/base_trim/tinfx.tga
 		tcGen environment
 		blendfunc add
 		rgbGen vertex
@@ -747,7 +799,10 @@ textures/cosmo_sfx/diamond_blue
 }
 
 
-textures/cosmo_sfx/chalkdoor_d{	qer_editorimage textures/cosmo_sfx/chalkdoor.tga	nopicmip
+textures/cosmo_sfx/chalkdoor_d
+{
+	qer_editorimage textures/cosmo_sfx/chalkdoor.tga
+	nopicmip
     polygonOffset
 
     {
@@ -788,7 +843,7 @@ textures/cosmo_light/crystalwhite_5k
 		rgbgen identity
 	}
     {
-		map textures/base_trim/tinfx.jpg
+		map textures/base_trim/tinfx.tga
 		tcGen environment
 		blendfunc add
 		rgbGen vertex

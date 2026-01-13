@@ -53,7 +53,7 @@ textures/mc-oa-dm02/logo2
         surfaceparm nomarks
 	q3map_flare flareShader-twilightflare
 	{
-		map textures/mc-oa-dm02/logo2.jpg
+		map textures/mc-oa-dm02/logo2.tga
 		blendFunc Add
 		
                   
@@ -71,7 +71,7 @@ textures/mc-oa-dm02/teleport
         surfaceparm trans
         surfaceparm nomarks
 	{
-		map textures/mc-oa-dm02/teleport.jpg
+		map textures/mc-oa-dm02/teleport.tga
 		blendFunc Add
 		
                   
@@ -82,7 +82,7 @@ textures/mc-oa-dm02/teleport
 
 textures/mc-oa-dm02/mc-oa-dm02
 {
-	qer_editorimage textures/mc-oa-dm02/mc-oa-dm02.jpg
+	qer_editorimage textures/mc-oa-dm02/mc-oa-dm02.tga
 	surfaceparm sky
 	surfaceparm noimpact
 	surfaceparm nolightmap
@@ -168,7 +168,7 @@ textures/anoice1/anoice1
 	q3map_sun 0.65 0.75 0.85 195 295 14
 	skyparms env/anoice1/anoice1 - -
 	{
-		map textures/skies/anoice1.jpg
+		map textures/skies/anoice1.tga
 		blendfunc filter
 		tcmod scale 3 2
 		tcmod scroll .01 .02
@@ -190,12 +190,12 @@ textures/e7/e7trimlight
 		tcGen lightmap 
 	}
 	{
-		map textures/e7/e7trimlight.jpg
+		map textures/e7/e7trimlight.tga
 		blendfunc filter
 		rgbGen identity
 	}
 	{
-		map textures/e7/e7trimlight_glow.jpg
+		map textures/e7/e7trimlight_glow.tga
 		blendfunc add
 		rgbGen identity
 	}
@@ -1973,7 +1973,7 @@ surfaceparm nodlight
 deformvertexes autosprite
 deformvertexes move -11.925312 29.985764 146.490326 sawtooth 0 1 0.087225 0.666733
 {
-clampmap textures/mc-sm19-amphetamine/spark.jpg
+clampmap textures/mc-sm19-amphetamine/spark.tga
 tcMod rotate 0.000000
 AlphaGen wave sawtooth 1.000000 0.000000 0.087225 0.666733
 rgbGen wave sawtooth 1.000000 -1.000000 0.087225 0.666733
@@ -1994,7 +1994,7 @@ surfaceparm nodlight
 deformvertexes autosprite
 deformvertexes move -104.517090 -89.074257 59.711781 sawtooth 0 1 -0.095013 0.668232
 {
-clampmap textures/mc-sm19-amphetamine/spark.jpg
+clampmap textures/mc-sm19-amphetamine/spark.tga
 tcMod rotate 0.000000
 AlphaGen wave sawtooth 1.000000 0.000000 -0.095013 0.668232
 rgbGen wave sawtooth 1.000000 -1.000000 -0.095013 0.668232
@@ -2015,7 +2015,7 @@ surfaceparm nodlight
 deformvertexes autosprite
 deformvertexes move -35.743641 66.884636 140.850006 sawtooth 0 1 -0.074236 0.626726
 {
-clampmap textures/mc-sm19-amphetamine/spark.jpg
+clampmap textures/mc-sm19-amphetamine/spark.tga
 tcMod rotate 0.000000
 AlphaGen wave sawtooth 1.000000 0.000000 -0.074236 0.626726
 rgbGen wave sawtooth 1.000000 -1.000000 -0.074236 0.626726
@@ -2036,7 +2036,7 @@ surfaceparm nodlight
 deformvertexes autosprite
 deformvertexes move -81.889450 -100.071449 93.164749 sawtooth 0 1 0.013425 0.627283
 {
-clampmap textures/mc-sm19-amphetamine/spark.jpg
+clampmap textures/mc-sm19-amphetamine/spark.tga
 tcMod rotate 0.000000
 AlphaGen wave sawtooth 1.000000 0.000000 0.013425 0.627283
 rgbGen wave sawtooth 1.000000 -1.000000 0.013425 0.627283
@@ -2057,7 +2057,7 @@ surfaceparm nodlight
 deformvertexes autosprite
 deformvertexes move 5.242358 99.504318 108.932251 sawtooth 0 1 -0.055541 0.676629
 {
-clampmap textures/mc-sm19-amphetamine/spark.jpg
+clampmap textures/mc-sm19-amphetamine/spark.tga
 tcMod rotate 0.000000
 AlphaGen wave sawtooth 1.000000 0.000000 -0.055541 0.676629
 rgbGen wave sawtooth 1.000000 -1.000000 -0.055541 0.676629
@@ -2078,7 +2078,7 @@ surfaceparm nodlight
 deformvertexes autosprite
 deformvertexes move -75.135094 -18.878418 128.561081 sawtooth 0 1 -0.023869 0.665988
 {
-clampmap textures/mc-sm19-amphetamine/spark.jpg
+clampmap textures/mc-sm19-amphetamine/spark.tga
 tcMod rotate 0.000000
 AlphaGen wave sawtooth 1.000000 0.000000 -0.023869 0.665988
 rgbGen wave sawtooth 1.000000 -1.000000 -0.023869 0.665988
@@ -2099,7 +2099,7 @@ surfaceparm nodlight
 deformvertexes autosprite
 deformvertexes move -87.136635 -28.255167 118.201042 sawtooth 0 1 -0.048436 0.670002
 {
-clampmap textures/mc-sm19-amphetamine/spark.jpg
+clampmap textures/mc-sm19-amphetamine/spark.tga
 tcMod rotate 0.000000
 AlphaGen wave sawtooth 1.000000 0.000000 -0.048436 0.670002
 rgbGen wave sawtooth 1.000000 -1.000000 -0.048436 0.670002

@@ -10,7 +10,7 @@ models/players/skelebot/skin1
 		rgbGen lightingDiffuse
 	}
 	{
-		map textures/effects/tinfx3.jpg
+		map textures/effects/tinfx3.tga
  		blendfunc add
 		tcGen environment
 //		tcMod scale 0.1 0.1
@@ -26,7 +26,7 @@ models/players/skelebot/skin2
 		rgbGen lightingDiffuse
 	}
 	{
-		map textures/effects/tinfx3.jpg
+		map textures/effects/tinfx3.tga
  		blendfunc add
 		tcGen environment
 //		tcMod scale 5 5
@@ -46,7 +46,7 @@ models/players/skelebot/skin1blue
 		rgbGen lightingDiffuse
 	}
 	{
-		map textures/effects/tinfx3.jpg
+		map textures/effects/tinfx3.tga
  		blendfunc add
 		tcGen environment
 		rgbGen lightingDiffuse
@@ -60,7 +60,7 @@ models/players/skelebot/skin2blue
 		rgbGen lightingDiffuse
 	}
 	{
-		map textures/effects/tinfx3.jpg
+		map textures/effects/tinfx3.tga
  		blendfunc add
 		tcGen environment
 		rgbGen lightingDiffuse
@@ -78,7 +78,7 @@ models/players/skelebot/skin1red
 		rgbGen lightingDiffuse
 	}
 	{
-		map textures/effects/tinfx3.jpg
+		map textures/effects/tinfx3.tga
  		blendfunc add
 		tcGen environment
 		rgbGen lightingDiffuse
@@ -92,7 +92,7 @@ models/players/skelebot/skin2red
 		rgbGen lightingDiffuse
 	}
 	{
-		map textures/effects/tinfx3.jpg
+		map textures/effects/tinfx3.tga
  		blendfunc add
 		tcGen environment
 		rgbGen lightingDiffuse
@@ -110,7 +110,7 @@ models/players/skelebot/skin1metal
 		rgbGen lightingDiffuse
 	}
 	{
-		map textures/effects/tinfx3.jpg
+		map textures/effects/tinfx3.tga
  		blendfunc add
 		tcGen environment
 		rgbGen lightingDiffuse
@@ -124,7 +124,7 @@ models/players/skelebot/skin2metal
 		rgbGen lightingDiffuse
 	}
 	{
-		map textures/effects/tinfx3.jpg
+		map textures/effects/tinfx3.tga
  		blendfunc add
 		tcGen environment
 		rgbGen lightingDiffuse

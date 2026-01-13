@@ -57,20 +57,20 @@ textures/base_trim/wires02
 
 textures/base_floor/tilefloor7_ow
 {
-	qer_editorimage textures/base_floor/tilefloor7_ow.jpg
-	q3map_lightimage textures/base_floor/tilefloor7_owfx.jpg
+	qer_editorimage textures/base_floor/tilefloor7_ow.tga
+	q3map_lightimage textures/base_floor/tilefloor7_owfx.tga
 	q3map_surfacelight 50
 	{
 		map $lightmap
 		rgbgen identity
 	}
 	{
-		map textures/base_floor/tilefloor7_ow.jpg
+		map textures/base_floor/tilefloor7_ow.tga
 		blendfunc filter
 		rgbgen identity
 	}
 	{
-		map textures/base_floor/tilefloor7_owfx.jpg
+		map textures/base_floor/tilefloor7_owfx.tga
 		blendfunc add
 		rgbgen wave sin 2 1 .5 6
 	}
@@ -166,7 +166,7 @@ textures/proto2/marble02b_s_green
 textures/gothic_button/timbutton
 {
 	q3map_surfacelight textures/gothic_button/timbutton.tga
-	q3map_lightimage textures/gothic_button/timbutton2.jpg
+	q3map_lightimage textures/gothic_button/timbutton2.tga
 	q3map_surfacelight 20
 	
 	{
@@ -179,7 +179,7 @@ textures/gothic_button/timbutton
 		rgbgen vertex
 	}
 	{
-		map textures/gothic_button/timbutton2.jpg
+		map textures/gothic_button/timbutton2.tga
 		blendfunc add
 		rgbGen wave sin 1 1 0 0.5
 	}
@@ -426,14 +426,14 @@ textures/base_wall/metalfloor_wall_15ow
 		rgbgen identity
 	}
 	{
-		map textures/sfx/zap_scroll2.jpg
+		map textures/sfx/zap_scroll2.tga
 		tcmod scale 2 .1
 		tcmod scroll -.4 1
 		blendfunc add
 		rgbgen identity
 	}
 	{
-		map textures/sfx/zap_scroll.jpg
+		map textures/sfx/zap_scroll.tga
 		tcmod scale 2 .1
 		tcmod scroll .4 -1
 		blendfunc add
@@ -452,9 +452,9 @@ textures/base_wall/metalfloor_wall_15ow
 
 textures/base_wall/metalfloor_wall_10
 {
-	qer_editorimage textures/base_wall/metalfloor_wall_10.jpg
+	qer_editorimage textures/base_wall/metalfloor_wall_10.tga
 	{
-		map textures/base_wall/metalfloor_wall_10.jpg
+		map textures/base_wall/metalfloor_wall_10.tga
 		rgbgen identity
 	}
 	{
@@ -463,7 +463,7 @@ textures/base_wall/metalfloor_wall_10
 		rgbgen vertex
 	}
 	{
-		map textures/base_wall/metalfloor_wall_10.jpg
+		map textures/base_wall/metalfloor_wall_10.tga
 		blendfunc add
 		rgbgen identity
 	}
@@ -481,9 +481,9 @@ textures/base_wall/metalfloor_wall_10
 
 textures/clown/cheapfloor2
 {
-	qer_editorimage textures/clown/stone_tile.jpg
+	qer_editorimage textures/clown/stone_tile.tga
 	{
-		map textures/clown/stone_tile.jpg
+		map textures/clown/stone_tile.tga
 		rgbgen identity
 	}
 	{
@@ -492,7 +492,7 @@ textures/clown/cheapfloor2
 		rgbgen vertex
 	}
 	{
-		map textures/clown/stone_tile.jpg
+		map textures/clown/stone_tile.tga
 		blendfunc add
 		rgbgen identity
 	}
@@ -520,20 +520,20 @@ textures/proto2/c_zinc_shiny
 
 textures/proto2/vertex_greenstone
 {
-	qer_editorimage textures/gothic_block/blocks17i.jpg
+	qer_editorimage textures/gothic_block/blocks17i.tga
 	surfaceparm pointlight
 	{
-		map textures/gothic_block/blocks17i.jpg
+		map textures/gothic_block/blocks17i.tga
 		rgbgen oneminusvertex
 	}
 }
 
 textures/proto2/vertex_cavestone
 {
-	qer_editorimage textures/organics/pjrock7d.jpg
+	qer_editorimage textures/organics/pjrock7d.tga
 	surfaceparm pointlight
 	{
-		map textures/organics/pjrock7d.jpg
+		map textures/organics/pjrock7d.tga
 		rgbgen oneminusvertex
 	}
 }
@@ -890,21 +890,21 @@ textures/base_wall/patch10beatup_spec
 
 textures/base_wall/patch10shiny_trans
 {
-	qer_editorimage textures/base_wall/patch10.jpg
+	qer_editorimage textures/base_wall/patch10.tga
 	surfaceparm nonsolid
 	{
-		map textures/base_wall/patch10.jpg
+		map textures/base_wall/patch10.tga
 		rgbGen identity
 		
 	}
 	{
-		map textures/base_wall/chrome_env.jpg
+		map textures/base_wall/chrome_env.tga
 		tcGen environment 
 		rgbGen oneminusvertex
 		tcmod scale .5 .5
 	}
 	{
-		map textures/base_wall/patch10.jpg
+		map textures/base_wall/patch10.tga
 		blendFunc add
 		rgbGen identity
 		

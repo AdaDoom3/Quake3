@@ -6,7 +6,7 @@ textures/castle/terrain_0
 	q3map_tcGen ivector ( 128 0 0 ) ( 0 128 0 )
 
 	{
-		map textures/organics/pjrock7d.jpg
+		map textures/organics/pjrock7d.tga
 		blendFunc GL_DST_COLOR GL_ZERO
 	}
 	{
@@ -57,7 +57,7 @@ textures/castle/terrain_2
 	q3map_tcGen ivector ( 128 0 0 ) ( 0 128 0 )
 
 	{
-		map textures/organics/pjrock7d.jpg
+		map textures/organics/pjrock7d.tga
 		blendFunc GL_DST_COLOR GL_ZERO
 	}
 	{
@@ -83,7 +83,7 @@ textures/castle/terrain_0to1
 	q3map_tcGen ivector ( 128 0 0 ) ( 0 128 0 )
 
 	{
-		map textures/organics/pjrock7d.jpg
+		map textures/organics/pjrock7d.tga
 		blendFunc GL_DST_COLOR GL_ZERO
 	}
 	{
@@ -114,11 +114,11 @@ textures/castle/terrain_0to2
 	q3map_tcGen ivector ( 128 0 0 ) ( 0 128 0 )
 
 	{
-		map textures/organics/pjrock7d.jpg
+		map textures/organics/pjrock7d.tga
 		blendFunc GL_DST_COLOR GL_ZERO
 	}
 	{
-		map textures/organics/pjrock7d.jpg
+		map textures/organics/pjrock7d.tga
 		alphaGen vertex
 		blendFunc GL_SRC_ALPHA GL_ONE_MINUS_SRC_ALPHA
 	}
@@ -149,7 +149,7 @@ textures/castle/terrain_1to2
 		blendFunc GL_DST_COLOR GL_ZERO
 	}
 	{
-		map textures/organics/pjrock7d.jpg
+		map textures/organics/pjrock7d.tga
 		alphaGen vertex
 		blendFunc GL_SRC_ALPHA GL_ONE_MINUS_SRC_ALPHA
 	}
@@ -171,7 +171,7 @@ textures/castle/terrain_1to2
 textures/castle/terrain.vertex
 {
 	{
-		map textures/organics/pjrock7d.jpg
+		map textures/organics/pjrock7d.tga
 		rgbGen vertex
 	}
 }
@@ -186,7 +186,7 @@ textures/castle/ter_rock-mud
 
 
 	{
-		map textures/organics/pjrock7d.jpg	// Primary
+		map textures/organics/pjrock7d.tga	// Primary
 		rgbGen identity
 	}
 

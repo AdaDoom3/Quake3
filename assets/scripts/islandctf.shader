@@ -41,7 +41,7 @@ textures/islandctf/terrain_2
 	q3map_texturesize 512 512
 	q3map_tcGen ivector ( 256 0 0 ) ( 0 256 0 )
 	{
-		map textures/stone/pjrock16.jpg
+		map textures/stone/pjrock16.tga
 	}
 	{
 		map $lightmap
@@ -77,7 +77,7 @@ textures/islandctf/terrain_4
 	q3map_shadeAngle 90
 	q3map_tcGen ivector ( 256 0 0 ) ( 0 256 0 )
 	{
-		map textures/stone/pjrock21.jpg
+		map textures/stone/pjrock21.tga
 	}
 	{
 		map $lightmap
@@ -122,7 +122,7 @@ textures/islandctf/terrain_4
 		// map textures/nki/nki_forest2.tga
 	// }
 	// {
-		// map textures/stone/pjrock16.jpg
+		// map textures/stone/pjrock16.tga
 		// alphaGen vertex
 		// blendFunc GL_SRC_ALPHA GL_ONE_MINUS_SRC_ALPHA
 	// }
@@ -168,7 +168,7 @@ textures/islandctf/terrain_4
 		// map textures/nki/nki_forest2.tga
 	// }
 	// {
-		// map textures/stone/pjrock21.jpg
+		// map textures/stone/pjrock21.tga
 		// alphaGen vertex
 		// blendFunc GL_SRC_ALPHA GL_ONE_MINUS_SRC_ALPHA
 	// }
@@ -191,7 +191,7 @@ textures/islandctf/terrain_1to2
 		map textures/nki/nki_sand2.tga
 	}
 	{
-		map textures/stone/pjrock16.jpg
+		map textures/stone/pjrock16.tga
 		alphaGen vertex
 		blendFunc GL_SRC_ALPHA GL_ONE_MINUS_SRC_ALPHA
 	}
@@ -239,7 +239,7 @@ textures/islandctf/terrain_1to4
 		map textures/nki/nki_sand2.tga
 	}
 	{
-		map textures/stone/pjrock21.jpg
+		map textures/stone/pjrock21.tga
 		alphaGen vertex
 		blendFunc GL_SRC_ALPHA GL_ONE_MINUS_SRC_ALPHA
 	}
@@ -260,7 +260,7 @@ textures/islandctf/terrain_2to3
 	q3map_tcGen ivector ( 256 0 0 ) ( 0 256 0 )
 	
 	{
-		map textures/stone/pjrock16.jpg
+		map textures/stone/pjrock16.tga
 	}
 	{
 		map textures/nki/nki_ground1.tga
@@ -284,10 +284,10 @@ textures/islandctf/terrain_2to4
 	q3map_tcGen ivector ( 256 0 0 ) ( 0 256 0 )
 	
 	{
-		map textures/stone/pjrock16.jpg
+		map textures/stone/pjrock16.tga
 	}
 	{
-		map textures/stone/pjrock21.jpg
+		map textures/stone/pjrock21.tga
 		alphaGen vertex
 		blendFunc GL_SRC_ALPHA GL_ONE_MINUS_SRC_ALPHA
 	}
@@ -311,7 +311,7 @@ textures/islandctf/terrain_3to4
 		map textures/nki/nki_ground1.tga
 	}
 	{
-		map textures/stone/pjrock21.jpg
+		map textures/stone/pjrock21.tga
 		alphaGen vertex
 		blendFunc GL_SRC_ALPHA GL_ONE_MINUS_SRC_ALPHA
 	}

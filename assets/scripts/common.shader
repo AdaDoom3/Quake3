@@ -170,7 +170,7 @@ textures/common/timportal
 
 	}
 	{
-		map textures/oa_fogs/kc_fogcloud3.jpg
+		map textures/oa_fogs/kc_fogcloud3.tga
 		blendfunc gl_src_alpha gl_one_minus_src_alpha
 		alphagen portal 512
 		rgbGen identity	

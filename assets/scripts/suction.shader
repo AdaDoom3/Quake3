@@ -1,40 +1,40 @@
 textures/suction/light_solid_red
 {
-	q3map_lightimage textures/suction/solid_red.jpg
-	qer_editorimage textures/suction/solid_red.jpg
+	q3map_lightimage textures/suction/solid_red.tga
+	qer_editorimage textures/suction/solid_red.tga
 	surfaceparm nomarks
 	surfaceparm nolightmap
 	q3map_surfacelight 1000
 	q3map_backsplash 100 32
 	q3map_lightsubdivide 32
 	{
-		map textures/suction/solid_red.jpg
+		map textures/suction/solid_red.tga
 		blendFunc GL_ONE GL_ZERO
 	}
 }
 
 textures/suction/light_solid_white
 {
-	qer_editorimage textures/suction/solid_white.jpg
+	qer_editorimage textures/suction/solid_white.tga
 	surfaceparm nomarks
 	surfaceparm nolightmap
 	{
-		map textures/suction/solid_white.jpg
+		map textures/suction/solid_white.tga
 		blendFunc GL_ONE GL_ZERO
 	}
 }
 
 textures/suction/light_solid_blue
 {
-	q3map_lightimage textures/suction/solid_blue.jpg
-	qer_editorimage textures/suction/solid_blue.jpg
+	q3map_lightimage textures/suction/solid_blue.tga
+	qer_editorimage textures/suction/solid_blue.tga
 	surfaceparm nomarks
 	surfaceparm nolightmap
 	q3map_surfacelight 1000
 	q3map_backsplash 100 32
 	q3map_lightsubdivide 32
 	{
-		map textures/suction/solid_blue.jpg
+		map textures/suction/solid_blue.tga
 		blendFunc GL_ONE GL_ZERO
 	}
 }
@@ -51,7 +51,7 @@ textures/suction/beam_red
 		blendfunc GL_SRC_ALPHA GL_ONE_MINUS_SRC_ALPHA
 	}
 	{
-		map textures/suction/beam_mover.jpg
+		map textures/suction/beam_mover.tga
 		blendfunc add
 		tcGen base
 		tcMod scroll 0 -0.2
@@ -71,7 +71,7 @@ textures/suction/beam_blue
 		blendfunc GL_SRC_ALPHA GL_ONE_MINUS_SRC_ALPHA
 	}
 	{
-		map textures/suction/beam_mover.jpg
+		map textures/suction/beam_mover.tga
 		blendfunc add
 		tcGen base
 		tcMod scroll 0 -0.2
@@ -81,7 +81,7 @@ textures/suction/beam_blue
 
 textures/suction/greenfloor
 {
-	qer_editorimage textures/suction/solid_green.jpg
+	qer_editorimage textures/suction/solid_green.tga
 	qer_trans 0.5
 	surfaceparm nolightmap
 	surfaceparm trans
@@ -89,12 +89,12 @@ textures/suction/greenfloor
 	q3map_shadeangle 160
 	cull disable
 	{
-		map textures/suction/solid_green.jpg
+		map textures/suction/solid_green.tga
 		alphaGen const 0.45
 		blendfunc GL_SRC_ALPHA GL_ONE_MINUS_SRC_ALPHA
 	}
 	{
-		map textures/suction/envmap.jpg
+		map textures/suction/envmap.tga
 		blendfunc add
 		tcGen environment
 		tcMod scale 0.3 0.3

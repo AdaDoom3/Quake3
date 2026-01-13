@@ -6,7 +6,7 @@ models/players/smarine/u_torso
 		rgbGen lightingDiffuse
 	}
 //	{
-// 		map textures/effects/tinfx3.jpg
+// 		map textures/effects/tinfx3.tga
 // 		blendfunc add
 // 		tcMod scale 2 2
 // 		rgbGen lightingDiffuse
@@ -22,7 +22,7 @@ models/players/smarine/l_legs
 		rgbGen lightingDiffuse
 	}
 // 	{
-// 		map textures/effects/tinfx3.jpg
+// 		map textures/effects/tinfx3.tga
 // 		blendfunc add
 // 		tcMod scale 2 2
 // 		rgbGen lightingDiffuse
@@ -38,7 +38,7 @@ models/players/smarine/h_head
 		rgbGen lightingDiffuse
 	}
 // 	{
-// 		map textures/effects/tinfx3.jpg
+// 		map textures/effects/tinfx3.tga
 // 		blendfunc add
 // 		tcMod scale 2 2
 // 		rgbGen lightingDiffuse
