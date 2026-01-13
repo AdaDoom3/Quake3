@@ -325,30 +325,32 @@ void render(BSP*b,uint8_t*fb,int w,int h,v3 pos,v3 dir,v3 up){
             if(h.hit){
                 uint32_t i0=b->idx[h.tri*3],i1=b->idx[h.tri*3+1],i2=b->idx[h.tri*3+2];
                 BSPVert v0=b->verts[i0],v1=b->verts[i1],v2=b->verts[i2];
-
-                float lmu=(1.f-h.bu-h.bv)*v0.uv[1][0]+h.bu*v1.uv[1][0]+h.bv*v2.uv[1][0];
-                float lmv=(1.f-h.bu-h.bv)*v0.uv[1][1]+h.bu*v1.uv[1][1]+h.bv*v2.uv[1][1];
-
                 uint16_t si=b->trisurf[h.tri];
-                int lmidx=b->surf[si].lm;
-                v3 lm=V3(1,1,1);
-                if(lmidx>=0&&lmidx<b->nlm){
-                    int lx=(int)(lmu*127.f),ly=(int)(lmv*127.f);
-                    lx=lx<0?0:lx>127?127:lx;
-                    ly=ly<0?0:ly>127?127:ly;
-                    uint8_t*lmp=&b->lm[lmidx*128*128*3+(ly*128+lx)*3];
-                    lm=V3(lmp[0]/255.f,lmp[1]/255.f,lmp[2]/255.f);
-                }
+                BSPSurf*surf=&b->surf[si];
 
-                v3 light=v3norm(V3(1,1,2));
-                float diff=fmaxf(0.f,v3dot(h.n,light))*0.5f+0.5f;
-                fb[idx+0]=(uint8_t)(lm.x*diff*255.f);
-                fb[idx+1]=(uint8_t)(lm.y*diff*255.f);
-                fb[idx+2]=(uint8_t)(lm.z*diff*255.f);
+                if(surf->sh>=0&&surf->sh<b->ns&&(b->sh[surf->sh].fl&0x4)){
+                    fb[idx+0]=135;fb[idx+1]=206;fb[idx+2]=235;
+                }else{
+                    float lmu=(1.f-h.bu-h.bv)*v0.uv[1][0]+h.bu*v1.uv[1][0]+h.bv*v2.uv[1][0];
+                    float lmv=(1.f-h.bu-h.bv)*v0.uv[1][1]+h.bu*v1.uv[1][1]+h.bv*v2.uv[1][1];
+
+                    v3 lm=V3(1,1,1);
+                    if(surf->lm>=0&&surf->lm<b->nlm){
+                        int lx=(int)(lmu*127.f),ly=(int)(lmv*127.f);
+                        lx=lx<0?0:lx>127?127:lx;
+                        ly=ly<0?0:ly>127?127:ly;
+                        uint8_t*lmp=&b->lm[surf->lm*128*128*3+(ly*128+lx)*3];
+                        lm=V3(lmp[0]/255.f,lmp[1]/255.f,lmp[2]/255.f);
+                    }
+
+                    v3 light=v3norm(V3(1,1,2));
+                    float diff=fmaxf(0.f,v3dot(h.n,light))*0.5f+0.5f;
+                    fb[idx+0]=(uint8_t)(lm.x*diff*255.f);
+                    fb[idx+1]=(uint8_t)(lm.y*diff*255.f);
+                    fb[idx+2]=(uint8_t)(lm.z*diff*255.f);
+                }
             }else{
-                fb[idx+0]=50;
-                fb[idx+1]=50;
-                fb[idx+2]=80;
+                fb[idx+0]=135;fb[idx+1]=206;fb[idx+2]=235;
             }
         }
         if(y%10==0)printf("\rRendering: %d%%",(y*100)/h);fflush(stdout);
