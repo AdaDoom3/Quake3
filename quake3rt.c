@@ -36,6 +36,7 @@ typedef struct{int sh,fog,tp,fv,nv,fi,ni,lm,lx,ly,lw,lh;v3 lo,lv[3];int pw,ph;}B
 typedef struct{
     BSPVert*verts;uint32_t nv;
     uint32_t*idx;uint32_t ni;
+    uint16_t*trisurf;
     BSPPlane*pl;uint32_t np;
     BSPNode*nd;uint32_t nn;
     BSPLeaf*lf;uint32_t nl;
@@ -96,11 +97,15 @@ BSP loadBSP(const char*path){
 
         b.verts=realloc(b.verts,(b.nv+patchVerts)*sizeof(BSPVert));
         b.idx=malloc((totalIdx+patchIdx)*sizeof(uint32_t));b.ni=0;
+        b.trisurf=malloc((totalIdx+patchIdx)/3*sizeof(uint16_t));
 
         for(uint32_t i=0;i<b.nsurf;i++){
             BSPSurf*s=&b.surf[i];
             if(s->tp==1||s->tp==3){
-                for(int j=0;j<s->ni;j++)b.idx[b.ni++]=rawIdx[s->fi+j];
+                for(int j=0;j<s->ni;j++){
+                    if(j%3==0)b.trisurf[b.ni/3]=i;
+                    b.idx[b.ni++]=rawIdx[s->fi+j];
+                }
             }else if(s->tp==2&&s->pw>=3&&s->ph>=3&&(s->pw%2)==1&&(s->ph%2)==1){
                 int L=3;
                 int numPatchesX=(s->pw-1)/2,numPatchesY=(s->ph-1)/2;
@@ -142,7 +147,9 @@ BSP loadBSP(const char*path){
                 for(int y=0;y<h-1;y++){
                     for(int x=0;x<w-1;x++){
                         uint32_t i0=b.nv-w*h+y*w+x,i1=i0+1,i2=i0+w,i3=i2+1;
+                        b.trisurf[b.ni/3]=i;
                         b.idx[b.ni++]=i0;b.idx[b.ni++]=i2;b.idx[b.ni++]=i1;
+                        b.trisurf[b.ni/3]=i;
                         b.idx[b.ni++]=i1;b.idx[b.ni++]=i2;b.idx[b.ni++]=i3;
                     }
                 }
@@ -258,7 +265,7 @@ int main(int argc,char**argv){
 
 #ifdef SOFT_RT
 typedef struct{v3 o,d;float tmin,tmax;}Ray;
-typedef struct{int hit;float t,tmax;v3 n;int tri;}Hit;
+typedef struct{int hit;float t,tmax;v3 n;int tri;float bu,bv;}Hit;
 
 Hit rayTri(Ray r,v3 v0,v3 v1,v3 v2){
     Hit h={0};
@@ -277,6 +284,7 @@ Hit rayTri(Ray r,v3 v0,v3 v1,v3 v2){
     if(t<r.tmin||t>r.tmax)return h;
     h.hit=1;h.t=t;
     h.n=v3norm(v3cross(e1,e2));
+    h.bu=u;h.bv=v;
     return h;
 }
 
@@ -315,11 +323,28 @@ void render(BSP*b,uint8_t*fb,int w,int h,v3 pos,v3 dir,v3 up){
 
             int idx=(y*w+x)*3;
             if(h.hit){
+                uint32_t i0=b->idx[h.tri*3],i1=b->idx[h.tri*3+1],i2=b->idx[h.tri*3+2];
+                BSPVert v0=b->verts[i0],v1=b->verts[i1],v2=b->verts[i2];
+
+                float lmu=(1.f-h.bu-h.bv)*v0.uv[1][0]+h.bu*v1.uv[1][0]+h.bv*v2.uv[1][0];
+                float lmv=(1.f-h.bu-h.bv)*v0.uv[1][1]+h.bu*v1.uv[1][1]+h.bv*v2.uv[1][1];
+
+                uint16_t si=b->trisurf[h.tri];
+                int lmidx=b->surf[si].lm;
+                v3 lm=V3(1,1,1);
+                if(lmidx>=0&&lmidx<b->nlm){
+                    int lx=(int)(lmu*127.f),ly=(int)(lmv*127.f);
+                    lx=lx<0?0:lx>127?127:lx;
+                    ly=ly<0?0:ly>127?127:ly;
+                    uint8_t*lmp=&b->lm[lmidx*128*128*3+(ly*128+lx)*3];
+                    lm=V3(lmp[0]/255.f,lmp[1]/255.f,lmp[2]/255.f);
+                }
+
                 v3 light=v3norm(V3(1,1,2));
-                float diff=fmaxf(0.f,v3dot(h.n,light))*0.8f+0.2f;
-                fb[idx+0]=(uint8_t)(diff*255.f);
-                fb[idx+1]=(uint8_t)(diff*255.f);
-                fb[idx+2]=(uint8_t)(diff*255.f);
+                float diff=fmaxf(0.f,v3dot(h.n,light))*0.5f+0.5f;
+                fb[idx+0]=(uint8_t)(lm.x*diff*255.f);
+                fb[idx+1]=(uint8_t)(lm.y*diff*255.f);
+                fb[idx+2]=(uint8_t)(lm.z*diff*255.f);
             }else{
                 fb[idx+0]=50;
                 fb[idx+1]=50;
