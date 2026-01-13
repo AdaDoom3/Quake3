@@ -1,0 +1,32 @@
+#version 460
+#extension GL_EXT_ray_tracing:require
+#extension GL_EXT_scalar_block_layout:require
+
+layout(binding=0,set=0)uniform accelerationStructureEXT tlas;
+layout(binding=1,set=0,rgba8)uniform image2D img;
+layout(binding=2,set=0)readonly buffer Verts{vec3 p;vec2 uv[2];vec3 n;uint c;}v[];
+layout(binding=3,set=0)readonly buffer Idx{uint i[];}idx;
+layout(push_constant)uniform PC{mat4 invVP;vec3 camPos;uint frame;}pc;
+
+void main(){
+ivec2 px=ivec2(gl_LaunchIDEXT.xy);
+vec2 uv=(vec2(px)+.5)/vec2(gl_LaunchSizeEXT.xy)*2-1;
+vec4 t=pc.invVP*vec4(uv,1,1);
+vec3 d=normalize(t.xyz/t.w-pc.camPos);
+
+rayQueryEXT rq;
+rayQueryInitializeEXT(rq,tlas,0,0xFF,pc.camPos,.01,d,1e4);
+while(rayQueryProceedEXT(rq));
+
+vec3 c=vec3(.2,.2,.3);
+if(rayQueryGetIntersectionTypeEXT(rq,true)==gl_RayQueryCommittedIntersectionTriangleEXT){
+vec2 b=rayQueryGetIntersectionBarycentricsEXT(rq,true);
+int tri=rayQueryGetIntersectionPrimitiveIndexEXT(rq,true)*3;
+vec3 n0=v[idx.i[tri]].n,n1=v[idx.i[tri+1]].n,n2=v[idx.i[tri+2]].n;
+vec3 n=normalize(n0*(1-b.x-b.y)+n1*b.x+n2*b.y);
+vec3 l=normalize(vec3(1,1,2));
+float diff=max(0,dot(n,l))*.8+.2;
+c=vec3(diff);
+}
+imageStore(img,px,vec4(c,1));
+}

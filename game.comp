@@ -1,0 +1,47 @@
+#version 460
+layout(local_size_x=64)in;
+
+struct Ent{vec3 pos,vel;vec4 rot;uint state,weapon,health;float nextThink;};
+layout(binding=0)buffer Ents{Ent e[];};
+layout(binding=1)readonly buffer Input{uint keys;vec2 mouse;float dt;}inp;
+layout(binding=2)readonly buffer BSPVerts{vec3 p;vec2 uv[2];vec3 n;uint c;}bv[];
+layout(binding=3)readonly buffer BSPIdx{uint i[];}bi;
+
+bool trace(vec3 o,vec3 d,float tmax){
+for(uint i=0;i<bi.i.length()/3;i++){
+vec3 v0=bv[bi.i[i*3]].p,v1=bv[bi.i[i*3+1]].p,v2=bv[bi.i[i*3+2]].p;
+vec3 e1=v1-v0,e2=v2-v0,h=cross(d,e2);
+float a=dot(e1,h);if(abs(a)<1e-6)continue;
+float f=1/a;
+vec3 s=o-v0;float u=f*dot(s,h);if(u<0||u>1)continue;
+vec3 q=cross(s,e1);float v=f*dot(d,q);if(v<0||u+v>1)continue;
+float t=f*dot(e2,q);if(t>0&&t<tmax)return true;
+}return false;
+}
+
+void main(){
+uint id=gl_GlobalInvocationID.x;if(id>=e.length())return;
+if(id==0){
+float yaw=atan(e[0].rot.y,e[0].rot.x);
+float pitch=asin(e[0].rot.z);
+yaw+=inp.mouse.x*.002;
+pitch=clamp(pitch-inp.mouse.y*.002,-1.57,1.57);
+e[0].rot.x=cos(yaw)*cos(pitch);
+e[0].rot.y=sin(yaw)*cos(pitch);
+e[0].rot.z=sin(pitch);
+vec3 fwd=e[0].rot.xyz;
+vec3 right=normalize(cross(fwd,vec3(0,0,1)));
+vec3 vel=vec3(0);
+if((inp.keys&1)!=0)vel+=fwd;
+if((inp.keys&2)!=0)vel-=right;
+if((inp.keys&4)!=0)vel-=fwd;
+if((inp.keys&8)!=0)vel+=right;
+if(length(vel)>0)vel=normalize(vel)*320;
+e[0].vel.xy=vel.xy;
+e[0].vel.z-=800*inp.dt;
+vec3 newPos=e[0].pos+e[0].vel*inp.dt;
+if(!trace(e[0].pos,normalize(newPos-e[0].pos),length(newPos-e[0].pos)))
+e[0].pos=newPos;
+else e[0].vel.z=0;
+}
+}

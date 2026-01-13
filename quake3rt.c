@@ -282,3 +282,119 @@ int main(int argc,char**argv){
     return 0;
 }
 #endif
+
+#ifdef VK_RT
+#include<SDL2/SDL.h>
+#include<SDL2/SDL_vulkan.h>
+#include<vulkan/vulkan.h>
+
+#define VK(x) do{VkResult r=x;if(r)fprintf(stderr,#x" = %d\n",r),exit(1);}while(0)
+
+typedef struct{VkBuffer b;VkDeviceMemory m;VkDeviceAddress a;}Buf;
+
+Buf mkBuf(VkDevice d,VkPhysicalDevice p,VkDeviceSize sz,VkBufferUsageFlags u,VkMemoryPropertyFlags f){
+Buf b;VkBufferCreateInfo bi={VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,0,0,sz,u};
+VK(vkCreateBuffer(d,&bi,0,&b.b));
+VkMemoryRequirements mr;vkGetBufferMemoryRequirements(d,b.b,&mr);
+VkPhysicalDeviceMemoryProperties mp;vkGetPhysicalDeviceMemoryProperties(p,&mp);
+uint32_t mt=0;for(uint32_t i=0;i<mp.memoryTypeCount;i++)
+if((mr.memoryTypeBits&(1<<i))&&(mp.memoryTypes[i].propertyFlags&f)==f){mt=i;break;}
+VkMemoryAllocateFlagsInfo fi={VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_FLAGS_INFO,0,VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT};
+VkMemoryAllocateInfo ai={VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,&fi,mr.size,mt};
+VK(vkAllocateMemory(d,&ai,0,&b.m));
+VK(vkBindBufferMemory(d,b.b,b.m,0));
+VkBufferDeviceAddressInfo da={VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO,0,b.b};
+b.a=vkGetBufferDeviceAddress(d,&da);
+return b;
+}
+
+void upBuf(VkDevice d,Buf b,void*src,size_t sz){
+void*dst;VK(vkMapMemory(d,b.m,0,sz,0,&dst));memcpy(dst,src,sz);vkUnmapMemory(d,b.m);
+}
+
+VkShaderModule ldSh(VkDevice d,const char*p){
+FILE*f=fopen(p,"rb");fseek(f,0,SEEK_END);size_t sz=ftell(f);rewind(f);
+uint32_t*code=malloc(sz);fread(code,1,sz,f);fclose(f);
+VkShaderModuleCreateInfo ci={VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,0,0,sz,code};
+VkShaderModule sm;VK(vkCreateShaderModule(d,&ci,0,&sm));free(code);return sm;
+}
+
+int main(int argc,char**argv){
+if(argc<2){fprintf(stderr,"Usage: %s <map.bsp> [out.tga]\n",argv[0]);return 1;}
+
+BSP bsp=loadBSP(argv[1]);
+printf("Loaded %u verts, %u tris\n",bsp.nv,bsp.ni/3);
+
+SDL_Init(SDL_INIT_VIDEO);
+SDL_Window*win=SDL_CreateWindow("Q3RT",0,0,1280,720,SDL_WINDOW_VULKAN);
+
+uint32_t extCnt;SDL_Vulkan_GetInstanceExtensions(win,&extCnt,0);
+const char**exts=malloc(sizeof(char*)*extCnt);
+SDL_Vulkan_GetInstanceExtensions(win,&extCnt,exts);
+
+VkApplicationInfo ai={VK_STRUCTURE_TYPE_APPLICATION_INFO,0,"Q3RT",1,"Q3RT",1,VK_API_VERSION_1_3};
+VkInstanceCreateInfo ici={VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO,0,0,&ai,0,0,extCnt,exts};
+VkInstance inst;VK(vkCreateInstance(&ici,0,&inst));
+
+VkPhysicalDevice pd;uint32_t pdCnt=1;vkEnumeratePhysicalDevices(inst,&pdCnt,&pd);
+
+uint32_t qf=0;
+VkPhysicalDeviceFeatures2 f2={VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2};
+VkPhysicalDeviceVulkan12Features f12={VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES};
+VkPhysicalDeviceAccelerationStructureFeaturesKHR asf={VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR};
+VkPhysicalDeviceRayQueryFeaturesKHR rqf={VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_QUERY_FEATURES_KHR};
+f2.pNext=&f12;f12.pNext=&asf;asf.pNext=&rqf;
+vkGetPhysicalDeviceFeatures2(pd,&f2);
+f12.bufferDeviceAddress=VK_TRUE;asf.accelerationStructure=VK_TRUE;rqf.rayQuery=VK_TRUE;
+
+float qp=1.f;VkDeviceQueueCreateInfo qci={VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,0,0,qf,1,&qp};
+const char*devExts[]={"VK_KHR_swapchain","VK_KHR_acceleration_structure","VK_KHR_ray_query",
+"VK_KHR_deferred_host_operations","VK_KHR_buffer_device_address"};
+VkDeviceCreateInfo dci={VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,&f2,0,1,&qci,0,0,5,devExts,0};
+VkDevice dev;VK(vkCreateDevice(pd,&dci,0,&dev));
+
+VkQueue q;vkGetDeviceQueue(dev,qf,0,&q);
+
+VkSurfaceKHR surf;SDL_Vulkan_CreateSurface(win,inst,&surf);
+
+VkSwapchainCreateInfoKHR sci={VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR,0,0,surf,2,VK_FORMAT_B8G8R8A8_UNORM,
+VK_COLOR_SPACE_SRGB_NONLINEAR_KHR,{1280,720},1,VK_IMAGE_USAGE_STORAGE_BIT|VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
+VK_SHARING_MODE_EXCLUSIVE,0,0,VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR,VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR,
+VK_PRESENT_MODE_FIFO_KHR,VK_TRUE,0};
+VkSwapchainKHR sc;VK(vkCreateSwapchainKHR(dev,&sci,0,&sc));
+
+uint32_t imgCnt;vkGetSwapchainImagesKHR(dev,sc,&imgCnt,0);
+VkImage scImgs[8];vkGetSwapchainImagesKHR(dev,sc,&imgCnt,scImgs);
+VkImageView scViews[8];
+for(uint32_t i=0;i<imgCnt;i++){
+VkImageViewCreateInfo vci={VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,0,0,scImgs[i],VK_IMAGE_VIEW_TYPE_2D,
+VK_FORMAT_B8G8R8A8_UNORM,{},{VK_IMAGE_ASPECT_COLOR_BIT,0,1,0,1}};
+VK(vkCreateImageView(dev,&vci,0,&scViews[i]));
+}
+
+Buf vb=mkBuf(dev,pd,sizeof(BSPVert)*bsp.nv,
+VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR|VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT|VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT|VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+upBuf(dev,vb,bsp.verts,sizeof(BSPVert)*bsp.nv);
+
+Buf ib=mkBuf(dev,pd,sizeof(uint32_t)*bsp.ni,
+VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR|VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT|VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT|VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+upBuf(dev,ib,bsp.idx,sizeof(uint32_t)*bsp.ni);
+
+printf("Uploaded geometry to GPU\n");
+
+VkCommandPoolCreateInfo pci={VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,0,0,qf};
+VkCommandPool pool;VK(vkCreateCommandPool(dev,&pci,0,&pool));
+
+VkCommandBufferAllocateInfo cai={VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,0,pool,VK_COMMAND_BUFFER_LEVEL_PRIMARY,1};
+VkCommandBuffer cmd;VK(vkAllocateCommandBuffers(dev,&cai,&cmd));
+
+printf("Vulkan RT initialized\n");
+printf("Next: Build BLAS, compile shaders, render frame\n");
+
+SDL_DestroyWindow(win);
+SDL_Quit();
+return 0;
+}
+#endif
