@@ -466,7 +466,60 @@ VK(vkEndCommandBuffer(cmd));
 VK(vkQueueSubmit(q,1,&si,0));
 VK(vkQueueWaitIdle(q));
 
-printf("Built BLAS (%u tris) + TLAS\n",primCnt);
+printf("Built BLAS+TLAS\n");
+
+VkDescriptorSetLayoutBinding b[]={{0,VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR,1,VK_SHADER_STAGE_COMPUTE_BIT},
+{1,VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,1,VK_SHADER_STAGE_COMPUTE_BIT},{2,VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,1,VK_SHADER_STAGE_COMPUTE_BIT},
+{3,VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,1,VK_SHADER_STAGE_COMPUTE_BIT}};
+VkDescriptorSetLayoutCreateInfo dslci={VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,0,0,4,b};
+VkDescriptorSetLayout dsl;VK(vkCreateDescriptorSetLayout(dev,&dslci,0,&dsl));
+VkPushConstantRange pcr={VK_SHADER_STAGE_COMPUTE_BIT,0,80};
+VkPipelineLayoutCreateInfo plci={VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,0,0,1,&dsl,1,&pcr};
+VkPipelineLayout pll;VK(vkCreatePipelineLayout(dev,&plci,0,&pll));
+VkShaderModule sm=ldSh(dev,"rt.comp.spv");
+VkComputePipelineCreateInfo cpci={VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,0,0,
+{VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,0,0,VK_SHADER_STAGE_COMPUTE_BIT,sm,"main"},pll};
+VkPipeline pip;VK(vkCreateComputePipelines(dev,0,1,&cpci,0,&pip));
+VkDescriptorPoolSize ps[]={{VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR,1},{VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,2},
+{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,4}};
+VkDescriptorPoolCreateInfo dpci={VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,0,0,1,3,ps};
+VkDescriptorPool dpo;VK(vkCreateDescriptorPool(dev,&dpci,0,&dpo));
+VkDescriptorSetAllocateInfo dsai={VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,0,dpo,1,&dsl};
+VkDescriptorSet ds;VK(vkAllocateDescriptorSets(dev,&dsai,&ds));
+VkWriteDescriptorSetAccelerationStructureKHR asw={VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET_ACCELERATION_STRUCTURE_KHR,0,1,&tlas};
+VkDescriptorImageInfo ii={0,scViews[0],VK_IMAGE_LAYOUT_GENERAL};
+VkDescriptorBufferInfo vbi={vb.b,0,VK_WHOLE_SIZE},ibi={ib.b,0,VK_WHOLE_SIZE};
+VkWriteDescriptorSet w[]={{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,&asw,ds,0,0,1,VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR},
+{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,0,ds,1,0,1,VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,&ii},
+{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,0,ds,2,0,1,VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,0,&vbi},
+{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,0,ds,3,0,1,VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,0,&ibi}};
+vkUpdateDescriptorSets(dev,4,w,0,0);
+v3 cp=V3(0,0,100);
+m4 iVP={1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1};
+VkImageMemoryBarrier bar={VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,0,0,VK_ACCESS_SHADER_WRITE_BIT,
+VK_IMAGE_LAYOUT_UNDEFINED,VK_IMAGE_LAYOUT_GENERAL,VK_QUEUE_FAMILY_IGNORED,VK_QUEUE_FAMILY_IGNORED,scImgs[0],
+{VK_IMAGE_ASPECT_COLOR_BIT,0,1,0,1}};
+VK(vkResetCommandBuffer(cmd,0));
+VK(vkBeginCommandBuffer(cmd,&cbi));
+vkCmdPipelineBarrier(cmd,VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,0,0,0,0,0,1,&bar);
+vkCmdBindPipeline(cmd,VK_PIPELINE_BIND_POINT_COMPUTE,pip);
+vkCmdBindDescriptorSets(cmd,VK_PIPELINE_BIND_POINT_COMPUTE,pll,0,1,&ds,0,0);
+struct{m4 iVP;v3 cp;}pc;memcpy(&pc.iVP,iVP,64);pc.cp=cp;
+vkCmdPushConstants(cmd,pll,VK_SHADER_STAGE_COMPUTE_BIT,0,sizeof(pc),&pc);
+vkCmdDispatch(cmd,80,45,1);
+bar.srcAccessMask=VK_ACCESS_SHADER_WRITE_BIT;bar.dstAccessMask=VK_ACCESS_MEMORY_READ_BIT;
+bar.oldLayout=VK_IMAGE_LAYOUT_GENERAL;bar.newLayout=VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+vkCmdPipelineBarrier(cmd,VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,0,0,0,0,0,1,&bar);
+VK(vkEndCommandBuffer(cmd));
+VK(vkQueueSubmit(q,1,&si,0));
+VK(vkQueueWaitIdle(q));
+printf("Rendered frame\n");
+VkSemaphoreCreateInfo sci={VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
+VkSemaphore sem;VK(vkCreateSemaphore(dev,&sci,0,&sem));
+uint32_t ii2;VK(vkAcquireNextImageKHR(dev,sc,UINT64_MAX,sem,0,&ii2));
+VkPresentInfoKHR pi={VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,0,0,0,1,&sc,&ii2};
+vkQueuePresentKHR(q,&pi);
+SDL_Delay(3000);
 
 SDL_DestroyWindow(win);
 SDL_Quit();
