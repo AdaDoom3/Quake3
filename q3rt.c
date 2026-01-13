@@ -64,7 +64,13 @@ PFN_glGenerateMipmap pfnGenerateMipmap;
 typedef void(*PFN_glGetTexImage)(unsigned,int,unsigned,unsigned,void*);
 PFN_glGetTexImage pfnGetTexImage;
 
-SDL_Window*w;SDL_GLContext c;unsigned p,t,b[4];float m[16],v[3]={0,100,0};int frame=0;
+typedef struct{int o,l;}LMP;
+typedef struct{int id,v;LMP l[17];}HDR;
+typedef struct{float p[3],s[2],t[2],n[3];unsigned char c[4];}VTX;
+typedef struct{int h,f,y,fv,nv,fi,ni,lm,lx,ly,lw,lh;float lo[3],lv[9];int pw,ph;}SRF;
+
+SDL_Window*w;SDL_GLContext c;unsigned p,t,b[4];float m[16],cam[3]={0,100,0};int frame=0;
+VTX*verts;int*idx;SRF*surf;int nv,ni,ns;unsigned char*bsp;
 
 void*P(const char*n){return SDL_GL_GetProcAddress(n);}
 
@@ -118,6 +124,19 @@ if(!r){char e[1024];pfnGetProgramInfoLog(pg,1024,0,e);printf("Link error:\n%s\n"
 return pg;
 }
 
+void B(const char*n){
+FILE*f=fopen(n,"rb");if(!f){printf("Cannot open %s\n",n);exit(1);}
+fseek(f,0,2);int sz=ftell(f);fseek(f,0,0);
+bsp=malloc(sz);fread(bsp,1,sz,f);fclose(f);
+HDR*h=(HDR*)bsp;
+if(h->id!=0x50534249){printf("Bad BSP magic\n");exit(1);}
+if(h->v!=0x2e){printf("Bad BSP version %d\n",h->v);exit(1);}
+verts=(VTX*)(bsp+h->l[10].o);nv=h->l[10].l/sizeof(VTX);
+idx=(int*)(bsp+h->l[11].o);ni=h->l[11].l/4;
+surf=(SRF*)(bsp+h->l[13].o);ns=h->l[13].l/sizeof(SRF);
+printf("BSP: %d verts, %d idx, %d surf\n",nv,ni,ns);
+}
+
 void I(){
 SDL_Init(SDL_INIT_VIDEO);
 SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION,4);
@@ -134,7 +153,8 @@ pfnGenBuffers(4,b);
 }
 
 int main(int a,char**v){
-I();
+const char*map=a>1?v[1]:"assets/maps/aggressor.bsp";
+B(map);I();
 p=C("#version 450\n"
 "layout(local_size_x=16,local_size_y=16)in;\n"
 "layout(rgba32f,binding=0)uniform image2D img;\n"
