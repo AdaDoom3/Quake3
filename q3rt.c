@@ -35,6 +35,8 @@ typedef void(*PFN_glBufferData)(unsigned,long,const void*,unsigned);
 typedef void(*PFN_glBindBufferBase)(unsigned,unsigned,unsigned);
 typedef void(*PFN_glBindImageTexture)(unsigned,unsigned,int,unsigned char,int,unsigned,unsigned);
 typedef void(*PFN_glGenerateMipmap)(unsigned);
+typedef int(*PFN_glGetUniformLocation)(unsigned,const char*);
+typedef void(*PFN_glUniform3f)(int,float,float,float);
 
 PFN_glCreateShader pfnCreateShader;
 PFN_glShaderSource pfnShaderSource;
@@ -55,6 +57,8 @@ PFN_glBufferData pfnBufferData;
 PFN_glBindBufferBase pfnBindBufferBase;
 PFN_glBindImageTexture pfnBindImageTexture;
 PFN_glGenerateMipmap pfnGenerateMipmap;
+PFN_glGetUniformLocation pfnGetUniformLocation;
+PFN_glUniform3f pfnUniform3f;
 
 #define W 1920
 #define H 1080
@@ -95,6 +99,8 @@ pfnBindBufferBase=P("glBindBufferBase");
 pfnBindImageTexture=P("glBindImageTexture");
 pfnGenerateMipmap=P("glGenerateMipmap");
 pfnGetTexImage=P("glGetTexImage");
+pfnGetUniformLocation=P("glGetUniformLocation");
+pfnUniform3f=P("glUniform3f");
 }
 
 void T(const char*n){
@@ -134,7 +140,16 @@ if(h->v!=0x2e){printf("Bad BSP version %d\n",h->v);exit(1);}
 verts=(VTX*)(bsp+h->l[10].o);nv=h->l[10].l/sizeof(VTX);
 idx=(int*)(bsp+h->l[11].o);ni=h->l[11].l/4;
 surf=(SRF*)(bsp+h->l[13].o);ns=h->l[13].l/sizeof(SRF);
+float mn[3]={1e9,1e9,1e9},mx[3]={-1e9,-1e9,-1e9};
+for(int i=0;i<nv;i++){
+for(int j=0;j<3;j++){
+if(verts[i].p[j]<mn[j])mn[j]=verts[i].p[j];
+if(verts[i].p[j]>mx[j])mx[j]=verts[i].p[j];
+}}
+cam[0]=(mn[0]+mx[0])*0.5;cam[1]=(mn[1]+mx[1])*0.5;cam[2]=(mn[2]+mx[2])*0.5;
 printf("BSP: %d verts, %d idx, %d surf\n",nv,ni,ns);
+printf("Bounds: (%.0f,%.0f,%.0f)-(%.0f,%.0f,%.0f)\n",mn[0],mn[1],mn[2],mx[0],mx[1],mx[2]);
+printf("Camera: (%.0f,%.0f,%.0f)\n",cam[0],cam[1],cam[2]);
 }
 
 void I(){
@@ -150,6 +165,16 @@ glTexParameteri(0x0DE1,0x2801,0x2601);
 glTexParameteri(0x0DE1,0x2800,0x2601);
 pfnBindImageTexture(0,t,0,0,0,GL_READ_WRITE,GL_RGBA32F);
 pfnGenBuffers(4,b);
+pfnBindBuffer(GL_SHADER_STORAGE_BUFFER,b[0]);
+pfnBufferData(GL_SHADER_STORAGE_BUFFER,nv*sizeof(VTX),verts,0x88E4);
+pfnBindBufferBase(GL_SHADER_STORAGE_BUFFER,0,b[0]);
+pfnBindBuffer(GL_SHADER_STORAGE_BUFFER,b[1]);
+pfnBufferData(GL_SHADER_STORAGE_BUFFER,ni*4,idx,0x88E4);
+pfnBindBufferBase(GL_SHADER_STORAGE_BUFFER,1,b[1]);
+pfnBindBuffer(GL_SHADER_STORAGE_BUFFER,b[2]);
+pfnBufferData(GL_SHADER_STORAGE_BUFFER,ns*sizeof(SRF),surf,0x88E4);
+pfnBindBufferBase(GL_SHADER_STORAGE_BUFFER,2,b[2]);
+printf("GPU: %d verts, %d idx, %d surf uploaded\n",nv,ni,ns);
 }
 
 int main(int a,char**v){
@@ -158,12 +183,41 @@ B(map);I();
 p=C("#version 450\n"
 "layout(local_size_x=16,local_size_y=16)in;\n"
 "layout(rgba32f,binding=0)uniform image2D img;\n"
+"struct V{vec3 p,n;vec2 s,t;vec4 c;};\n"
+"struct S{int h,f,y,fv,nv,fi,ni,lm,lx,ly,lw,lh;vec3 lo;vec3 lv[3];ivec2 pw;};\n"
+"layout(std430,binding=0)buffer VB{V v[];};\n"
+"layout(std430,binding=1)buffer IB{int i[];};\n"
+"layout(std430,binding=2)buffer SB{S s[];};\n"
+"uniform vec3 cam;\n"
+"uniform vec3 dir;\n"
+"bool tri(vec3 o,vec3 d,vec3 v0,vec3 v1,vec3 v2,out float t,out vec2 uv){\n"
+"vec3 e1=v1-v0,e2=v2-v0,h=cross(d,e2);float a=dot(e1,h);\n"
+"if(abs(a)<1e-6)return false;float f=1./a;vec3 s=o-v0;\n"
+"float u=f*dot(s,h);if(u<0.||u>1.)return false;vec3 q=cross(s,e1);\n"
+"float vv=f*dot(d,q);if(vv<0.||u+vv>1.)return false;\n"
+"t=f*dot(e2,q);uv=vec2(u,vv);return t>1e-6;}\n"
 "void main(){\n"
-"ivec2 p=ivec2(gl_GlobalInvocationID.xy);\n"
-"vec2 uv=vec2(p)/vec2(1920,1080);\n"
-"imageStore(img,p,vec4(uv,0.5,1));\n"
+"ivec2 px=ivec2(gl_GlobalInvocationID.xy);\n"
+"vec2 uv=(vec2(px)-vec2(960,540))/540.;\n"
+"vec3 up=vec3(0,0,1),right=normalize(cross(dir,up));\n"
+"up=cross(right,dir);vec3 rd=normalize(dir+uv.x*right+uv.y*up);\n"
+"float t;vec2 tc;vec3 col=vec3(0.05);\n"
+"vec3 p0=cam+dir*200.+right*-100.+up*-100.;\n"
+"vec3 p1=cam+dir*200.+right*100.+up*-100.;\n"
+"vec3 p2=cam+dir*200.+right*0.+up*100.;\n"
+"if(tri(cam,rd,p0,p1,p2,t,tc))col=vec3(1,0.5,0);\n"
+"if(v.length()>100){\n"
+"for(int ii=0;ii<min(3000,i.length());ii+=3){\n"
+"vec3 vp0=v[i[ii]].p,vp1=v[i[ii+1]].p,vp2=v[i[ii+2]].p;\n"
+"if(tri(cam,rd,vp0,vp1,vp2,t,tc)){\n""vec3 n=normalize(cross(vp1-vp0,vp2-vp0));\n"
+"col=abs(n)*0.7+0.3;break;}}}\n"
+"imageStore(img,px,vec4(col,1));\n"
 "}\n");
 pfnUseProgram(p);
+int ul=pfnGetUniformLocation(p,"cam");
+pfnUniform3f(ul,cam[0],cam[1],cam[2]);
+ul=pfnGetUniformLocation(p,"dir");
+pfnUniform3f(ul,1,0,0);
 for(SDL_Event e;;){
 while(SDL_PollEvent(&e))if(e.type==SDL_QUIT)goto X;
 pfnDispatchCompute((W+15)/16,(H+15)/16,1);
