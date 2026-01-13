@@ -86,15 +86,14 @@ BSP loadBSP(const char*path){
         for(uint32_t i=0;i<b.nsurf;i++){
             BSPSurf*s=&b.surf[i];
             if(s->tp==1||s->tp==3)totalIdx+=s->ni;
-            else if(s->tp==2&&s->pw>=3&&s->ph>=3){
-                int div=5;
-                int qw=(s->pw-1)/2,qh=(s->ph-1)/2;
-                patchVerts+=qw*qh*div*div;
-                patchIdx+=qw*qh*(div-1)*(div-1)*6;
+            else if(s->tp==2&&s->pw>=3&&s->ph>=3&&(s->pw%2)==1&&(s->ph%2)==1){
+                int L=3;
+                int w=(s->pw-1)/2*L+1,h=(s->ph-1)/2*L+1;
+                patchVerts+=w*h;
+                patchIdx+=(w-1)*(h-1)*6;
             }
         }
 
-        uint32_t baseNv=b.nv;
         b.verts=realloc(b.verts,(b.nv+patchVerts)*sizeof(BSPVert));
         b.idx=malloc((totalIdx+patchIdx)*sizeof(uint32_t));b.ni=0;
 
@@ -102,32 +101,52 @@ BSP loadBSP(const char*path){
             BSPSurf*s=&b.surf[i];
             if(s->tp==1||s->tp==3){
                 for(int j=0;j<s->ni;j++)b.idx[b.ni++]=rawIdx[s->fi+j];
-            }else if(s->tp==2&&s->pw>=3&&s->ph>=3){
-                int div=5;
-                for(int py=0;py<(s->ph-1)/2;py++){
-                    for(int px=0;px<(s->pw-1)/2;px++){
+            }else if(s->tp==2&&s->pw>=3&&s->ph>=3&&(s->pw%2)==1&&(s->ph%2)==1){
+                int L=3;
+                int numPatchesX=(s->pw-1)/2,numPatchesY=(s->ph-1)/2;
+                int w=numPatchesX*L+1,h=numPatchesY*L+1;
+                BSPVert*grid=malloc(w*h*sizeof(BSPVert));
+
+                for(int py=0;py<numPatchesY;py++){
+                    for(int px=0;px<numPatchesX;px++){
                         BSPVert cp[9];
                         for(int cy=0;cy<3;cy++)for(int cx=0;cx<3;cx++)
                             cp[cy*3+cx]=b.verts[s->fv+(py*2+cy)*s->pw+px*2+cx];
-                        uint32_t base=b.nv;
-                        for(int y=0;y<div;y++){
-                            for(int x=0;x<div;x++){
-                                float u=(float)x/(div-1),v=(float)y/(div-1);
+
+                        for(int y=0;y<=L;y++){
+                            for(int x=0;x<=L;x++){
+                                float u=(float)x/L,v=(float)y/L;
                                 BSPVert r0=bezier3(cp[0],cp[1],cp[2],u);
                                 BSPVert r1=bezier3(cp[3],cp[4],cp[5],u);
                                 BSPVert r2=bezier3(cp[6],cp[7],cp[8],u);
-                                b.verts[b.nv++]=bezier3(r0,r1,r2,v);
-                            }
-                        }
-                        for(int y=0;y<div-1;y++){
-                            for(int x=0;x<div-1;x++){
-                                uint32_t i0=base+y*div+x,i1=i0+1,i2=i0+div,i3=i2+1;
-                                b.idx[b.ni++]=i0;b.idx[b.ni++]=i2;b.idx[b.ni++]=i1;
-                                b.idx[b.ni++]=i1;b.idx[b.ni++]=i2;b.idx[b.ni++]=i3;
+                                BSPVert pt=bezier3(r0,r1,r2,v);
+                                int gx=px*L+x,gy=py*L+y;
+                                if(gx<w&&gy<h)grid[gy*w+gx]=pt;
                             }
                         }
                     }
                 }
+
+                for(int y=0;y<h;y++){
+                    for(int x=0;x<w;x++){
+                        BSPVert*v=&grid[y*w+x];
+                        if(x>0&&x<w-1&&y>0&&y<h-1){
+                            v3 dx=v3sub(grid[y*w+x+1].p,grid[y*w+x-1].p);
+                            v3 dy=v3sub(grid[(y+1)*w+x].p,grid[(y-1)*w+x].p);
+                            v->n=v3norm(v3cross(dx,dy));
+                        }
+                        b.verts[b.nv++]=*v;
+                    }
+                }
+
+                for(int y=0;y<h-1;y++){
+                    for(int x=0;x<w-1;x++){
+                        uint32_t i0=b.nv-w*h+y*w+x,i1=i0+1,i2=i0+w,i3=i2+1;
+                        b.idx[b.ni++]=i0;b.idx[b.ni++]=i2;b.idx[b.ni++]=i1;
+                        b.idx[b.ni++]=i1;b.idx[b.ni++]=i2;b.idx[b.ni++]=i3;
+                    }
+                }
+                free(grid);
             }
         }
     }
