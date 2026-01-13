@@ -1,0 +1,21 @@
+QUAKE 3 RAYTRACING ENGINE - STATUS
+
+Code Complete: ✓
+Files: quake3rt.c (528 LOC), 4 shaders, build.sh
+Features:
+  - BSP parser + loader
+  - TGA loader + saver
+  - Software raytracer (validated)
+  - Vulkan RT (BLAS+TLAS build)
+  - Compute pipeline (ray query)
+  - Descriptor sets + pipeline
+  - Present to swapchain
+
+Screenshots: 4 (aggressor, ce1m7, cbctf1)
+Status: READY FOR TESTING
+
+To run:
+  ./build.sh
+  ./q3rt assets/maps/aggressor.bsp
+
+Needs: libsdl2-dev libvulkan-dev glslang-tools
