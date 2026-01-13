@@ -31,6 +31,7 @@ typedef struct{int pl;int ch[2];}BSPNode;
 typedef struct{int cl,ar;i3 mn,mx;int lf,nf,lb,nb;}BSPLeaf;
 typedef struct{char nm[64];int fl,ct;}BSPShader;
 typedef struct{i3 mn,mx;int fc,n,br,nb;}BSPModel;
+typedef struct{int sh,fog,tp,fv,nv,fi,ni,lm,lx,ly,lw,lh;v3 lo,lv[3];int pw,ph;}BSPSurf;
 
 typedef struct{
     BSPVert*verts;uint32_t nv;
@@ -40,6 +41,7 @@ typedef struct{
     BSPLeaf*lf;uint32_t nl;
     int*lffc;uint32_t nlf;
     BSPShader*sh;uint32_t ns;
+    BSPSurf*surf;uint32_t nsurf;
     uint8_t*lm;uint32_t nlm;
     char*ent;
 }BSP;
@@ -59,9 +61,19 @@ BSP loadBSP(const char*path){
     if(h.lm[4].l){b.lf=ld(f,&h.lm[4]);b.nl=h.lm[4].l/sizeof(BSPLeaf);}
     if(h.lm[5].l){b.lffc=ld(f,&h.lm[5]);b.nlf=h.lm[5].l/sizeof(int);}
     if(h.lm[10].l){b.verts=ld(f,&h.lm[10]);b.nv=h.lm[10].l/sizeof(BSPVert);}
-    if(h.lm[11].l){b.idx=ld(f,&h.lm[11]);b.ni=h.lm[11].l/sizeof(uint32_t);}
+    uint32_t*rawIdx=0;uint32_t rawNi=0;
+    if(h.lm[11].l){rawIdx=ld(f,&h.lm[11]);rawNi=h.lm[11].l/sizeof(uint32_t);}
+    if(h.lm[13].l){b.surf=ld(f,&h.lm[13]);b.nsurf=h.lm[13].l/sizeof(BSPSurf);}
     if(h.lm[14].l){b.lm=ld(f,&h.lm[14]);b.nlm=h.lm[14].l/(128*128*3);}
 
+    b.idx=malloc(rawNi*sizeof(uint32_t));b.ni=0;
+    for(uint32_t i=0;i<b.nsurf;i++){
+        BSPSurf*s=&b.surf[i];
+        if(s->tp==1||s->tp==3){
+            for(int j=0;j<s->ni;j++)b.idx[b.ni++]=rawIdx[s->fi+j];
+        }
+    }
+    free(rawIdx);
     fclose(f);
     return b;
 }
