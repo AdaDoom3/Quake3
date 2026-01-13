@@ -48,6 +48,21 @@ typedef struct{
 
 void*ld(FILE*f,Lump*l){void*p=malloc(l->l);fseek(f,l->o,0);fread(p,1,l->l,f);return p;}
 
+BSPVert lerpVert(BSPVert a,BSPVert b,float t){
+    BSPVert r;
+    r.p=v3add(v3mul(a.p,1-t),v3mul(b.p,t));
+    r.n=v3norm(v3add(v3mul(a.n,1-t),v3mul(b.n,t)));
+    for(int i=0;i<2;i++)for(int j=0;j<2;j++)r.uv[i][j]=a.uv[i][j]*(1-t)+b.uv[i][j]*t;
+    r.c=a.c;
+    return r;
+}
+
+BSPVert bezier3(BSPVert p0,BSPVert p1,BSPVert p2,float t){
+    BSPVert q0=lerpVert(p0,p1,t);
+    BSPVert q1=lerpVert(p1,p2,t);
+    return lerpVert(q0,q1,t);
+}
+
 BSP loadBSP(const char*path){
     FILE*f=fopen(path,"rb");if(!f){fprintf(stderr,"Failed to open %s\n",path);exit(1);}
     BSPHdr h;fread(&h,sizeof(h),1,f);
@@ -67,16 +82,52 @@ BSP loadBSP(const char*path){
     if(h.lm[14].l){b.lm=ld(f,&h.lm[14]);b.nlm=h.lm[14].l/(128*128*3);}
 
     if(rawIdx&&b.surf){
-        uint32_t totalIdx=0;
+        uint32_t totalIdx=0,patchVerts=0,patchIdx=0;
         for(uint32_t i=0;i<b.nsurf;i++){
             BSPSurf*s=&b.surf[i];
             if(s->tp==1||s->tp==3)totalIdx+=s->ni;
+            else if(s->tp==2&&s->pw>=3&&s->ph>=3){
+                int div=5;
+                int qw=(s->pw-1)/2,qh=(s->ph-1)/2;
+                patchVerts+=qw*qh*div*div;
+                patchIdx+=qw*qh*(div-1)*(div-1)*6;
+            }
         }
-        b.idx=malloc(totalIdx*sizeof(uint32_t));b.ni=0;
+
+        uint32_t baseNv=b.nv;
+        b.verts=realloc(b.verts,(b.nv+patchVerts)*sizeof(BSPVert));
+        b.idx=malloc((totalIdx+patchIdx)*sizeof(uint32_t));b.ni=0;
+
         for(uint32_t i=0;i<b.nsurf;i++){
             BSPSurf*s=&b.surf[i];
             if(s->tp==1||s->tp==3){
                 for(int j=0;j<s->ni;j++)b.idx[b.ni++]=rawIdx[s->fi+j];
+            }else if(s->tp==2&&s->pw>=3&&s->ph>=3){
+                int div=5;
+                for(int py=0;py<(s->ph-1)/2;py++){
+                    for(int px=0;px<(s->pw-1)/2;px++){
+                        BSPVert cp[9];
+                        for(int cy=0;cy<3;cy++)for(int cx=0;cx<3;cx++)
+                            cp[cy*3+cx]=b.verts[s->fv+(py*2+cy)*s->pw+px*2+cx];
+                        uint32_t base=b.nv;
+                        for(int y=0;y<div;y++){
+                            for(int x=0;x<div;x++){
+                                float u=(float)x/(div-1),v=(float)y/(div-1);
+                                BSPVert r0=bezier3(cp[0],cp[1],cp[2],u);
+                                BSPVert r1=bezier3(cp[3],cp[4],cp[5],u);
+                                BSPVert r2=bezier3(cp[6],cp[7],cp[8],u);
+                                b.verts[b.nv++]=bezier3(r0,r1,r2,v);
+                            }
+                        }
+                        for(int y=0;y<div-1;y++){
+                            for(int x=0;x<div-1;x++){
+                                uint32_t i0=base+y*div+x,i1=i0+1,i2=i0+div,i3=i2+1;
+                                b.idx[b.ni++]=i0;b.idx[b.ni++]=i2;b.idx[b.ni++]=i1;
+                                b.idx[b.ni++]=i1;b.idx[b.ni++]=i2;b.idx[b.ni++]=i3;
+                            }
+                        }
+                    }
+                }
             }
         }
     }
