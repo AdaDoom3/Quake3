@@ -1,0 +1,21 @@
+# Build artifacts
+q3rt_soft
+q3rt
+test_bsp
+test_tga
+*.o
+*.so
+*.a
+
+# Compiled shaders
+*.spv
+
+# Editor files
+*.swp
+*~
+.vscode/
+.idea/
+
+# OS files
+.DS_Store
+Thumbs.db
