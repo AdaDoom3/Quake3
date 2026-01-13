@@ -66,14 +66,21 @@ BSP loadBSP(const char*path){
     if(h.lm[13].l){b.surf=ld(f,&h.lm[13]);b.nsurf=h.lm[13].l/sizeof(BSPSurf);}
     if(h.lm[14].l){b.lm=ld(f,&h.lm[14]);b.nlm=h.lm[14].l/(128*128*3);}
 
-    b.idx=malloc(rawNi*sizeof(uint32_t));b.ni=0;
-    for(uint32_t i=0;i<b.nsurf;i++){
-        BSPSurf*s=&b.surf[i];
-        if(s->tp==1||s->tp==3){
-            for(int j=0;j<s->ni;j++)b.idx[b.ni++]=rawIdx[s->fi+j];
+    if(rawIdx&&b.surf){
+        uint32_t totalIdx=0;
+        for(uint32_t i=0;i<b.nsurf;i++){
+            BSPSurf*s=&b.surf[i];
+            if(s->tp==1||s->tp==3)totalIdx+=s->ni;
+        }
+        b.idx=malloc(totalIdx*sizeof(uint32_t));b.ni=0;
+        for(uint32_t i=0;i<b.nsurf;i++){
+            BSPSurf*s=&b.surf[i];
+            if(s->tp==1||s->tp==3){
+                for(int j=0;j<s->ni;j++)b.idx[b.ni++]=rawIdx[s->fi+j];
+            }
         }
     }
-    free(rawIdx);
+    if(rawIdx)free(rawIdx);
     fclose(f);
     return b;
 }
@@ -124,7 +131,7 @@ int main(int argc,char**argv){
     printf("  Lightmaps: %u\n",b.nlm);
     printf("  Shaders: %u\n",b.ns);
 
-    if(b.nv>0){
+    if(b.nv>0&&b.verts){
         v3 mn=b.verts[0].p,mx=b.verts[0].p;
         for(uint32_t i=1;i<b.nv;i++){
             if(b.verts[i].p.x<mn.x)mn.x=b.verts[i].p.x;
