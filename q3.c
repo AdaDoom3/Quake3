@@ -118,6 +118,9 @@ typedef struct{
   unsigned int vao,vbo,ebo,tx[256],lm[256];
   unsigned int prg,vsh,fsh,wprog,wvao,wvbo,ikvao,ikvbo;
   V cp,ca;float cy,pitch;int fwd,bck,lft,rgt;
+  V vel;              // Player velocity (physics)
+  int on_ground;      // Ground contact flag
+  float ground_z;     // Current ground height
   M m;AnimCtrl*anim;Spawn spawn;MD3G wpn;Character player;int run,fc;
   int show_player;  // Toggle to show character model
   int auto_test;    // Automated test mode
@@ -855,16 +858,165 @@ static void drw(G*g){
    collision detection, producing a new player position each frame.
    ═══════════════════════════════════════════════════════════════════════════*/
 
+// BSP ground collision - find highest floor polygon under player
+static float trace_ground(M*m,V pos){
+  float best_z=-1000;
+  const float SEARCH_RADIUS=150.0f;  // Horizontal search radius
+
+  // Scan all faces for floors near player position
+  for(int i=0;i<m->nlf;i++){
+    LF*f=&m->lf[i];
+    if(f->t!=1||f->nv<3)continue;  // Only polygon faces with vertices
+
+    // Check if face normal points upward (floor)
+    if(f->nm.z<0.7f)continue;
+
+    // Check all vertices of this face
+    int found_nearby=0;
+    float face_z_sum=0;
+    int face_vert_count=0;
+
+    for(int v=0;v<f->nv&&(f->v+v)<m->nv;v++){
+      V fv=m->vs[f->v+v];
+
+      // Calculate distance to this vertex
+      float dx=fv.x-pos.x;
+      float dy=fv.y-pos.y;
+      float dist_sq=dx*dx+dy*dy;
+
+      // If vertex is within radius and below player
+      if(dist_sq<SEARCH_RADIUS*SEARCH_RADIUS){
+        found_nearby=1;
+        face_z_sum+=fv.z;
+        face_vert_count++;
+      }
+    }
+
+    // If we found nearby vertices, use average Z of face
+    if(found_nearby&&face_vert_count>0){
+      float face_z=face_z_sum/face_vert_count;
+      if(face_z>best_z&&face_z<=pos.z+10)best_z=face_z;
+    }
+  }
+
+  return best_z;
+}
+
 static void mv(G*g,float dt){
-  float sp=300*dt;
+  const float GRAVITY=800.0f;          // Q3 gravity
+  const float GROUND_ACCEL=1000.0f;    // Ground acceleration
+  const float AIR_ACCEL=100.0f;        // Air acceleration
+  const float FRICTION=6.0f;           // Ground friction
+  const float MAX_STEP_HEIGHT=18.0f;   // Q3 step height
+  const float MAX_VEL=320.0f;          // Max horizontal velocity
+
   // Q3 coords: X=forward, Y=right, Z=up
   V fwd=v3(cosf(g->cy)*cosf(g->pitch),sinf(g->cy)*cosf(g->pitch),-sinf(g->pitch));
   V rgt=v3(-sinf(g->cy),cosf(g->cy),0);
 
-  if(g->fwd)g->cp=add(g->cp,scl(fwd,sp));
-  if(g->bck)g->cp=sub(g->cp,scl(fwd,sp));
-  if(g->lft)g->cp=sub(g->cp,scl(rgt,sp));
-  if(g->rgt)g->cp=add(g->cp,scl(rgt,sp));
+  // Build movement input vector
+  V move_input=v3(0,0,0);
+  if(g->fwd)move_input=add(move_input,fwd);
+  if(g->bck)move_input=sub(move_input,fwd);
+  if(g->lft)move_input=sub(move_input,rgt);
+  if(g->rgt)move_input=add(move_input,rgt);
+
+  // Normalize movement input (prevent diagonal speed boost)
+  float input_len=vlen(move_input);
+  if(input_len>0.01f)move_input=scl(move_input,1.0f/input_len);
+
+  // Apply gravity
+  if(!g->on_ground){
+    g->vel.z-=GRAVITY*dt;
+  }
+
+  // Apply movement acceleration
+  float accel=g->on_ground?GROUND_ACCEL:AIR_ACCEL;
+  if(input_len>0.01f){
+    g->vel.x+=move_input.x*accel*dt;
+    g->vel.y+=move_input.y*accel*dt;
+  }
+
+  // Apply friction when on ground and not moving
+  if(g->on_ground&&input_len<0.01f){
+    float speed=sqrtf(g->vel.x*g->vel.x+g->vel.y*g->vel.y);
+    if(speed>0){
+      float drop=speed*FRICTION*dt;
+      float newspeed=fmaxf(0,speed-drop);
+      float scale=newspeed/speed;
+      g->vel.x*=scale;
+      g->vel.y*=scale;
+    }
+  }
+
+  // Limit horizontal velocity
+  float vel_2d=sqrtf(g->vel.x*g->vel.x+g->vel.y*g->vel.y);
+  if(vel_2d>MAX_VEL){
+    float scale=MAX_VEL/vel_2d;
+    g->vel.x*=scale;
+    g->vel.y*=scale;
+  }
+
+  // Try to move
+  V new_pos=add(g->cp,scl(g->vel,dt));
+
+  // Ground trace from both current and new position
+  float ground_at_new=trace_ground(&g->m,new_pos);
+  float ground_at_cur=trace_ground(&g->m,g->cp);
+
+  // Use the best ground estimate
+  g->ground_z=(ground_at_new>ground_at_cur)?ground_at_new:ground_at_cur;
+
+  // Safety: if no ground found, use spawn height as fallback to prevent falling out
+  if(g->ground_z<-500){
+    g->ground_z=g->spawn.pos.z;
+  }
+
+  // Check for landing or step climbing
+  const float PLAYER_HEIGHT=56.0f;
+  const float GROUND_SNAP_DIST=10.0f;  // Distance to auto-snap to ground
+
+  float clearance=new_pos.z-g->ground_z;
+
+  if(clearance<-5.0f){
+    // Significantly below ground - climb step or land
+    float step_height=g->ground_z-g->cp.z;
+    if(step_height>0&&step_height<=MAX_STEP_HEIGHT){
+      // Climbable step
+      new_pos.z=g->ground_z;
+      g->vel.z=0;
+      g->on_ground=1;
+    }else{
+      // Hit solid floor or fell through - snap to ground
+      new_pos.z=g->ground_z;
+      g->vel.z=0;
+      g->on_ground=1;
+    }
+  }else if(clearance<GROUND_SNAP_DIST&&g->vel.z<=0){
+    // Close to ground and moving down - land
+    new_pos.z=g->ground_z;
+    g->vel.z=0;
+    g->on_ground=1;
+  }else if(clearance>GROUND_SNAP_DIST*3){
+    // Far from ground - in air
+    g->on_ground=0;
+  }else{
+    // Near ground - maintain contact
+    if(clearance<0){
+      new_pos.z=g->ground_z;
+      g->vel.z=0;
+    }
+    g->on_ground=1;
+  }
+
+  // Safety bounds - never go too far below spawn
+  if(new_pos.z<g->spawn.pos.z-200){
+    new_pos.z=g->spawn.pos.z;
+    g->vel.z=0;
+    g->on_ground=1;
+  }
+
+  g->cp=new_pos;
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -1027,6 +1179,7 @@ static int ini(G*g,const char*mp){
 
   // Camera starts at spawn
   g->cp=g->spawn.pos;g->cy=g->spawn.angle;g->pitch=0.0f;g->run=1;g->fc=0;
+  g->vel=v3(0,0,0);g->on_ground=1;g->ground_z=g->spawn.pos.z;
   g->auto_test=1;  // Enable automated testing
   g->test_phase=0;
 
