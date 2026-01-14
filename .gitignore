@@ -3,6 +3,8 @@
 *.a
 quake3rt
 screenshot_tool
+test_suite
+perf_bench
 
 # Screenshots (too large for git)
 *.ppm
