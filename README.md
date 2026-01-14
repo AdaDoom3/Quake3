@@ -2,8 +2,18 @@
 
 A single-file, code-golfed implementation of the Quake 3 engine written in literate programming style.
 
+## 🎯 NEW: Integrated Engine
+
+**q3_integrated.c** (738 lines) combines BSP rendering with advanced animation:
+- ✅ FABRIK inverse kinematics
+- ✅ Spring dynamics + muscle simulation
+- ✅ Multi-threaded animation (pthreads)
+- ✅ 15% smaller than separate files
+- 📖 See [INTEGRATION.md](INTEGRATION.md) for full details
+
 ## Features
 
+### BSP Renderer (q3.c)
 - ✅ **Single file**: 563 lines of C99 code (23KB source)
 - ✅ **Complete BSP parser**: Loads authentic Quake 3 .bsp map files
 - ✅ **Multi-texture rendering**: TGA texture loading with mipmaps
@@ -11,6 +21,14 @@ A single-file, code-golfed implementation of the Quake 3 engine written in liter
 - ✅ **OpenGL 3.3 shaders**: Modern shader-based pipeline
 - ✅ **FPS controls**: WASD movement + mouse look
 - ✅ **Zero errors**: 0% sky/missing textures
+
+### Animation System (animation_system.c/h)
+- ✅ **FABRIK IK solver**: O(n) inverse kinematics
+- ✅ **Spring dynamics**: Secondary motion (hair, cloth)
+- ✅ **Muscle simulation**: Anatomical deformation
+- ✅ **Blend shapes**: Facial animation
+- ✅ **Multi-threaded**: pthreads for parallel updates
+- ✅ **13/13 tests passing**: Comprehensive test coverage
 
 ## Architecture
 
@@ -23,15 +41,27 @@ Written in functional C99 with Haskell-style design principles:
 
 ## Build
 
+### Integrated Engine (recommended)
+```bash
+gcc -o q3_integrated q3_integrated.c \
+    -lSDL2 -lGL -lGLEW -lm -pthread \
+    -O3 -std=c99 -Wno-unused-result
+```
+**Binary size**: 35KB optimized
+
+### BSP Renderer Only
 ```bash
 gcc -o q3 q3.c -lSDL2 -lGL -lGLEW -lm -O3 -std=c99
 ```
-
 **Binary size**: 31KB optimized
 
 ## Run
 
 ```bash
+# Integrated engine with animation
+./q3_integrated assets/maps/dm4ish.bsp
+
+# Original BSP renderer
 ./q3 assets/maps/dm4ish.bsp
 ```
 

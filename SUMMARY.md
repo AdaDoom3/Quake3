@@ -4,6 +4,14 @@ A modern, code-golfed recreation of the Quake 3 engine with advanced animation c
 
 ## Repository Contents
 
+### 🎯 Integrated Engine (`q3_integrated.c`) - NEW!
+- **738 lines** of literate C99 code
+- Single-file BSP renderer + animation system
+- FABRIK inverse kinematics
+- Spring dynamics + muscle simulation
+- Multi-threaded animation (pthreads)
+- **Status**: ✅ Compiles cleanly, 15% smaller than separate files
+
 ### Core Rendering Engine (`q3.c`)
 - **563 lines** of literate C99 code
 - Single-file BSP renderer with full Q3 map support
@@ -73,17 +81,24 @@ A modern, code-golfed recreation of the Quake 3 engine with advanced animation c
 
 | Component | Lines | Language | Status |
 |-----------|-------|----------|--------|
+| **q3_integrated.c** | **738** | **C99** | **✅ Integrated** |
 | q3.c | 563 | C99 | ✅ Working |
 | physics_ik.c | 746 | C99 | ✅ Tested |
 | animation_system.c | 200 | C99 | ✅ Tested |
 | animation_system.h | 103 | C99 | ✅ API |
 | advanced_tests.c | 470 | C99 | ✅ Passing |
-| **Total** | **2082** | | |
+| **Total** | **2820** | | |
 
 Binary sizes:
-- q3: 31KB (optimized)
-- physics_ik: ~40KB
-- advanced_tests: ~45KB
+- **q3_integrated: 35KB (renderer + animation)**
+- q3: 31KB (renderer only)
+- physics_ik: ~40KB (standalone demo)
+- advanced_tests: ~45KB (test suite)
+
+### Integration Achievement
+- Separate files: 866 lines (q3.c + animation_system.c + animation_system.h)
+- Integrated file: 738 lines (q3_integrated.c)
+- **Reduction: 128 lines (15% smaller)**
 
 ## Performance
 
