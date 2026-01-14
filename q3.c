@@ -687,12 +687,23 @@ static void vpmat(float*o,V e,float y,float p,int w,int h){
   // Right = (sy, -cy, 0) when roll=0
   // Up = Right × Forward
   V f=v3(cp*cy,cp*sy,-sp);     // Forward
-  V s=v3(sy,-cy,0);             // Right (Q3: positive Y is left, negative Y is right!)
+  V s=v3(sy,-cy,0);             // Right
   V u=crs(s,f);                 // Up = Right × Forward
 
-  // View matrix: world to camera space (column-major for OpenGL)
-  float v[16]={s.x,s.y,s.z,0,u.x,u.y,u.z,0,-f.x,-f.y,-f.z,0,0,0,0,1};
-  v[12]=-dot(s,e);v[13]=-dot(u,e);v[14]=dot(f,e);
+  // View matrix: Q3 puts axis vectors in ROWS (see tr_main.c viewerMatrix construction)
+  // axis[0]=forward in row 0, axis[1]=left in row 1, axis[2]=up in row 2
+  // In column-major: row i, col j is at index j*4+i
+  // So: v[j*4+i] = axis[i][j]
+  V left=scl(s,-1);  // Q3 uses LEFT not RIGHT (axis[1] = -right from AnglesToAxis)
+  float v[16]={
+    f.x,left.x,u.x,0,  // Column 0: (forward.x, left.x, up.x, 0)
+    f.y,left.y,u.y,0,  // Column 1: (forward.y, left.y, up.y, 0)
+    f.z,left.z,u.z,0,  // Column 2: (forward.z, left.z, up.z, 0)
+    0,0,0,1
+  };
+  v[12]=-e.x*f.x-e.y*f.y-e.z*f.z;  // -dot(e, forward)
+  v[13]=-e.x*left.x-e.y*left.y-e.z*left.z;  // -dot(e, left)
+  v[14]=-e.x*u.x-e.y*u.y-e.z*u.z;  // -dot(e, up)
 
   float a=(float)w/h,F=70*M_PI/180,n=0.1f,r=4096.0f;
   float t=1.0f/tanf(F/2);
