@@ -99,12 +99,27 @@ typedef struct{
 
 typedef struct{V pos;float angle;}Spawn;
 
+// Character model - full 3-part MD3 player
+typedef struct{
+  V**lower_frames;  // Animation frames for lower (legs)
+  V**upper_frames;  // Animation frames for upper (torso)
+  V*head;           // Single frame for head
+  int*lower_tris,*upper_tris,*head_tris;
+  int lower_nv,lower_nt,lower_nf;
+  int upper_nv,upper_nt,upper_nf;
+  int head_nv,head_nt;
+  unsigned int lower_vao,lower_vbo,lower_ebo;
+  unsigned int upper_vao,upper_vbo,upper_ebo;
+  unsigned int head_vao,head_vbo,head_ebo;
+}Character;
+
 typedef struct{
   SDL_Window*w;SDL_GLContext g;int sw,sh;
   unsigned int vao,vbo,ebo,tx[256],lm[256];
   unsigned int prg,vsh,fsh,wprog,wvao,wvbo,ikvao,ikvbo;
   V cp,ca;float cy,pitch;int fwd,bck,lft,rgt;
-  M m;AnimCtrl*anim;Spawn spawn;MD3G wpn;int run,fc;
+  M m;AnimCtrl*anim;Spawn spawn;MD3G wpn;Character player;int run,fc;
+  int show_player;  // Toggle to show character model
 }G;
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -429,6 +444,69 @@ static MD3G ldmd3(const char*p){
   return geo;
 }
 
+// Load MD3 with ALL animation frames (for character models)
+static void ld_md3_multi(const char*path,V***frames_out,int**tris_out,int*nv_out,int*nt_out,int*nf_out){
+  int sz;unsigned char*d=rd(path,&sz);
+  if(!d){*frames_out=NULL;return;}
+
+  MD3H*h=(MD3H*)d;
+  if(memcmp(h->id,"IDP3",4)||h->ver!=15){free(d);*frames_out=NULL;return;}
+
+  MD3M*m=(MD3M*)(d+h->ofs_meshes);
+  unsigned char*mesh_base=(unsigned char*)m;
+
+  *nv_out=m->nverts;
+  *nt_out=m->ntris;
+  *nf_out=m->nframes;
+
+  // Load all frames
+  *frames_out=malloc(m->nframes*sizeof(V*));
+  short*vdata=(short*)(mesh_base+m->ofs_verts);
+
+  for(int f=0;f<m->nframes;f++){
+    (*frames_out)[f]=malloc(m->nverts*sizeof(V));
+    for(int i=0;i<m->nverts;i++){
+      int idx=(f*m->nverts+i)*4;
+      (*frames_out)[f][i].x=vdata[idx+0]/64.0f;
+      (*frames_out)[f][i].y=vdata[idx+1]/64.0f;
+      (*frames_out)[f][i].z=vdata[idx+2]/64.0f;
+    }
+  }
+
+  // Triangles
+  int*idx=(int*)(mesh_base+m->ofs_tris);
+  *tris_out=malloc(m->ntris*3*sizeof(int));
+  memcpy(*tris_out,idx,m->ntris*3*sizeof(int));
+
+  free(d);
+}
+
+// Load complete character model (head + upper + lower)
+static void ld_character(Character*c,const char*model_name){
+  char path[256];
+
+  // Lower body (legs) - has most animation frames
+  sprintf(path,"assets/models/players/%s/lower.md3",model_name);
+  ld_md3_multi(path,&c->lower_frames,&c->lower_tris,&c->lower_nv,&c->lower_nt,&c->lower_nf);
+  printf("Loaded %s lower: %d verts, %d tris, %d frames\n",model_name,c->lower_nv,c->lower_nt,c->lower_nf);
+
+  // Upper body (torso)
+  sprintf(path,"assets/models/players/%s/upper.md3",model_name);
+  ld_md3_multi(path,&c->upper_frames,&c->upper_tris,&c->upper_nv,&c->upper_nt,&c->upper_nf);
+  printf("Loaded %s upper: %d verts, %d tris, %d frames\n",model_name,c->upper_nv,c->upper_nt,c->upper_nf);
+
+  // Head (usually single frame)
+  sprintf(path,"assets/models/players/%s/head.md3",model_name);
+  V**head_frames;
+  int head_nf;
+  ld_md3_multi(path,&head_frames,&c->head_tris,&c->head_nv,&c->head_nt,&head_nf);
+  if(head_frames){
+    c->head=head_frames[0];  // Use first frame
+    free(head_frames);
+  }
+  printf("Loaded %s head: %d verts, %d tris\n",model_name,c->head_nv,c->head_nt);
+}
+
 /* ═══════════════════════════════════════════════════════════════════════════
    CHAPTER VIII: Shader Compilation - The GPU's Functional Pipeline
 
@@ -657,6 +735,76 @@ static void drw(G*g){
   glUniform3f(glGetUniformLocation(g->wprog,"tint"),0,1,1);
   glDrawArrays(GL_LINES,0,18);
 
+  // Character model - animated sarge in front of spawn
+  if(g->show_player&&g->player.lower_frames){
+    int frame=((g->fc/2)%g->player.lower_nf);  // Slow animation
+
+    // Position character in front of camera view
+    V char_pos=v3(g->spawn.pos.x+100,g->spawn.pos.y,g->spawn.pos.z-30);
+
+    // Lower body (legs) - green
+    glBindVertexArray(g->player.lower_vao);
+    glBindBuffer(GL_ARRAY_BUFFER,g->player.lower_vbo);
+    glBufferData(GL_ARRAY_BUFFER,g->player.lower_nv*sizeof(V),g->player.lower_frames[frame],GL_DYNAMIC_DRAW);
+    glVertexAttribPointer(0,3,GL_FLOAT,GL_FALSE,0,0);
+    glEnableVertexAttribArray(0);
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER,g->player.lower_ebo);
+    glBufferData(GL_ELEMENT_ARRAY_BUFFER,g->player.lower_nt*3*sizeof(int),g->player.lower_tris,GL_DYNAMIC_DRAW);
+
+    float lower_m[16]={
+      1,0,0,0,
+      0,1,0,0,
+      0,0,1,0,
+      char_pos.x,char_pos.y,char_pos.z,1
+    };
+    glUniformMatrix4fv(glGetUniformLocation(g->wprog,"VP"),1,GL_FALSE,vp);
+    glUniformMatrix4fv(glGetUniformLocation(g->wprog,"M"),1,GL_FALSE,lower_m);
+    glUniform3f(glGetUniformLocation(g->wprog,"tint"),0.3f,0.9f,0.3f);
+    glDrawElements(GL_TRIANGLES,g->player.lower_nt*3,GL_UNSIGNED_INT,0);
+
+    // Upper body (torso) - blue, offset upward
+    if(g->player.upper_frames&&frame<g->player.upper_nf){
+      glBindVertexArray(g->player.upper_vao);
+      glBindBuffer(GL_ARRAY_BUFFER,g->player.upper_vbo);
+      glBufferData(GL_ARRAY_BUFFER,g->player.upper_nv*sizeof(V),g->player.upper_frames[frame],GL_DYNAMIC_DRAW);
+      glVertexAttribPointer(0,3,GL_FLOAT,GL_FALSE,0,0);
+      glEnableVertexAttribArray(0);
+      glBindBuffer(GL_ELEMENT_ARRAY_BUFFER,g->player.upper_ebo);
+      glBufferData(GL_ELEMENT_ARRAY_BUFFER,g->player.upper_nt*3*sizeof(int),g->player.upper_tris,GL_DYNAMIC_DRAW);
+
+      float upper_m[16]={
+        1,0,0,0,
+        0,1,0,0,
+        0,0,1,0,
+        char_pos.x,char_pos.y,char_pos.z+24,1  // Offset up for torso
+      };
+      glUniformMatrix4fv(glGetUniformLocation(g->wprog,"M"),1,GL_FALSE,upper_m);
+      glUniform3f(glGetUniformLocation(g->wprog,"tint"),0.3f,0.5f,1.0f);
+      glDrawElements(GL_TRIANGLES,g->player.upper_nt*3,GL_UNSIGNED_INT,0);
+    }
+
+    // Head - red, offset further up
+    if(g->player.head){
+      glBindVertexArray(g->player.head_vao);
+      glBindBuffer(GL_ARRAY_BUFFER,g->player.head_vbo);
+      glBufferData(GL_ARRAY_BUFFER,g->player.head_nv*sizeof(V),g->player.head,GL_STATIC_DRAW);
+      glVertexAttribPointer(0,3,GL_FLOAT,GL_FALSE,0,0);
+      glEnableVertexAttribArray(0);
+      glBindBuffer(GL_ELEMENT_ARRAY_BUFFER,g->player.head_ebo);
+      glBufferData(GL_ELEMENT_ARRAY_BUFFER,g->player.head_nt*3*sizeof(int),g->player.head_tris,GL_STATIC_DRAW);
+
+      float head_m[16]={
+        1,0,0,0,
+        0,1,0,0,
+        0,0,1,0,
+        char_pos.x,char_pos.y,char_pos.z+48,1  // Offset up for head
+      };
+      glUniformMatrix4fv(glGetUniformLocation(g->wprog,"M"),1,GL_FALSE,head_m);
+      glUniform3f(glGetUniformLocation(g->wprog,"tint"),1.0f,0.3f,0.3f);
+      glDrawElements(GL_TRIANGLES,g->player.head_nt*3,GL_UNSIGNED_INT,0);
+    }
+  }
+
   // Weapon - golden BFG floating in world space for now
   if(g->wpn.ni>0){
     glBindVertexArray(g->wvao);
@@ -838,6 +986,28 @@ static int ini(G*g,const char*mp){
   glBufferData(GL_ARRAY_BUFFER,20*sizeof(V),NULL,GL_DYNAMIC_DRAW);
   glVertexAttribPointer(0,3,GL_FLOAT,GL_FALSE,0,0);
   glEnableVertexAttribArray(0);
+
+  // Load character model (sarge)
+  printf("\nLoading character model...\n");
+  ld_character(&g->player,"sarge");
+  g->show_player=1;  // Show by default
+
+  // Setup character VAOs
+  if(g->player.lower_frames){
+    glGenVertexArrays(1,&g->player.lower_vao);
+    glGenBuffers(1,&g->player.lower_vbo);
+    glGenBuffers(1,&g->player.lower_ebo);
+  }
+  if(g->player.upper_frames){
+    glGenVertexArrays(1,&g->player.upper_vao);
+    glGenBuffers(1,&g->player.upper_vbo);
+    glGenBuffers(1,&g->player.upper_ebo);
+  }
+  if(g->player.head){
+    glGenVertexArrays(1,&g->player.head_vao);
+    glGenBuffers(1,&g->player.head_vbo);
+    glGenBuffers(1,&g->player.head_ebo);
+  }
 
   // Camera starts at spawn
   g->cp=g->spawn.pos;g->cy=g->spawn.angle;g->pitch=0.0f;g->run=1;g->fc=0;
