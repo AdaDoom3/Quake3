@@ -225,9 +225,9 @@ static char*vss=
 "layout(location=2)in vec2 L;"
 "layout(location=3)in vec4 C;"
 "out vec2 uv;out vec2 lm;out vec4 col;"
-"uniform mat4 V,M;"
+"uniform mat4 VP;"
 "void main(){"
-  "gl_Position=vec4(P,1);"
+  "gl_Position=VP*vec4(P,1);"
   "uv=T;lm=L;col=C;"
 "}";
 
@@ -336,25 +336,26 @@ static void vpmat(float*m,V p,float y,float pi,int w,int h){
   V r=nrm(crs(v3(0,1,0),f));
   V u=crs(f,r);
 
-  float v[16]={
-    r.x,r.y,r.z,-dot(r,p),
-    u.x,u.y,u.z,-dot(u,p),
-    f.x,f.y,f.z,-dot(f,p),
-    0,0,0,1
-  };
+  float fov=70*M_PI/180,asp=(float)w/h,n=1,far=8192;
+  float t=tanf(fov/2)*n;
 
-  float fov=90*M_PI/180,asp=(float)w/h,n=0.1f,far=4096;
-  float tf=tanf(fov/2);
   float pr[16]={
-    1/(asp*tf),0,0,0,
-    0,1/tf,0,0,
+    n/(asp*t),0,0,0,
+    0,n/t,0,0,
     0,0,-(far+n)/(far-n),-2*far*n/(far-n),
     0,0,-1,0
   };
 
+  float vw[16]={
+    r.x,u.x,f.x,0,
+    r.y,u.y,f.y,0,
+    r.z,u.z,f.z,0,
+    -dot(r,p),-dot(u,p),-dot(f,p),1
+  };
+
   for(int i=0;i<16;i++)m[i]=0;
   for(int i=0;i<4;i++)for(int j=0;j<4;j++)
-    for(int k=0;k<4;k++)m[i*4+j]+=pr[i*4+k]*v[j+k*4];
+    for(int k=0;k<4;k++)m[i+j*4]+=pr[i+k*4]*vw[k+j*4];
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -382,35 +383,17 @@ static void drw(G*g){
 
   glUseProgram(g->prg);
 
-  float vp[16],id[16]={1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1};
+  float vp[16];
   vpmat(vp,g->cp,g->cy,g->pitch,g->sw,g->sh);
 
-  int vl=glGetUniformLocation(g->prg,"V");
-  int ml=glGetUniformLocation(g->prg,"M");
+  int vpl=glGetUniformLocation(g->prg,"VP");
   int txl=glGetUniformLocation(g->prg,"tx");
   int lml=glGetUniformLocation(g->prg,"lmtx");
   int skyl=glGetUniformLocation(g->prg,"sky");
 
-  if(g->fc==60){
-    printf("Uniform locations: V=%d M=%d tx=%d lmtx=%d sky=%d\n",vl,ml,txl,lml,skyl);fflush(stdout);
-  }
-
-  glUniformMatrix4fv(vl,1,GL_FALSE,vp);
-  glUniformMatrix4fv(ml,1,GL_FALSE,id);
+  glUniformMatrix4fv(vpl,1,GL_FALSE,vp);
 
   glBindVertexArray(g->vao);
-
-  if(g->fc<65){
-    float test[]={0,0.5f,0,0,0,-0.5f,-0.5f,0,0,0,0.5f,-0.5f,0,0,0};
-    unsigned int tvao,tvbo;
-    glGenVertexArrays(1,&tvao);glBindVertexArray(tvao);
-    glGenBuffers(1,&tvbo);glBindBuffer(GL_ARRAY_BUFFER,tvbo);
-    glBufferData(GL_ARRAY_BUFFER,sizeof(test),test,GL_STATIC_DRAW);
-    glVertexAttribPointer(0,3,GL_FLOAT,0,5*sizeof(float),0);glEnableVertexAttribArray(0);
-    glVertexAttribPointer(1,2,GL_FLOAT,0,5*sizeof(float),(void*)(3*sizeof(float)));glEnableVertexAttribArray(1);
-    glDrawArrays(GL_TRIANGLES,0,3);
-    glBindVertexArray(g->vao);
-  }
 
   int drawn=0,t1=0,t3=0,skip=0;
   for(int f=0;f<g->m.nlf;f++){
@@ -439,21 +422,25 @@ static void drw(G*g){
     glBindTexture(GL_TEXTURE_2D,g->lm[lmid]);
     glUniform1i(lml,1);
 
-    if((lf->c==1||lf->c==3)&&lf->nv>=3){
-      glDrawArrays(GL_TRIANGLES,lf->v,3);
+    if(lf->c==1&&lf->nmv>=3){
+      glDrawElementsBaseVertex(GL_TRIANGLES,lf->nmv,GL_UNSIGNED_INT,
+        (void*)(size_t)(lf->mv*sizeof(int)),lf->v);
+      drawn++;
+    }else if(lf->c==3&&lf->nv>=3){
+      glDrawArrays(GL_TRIANGLE_FAN,lf->v,lf->nv);
       drawn++;
     }
   }
 
-  if(g->fc==60){
+  if(g->fc==60||g->fc==90){
     GLenum err=glGetError();
-    printf("Face types: t1=%d t3=%d skipped=%d drawn=%d GL_ERROR=%d\n",t1,t3,skip,drawn,err);fflush(stdout);
+    printf("Frame %d: t1=%d t3=%d skip=%d drew=%d GL_ERR=%d\n",g->fc,t1,t3,skip,drawn,err);fflush(stdout);
   }
 
   SDL_GL_SwapWindow(g->w);
 
-  if(g->fc==60){
-    char fn[64];sprintf(fn,"screenshot_%03d.ppm",g->fc);
+  if(g->fc==60||g->fc==90){
+    char fn[64];sprintf(fn,"shot_%03d.ppm",g->fc);
     ss(fn,g->sw,g->sh);printf("Screenshot: %s\n",fn);
   }
   g->fc++;
@@ -467,14 +454,14 @@ static void drw(G*g){
    ═══════════════════════════════════════════════════════════════════════════*/
 
 static void mv(G*g,float dt){
-  float sp=500*dt;
+  float sp=300*dt;
   V fwd=v3(cosf(g->cy),0,sinf(g->cy));
   V rgt=v3(-sinf(g->cy),0,cosf(g->cy));
 
-  if(g->fwd)g->cp=add(g->cp,scl(fwd,sp));
-  if(g->bck)g->cp=sub(g->cp,scl(fwd,sp));
-  if(g->lft)g->cp=sub(g->cp,scl(rgt,sp));
-  if(g->rgt)g->cp=add(g->cp,scl(rgt,sp));
+  if(g->fwd){g->cp=add(g->cp,scl(fwd,sp));g->pitch-=dt*0.1f;}
+  if(g->bck){g->cp=sub(g->cp,scl(fwd,sp));g->pitch+=dt*0.1f;}
+  if(g->lft){g->cp=sub(g->cp,scl(rgt,sp));g->cy+=dt*0.3f;}
+  if(g->rgt){g->cp=add(g->cp,scl(rgt,sp));g->cy-=dt*0.3f;}
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -594,8 +581,8 @@ static int ini(G*g,const char*mp){
   printf("Map bounds: [%.0f,%.0f,%.0f] to [%.0f,%.0f,%.0f]\n",
     g->m.bb.a.x,g->m.bb.a.y,g->m.bb.a.z,g->m.bb.b.x,g->m.bb.b.y,g->m.bb.b.z);
   printf("Map center: [%.0f,%.0f,%.0f]\n",c.x,c.y,c.z);
-  g->cp=v3(0,0,0);
-  g->cy=0.0f;g->pitch=0.2f;
+  g->cp=v3(0,0,1500);
+  g->cy=0.0f;g->pitch=-0.5f;
   printf("Camera: [%.0f,%.0f,%.0f] yaw=%.2f pitch=%.2f\n",g->cp.x,g->cp.y,g->cp.z,g->cy,g->pitch);
   g->run=1;g->fc=0;
 
