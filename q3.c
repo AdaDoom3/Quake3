@@ -642,10 +642,14 @@ static void ltx(G*g){
 
 static void vpmat(float*o,V e,float y,float p,int w,int h){
   float cy=cosf(y),sy=sinf(y),cp=cosf(p),sp=sinf(p);
-  V f=nrm(v3(cy*cp,sp,sy*cp));
-  V s=nrm(crs(v3(0,1,0),f));
-  V u=crs(f,s);
 
+  // Q3 coordinate system: X=forward, Y=right, Z=up
+  // Fix: swap X/Y to match Q3's AngleVectors
+  V f=nrm(v3(cy*cp,sy*cp,-sp));      // Forward vector
+  V s=nrm(v3(-sy,cy,0));             // Side (right) vector
+  V u=crs(s,f);                      // Up vector (side × forward)
+
+  // View matrix: world to camera space (column-major)
   float v[16]={s.x,s.y,s.z,0,u.x,u.y,u.z,0,-f.x,-f.y,-f.z,0,0,0,0,1};
   v[12]=-dot(s,e);v[13]=-dot(u,e);v[14]=dot(f,e);
 
@@ -825,10 +829,15 @@ static void drw(G*g){
 
   SDL_GL_SwapWindow(g->w);
 
-  if(g->fc==60||g->fc==90){
-    char fn[64];sprintf(fn,"integrated_shot_%03d.ppm",g->fc);
-    ss(fn,g->sw,g->sh);printf("Screenshot: %s\n",fn);
-    if(g->fc==90)g->run=0;
+  // Capture multiple strategic screenshots for analysis
+  int capture_frames[]={30,60,90,120,150,180,210,240,270,300};
+  for(int i=0;i<10;i++){
+    if(g->fc==capture_frames[i]){
+      char fn[64];sprintf(fn,"test_frame_%03d.ppm",g->fc);
+      ss(fn,g->sw,g->sh);printf("Screenshot: %s\n",fn);
+      if(g->fc==300)g->run=0;  // Exit after last screenshot
+      break;
+    }
   }
   g->fc++;
 }
@@ -842,13 +851,14 @@ static void drw(G*g){
 
 static void mv(G*g,float dt){
   float sp=300*dt;
-  V fwd=v3(cosf(g->cy),0,sinf(g->cy));
-  V rgt=v3(-sinf(g->cy),0,cosf(g->cy));
+  // Q3 coords: X=forward, Y=right, Z=up
+  V fwd=v3(cosf(g->cy)*cosf(g->pitch),sinf(g->cy)*cosf(g->pitch),-sinf(g->pitch));
+  V rgt=v3(-sinf(g->cy),cosf(g->cy),0);
 
-  if(g->fwd){g->cp=add(g->cp,scl(fwd,sp));g->pitch-=dt*0.1f;}
-  if(g->bck){g->cp=sub(g->cp,scl(fwd,sp));g->pitch+=dt*0.1f;}
-  if(g->lft){g->cp=sub(g->cp,scl(rgt,sp));g->cy+=dt*0.3f;}
-  if(g->rgt){g->cp=add(g->cp,scl(rgt,sp));g->cy-=dt*0.3f;}
+  if(g->fwd)g->cp=add(g->cp,scl(fwd,sp));
+  if(g->bck)g->cp=sub(g->cp,scl(fwd,sp));
+  if(g->lft)g->cp=sub(g->cp,scl(rgt,sp));
+  if(g->rgt)g->cp=add(g->cp,scl(rgt,sp));
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
