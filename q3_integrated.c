@@ -92,12 +92,14 @@ typedef struct{
   pthread_mutex_t lock;int multi_threaded;
 }AnimCtrl;
 
+typedef struct{V pos;float angle;}Spawn;
+
 typedef struct{
   SDL_Window*w;SDL_GLContext g;int sw,sh;
   unsigned int vao,vbo,ebo,tx[256],lm[256];
-  unsigned int prg,vsh,fsh;
+  unsigned int prg,vsh,fsh,wprog,wvao,wvbo;
   V cp,ca;float cy,pitch;int fwd,bck,lft,rgt;
-  M m;AnimCtrl*anim;int run,fc;
+  M m;AnimCtrl*anim;Spawn spawn;int run,fc;
 }G;
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -350,6 +352,36 @@ static int ld(const char*p,M*m){
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
+   CHAPTER VII.5: Entity Parsing - Finding Spawn Points
+
+   The entity lump (lump 0) contains spawn points and item placements.
+   We parse this text-based data to find info_player_start.
+   ═══════════════════════════════════════════════════════════════════════════*/
+
+static Spawn pent(const char*p){
+  int sz;char*d=rd(p,&sz);
+  Spawn s={.pos=v3(0,50,-200),.angle=0};
+  if(!d)return s;
+  H*h=(H*)d;
+  char*ent=(char*)(d+h->d[0].ofs);
+  char*pos=strstr(ent,"info_player");
+  if(pos){
+    char*org=strstr(pos,"origin");
+    if(org){
+      float x,y,z;
+      if(sscanf(org+9,"%f %f %f",&x,&y,&z)==3)s.pos=v3(x,y,z+60);
+    }
+    char*ang=strstr(pos,"angle");
+    if(ang){
+      float a;
+      if(sscanf(ang+7,"%f",&a)==1)s.angle=a*M_PI/180.0f;
+    }
+  }
+  free(d);
+  return s;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
    CHAPTER VIII: Shader Compilation - The GPU's Functional Pipeline
 
    Shaders are pure functions executed in parallel across the geometry.
@@ -393,12 +425,36 @@ static unsigned int csh(unsigned int t,const char*s){
   return h;
 }
 
+static char*wvss=
+"#version 330 core\n"
+"layout(location=0)in vec3 P;"
+"out vec3 col;"
+"uniform mat4 VP,M;"
+"void main(){"
+  "gl_Position=VP*M*vec4(P,1);"
+  "col=vec3(0.3,0.3,0.3);"
+"}";
+
+static char*wfss=
+"#version 330 core\n"
+"in vec3 col;"
+"out vec4 F;"
+"void main(){"
+  "F=vec4(col,1);"
+"}";
+
 static void ishd(G*g){
   g->vsh=csh(GL_VERTEX_SHADER,vss);
   g->fsh=csh(GL_FRAGMENT_SHADER,fss);
   g->prg=glCreateProgram();
   glAttachShader(g->prg,g->vsh);glAttachShader(g->prg,g->fsh);
   glLinkProgram(g->prg);
+
+  unsigned int wvsh=csh(GL_VERTEX_SHADER,wvss);
+  unsigned int wfsh=csh(GL_FRAGMENT_SHADER,wfss);
+  g->wprog=glCreateProgram();
+  glAttachShader(g->wprog,wvsh);glAttachShader(g->wprog,wfsh);
+  glLinkProgram(g->wprog);
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -543,6 +599,24 @@ static void drw(G*g){
     }
   }
 
+  // Weapon rendering (rocket launcher)
+  glUseProgram(g->wprog);
+  glDisable(GL_DEPTH_TEST);
+  glBindVertexArray(g->wvao);
+
+  float wm[16]={1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1};
+  float s=0.02f,ox=0.15f,oy=-0.1f,oz=-0.3f;
+  wm[0]=s;wm[5]=s;wm[10]=s;
+  wm[12]=ox;wm[13]=oy;wm[14]=oz;
+
+  int wvpl=glGetUniformLocation(g->wprog,"VP");
+  int wml=glGetUniformLocation(g->wprog,"M");
+  glUniformMatrix4fv(wvpl,1,GL_FALSE,vp);
+  glUniformMatrix4fv(wml,1,GL_FALSE,wm);
+
+  glDrawArrays(GL_TRIANGLES,0,36);
+  glEnable(GL_DEPTH_TEST);
+
   SDL_GL_SwapWindow(g->w);
 
   if(g->fc==60||g->fc==90){
@@ -674,7 +748,29 @@ static int ini(G*g,const char*mp){
   glVertexAttribPointer(3,4,GL_UNSIGNED_BYTE,GL_TRUE,stride,(void*)(sizeof(V)+sizeof(T)*2));
   glEnableVertexAttribArray(3);
 
-  g->cp=v3(0,0,0);g->cy=0.0f;g->pitch=0.0f;g->run=1;g->fc=0;
+  // Weapon geometry (simple box for rocket launcher)
+  float wverts[]={
+    -1,-1,-3, 1,-1,-3, 1,1,-3, -1,-1,-3, 1,1,-3, -1,1,-3,
+    -1,-1,0, 1,-1,0, 1,1,0, -1,-1,0, 1,1,0, -1,1,0,
+    -1,-1,-3, -1,1,-3, -1,1,0, -1,-1,-3, -1,1,0, -1,-1,0,
+    1,-1,-3, 1,1,-3, 1,1,0, 1,-1,-3, 1,1,0, 1,-1,0,
+    -1,-1,-3, 1,-1,-3, 1,-1,0, -1,-1,-3, 1,-1,0, -1,-1,0,
+    -1,1,-3, 1,1,-3, 1,1,0, -1,1,-3, 1,1,0, -1,1,0
+  };
+  glGenVertexArrays(1,&g->wvao);
+  glBindVertexArray(g->wvao);
+  glGenBuffers(1,&g->wvbo);
+  glBindBuffer(GL_ARRAY_BUFFER,g->wvbo);
+  glBufferData(GL_ARRAY_BUFFER,sizeof(wverts),wverts,GL_STATIC_DRAW);
+  glVertexAttribPointer(0,3,GL_FLOAT,GL_FALSE,0,0);
+  glEnableVertexAttribArray(0);
+
+  // Load spawn point
+  g->spawn=pent(mp);
+  g->cp=g->spawn.pos;g->cy=g->spawn.angle;g->pitch=0.0f;g->run=1;g->fc=0;
+
+  printf("Spawn point: (%.1f, %.1f, %.1f) angle: %.1f°\n",
+    g->spawn.pos.x,g->spawn.pos.y,g->spawn.pos.z,g->spawn.angle*180/M_PI);
 
   return 1;
 }
