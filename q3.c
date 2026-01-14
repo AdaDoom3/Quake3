@@ -99,14 +99,22 @@ typedef struct{
 
 typedef struct{V pos;float angle;}Spawn;
 
-// Character model - full 3-part MD3 player
+// MD3 tag - attachment point with 3x3 rotation matrix
+typedef struct{
+  char name[64];
+  V origin;
+  float axis[3][3];
+}Tag;
+
+// Character model - full 3-part MD3 player with tags
 typedef struct{
   V**lower_frames;  // Animation frames for lower (legs)
   V**upper_frames;  // Animation frames for upper (torso)
   V*head;           // Single frame for head
+  Tag*lower_tags,*upper_tags;  // Tags for articulation
   int*lower_tris,*upper_tris,*head_tris;
-  int lower_nv,lower_nt,lower_nf;
-  int upper_nv,upper_nt,upper_nf;
+  int lower_nv,lower_nt,lower_nf,lower_ntags;
+  int upper_nv,upper_nt,upper_nf,upper_ntags;
   int head_nv,head_nt;
   unsigned int lower_vao,lower_vbo,lower_ebo;
   unsigned int upper_vao,upper_vbo,upper_ebo;
@@ -450,19 +458,40 @@ static MD3G ldmd3(const char*p){
 }
 
 // Load MD3 with ALL animation frames (for character models)
-static void ld_md3_multi(const char*path,V***frames_out,int**tris_out,int*nv_out,int*nt_out,int*nf_out){
+static void ld_md3_multi(const char*path,V***frames_out,Tag**tags_out,int*ntags_out,
+                        int**tris_out,int*nv_out,int*nt_out,int*nf_out){
   int sz;unsigned char*d=rd(path,&sz);
   if(!d){*frames_out=NULL;return;}
 
   MD3H*h=(MD3H*)d;
   if(memcmp(h->id,"IDP3",4)||h->ver!=15){free(d);*frames_out=NULL;return;}
 
+  *nf_out=h->nframes;
+  *ntags_out=h->ntags;
+
+  // Load tags (position + 3x3 matrix per tag per frame)
+  if(h->ntags>0){
+    *tags_out=malloc(h->ntags*h->nframes*sizeof(Tag));
+    unsigned char*tag_data=d+h->ofs_tags;
+    for(int f=0;f<h->nframes;f++){
+      for(int t=0;t<h->ntags;t++){
+        int idx=f*h->ntags+t;
+        char*name=(char*)(tag_data+(idx*(64+12+36)));
+        float*origin=(float*)(tag_data+(idx*(64+12+36))+64);
+        float*axis=(float*)(tag_data+(idx*(64+12+36))+64+12);
+        strncpy((*tags_out)[idx].name,name,64);
+        (*tags_out)[idx].origin=v3(origin[0],origin[1],origin[2]);
+        for(int i=0;i<3;i++)for(int j=0;j<3;j++)
+          (*tags_out)[idx].axis[i][j]=axis[i*3+j];
+      }
+    }
+  }
+
   MD3M*m=(MD3M*)(d+h->ofs_meshes);
   unsigned char*mesh_base=(unsigned char*)m;
 
   *nv_out=m->nverts;
   *nt_out=m->ntris;
-  *nf_out=m->nframes;
 
   // Load all frames
   *frames_out=malloc(m->nframes*sizeof(V*));
@@ -490,24 +519,29 @@ static void ld_md3_multi(const char*path,V***frames_out,int**tris_out,int*nv_out
 static void ld_character(Character*c,const char*model_name){
   char path[256];
 
-  // Lower body (legs) - has most animation frames
+  // Lower body (legs) - has most animation frames + tag_torso attachment point
   sprintf(path,"assets/models/players/%s/lower.md3",model_name);
-  ld_md3_multi(path,&c->lower_frames,&c->lower_tris,&c->lower_nv,&c->lower_nt,&c->lower_nf);
-  printf("Loaded %s lower: %d verts, %d tris, %d frames\n",model_name,c->lower_nv,c->lower_nt,c->lower_nf);
+  ld_md3_multi(path,&c->lower_frames,&c->lower_tags,&c->lower_ntags,
+    &c->lower_tris,&c->lower_nv,&c->lower_nt,&c->lower_nf);
+  printf("Loaded %s lower: %d verts, %d tris, %d frames, %d tags\n",
+    model_name,c->lower_nv,c->lower_nt,c->lower_nf,c->lower_ntags);
 
-  // Upper body (torso)
+  // Upper body (torso) - has tag_head and tag_weapon
   sprintf(path,"assets/models/players/%s/upper.md3",model_name);
-  ld_md3_multi(path,&c->upper_frames,&c->upper_tris,&c->upper_nv,&c->upper_nt,&c->upper_nf);
-  printf("Loaded %s upper: %d verts, %d tris, %d frames\n",model_name,c->upper_nv,c->upper_nt,c->upper_nf);
+  ld_md3_multi(path,&c->upper_frames,&c->upper_tags,&c->upper_ntags,
+    &c->upper_tris,&c->upper_nv,&c->upper_nt,&c->upper_nf);
+  printf("Loaded %s upper: %d verts, %d tris, %d frames, %d tags\n",
+    model_name,c->upper_nv,c->upper_nt,c->upper_nf,c->upper_ntags);
 
   // Head (usually single frame)
   sprintf(path,"assets/models/players/%s/head.md3",model_name);
-  V**head_frames;
-  int head_nf;
-  ld_md3_multi(path,&head_frames,&c->head_tris,&c->head_nv,&c->head_nt,&head_nf);
+  V**head_frames;Tag*head_tags;
+  int head_nf,head_ntags;
+  ld_md3_multi(path,&head_frames,&head_tags,&head_ntags,
+    &c->head_tris,&c->head_nv,&c->head_nt,&head_nf);
   if(head_frames){
     c->head=head_frames[0];  // Use first frame
-    free(head_frames);
+    free(head_frames);if(head_tags)free(head_tags);
   }
   printf("Loaded %s head: %d verts, %d tris\n",model_name,c->head_nv,c->head_nt);
 }
@@ -648,13 +682,15 @@ static void ltx(G*g){
 static void vpmat(float*o,V e,float y,float p,int w,int h){
   float cy=cosf(y),sy=sinf(y),cp=cosf(p),sp=sinf(p);
 
-  // Q3 coordinate system: X=forward, Y=right, Z=up
-  // Fix: swap X/Y to match Q3's AngleVectors
-  V f=nrm(v3(cy*cp,sy*cp,-sp));      // Forward vector
-  V s=nrm(v3(-sy,cy,0));             // Side (right) vector
-  V u=crs(s,f);                      // Up vector (side × forward)
+  // Q3 coordinate system from AngleVectors (q_math.c)
+  // Forward = (cp*cy, cp*sy, -sp)
+  // Right = (sy, -cy, 0) when roll=0
+  // Up = Right × Forward
+  V f=v3(cp*cy,cp*sy,-sp);     // Forward
+  V s=v3(sy,-cy,0);             // Right (Q3: positive Y is left, negative Y is right!)
+  V u=crs(s,f);                 // Up = Right × Forward
 
-  // View matrix: world to camera space (column-major)
+  // View matrix: world to camera space (column-major for OpenGL)
   float v[16]={s.x,s.y,s.z,0,u.x,u.y,u.z,0,-f.x,-f.y,-f.z,0,0,0,0,1};
   v[12]=-dot(s,e);v[13]=-dot(u,e);v[14]=dot(f,e);
 
