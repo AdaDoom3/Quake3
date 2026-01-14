@@ -1,3 +1,9 @@
 *_test
 *_ik
 *.o
+*.ppm
+q3
+q3_integrated
+advanced_tests
+physics_ik
+test_generator
