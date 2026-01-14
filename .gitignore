@@ -1,0 +1,10 @@
+# Build artifacts
+*.o
+*.a
+quake3rt
+screenshot_tool
+
+# Screenshots (too large for git)
+*.ppm
+*.png
+*.jpg
