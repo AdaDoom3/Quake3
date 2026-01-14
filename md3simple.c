@@ -12,63 +12,47 @@ typedef struct{float x,y,z;}V;
 
 static V v3(float x,float y,float z){return (V){x,y,z};}
 
-// Load MD3 single frame
+// MD3 structures
+typedef struct{char id[4];int ver;char name[64];int flags;int nframes,ntags,nmeshes,nskins;int ofs_frames,ofs_tags,ofs_meshes,ofs_eof;}MD3H;
+typedef struct{char id[4];char name[64];int flags;int nframes,nshaders,nverts,ntris;int ofs_tris,ofs_shaders,ofs_st,ofs_verts,ofs_end;}MD3M;
+
+// Load MD3 single frame using working approach from q3.c
 static V*load_md3_frame0(const char*path,int*nverts,int*ntris,int**tris){
   FILE*f=fopen(path,"rb");
   if(!f){printf("Can't open %s\n",path);return NULL;}
 
-  // Read header
-  char id[4];int ver;
-  fread(id,4,1,f);
-  fread(&ver,4,1,f);
+  // Get file size
+  fseek(f,0,SEEK_END);
+  int sz=ftell(f);
+  fseek(f,0,SEEK_SET);
 
-  if(memcmp(id,"IDP3",4)||ver!=15){
+  // Read entire file
+  unsigned char*d=malloc(sz);
+  fread(d,1,sz,f);
+  fclose(f);
+
+  MD3H*h=(MD3H*)d;
+  if(memcmp(h->id,"IDP3",4)||h->ver!=15){
     printf("Bad MD3\n");
-    fclose(f);
+    free(d);
     return NULL;
   }
 
-  // Skip to mesh offset (at byte 108)
-  int ofs_meshes;
-  fseek(f,104,SEEK_SET);
-  fread(&ofs_meshes,4,1,f);
+  // Get first mesh
+  MD3M*mesh=(MD3M*)(d+h->ofs_meshes);
+  unsigned char*mesh_base=(unsigned char*)mesh;
 
-  // Go to first mesh
-  fseek(f,ofs_meshes,SEEK_SET);
+  printf("Mesh: %d verts, %d tris, %d frames\n",mesh->nverts,mesh->ntris,mesh->nframes);
 
-  // Read mesh header
-  char mesh_id[4];
-  fread(mesh_id,4,1,f);
-  fseek(f,ofs_meshes+68,SEEK_SET);  // Skip to nverts
-  int nv,nt;
-  fread(&nv,4,1,f);
-  fread(&nt,4,1,f);
-
-  printf("Mesh: %d verts, %d tris\n",nv,nt);
-
-  // Read triangle offsets
-  int ofs_tris,ofs_verts;
-  fread(&ofs_tris,4,1,f);
-  fseek(f,4,SEEK_CUR);  // Skip ofs_shaders
-  fseek(f,4,SEEK_CUR);  // Skip ofs_st
-  fread(&ofs_verts,4,1,f);
-
-  // Read triangles
-  fseek(f,ofs_meshes+ofs_tris,SEEK_SET);
-  *tris=malloc(nt*3*sizeof(int));
-  fread(*tris,4,nt*3,f);
-  *ntris=nt;
-
-  // Read vertices (frame 0)
-  fseek(f,ofs_meshes+ofs_verts,SEEK_SET);
-  short*shorts=malloc(nv*4*sizeof(short));
-  fread(shorts,sizeof(short),nv*4,f);
+  // Read vertices for frame 0
+  short*vdata=(short*)(mesh_base+mesh->ofs_verts);
+  int nv=mesh->nverts;
 
   V*verts=malloc(nv*sizeof(V));
   for(int i=0;i<nv;i++){
-    verts[i].x=shorts[i*4+0]/64.0f;
-    verts[i].y=shorts[i*4+1]/64.0f;
-    verts[i].z=shorts[i*4+2]/64.0f;
+    verts[i].x=vdata[i*4+0]/64.0f;
+    verts[i].y=vdata[i*4+1]/64.0f;
+    verts[i].z=vdata[i*4+2]/64.0f;
   }
 
   printf("First 3 verts: (%.1f,%.1f,%.1f) (%.1f,%.1f,%.1f) (%.1f,%.1f,%.1f)\n",
@@ -76,9 +60,15 @@ static V*load_md3_frame0(const char*path,int*nverts,int*ntris,int**tris){
     verts[1].x,verts[1].y,verts[1].z,
     verts[2].x,verts[2].y,verts[2].z);
 
-  free(shorts);
-  fclose(f);
+  // Read triangle indices
+  int*idx=(int*)(mesh_base+mesh->ofs_tris);
+  int nt=mesh->ntris;
+  *tris=malloc(nt*3*sizeof(int));
+  memcpy(*tris,idx,nt*3*sizeof(int));
+
+  free(d);
   *nverts=nv;
+  *ntris=nt;
   return verts;
 }
 
@@ -110,30 +100,52 @@ int main(){
   glClearColor(0.2f,0.2f,0.3f,1);
   glEnable(GL_DEPTH_TEST);
 
-  // Simple shaders
+  // Simple shaders - just display the model scaled to NDC
   const char*vs=
     "#version 330 core\n"
     "layout(location=0)in vec3 P;"
-    "uniform mat4 MVP;"
-    "void main(){gl_Position=MVP*vec4(P,1);}";
+    "void main(){"
+    "  vec3 scaled=P*0.03;"  // Scale to fit in view
+    "  gl_Position=vec4(scaled,1);"  // Direct to NDC
+    "}";
 
   const char*fs=
     "#version 330 core\n"
     "out vec4 F;"
-    "void main(){F=vec4(0.3,0.8,0.3,1);}";
+    "void main(){F=vec4(0.3,0.9,0.3,1);}";
 
   unsigned int vsh=glCreateShader(GL_VERTEX_SHADER);
   glShaderSource(vsh,1,&vs,0);
   glCompileShader(vsh);
+  int ok;
+  glGetShaderiv(vsh,GL_COMPILE_STATUS,&ok);
+  if(!ok){
+    char log[512];
+    glGetShaderInfoLog(vsh,512,0,log);
+    printf("VS error: %s\n",log);
+  }
 
   unsigned int fsh=glCreateShader(GL_FRAGMENT_SHADER);
   glShaderSource(fsh,1,&fs,0);
   glCompileShader(fsh);
+  glGetShaderiv(fsh,GL_COMPILE_STATUS,&ok);
+  if(!ok){
+    char log[512];
+    glGetShaderInfoLog(fsh,512,0,log);
+    printf("FS error: %s\n",log);
+  }
 
   unsigned int prog=glCreateProgram();
   glAttachShader(prog,vsh);
   glAttachShader(prog,fsh);
   glLinkProgram(prog);
+  glGetProgramiv(prog,GL_LINK_STATUS,&ok);
+  if(!ok){
+    char log[512];
+    glGetProgramInfoLog(prog,512,0,log);
+    printf("Link error: %s\n",log);
+  }
+  printf("Shaders compiled and linked successfully\n");
 
   // Upload geometry
   unsigned int vao,vbo,ebo;
@@ -150,44 +162,20 @@ int main(){
   glBindBuffer(GL_ELEMENT_ARRAY_BUFFER,ebo);
   glBufferData(GL_ELEMENT_ARRAY_BUFFER,ntris*3*sizeof(int),tris,GL_STATIC_DRAW);
 
-  printf("\nRendering...\n");
-
-  // Build MVP matrix
-  // View: camera at (0, 0, 100) looking at origin
-  // Projection: perspective
-  float aspect=800.0f/600.0f;
-  float fov=60.0f*PI/180.0f;
-  float ftan=1.0f/tanf(fov/2.0f);
-
-  float proj[16]={
-    ftan/aspect,0,0,0,
-    0,ftan,0,0,
-    0,0,-1.01f,-1,
-    0,0,-2.01f,0
-  };
-
-  float view[16]={
-    1,0,0,0,
-    0,1,0,0,
-    0,0,1,0,
-    0,0,-100,1
-  };
-
-  float mvp[16];
-  memset(mvp,0,sizeof(mvp));
-  for(int i=0;i<4;i++)
-    for(int j=0;j<4;j++)
-      for(int k=0;k<4;k++)
-        mvp[i*4+j]+=proj[i*4+k]*view[k*4+j];
+  printf("\nRendering with simple NDC transform...\n");
 
   // Render one frame
   glClear(GL_COLOR_BUFFER_BIT|GL_DEPTH_BUFFER_BIT);
 
-  glUseProgram(prog);
-  glUniformMatrix4fv(glGetUniformLocation(prog,"MVP"),1,GL_FALSE,mvp);
+  // Draw as solid with no culling
+  glDisable(GL_CULL_FACE);
 
+  glUseProgram(prog);
   glBindVertexArray(vao);
   glDrawElements(GL_TRIANGLES,ntris*3,GL_UNSIGNED_INT,0);
+
+  GLenum err=glGetError();
+  if(err!=GL_NO_ERROR)printf("GL Error: 0x%x\n",err);
 
   SDL_GL_SwapWindow(win);
 
