@@ -143,14 +143,9 @@ static unsigned char*tga(unsigned char*d,int*w,int*h){
 
 static int ld(const char*p,M*m){
   int sz;unsigned char*d=rd(p,&sz);
-  if(!d){printf("Failed to read %s\n",p);fflush(stdout);return 0;}
-  printf("Read %d bytes\n",sz);fflush(stdout);
+  if(!d)return 0;
   H*h=(H*)d;
-  if(memcmp(h->sig,"IBSP",4)){printf("Not a BSP file\n");fflush(stdout);return 0;}
-  if(h->ver!=0x2e){printf("Wrong BSP version: %d\n",h->ver);fflush(stdout);return 0;}
-
-  printf("BSP lumps: ents=%d shaders=%d faces=%d verts=%d indices=%d\n",
-    h->d[0].len,h->d[1].len,h->d[13].len,h->d[10].len,h->d[11].len);fflush(stdout);
+  if(memcmp(h->sig,"IBSP",4)||h->ver!=0x2e)return 0;
 
   typedef struct{V p;T tx;T lm;V n;C c;}VT;
   int nvt=h->d[10].len/sizeof(VT);
@@ -163,15 +158,9 @@ static int ld(const char*p,M*m){
   }
 
   int nidx=h->d[11].len/sizeof(int);
-  printf("Indices: ofs=%d len=%d count=%d filesize=%d\n",h->d[11].ofs,h->d[11].len,nidx,sz);fflush(stdout);
-  if(h->d[11].ofs+h->d[11].len>sz){printf("Index data exceeds file size!\n");fflush(stdout);return 0;}
   int*idx=(int*)(d+h->d[11].ofs);
-  printf("Malloc indices\n");fflush(stdout);
   m->is=malloc(nidx*sizeof(int));
-  if(!m->is){printf("Malloc failed!\n");fflush(stdout);return 0;}
-  printf("Memcpy indices\n");fflush(stdout);
   memcpy(m->is,idx,h->d[11].len);m->ni=nidx;
-  printf("Indices done\n");fflush(stdout);
 
   m->ntx=h->d[1].len/sizeof(TX);
   m->tx=malloc(m->ntx*sizeof(TX));memcpy(m->tx,d+h->d[1].ofs,m->ntx*sizeof(TX));
@@ -261,9 +250,6 @@ static void ishd(G*g){
   g->prg=glCreateProgram();
   glAttachShader(g->prg,g->vsh);glAttachShader(g->prg,g->fsh);
   glLinkProgram(g->prg);
-  int ok;glGetProgramiv(g->prg,GL_LINK_STATUS,&ok);
-  if(!ok){char l[512];glGetProgramInfoLog(g->prg,512,0,l);printf("Link: %s\n",l);}
-  else{printf("Shaders compiled and linked successfully\n");fflush(stdout);}
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -275,10 +261,8 @@ static void ishd(G*g){
 
 static void ltx(G*g){
   glGenTextures(256,g->tx);
-  int loaded=0;
   for(int i=0;i<g->m.ntx&&i<256;i++){
-    char p[256];
-    sprintf(p,"assets/%s.tga",g->m.tx[i].n);
+    char p[256];sprintf(p,"assets/%s.tga",g->m.tx[i].n);
     int sz,w,h;unsigned char*d=rd(p,&sz);
     if(d){
       unsigned char*px=tga(d,&w,&h);
@@ -291,27 +275,23 @@ static void ltx(G*g){
         glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_T,GL_REPEAT);
         glGenerateMipmap(GL_TEXTURE_2D);
         free(px);
-        loaded++;
-        if(i<5)printf("Loaded: %s\n",g->m.tx[i].n);
       }
       free(d);
     }else{
-      if(i<5)printf("Missing: %s\n",g->m.tx[i].n);
-      unsigned char white[16]={255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255};
+      unsigned char w[16]={255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255};
       glBindTexture(GL_TEXTURE_2D,g->tx[i]);
-      glTexImage2D(GL_TEXTURE_2D,0,GL_RGBA,2,2,0,GL_RGBA,GL_UNSIGNED_BYTE,white);
+      glTexImage2D(GL_TEXTURE_2D,0,GL_RGBA,2,2,0,GL_RGBA,GL_UNSIGNED_BYTE,w);
       glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MIN_FILTER,GL_NEAREST);
       glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MAG_FILTER,GL_NEAREST);
     }
   }
-  printf("Loaded %d/%d textures\n",loaded,g->m.ntx);fflush(stdout);
 
   glGenTextures(256,g->lm);
   for(int i=0;i<g->m.nlm&&i<256;i++){
     glBindTexture(GL_TEXTURE_2D,g->lm[i]);
-    unsigned char*rgba=malloc(128*128*4);
+    unsigned char*lm=g->m.lm+i*128*128*3,*rgba=malloc(128*128*4);
     for(int j=0;j<128*128;j++){
-      rgba[j*4]=255;rgba[j*4+1]=255;rgba[j*4+2]=255;rgba[j*4+3]=255;
+      rgba[j*4]=lm[j*3];rgba[j*4+1]=lm[j*3+1];rgba[j*4+2]=lm[j*3+2];rgba[j*4+3]=255;
     }
     glTexImage2D(GL_TEXTURE_2D,0,GL_RGBA,128,128,0,GL_RGBA,GL_UNSIGNED_BYTE,rgba);
     glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MIN_FILTER,GL_LINEAR);
@@ -320,7 +300,6 @@ static void ltx(G*g){
     glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_T,GL_CLAMP_TO_EDGE);
     free(rgba);
   }
-  printf("Loaded %d lightmaps (fullbright for debug)\n",g->m.nlm);fflush(stdout);
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -330,32 +309,22 @@ static void ltx(G*g){
    to clip space. This is the homomorphism from R³ to screen coordinates.
    ═══════════════════════════════════════════════════════════════════════════*/
 
-static void vpmat(float*m,V p,float y,float pi,int w,int h){
-  float cp=cosf(pi),sp=sinf(pi),cy=cosf(y),sy=sinf(y);
+static void vpmat(float*o,V e,float y,float p,int w,int h){
+  float cy=cosf(y),sy=sinf(y),cp=cosf(p),sp=sinf(p);
   V f=nrm(v3(cy*cp,sp,sy*cp));
-  V r=nrm(crs(v3(0,1,0),f));
-  V u=crs(f,r);
+  V s=nrm(crs(v3(0,1,0),f));
+  V u=crs(f,s);
 
-  float fov=70*M_PI/180,asp=(float)w/h,n=1,far=8192;
-  float t=tanf(fov/2)*n;
+  float v[16]={s.x,s.y,s.z,0,u.x,u.y,u.z,0,-f.x,-f.y,-f.z,0,0,0,0,1};
+  v[12]=-dot(s,e);v[13]=-dot(u,e);v[14]=dot(f,e);
 
-  float pr[16]={
-    n/(asp*t),0,0,0,
-    0,n/t,0,0,
-    0,0,-(far+n)/(far-n),-2*far*n/(far-n),
-    0,0,-1,0
-  };
+  float a=(float)w/h,F=70*M_PI/180,n=0.1f,r=4096.0f;
+  float t=1.0f/tanf(F/2);
+  float pr[16]={t/a,0,0,0,0,t,0,0,0,0,-(r+n)/(r-n),-1,0,0,-2*r*n/(r-n),0};
 
-  float vw[16]={
-    r.x,u.x,f.x,0,
-    r.y,u.y,f.y,0,
-    r.z,u.z,f.z,0,
-    -dot(r,p),-dot(u,p),-dot(f,p),1
-  };
-
-  for(int i=0;i<16;i++)m[i]=0;
+  for(int i=0;i<16;i++)o[i]=0;
   for(int i=0;i<4;i++)for(int j=0;j<4;j++)
-    for(int k=0;k<4;k++)m[i+j*4]+=pr[i+k*4]*vw[k+j*4];
+    for(int k=0;k<4;k++)o[j*4+i]+=pr[k*4+i]*v[j*4+k];
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -399,9 +368,6 @@ static void drw(G*g){
   for(int f=0;f<g->m.nlf;f++){
     LF*lf=&g->m.lf[f];
 
-    if(f<5&&g->fc==60){
-      printf("Face %d: type=%d v=%d nv=%d mv=%d nmv=%d t=%d m=%d\n",f,lf->c,lf->v,lf->nv,lf->mv,lf->nmv,lf->t,lf->m);
-    }
 
     if(lf->c==1){t1++;}
     else if(lf->c==3){t3++;}
@@ -432,10 +398,6 @@ static void drw(G*g){
     }
   }
 
-  if(g->fc==60||g->fc==90){
-    GLenum err=glGetError();
-    printf("Frame %d: t1=%d t3=%d skip=%d drew=%d GL_ERR=%d\n",g->fc,t1,t3,skip,drawn,err);fflush(stdout);
-  }
 
   SDL_GL_SwapWindow(g->w);
 
@@ -505,35 +467,27 @@ static void evt(G*g){
    ═══════════════════════════════════════════════════════════════════════════*/
 
 static int ini(G*g,const char*mp){
-  printf("SDL_Init...\n");fflush(stdout);
   SDL_Init(SDL_INIT_VIDEO);
   g->sw=1920;g->sh=1080;
-  printf("Creating window...\n");fflush(stdout);
   g->w=SDL_CreateWindow("Q3",SDL_WINDOWPOS_CENTERED,SDL_WINDOWPOS_CENTERED,
     g->sw,g->sh,SDL_WINDOW_OPENGL|SDL_WINDOW_SHOWN);
-  if(!g->w){printf("Window creation failed: %s\n",SDL_GetError());return 0;}
+  if(!g->w)return 0;
 
-  printf("Setting GL attributes...\n");
   SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION,3);
   SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION,3);
   SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK,SDL_GL_CONTEXT_PROFILE_CORE);
-  printf("Creating GL context...\n");
   g->g=SDL_GL_CreateContext(g->w);
-  if(!g->g){printf("GL context creation failed: %s\n",SDL_GetError());return 0;}
+  if(!g->g)return 0;
 
-  printf("Initializing GLEW...\n");
   glewExperimental=GL_TRUE;
-  if(glewInit()!=GLEW_OK){printf("GLEW init failed\n");return 0;}
+  if(glewInit()!=GLEW_OK)return 0;
 
   SDL_SetRelativeMouseMode(SDL_TRUE);
 
-  printf("Setting GL state...\n");
   glEnable(GL_DEPTH_TEST);
   glDisable(GL_CULL_FACE);
 
-  printf("Loading BSP: %s\n",mp);fflush(stdout);
-  if(!ld(mp,&g->m)){printf("Failed to load BSP\n");fflush(stdout);return 0;}
-  printf("Loaded: %d verts, %d faces, %d textures\n",g->m.nv,g->m.nlf,g->m.ntx);fflush(stdout);
+  if(!ld(mp,&g->m))return 0;
 
   ishd(g);
   ltx(g);
@@ -568,23 +522,8 @@ static int ini(G*g,const char*mp){
   glVertexAttribPointer(3,4,GL_UNSIGNED_BYTE,GL_TRUE,stride,(void*)(sizeof(V)+sizeof(T)*2));
   glEnableVertexAttribArray(3);
 
-  printf("First 3 vertices:\n");
-  for(int i=0;i<3&&i<g->m.nv;i++){
-    printf("  v[%d]: pos=[%.1f,%.1f,%.1f] uv=[%.2f,%.2f]\n",
-      i,g->m.vs[i].x,g->m.vs[i].y,g->m.vs[i].z,g->m.ts[i].u,g->m.ts[i].v);
-  }
-  printf("First 6 indices: ");
-  for(int i=0;i<6&&i<g->m.ni;i++)printf("%d ",g->m.is[i]);
-  printf("\n");
-
   V c=scl(add(g->m.bb.a,g->m.bb.b),0.5f);
-  printf("Map bounds: [%.0f,%.0f,%.0f] to [%.0f,%.0f,%.0f]\n",
-    g->m.bb.a.x,g->m.bb.a.y,g->m.bb.a.z,g->m.bb.b.x,g->m.bb.b.y,g->m.bb.b.z);
-  printf("Map center: [%.0f,%.0f,%.0f]\n",c.x,c.y,c.z);
-  g->cp=v3(0,0,1500);
-  g->cy=0.0f;g->pitch=-0.5f;
-  printf("Camera: [%.0f,%.0f,%.0f] yaw=%.2f pitch=%.2f\n",g->cp.x,g->cp.y,g->cp.z,g->cy,g->pitch);
-  g->run=1;g->fc=0;
+  g->cp=v3(0,0,0);g->cy=0.0f;g->pitch=0.0f;g->run=1;g->fc=0;
 
   return 1;
 }
@@ -598,13 +537,10 @@ static int ini(G*g,const char*mp){
    ═══════════════════════════════════════════════════════════════════════════*/
 
 int main(int argc,char**argv){
-  printf("Q3 Code Golf Edition starting...\n");
   G*g=calloc(1,sizeof(G));
   const char*mp=argc>1?argv[1]:"assets/maps/dm4ish.bsp";
 
-  printf("Initializing...\n");
-  if(!ini(g,mp)){printf("Init failed\n");return 1;}
-  printf("Init complete\n");
+  if(!ini(g,mp))return 1;
 
   unsigned int lt=SDL_GetTicks();
   while(g->run&&g->fc<120){
