@@ -599,20 +599,22 @@ static void drw(G*g){
     }
   }
 
-  // Weapon rendering (rocket launcher)
+  // Weapon occupies screen space - independent of world transformations
   glUseProgram(g->wprog);
   glDisable(GL_DEPTH_TEST);
   glBindVertexArray(g->wvao);
 
-  float wm[16]={1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1};
-  float s=0.02f,ox=0.15f,oy=-0.1f,oz=-0.3f;
-  wm[0]=s;wm[5]=s;wm[10]=s;
-  wm[12]=ox;wm[13]=oy;wm[14]=oz;
+  float t=g->fc*0.1f;
+  float bob=(g->fwd||g->bck||g->lft||g->rgt)?(sinf(t)*0.02f):0;
+
+  // NDC space: lower right corner exists at (0.7, -0.7)
+  float ortho[16]={0.15f,0,0,0, 0,0.15f,0,0, 0,0,-1,0, 0.7f,-0.7f+bob,0,1};
+  float identity[16]={1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1};
 
   int wvpl=glGetUniformLocation(g->wprog,"VP");
   int wml=glGetUniformLocation(g->wprog,"M");
-  glUniformMatrix4fv(wvpl,1,GL_FALSE,vp);
-  glUniformMatrix4fv(wml,1,GL_FALSE,wm);
+  glUniformMatrix4fv(wvpl,1,GL_FALSE,ortho);
+  glUniformMatrix4fv(wml,1,GL_FALSE,identity);
 
   glDrawArrays(GL_TRIANGLES,0,36);
   glEnable(GL_DEPTH_TEST);
