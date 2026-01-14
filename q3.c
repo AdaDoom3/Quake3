@@ -120,6 +120,8 @@ typedef struct{
   V cp,ca;float cy,pitch;int fwd,bck,lft,rgt;
   M m;AnimCtrl*anim;Spawn spawn;MD3G wpn;Character player;int run,fc;
   int show_player;  // Toggle to show character model
+  int auto_test;    // Automated test mode
+  int test_phase;   // Current test scenario
 }G;
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -829,14 +831,18 @@ static void drw(G*g){
 
   SDL_GL_SwapWindow(g->w);
 
-  // Capture multiple strategic screenshots for analysis
-  int capture_frames[]={30,60,90,120,150,180,210,240,270,300};
-  for(int i=0;i<10;i++){
-    if(g->fc==capture_frames[i]){
-      char fn[64];sprintf(fn,"test_frame_%03d.ppm",g->fc);
-      ss(fn,g->sw,g->sh);printf("Screenshot: %s\n",fn);
-      if(g->fc==300)g->run=0;  // Exit after last screenshot
-      break;
+  // Capture screenshots every 15 frames for comprehensive analysis
+  if(g->fc%15==0){
+    char fn[64];sprintf(fn,"physics_test_%03d.ppm",g->fc);
+    ss(fn,g->sw,g->sh);
+    printf("Test phase %d, Frame %d: ",g->test_phase,g->fc);
+    switch(g->test_phase%6){
+      case 0:printf("Static view\n");break;
+      case 1:printf("Forward movement\n");break;
+      case 2:printf("Backward movement\n");break;
+      case 3:printf("Forward + rotate left\n");break;
+      case 4:printf("Forward + rotate right\n");break;
+      case 5:printf("Pitch test\n");break;
     }
   }
   g->fc++;
@@ -1021,8 +1027,10 @@ static int ini(G*g,const char*mp){
 
   // Camera starts at spawn
   g->cp=g->spawn.pos;g->cy=g->spawn.angle;g->pitch=0.0f;g->run=1;g->fc=0;
+  g->auto_test=1;  // Enable automated testing
+  g->test_phase=0;
 
-  printf("Spawn: (%.0f,%.0f,%.0f) IK chain ahead at eye level\n",
+  printf("Spawn: (%.0f,%.0f,%.0f) - Starting automated physics tests\n",
     g->spawn.pos.x,g->spawn.pos.y,g->spawn.pos.z);
 
   return 1;
@@ -1062,7 +1070,7 @@ int main(int argc,char**argv){
   printf("\nRunning...\n");
 
   unsigned int lt=SDL_GetTicks();
-  while(g->run&&g->fc<120){
+  while(g->run&&g->fc<500){  // Extended for comprehensive testing
     unsigned int ct=SDL_GetTicks();
     float dt=(ct-lt)/1000.0f;
     lt=ct;
@@ -1084,7 +1092,36 @@ int main(int argc,char**argv){
       glBufferSubData(GL_ARRAY_BUFFER,0,li*sizeof(V),lines);
     }
 
-    evt(g);
+    // Automated physics testing - cycle through scenarios
+    if(g->auto_test){
+      int phase_duration=50;  // Frames per test phase
+      g->test_phase=g->fc/phase_duration;
+
+      switch(g->test_phase%6){
+        case 0:  // Static view
+          g->fwd=0;g->bck=0;g->lft=0;g->rgt=0;
+          break;
+        case 1:  // Move forward
+          g->fwd=1;g->bck=0;g->lft=0;g->rgt=0;
+          break;
+        case 2:  // Move backward
+          g->fwd=0;g->bck=1;g->lft=0;g->rgt=0;
+          break;
+        case 3:  // Rotate left while moving forward
+          g->fwd=1;g->bck=0;g->lft=1;g->rgt=0;
+          break;
+        case 4:  // Rotate right while moving forward
+          g->fwd=1;g->bck=0;g->lft=0;g->rgt=1;
+          break;
+        case 5:  // Look up/down test
+          g->fwd=0;g->bck=0;g->lft=0;g->rgt=0;
+          g->pitch=sinf(g->fc*0.02f)*0.5f;
+          break;
+      }
+    }else{
+      evt(g);
+    }
+
     mv(g,dt);
     drw(g);
 
