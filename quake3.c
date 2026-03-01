@@ -81,10 +81,10 @@ const char *DEVICE_EXTENSIONS[] = {VK_KHR_SWAPCHAIN_EXTENSION_NAME,
 #define SOFTWARE_RT
 
 // Windowing and viewport settings
-#define DEFAULT_WIDTH  1920    // Window width in pixels — 1080p (16:9) output
-#define DEFAULT_HEIGHT 1080    // Window height in pixels
+#define DEFAULT_WIDTH  1280    // Window width in pixels — 720p (16:9) output
+#define DEFAULT_HEIGHT 720     // Window height in pixels
 #ifdef SOFTWARE_RT
-#define RENDER_SCALE   0.38f   // Software RT: TAA temporal super-sampling recovers quality
+#define RENDER_SCALE   0.30f   // Software RT: ~384×216 internal → ~3.3× upscale at 720p
 #else
 #define RENDER_SCALE   1.00f   // GPU: full native resolution
 #endif
@@ -5601,10 +5601,12 @@ int main (int Argc, char **Argv) {
   //   --res WxH         Override render resolution
   //   --no-pbr          Disable PBR maps (diffuse + lightmap only, for A/B comparison)
   //   --no-parallax     Disable parallax occlusion mapping
+  //   --dump-frames D   Save each benchmark frame as D/frame_NNNN.tga
   //   mapname.bsp       Load specified BSP map instead of default
   int         Physics_Test      = 0;
   int         Benchmark_Frames  = 0;    // 0 = disabled, >0 = run N frames then exit
   const char *Screenshot_Path   = NULL; // NULL = disabled, otherwise save frame and exit
+  const char *Dump_Frames_Dir   = NULL; // NULL = disabled, otherwise dump each frame
   int         No_Postprocess    = 0;
   int         No_PBR            = 0;
   int         No_Parallax       = 0;
@@ -5615,6 +5617,7 @@ int main (int Argc, char **Argv) {
     if (strcmp (Argv[I], "--physics-test") == 0) Physics_Test = 1;
     else if (strcmp (Argv[I], "--benchmark") == 0 && I + 1 < Argc) Benchmark_Frames = atoi (Argv[++I]);
     else if (strcmp (Argv[I], "--screenshot") == 0 && I + 1 < Argc) Screenshot_Path = Argv[++I];
+    else if (strcmp (Argv[I], "--dump-frames") == 0 && I + 1 < Argc) Dump_Frames_Dir = Argv[++I];
     else if (strcmp (Argv[I], "--no-postprocess") == 0) No_Postprocess = 1;
     else if (strcmp (Argv[I], "--no-pbr") == 0) No_PBR = 1;
     else if (strcmp (Argv[I], "--no-parallax") == 0) No_Parallax = 1;
@@ -5861,8 +5864,8 @@ int main (int Argc, char **Argv) {
         Gpu_Postprocess_Push Warmup_PP = {.Time = 0,
           .Dt_Frame       = (uint32_t)Float_To_Half (Fixed_Dt) | ((uint32_t)(Frame_Count & 0xFFFF) << 16),
           .Velocity       = 0,
-          .Speed_Exposure = Pack_Half2x16 (0.f, 1.4f),
-          .Bloom_Grain    = Pack_Half2x16 (0.03f, 0.003f)};
+          .Speed_Exposure = Pack_Half2x16 (0.f, 1.6f),
+          .Bloom_Grain    = Pack_Half2x16 (0.05f, 0.001f)};
         Raytracing_Frame (Warmup_PP);
         VK_CHECK (vkWaitForFences (Device, 1, &Fence, VK_TRUE, UINT64_MAX));
         Frame_Count++;
@@ -5904,8 +5907,8 @@ int main (int Argc, char **Argv) {
       Gpu_Postprocess_Push PP = {.Time = F * Fixed_Dt,
         .Dt_Frame       = (uint32_t)Float_To_Half (Fixed_Dt) | ((uint32_t)(Frame_Count & 0xFFFF) << 16),
         .Velocity       = 0,
-        .Speed_Exposure = Pack_Half2x16 (0.f, 1.4f),
-        .Bloom_Grain    = Pack_Half2x16 (0.03f, 0.003f)};
+        .Speed_Exposure = Pack_Half2x16 (0.f, 1.6f),
+        .Bloom_Grain    = Pack_Half2x16 (0.05f, 0.001f)};
       Raytracing_Frame (PP);
       Frame_Count++;
 
@@ -5918,6 +5921,60 @@ int main (int Argc, char **Argv) {
 
       if (F % 50 == 0)
         printf ("  [frame %4d/%d] %.2f ms (%.1f fps)\n", F, Total_Frames, Frame_Ms, 1000.f / Frame_Ms);
+
+      // Dump frame to disk if --dump-frames was specified
+      if (Dump_Frames_Dir) {
+        VK_CHECK (vkWaitForFences (Device, 1, &Fence, VK_TRUE, UINT64_MAX));
+        uint64_t Px_Size = (uint64_t)Render_Width * Render_Height * 4;
+        Gpu_Buffer Rb = Buffer_Allocate (Px_Size, VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                                          VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+        VkCommandBuffer Dc;
+        VK_CHECK (vkAllocateCommandBuffers (Device, &(VkCommandBufferAllocateInfo){
+          .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+          .commandPool = Command_Pool, .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY, .commandBufferCount = 1}, &Dc));
+        VK_CHECK (vkBeginCommandBuffer (Dc, &(VkCommandBufferBeginInfo){
+          .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO, .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT}));
+        Image_Layout_Barrier (Dc, Raytracing_Storage_Image.Image,
+          VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+          VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT,
+          VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
+        vkCmdCopyImageToBuffer (Dc, Raytracing_Storage_Image.Image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+          Rb.Buffer, 1, &(VkBufferImageCopy){
+            .imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
+            .imageExtent = {(uint32_t)Render_Width, (uint32_t)Render_Height, 1}});
+        Image_Layout_Barrier (Dc, Raytracing_Storage_Image.Image,
+          VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL,
+          VK_ACCESS_TRANSFER_READ_BIT, VK_ACCESS_SHADER_WRITE_BIT,
+          VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR);
+        VK_CHECK (vkEndCommandBuffer (Dc));
+        VK_CHECK (vkQueueSubmit (Queue, 1, &(VkSubmitInfo){
+          .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO, .commandBufferCount = 1, .pCommandBuffers = &Dc}, VK_NULL_HANDLE));
+        vkQueueWaitIdle (Queue);
+
+        uint8_t *Px;
+        vkMapMemory (Device, Rb.Memory, 0, Px_Size, 0, (void **)&Px);
+        char Path[512];
+        snprintf (Path, sizeof (Path), "%s/frame_%04d.tga", Dump_Frames_Dir, F);
+        FILE *Tf = fopen (Path, "wb");
+        if (Tf) {
+          uint8_t Hdr[18] = {0};
+          Hdr[2] = 2; Hdr[12] = Render_Width & 0xFF; Hdr[13] = (Render_Width >> 8) & 0xFF;
+          Hdr[14] = Render_Height & 0xFF; Hdr[15] = (Render_Height >> 8) & 0xFF;
+          Hdr[16] = 32; Hdr[17] = 0x20;
+          fwrite (Hdr, 1, 18, Tf);
+          for (int Y = 0; Y < Render_Height; Y++)
+            for (int X = 0; X < Render_Width; X++) {
+              uint8_t *P = Px + (Y * Render_Width + X) * 4;
+              uint8_t B[4] = {P[2], P[1], P[0], P[3]};
+              fwrite (B, 1, 4, Tf);
+            }
+          fclose (Tf);
+        }
+        vkUnmapMemory (Device, Rb.Memory);
+        vkDestroyBuffer (Device, Rb.Buffer, NULL);
+        vkFreeMemory (Device, Rb.Memory, NULL);
+        vkFreeCommandBuffers (Device, Command_Pool, 1, &Dc);
+      }
     }
 
     vkDeviceWaitIdle (Device);
@@ -6088,8 +6145,8 @@ int main (int Argc, char **Argv) {
       .Time           = Total_Time,
       .Dt_Frame       = (uint32_t)Float_To_Half (Dt) | ((uint32_t)(Frame_Count & 0xFFFF) << 16),
       .Velocity       = Pack_Half2x16 (Physics.Velocity.x, Physics.Velocity.z),
-      .Speed_Exposure = Pack_Half2x16 (H_Speed, 1.4f),
-      .Bloom_Grain    = Pack_Half2x16 (0.03f, 0.003f)};
+      .Speed_Exposure = Pack_Half2x16 (H_Speed, 1.6f),
+      .Bloom_Grain    = Pack_Half2x16 (0.05f, 0.001f)};
     Raytracing_Frame (PP);
     Frame++;
     Frame_Count++;
@@ -6270,11 +6327,12 @@ void main () {
   float Depth_Sum  = 0.0;
 
   for (int S = 0; S < SPP; S++) {
-    // Stratified 2D jitter — decorrelated by sample index and frame number
-    // This gives blue-noise-like distribution over time, reducing visible aliasing
-    vec2  Seed   = vec2 (gl_LaunchIDEXT.xy) + vec2 (float(S) * 7.0, float(Frame) * 13.0);
-    vec2  Jitter = vec2 (Hash (Seed), Hash (Seed + 91.7)) - 0.5;
-    vec2  Pixel  = vec2 (gl_LaunchIDEXT.xy) + 0.5 + Jitter * 0.7;  // ±0.35 pixel spread
+    // No sub-pixel jitter: at low internal resolution, jitter causes different
+    // texture samples each frame which TAA blends into a blurry average.
+    // Stochastic shadow/reflection noise is still smoothed by TAA because the
+    // shadow/reflection patterns change per frame independently of ray position.
+    // Re-enable jitter when running at native resolution (GPU_RT path).
+    vec2  Pixel  = vec2 (gl_LaunchIDEXT.xy) + 0.5;
     vec2  Uv     = Pixel / vec2 (gl_LaunchSizeEXT.xy);
     vec2  Ndc    = Uv * 2.0 - 1.0;
 
@@ -6477,7 +6535,7 @@ void main () {
 
   // ── Direct lighting: Cook-Torrance microfacet BRDF ────────────────────────
   vec3  Ld = normalize (vec3 (0.6, 0.9, 0.3));        // Sun direction
-  vec3  Lr = vec3 (2.2, 1.9, 1.4);                    // Sun radiance (warm amber to match Q3 arena feel)
+  vec3  Lr = vec3 (2.8, 2.3, 1.6);                    // Sun radiance — punchy warm amber for dramatic arena lighting
   float NL  = max (dot (Normal, Ld), 0.0);
 
   // ── Optimization: skip full BRDF when surface faces away from sun ────────
@@ -6518,8 +6576,8 @@ void main () {
 
   // Hemisphere ambient diffuse (sky-ground gradient based on normal)
   // Warm indoor bounce lighting — Q3 arenas have amber-toned fill light from torches and lava.
-  vec3  Sky_Color    = vec3 (0.38, 0.34, 0.28);           // Warm indoor bounce (amber, not blue)
-  vec3  Ground_Color = vec3 (0.28, 0.22, 0.16);           // Warm ground bounce (stone floor)
+  vec3  Sky_Color    = vec3 (0.48, 0.42, 0.32);           // Warm indoor bounce (strong amber fill)
+  vec3  Ground_Color = vec3 (0.35, 0.28, 0.18);           // Warm ground bounce (bright stone floor)
   float Hemisphere   = Normal.y * 0.5 + 0.5;              // 0=down, 1=up
   vec3  Ambient_Irradiance = mix (Ground_Color, Sky_Color, Hemisphere);
 
@@ -6533,7 +6591,7 @@ void main () {
   // Reflect the view vector off the surface to tint specular with sky direction
   vec3  Reflect_Dir = reflect (-V, Normal);
   float Refl_Up     = Reflect_Dir.y * 0.5 + 0.5;
-  vec3  Env_Color   = mix (Ground_Color, Sky_Color * 1.5, Refl_Up);
+  vec3  Env_Color   = mix (Ground_Color, Sky_Color * 2.0, Refl_Up);  // Stronger spec env for visible reflections
   vec3  Indirect_Specular = Ambient_Specular * Env_Color;
 
   // Indirect diffuse: hemisphere ambient weighted by (1 - metallic) since metals have no diffuse
@@ -6555,12 +6613,11 @@ void main () {
   bool  Is_Reflection_Bounce = (gl_RayTminEXT > 0.005);
   // Reflection culling: skip on secondary bounces, very distant surfaces, or
   // negligible Fresnel contribution (< 10% is invisible in the final composite).
-  // ── SIMD-coherent stochastic reflection (NVIDIA ReSTIR-inspired) ─────────
-  // Alternate 8-pixel columns per frame, offset from shadow by using Y-based
-  // column grouping.  All 8 SIMD lanes agree → genuine traversal savings.
-  // TAA temporal accumulation blends reflection across frames for stable specular.
-  uint  Refl_Group  = gl_LaunchIDEXT.y / 8u;
-  bool  Refl_Active = !Is_Reflection_Bounce && ((Refl_Group + Frame) % 2u == 0u);
+  // ── Stochastic reflection (frame-gated, 100% SIMD coherent) ──────────────
+  // Trace reflections 2 out of every 3 frames — all lanes agree → no divergence.
+  // 67% coverage smooths bimodal frame times vs 50%.  TAA fills the skip frame.
+  // Note: gl_LaunchIDEXT causes lavapipe crash near traceRayEXT (driver bug).
+  bool  Refl_Active = !Is_Reflection_Bounce && ((Frame % 3u) < 2u);
   float Reflection_Weight = (!Refl_Active || Hit_Dist > 600.0) ? 0.0
     : max (max (Env_F.r, Env_F.g), Env_F.b) * (1.0 - R * R);
   vec3  Reflection_Color  = vec3 (0.0);
@@ -6595,7 +6652,7 @@ void main () {
     vec3 Direct = (Df + Sp) * Lr * NL;
     Color = Direct * 0.9 + (Indirect_Diffuse + Traced_Specular) * 1.5;
   } else {
-    vec3 Lm = textureLod (Lightmap, Lm_Coord, 0.0).rgb * 3.5;  // HDR lightmap (boosted for well-lit Q3 corridors)
+    vec3 Lm = textureLod (Lightmap, Lm_Coord, 0.0).rgb * 4.2;  // HDR lightmap — bright corridors matching OpenArena's well-lit look
 
     // ── Driver optimization: inline ray query for shadows ────────────────────
     // rayQueryEXT runs entirely within this shader invocation — no recursion,
@@ -6603,16 +6660,16 @@ void main () {
     // eliminates 1 warp scheduling slot per shadow test.  On AMD RDNA, ray
     // queries bypass the shader export/import and run on the same SIMD.
     // Bonus: shadows work on reflection bounces for free (no depth cost).
-    // ── SIMD-coherent stochastic shadow (NVIDIA ReSTIR-inspired) ────────────
-    // Trace shadow for only 50% of pixels per frame, alternating 8-pixel-wide
-    // columns each frame.  8-pixel columns match lavapipe's 256-bit AVX SIMD
-    // width (8 float lanes), so ALL lanes in a SIMD group agree to trace or
-    // skip — no intra-SIMD divergence, genuine 50% ray count reduction.
-    // TAA temporal accumulation blends lit/shadowed across frames.
-    // Still cull: NL ≤ 0, reflection bounces, distant surfaces.
+    // ── Stochastic shadow (interleaved gradient noise — blue-noise-like) ─────
+    // IGN (Jimenez 2014, used in DOOM 2016 / UE4) creates a perceptually optimal
+    // dithering pattern: errors are distributed uniformly with no visible banding,
+    // clumping, or structure.  X/8 grouping preserves lavapipe SIMD coherence.
+    // Adding Frame * golden_ratio creates temporal jitter for TAA accumulation.
     float Shadow_Factor = 1.0;
-    uint  Shadow_Column = gl_LaunchIDEXT.x / 8u;
-    bool  Shadow_Active = ((Shadow_Column + Frame) % 2u == 0u);
+    float IGN = fract (52.9829189 * fract (0.06711056 * float (gl_LaunchIDEXT.x / 8u)
+                                          + 0.00583715 * float (gl_LaunchIDEXT.y))
+                       + float (Frame) * 0.6180339887);
+    bool  Shadow_Active = (IGN < 0.75);  // 75% coverage — blue noise distribution
     if (NL > 0.0 && !Is_Reflection_Bounce && Hit_Dist < 400.0 && Shadow_Active) {
       rayQueryEXT Shadow_Query;
       rayQueryInitializeEXT (Shadow_Query, Top_Level,
@@ -6630,10 +6687,10 @@ void main () {
     vec3 Direct = (Df + Sp) * Lr * NL * Shadow_Factor;
     vec3 Baked_GI = Albedo * Lm * (1.0 - M);  // Lightmap is diffuse-only, metals don't use it
 
-    Color = Baked_GI + Direct * 0.7 + Indirect_Diffuse + Traced_Specular;
+    Color = Baked_GI + Direct * 0.8 + Indirect_Diffuse + Traced_Specular;
 
     // Add emissive contribution from illumination map
-    Color += Emissive * 2.5;  // Strong emissive for Q3 light panels and lava
+    Color += Emissive * 3.5;  // Bright emissive for Q3 light panels, lava, neon — key visual feature
 
     // ── Dynamic environment fog ──────────────────────────────────────────────
     // Skip fog on reflection bounces: primary ray applies fog to final color,
@@ -7327,56 +7384,46 @@ void main () {
   // Blend current frame with history using exponential moving average.
   // Combined with PCG sub-pixel jitter in raygen, this creates free temporal
   // super-sampling — effectively 4-8× more samples for zero extra ray cost.
-  // Luminance-based rejection: if history differs too much from current, snap
-  // to current (prevents ghosting on fast motion).  Zero extra imageLoads.
+  //
+  // Hybrid temporal blend: Speed-based for translation + luminance for rotation.
+  //   Base alpha 0.15 → converges in ~18 frames without over-smoothing (blurring).
+  //   Speed ramp → responsive during walking/running.
+  //   Luminance fallback → when player rotates (Speed=0 but view changes),
+  //   large per-pixel luminance diffs (>1.0 ratio) snap to fresh frame.
+  //   Stochastic shadow diffs (~0.3–0.7) stay under the 1.0 threshold → smoothed.
   if (Frame_Count > 0u) {
     vec3  History = imageLoad (History_Image, Pixel).rgb;
+    float Motion  = clamp (Speed / 200.0, 0.0, 1.0);
+    float Alpha   = mix (0.20, 0.40, Motion);
+    // Luminance-based rotation detector: fires when view changes to completely new surface
     float Lum_Cur = dot (Color,   vec3 (0.299, 0.587, 0.114));
     float Lum_His = dot (History, vec3 (0.299, 0.587, 0.114));
-    float Diff    = abs (Lum_Cur - Lum_His) / max (Lum_Cur, 0.01);
-    float Alpha   = (Diff > 0.5) ? 1.0 : 0.2;  // Reject if >50% luminance change
+    float Diff    = abs (Lum_Cur - Lum_His) / max (max (Lum_Cur, Lum_His), 0.05);
+    Alpha = max (Alpha, step (1.0, Diff) * 0.6);  // Snap on major view change
     Color = mix (History, Color, Alpha);
   }
   // Write blended result to history for next frame (pre-tonemap, linear HDR)
   imageStore (History_Image, Pixel, vec4 (Color, 1.0));
 
-  // ── 1. Depth-of-field: 2-tap (TAA temporal super-sampling fills in) ─────
-  float Focus_Depth = Focus_Depth_Shared;
-  float COC = clamp ((Depth - Focus_Depth) / max (Focus_Depth, 1.0) * 1.5, 0.0, 2.5);
-  if (COC > 0.5) {
-    int R = int (COC + 0.5);
-    Color = mix (Color,
-      (imageLoad (Color_Image, clamp (Pixel + ivec2 (R, 0), ivec2 (0), Size - 1)).rgb +
-       imageLoad (Color_Image, clamp (Pixel + ivec2 (0, R), ivec2 (0), Size - 1)).rgb) * 0.5,
-      0.5);
-  }
+  // DOF and motion blur disabled — at low internal resolution (384×216 → 1080p)
+  // the bilinear upscale already softens the image.  Adding blur on top of that
+  // makes the output unacceptably blurry and hard to read.  These effects should
+  // be re-enabled when GPU_RT runs at native resolution.
 
-  // ── 2. Velocity-based motion blur (2-tap) ─────────────────────────────────
-  if (Speed > 50.0) {
-    float Len = length (Vel);
-    if (Len > 0.001) {
-      vec2 Dir = Vel / Len * min (Speed * 0.002, 1.5);
-      Color = (Color + imageLoad (Color_Image, clamp (Pixel + ivec2 (Dir), ivec2 (0), Size - 1)).rgb
-                      + imageLoad (Color_Image, clamp (Pixel + ivec2 (Dir * 2.0), ivec2 (0), Size - 1)).rgb)
-              * 0.333;
-    }
-  }
-
-  // ── 3. Bloom: 2-tap bright extraction ─────────────────────────────────────
+  // ── 1. Bloom: 2-tap bright extraction ─────────────────────────────────────
   vec3 Bl = max (imageLoad (Color_Image, clamp (Pixel + ivec2 ( 6, 0), ivec2 (0), Size - 1)).rgb - 0.5, vec3 (0.0))
            + max (imageLoad (Color_Image, clamp (Pixel + ivec2 (-6, 0), ivec2 (0), Size - 1)).rgb - 0.5, vec3 (0.0));
   Color += Bl * Bloom_Strength;
 
-  // ── 4. Analytical CA + vignette + grain + tonemap (zero extra imageLoads) ─
+  // ── 2. Vignette + grain + tonemap (zero extra imageLoads) ──────────────
+  // CA disabled — at low internal res, the per-channel shift creates visible
+  // color fringing noise that confuses the image.  Re-enable for GPU_RT.
   vec2  FC = UV - 0.5;
   float D2 = dot (FC, FC);
-  float CA_Shift = D2 * 0.06;                    // Analytical chromatic aberration (no imageLoads)
-  Color.r *= (1.0 + CA_Shift);
-  Color.b *= (1.0 - CA_Shift);
   Color  = Color * (1.0 - D2 * 0.25)
          + (hash (vec2 (Pixel) + Params.Time * 1e3) - 0.5) * Grain_Strength;
   Color *= Exposure;
-  Color *= vec3 (1.06, 1.01, 0.93);  // Warm grade: amber shift to match Q3 arena feel
+  Color *= vec3 (1.10, 1.02, 0.88);  // Warm grade: strong amber shift for that Q3 arena glow
   Color  = clamp (Color * (2.51 * Color + 0.03) / (Color * (2.43 * Color + 0.59) + 0.14), 0.0, 1.0);  // ACES
 
   imageStore (Color_Image, Pixel, vec4 (clamp (Color, 0.0, 1.0), 1.0));
