@@ -61,12 +61,13 @@ const char *ENGINE_VERSION = "0.1.0";
 const uint  VALIDATION_LAYER_COUNT = 1;
 const char *VALIDATION_LAYERS[]    = {"VK_LAYER_KHRONOS_validation"};
 
-// Required device extensions: swapchain, acceleration structure, ray tracing pipeline, deferred host ops
-const uint DEVICE_EXTENSION_COUNT = 4;
+// Required device extensions: swapchain, acceleration structure, ray tracing pipeline, deferred host ops, ray query
+const uint DEVICE_EXTENSION_COUNT = 5;
 const char *DEVICE_EXTENSIONS[] = {VK_KHR_SWAPCHAIN_EXTENSION_NAME,
                                    VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME,
                                    VK_KHR_RAY_TRACING_PIPELINE_EXTENSION_NAME,
-                                   VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME};
+                                   VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME,
+                                   VK_KHR_RAY_QUERY_EXTENSION_NAME};
 
 // Windowing and viewport settings
 #define DEFAULT_WIDTH  1280    // Initial window width in pixels
@@ -78,7 +79,7 @@ const char *DEVICE_EXTENSIONS[] = {VK_KHR_SWAPCHAIN_EXTENSION_NAME,
 
 // Asset paths
 #define ASSET_ROOT  "assets/"  // Root directory for all game assets
-#define SHADER_ROOT "shaders/" // Root directory for pre-compiled SPIR-V shaders
+#define SHADER_ROOT "build/shaders/" // Root directory for pre-compiled SPIR-V shaders
 
 // Default BSP map to load when no command-line argument is given
 const char *DEFAULT_MAP = "oa_dm1.bsp";
@@ -1490,6 +1491,10 @@ uint8_t *TGA_Load (const char *Path, uint *Out_Width, uint *Out_Height) {
 //
 // ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 
+// ═══════════════════════
+//   MD3_Parse_Surface
+// ═══════════════════════
+
 void MD3_Parse_Surface (const uint8_t *Surface_Data,
                         Vertex **Inout_Vertices,    uint *Inout_Vertex_Count,
                         uint    **Inout_Indices,     uint *Inout_Index_Count,
@@ -1574,6 +1579,10 @@ void MD3_Parse_Surface (const uint8_t *Surface_Data,
   *Inout_Index_Count    += Surface->Number_Of_Triangles * 3;
   *Inout_Triangle_Count += Surface->Number_Of_Triangles;
 }
+
+// ══════════════════════
+//   Weapon_Model_Load
+// ══════════════════════
 
 Weapon_Model Weapon_Model_Load () {
   Weapon_Model Result = {0};
@@ -1722,6 +1731,10 @@ Weapon_Model Weapon_Model_Load () {
 //
 // ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 
+// ══════════════════════════
+//   Vulkan_Create_Instance
+// ══════════════════════════
+
 void Vulkan_Create_Instance () {
 
   // Gather the instance extensions required by SDL for Vulkan surface presentation
@@ -1752,6 +1765,10 @@ void Vulkan_Create_Instance () {
   SDL_Vulkan_CreateSurface (Window, Instance, &Surface);
 }
 
+// ═══════════════════════════════
+//   Vulkan_Pick_Physical_Device
+// ═══════════════════════════════
+
 void Vulkan_Pick_Physical_Device () {
 
   // Pick the first available physical device
@@ -1781,6 +1798,10 @@ void Vulkan_Pick_Physical_Device () {
   free (Families);
 }
 
+// ═══════════════════════════════════
+//   Vulkan_Create_Logical_Device
+// ═══════════════════════════════════
+
 void Vulkan_Create_Logical_Device () {
 
   // Chain together the feature structures for acceleration structure and ray tracing pipeline
@@ -1788,10 +1809,16 @@ void Vulkan_Create_Logical_Device () {
     .sType                  = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR,
     .accelerationStructure  = VK_TRUE};
 
-  // Enable ray tracing pipeline features chained to the acceleration structure features
+  // Enable ray query features for the physics compute shader's TLAS ray queries
+  VkPhysicalDeviceRayQueryFeaturesKHR Ray_Query_Features = {
+    .sType    = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_QUERY_FEATURES_KHR,
+    .pNext    = &Acceleration_Structure_Features,
+    .rayQuery = VK_TRUE};
+
+  // Enable ray tracing pipeline features chained to the ray query features
   VkPhysicalDeviceRayTracingPipelineFeaturesKHR Raytracing_Pipeline_Features = {
     .sType              = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_PIPELINE_FEATURES_KHR,
-    .pNext              = &Acceleration_Structure_Features,
+    .pNext              = &Ray_Query_Features,
     .rayTracingPipeline = VK_TRUE};
 
   // Enable Vulkan 1.2 features: buffer device address, descriptor indexing with runtime arrays
@@ -1811,11 +1838,12 @@ void Vulkan_Create_Logical_Device () {
                                                          .synchronization2 = VK_TRUE,
                                                          .dynamicRendering = VK_TRUE};
 
-  // Specify the required device extensions: swapchain, acceleration structure, ray tracing, deferred ops
+  // Specify the required device extensions: swapchain, accel struct, ray tracing, deferred ops, ray query
   const char *Device_Extensions[] = {VK_KHR_SWAPCHAIN_EXTENSION_NAME,
                                      VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME,
                                      VK_KHR_RAY_TRACING_PIPELINE_EXTENSION_NAME,
-                                     VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME};
+                                     VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME,
+                                     VK_KHR_RAY_QUERY_EXTENSION_NAME};
 
   // Set queue priority to maximum (1.0) for the single graphics queue
   float Priority = 1.f;
@@ -1831,7 +1859,7 @@ void Vulkan_Create_Logical_Device () {
                                 .queueFamilyIndex = Queue_Family_Index,
                                 .queueCount       = 1,
                                 .pQueuePriorities = &Priority},
-                              .enabledExtensionCount   = 4,
+                              .enabledExtensionCount   = 5,
                               .ppEnabledExtensionNames = Device_Extensions},
                             /*pAllocator     =>*/ NULL,
                             /*pDevice        =>*/ &Device));
@@ -1848,6 +1876,10 @@ void Vulkan_Create_Logical_Device () {
   // Load the ray tracing extension function pointers from the logical device
   VULKAN_FUNCTIONS (LOAD_VK)
 }
+
+// ════════════════════════════
+//   Vulkan_Create_Swapchain
+// ════════════════════════════
 
 void Vulkan_Create_Swapchain () {
   VkSurfaceCapabilitiesKHR Capabilities;
@@ -1885,6 +1917,10 @@ void Vulkan_Create_Swapchain () {
 
 } // Vulkan_Create_Swapchain
 
+// ══════════════════════════════════
+//   Vulkan_Create_Synchronization
+// ══════════════════════════════════
+
 void Vulkan_Create_Synchronization () {
 
   // Create a command pool with per-buffer reset capability for our single reusable command buffer
@@ -1918,6 +1954,10 @@ void Vulkan_Create_Synchronization () {
   VK_CHECK (vkCreateSemaphore (Device, &Semaphore_Info, NULL, &Semaphore_Image_Available));
   VK_CHECK (vkCreateSemaphore (Device, &Semaphore_Info, NULL, &Semaphore_Render_Finished));
 }
+
+// ══════════════════════════════════════
+//   Vulkan_Transition_Storage_Image
+// ══════════════════════════════════════
 
 void Vulkan_Transition_Storage_Image () {
 
@@ -1958,6 +1998,10 @@ void Vulkan_Transition_Storage_Image () {
 //
 // ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 
+// ══════════════════════
+//   Convert_BSP_Vertex
+// ══════════════════════
+
 Vertex Convert_BSP_Vertex (const BSP_Vertex *Source) {
 
   // Swizzle from Quake 3's Z-up coordinate system to our Y-up system: (x, y, z) becomes (x, z, -y)
@@ -1969,6 +2013,10 @@ Vertex Convert_BSP_Vertex (const BSP_Vertex *Source) {
   };
 }
 
+// ══════════════════
+//   Bezier_Evaluate
+// ══════════════════
+
 vec3 Bezier_Evaluate (vec3 Control_A, vec3 Control_B, vec3 Control_C, float Parameter) {
 
   // Evaluate the quadratic Bézier curve: B(t) = (1-t)²·A + 2(1-t)t·B + t²·C
@@ -1977,6 +2025,10 @@ vec3 Bezier_Evaluate (vec3 Control_A, vec3 Control_B, vec3 Control_C, float Para
                    Scale (Control_B, 2.f * Inverse * Parameter)),
               Scale (Control_C, Parameter * Parameter));
 }
+
+// ═══════════════════════
+//   BSP_Tessellate_Patch
+// ═══════════════════════
 
 uint BSP_Tessellate_Patch (const BSP_Vertex *Control_Grid, int Patch_Width, int Patch_Height,
                           Vertex **Inout_Vertices, uint *Inout_Vertex_Count,
@@ -2075,6 +2127,10 @@ uint BSP_Tessellate_Patch (const BSP_Vertex *Control_Grid, int Patch_Width, int 
   return Added_Indices / 3;
 
 } // BSP_Tessellate_Patch
+
+// ══════════════════════════
+//   Scene_Load_From_BSP
+// ══════════════════════════
 
 Scene Scene_Load_From_BSP (const char *Path, Spawn *Out_Spawn) {
 
@@ -2376,6 +2432,10 @@ Spawn BSP_Find_Spawn (const uint8_t *File_Data, const BSP_Header *Header) {
 //
 // ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 
+// ═══════════════════════
+//   Scene_Load_Textures
+// ═══════════════════════
+
 void Scene_Load_Textures (const Scene *Scene_Data) {
   Texture_Sampler  = Sampler_Create_Repeating ();
   Texture_Count    = Scene_Data->Material_Count;
@@ -2432,6 +2492,10 @@ void Scene_Load_Textures (const Scene *Scene_Data) {
   }
 } // Scene_Load_Textures
 
+// ════════════════════════
+//   Weapon_Load_Textures
+// ════════════════════════
+
 void Weapon_Load_Textures (Weapon_Instance *Weapon) {
 
   // Record the starting index in the global texture array for this weapon's textures
@@ -2470,6 +2534,10 @@ void Weapon_Load_Textures (Weapon_Instance *Weapon) {
 // §10. Acceleration Structures
 //
 // ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+
+// ═══════════════════════════════
+//   Build_World_Bottom_Level
+// ═══════════════════════════════
 
 Acceleration_Structure Build_World_Bottom_Level (const Scene *Scene_Data) {
 
@@ -2589,6 +2657,10 @@ Acceleration_Structure Build_World_Bottom_Level (const Scene *Scene_Data) {
 
 } // Build_World_Bottom_Level
 
+// ═══════════════════════════════════
+//   Weapon_Bottom_Level_Initialize
+// ═══════════════════════════════════
+
 void Weapon_Bottom_Level_Initialize (Weapon_Instance *Weapon) {
   if (not Weapon->Model.Vertex_Count) return;
 
@@ -2698,6 +2770,10 @@ void Weapon_Bottom_Level_Initialize (Weapon_Instance *Weapon) {
 
 } // Weapon_Bottom_Level_Initialize
 
+// ═══════════════════════════════
+//   Weapon_Bottom_Level_Rebuild
+// ═══════════════════════════════
+
 void Weapon_Bottom_Level_Rebuild (Weapon_Instance *Weapon) {
 
   // Skip if no weapon geometry is loaded
@@ -2756,6 +2832,10 @@ void Weapon_Bottom_Level_Rebuild (Weapon_Instance *Weapon) {
   VK_CHECK (vkQueueWaitIdle (Queue));
 }
 
+// ════════════════════════
+//   Top_Level_Initialize
+// ════════════════════════
+
 void Top_Level_Initialize (uint Maximum_Instances) {
 
   // Allocate a host-visible instance buffer for writing TLAS instance descriptors each frame
@@ -2812,6 +2892,10 @@ void Top_Level_Initialize (uint Maximum_Instances) {
       .sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_DEVICE_ADDRESS_INFO_KHR,
       .accelerationStructure = Top_Level.Handle});
 } // Top_Level_Initialize
+
+// ═══════════════════
+//   Top_Level_Rebuild
+// ═══════════════════
 
 void Top_Level_Rebuild (Acceleration_Structure *World, Acceleration_Structure *Weapon) {
 
@@ -2893,6 +2977,10 @@ void Top_Level_Rebuild (Acceleration_Structure *World, Acceleration_Structure *W
 // §12. Pipeline
 //
 // ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+
+// ══════════════════════════════
+//   Raytracing_Pipeline_Create
+// ══════════════════════════════
 
 void Raytracing_Pipeline_Create () {
 
@@ -2978,6 +3066,10 @@ void Raytracing_Pipeline_Create () {
   vkDestroyShaderModule (Device, Shadow_Miss_Module,    NULL);
 }
 
+// ══════════════════════════════════
+//   Shader_Binding_Table_Create
+// ══════════════════════════════════
+
 void Shader_Binding_Table_Create () {
   uint Handle_Size      = Raytracing_Properties.shaderGroupHandleSize;
   uint Handle_Alignment = Raytracing_Properties.shaderGroupHandleAlignment;
@@ -3022,6 +3114,10 @@ void Shader_Binding_Table_Create () {
 // §12. Pipeline — Descriptors
 //
 // ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+
+// ════════════════════════
+//   Descriptor_Set_Create
+// ════════════════════════
 
 void Descriptor_Set_Create (Weapon_Instance *Weapon) {
 
@@ -3109,6 +3205,10 @@ void Descriptor_Set_Create (Weapon_Instance *Weapon) {
 //
 // ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 
+// ═══════════════════════
+//   Shader_Module_Load
+// ═══════════════════════
+
 // BUG FIX: the original had TWO definitions of this function merged together (opening the file
 // twice, declaring Size twice). This is the single correct version.
 
@@ -3156,6 +3256,10 @@ VkShaderModule Shader_Module_Load (const char *Path) {
 //
 // ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 
+// ═════════════════
+//   Camera_Upload
+// ═════════════════
+
 // BUG FIX: local variable `View` shadowed the `View()` function. Renamed to `View_Matrix`.
 void Camera_Upload (Camera *State, float Field_Of_View, uint Weapon_Texture_Base) {
 
@@ -3186,6 +3290,10 @@ void Camera_Upload (Camera *State, float Field_Of_View, uint Weapon_Texture_Base
 // §12. Pipeline — Weapon Update
 //
 // ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+
+// ═════════════════
+//   Weapon_Update
+// ═════════════════
 
 void Weapon_Update (Weapon_Instance *Weapon, const Camera *Camera_Data, float Delta_Time, int Fire) {
   if (not Weapon->Model.Vertex_Count) return;
@@ -3299,6 +3407,10 @@ void Weapon_Update (Weapon_Instance *Weapon, const Camera *Camera_Data, float De
 //
 // ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 
+// ══════════════
+//   Poll_Input
+// ══════════════
+
 Input Poll_Input () {
   Input Input_Data = {0};
   SDL_Event Event;
@@ -3331,6 +3443,10 @@ Input Poll_Input () {
 // §14. Render — Frame
 //
 // ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+
+// ════════════════════
+//   Raytracing_Frame
+// ════════════════════
 
 void Raytracing_Frame () {
 
@@ -3445,6 +3561,10 @@ void Raytracing_Frame () {
 
 // ── §10A. Convex Hull Construction ────────────────────────────────────────────────────────────────
 
+// ═══════════
+//   QH_Dist
+// ═══════════
+
 static float QH_Dist (vec3 P, vec3 A, vec3 B, vec3 C) {
 
   // Compute the signed distance from point P to the plane defined by triangle (A, B, C)
@@ -3452,6 +3572,10 @@ static float QH_Dist (vec3 P, vec3 A, vec3 B, vec3 C) {
   float Length = sqrtf (Dot (Normal, Normal));
   return Length > 1e-8f ? Dot (Subtract (P, A), Scale (Normal, 1.f / Length)) : 0;
 }
+
+// ═════════════
+//   Quickhull
+// ═════════════
 
 Convex_Hull Quickhull (const vec3 *Points, uint Count) {
 
@@ -3673,6 +3797,10 @@ Convex_Hull Quickhull (const vec3 *Points, uint Count) {
   return Result;
 }
 
+// ══════════════════════
+//   Hull_From_Vertices
+// ══════════════════════
+
 Convex_Hull Hull_From_Vertices (const Vertex *Vertices, uint Count) {
 
   // Extract vec3 positions from the vertex array and delegate to Quickhull
@@ -3683,6 +3811,10 @@ Convex_Hull Hull_From_Vertices (const Vertex *Vertices, uint Count) {
   free (Positions);
   return Hull;
 }
+
+// ═══════════════
+//   Hull_Upload
+// ═══════════════
 
 void Hull_Upload (const Convex_Hull *Hull) {
 
@@ -3711,6 +3843,10 @@ void Hull_Upload (const Convex_Hull *Hull) {
 }
 
 // ── §10B. GPU Physics Pipeline ────────────────────────────────────────────────────────────────────
+
+// ═══════════════════════════
+//   Physics_Pipeline_Create
+// ═══════════════════════════
 
 void Physics_Pipeline_Create () {
 
@@ -3752,6 +3888,10 @@ void Physics_Pipeline_Create () {
     NULL, &Physics_Pipeline));
   vkDestroyShaderModule (Device, Physics_Module, NULL);
 }
+
+// ═══════════════════════════════
+//   Physics_Resources_Create
+// ═══════════════════════════════
 
 void Physics_Resources_Create (const Player *Initial_State) {
 
@@ -3822,6 +3962,10 @@ void Physics_Resources_Create (const Player *Initial_State) {
 }
 
 // ── §10C. Physics Dispatch ────────────────────────────────────────────────────────────────────────
+
+// ════════════════════
+//   Physics_Dispatch
+// ════════════════════
 
 Player Physics_Dispatch (Input In, float Dt) {
 
@@ -3904,6 +4048,10 @@ Player Physics_Dispatch (Input In, float Dt) {
 // §14. Main
 //
 // ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+
+// ════════
+//   Main
+// ════════
 
 int main (int Argc, char **Argv) {
 
@@ -4143,36 +4291,40 @@ void main () {
     : Texture_Ids.Data[Primitive];
   vec3 Albedo  = texture (Textures[nonuniformEXT(Tex_Id)], Tex_Coord).rgb;
 
-  // Lighting: lightmap for world geometry, simple directional for weapon
-  vec3 Sun_Direction = normalize (vec3 (0.5, 0.8, 0.3));
-  vec3 Lighting;
+  // Lighting: separate paths for weapon (simple directional) and world (lightmap + sun)
+  vec3 Sun_Direction = normalize (vec3 (0.6, 0.9, 0.3));
+  vec3 Color;
+
   if (Is_Weapon) {
-    float Diffuse = max (dot (Normal, Sun_Direction), 0.0) * 0.6 + 0.4;
-    Lighting = vec3 (Diffuse);
+    // Weapon: ambient + directional light, no lightmap
+    float Sun_Dot = max (0.0, dot (Normal, Sun_Direction)) * 0.4;
+    Color = Albedo * (vec3 (0.6) + vec3 (Sun_Dot));
   } else {
-    Lighting = texture (Lightmap, Lm_Coord).rgb;
+    // BSP lightmap (baked lighting) — 2.5x overbright to match Quake 3 levels
+    vec3 Lightmap_Color = texture (Lightmap, Lm_Coord).rgb * 2.5;
+
+    // RT shadow ray toward sun for dynamic shadows (cull mask 0xFE excludes weapon)
+    Shadow_Factor = 0.0;
+    traceRayEXT (Top_Level,
+                 gl_RayFlagsTerminateOnFirstHitEXT | gl_RayFlagsSkipClosestHitShaderEXT,
+                 0xFE,                            // cull mask (skip weapon)
+                 0, 1, 1,                         // SBT offset, stride, miss index
+                 Position + Normal * 0.1,         // origin (biased along normal)
+                 0.001,                           // t_min
+                 Sun_Direction,                   // direction
+                 10000.0,                         // t_max
+                 1);                              // payload location
+
+    // Subtle sun contribution on top of lightmap (only where shadow ray reaches the sky)
+    float Sun_Contribution = max (0.0, dot (Normal, Sun_Direction)) * Shadow_Factor * 0.15;
+    Color = Albedo * (Lightmap_Color + vec3 (Sun_Contribution));
+
+    // Subtle distance fog for depth perception
+    float Fog = 1.0 - exp (-gl_HitTEXT * 0.00012);
+    Color = mix (Color, vec3 (0.45, 0.52, 0.65), Fog);
   }
 
-  // Trace a shadow ray toward the sun (skip weapon geometry via cull mask 0xFE)
-  Shadow_Factor = 0.0;
-  traceRayEXT (Top_Level,
-               gl_RayFlagsTerminateOnFirstHitEXT | gl_RayFlagsSkipClosestHitShaderEXT,
-               0xFE,                         // cull mask (skip weapon instance)
-               0,                             // SBT record offset
-               0,                             // SBT record stride
-               1,                             // miss index (shadow miss)
-               Position + Normal * 0.01,      // origin (biased along normal)
-               0.001,                         // t_min
-               Sun_Direction,                 // direction
-               10000.0,                       // t_max
-               1);                            // payload location
-
-  // Combine albedo, lighting, and shadow
-  float Shadow = mix (0.3, 1.0, Shadow_Factor);
-  Payload = Albedo * Lighting * Shadow;
-
-  // Apply simple tone mapping (Reinhard)
-  Payload = Payload / (Payload + 1.0);
+  Payload = Color;
 }
 }
 
