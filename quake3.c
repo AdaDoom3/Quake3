@@ -70,8 +70,8 @@ const char *DEVICE_EXTENSIONS[] = {VK_KHR_SWAPCHAIN_EXTENSION_NAME,
                                    VK_KHR_RAY_QUERY_EXTENSION_NAME};
 
 // Windowing and viewport settings
-#define DEFAULT_WIDTH  320     // Initial window width in pixels (small for lavapipe performance)
-#define DEFAULT_HEIGHT 180     // Initial window height in pixels
+#define DEFAULT_WIDTH  640     // Window width in pixels (2× for higher quality ray tracing)
+#define DEFAULT_HEIGHT 360     // Window height in pixels
 #define FIELD_OF_VIEW  90.f    // Vertical field-of-view in degrees
 #define NEAR_CLIP      0.1f    // Near clip plane distance
 #define FAR_CLIP       10000.f // Far clip plane distance
@@ -5740,37 +5740,90 @@ void main () {
     : Texture_Ids.Data[Primitive];
   vec3 Albedo  = texture (Textures[nonuniformEXT(Tex_Id)], Tex_Coord).rgb;
 
-  // Lighting: separate paths for weapon (simple directional) and world (lightmap + sun)
-  vec3 Sun_Direction = normalize (vec3 (0.6, 0.9, 0.3));
+  // ── PBR via Grassmann grade decomposition of the Cook-Torrance BRDF ──────────────────────
+  //
+  // The rendering equation decomposes into Grassmann grades:
+  //   Grade-0 (scalar):  diffuse irradiance — Lambert BRDF ∝ ρ/π
+  //   Grade-2 (bivector): specular lobe — D·G·F / (4·⟨N,V⟩·⟨N,L⟩)
+  // where ⟨·,·⟩ is the inner product and D is the GGX distribution on the
+  // hemisphere's tangent bivector algebra.  The Fresnel term F interpolates
+  // between the grade-0 and grade-2 contributions: energy conservation is
+  // enforced by kD = (1 − F)(1 − metalness).
+  //
+  // Material heuristic: Q3 BSP textures lack PBR maps, so we derive roughness
+  // and metalness from albedo statistics.  Saturated ⇒ dielectric (rough),
+  // dark desaturated ⇒ metal (smooth).  This gives plausible results on stone,
+  // metal grates, and tech panels without requiring new assets.
+
+  const float PI = 3.14159265;
+  vec3  Sun_Dir = normalize (vec3 (0.6, 0.9, 0.3));
+  vec3  Sun_Rad = vec3 (1.1, 1.05, 0.95);   // Neutral-warm sun radiance
+  vec3  V       = -gl_WorldRayDirectionEXT;  // View direction (toward camera)
+  float N_dot_V = max (dot (Normal, V), 0.001);
+
+  // Material: derive roughness + metalness from albedo luminance & saturation
+  float Luma    = dot (Albedo, vec3 (0.2126, 0.7152, 0.0722));
+  float Hi      = max (Albedo.r, max (Albedo.g, Albedo.b));
+  float Lo      = min (Albedo.r, min (Albedo.g, Albedo.b));
+  float Sat     = (Hi - Lo) / max (Hi, 0.001);
+  float Rough   = mix (0.35, 0.85, Sat);           // Saturated = rough dielectric
+  float Metal   = smoothstep (0.35, 0.15, Sat) * smoothstep (0.45, 0.2, Luma);
+  vec3  F0      = mix (vec3 (0.04), Albedo, Metal); // Fresnel reflectance at normal incidence
+
   vec3 Color;
 
   if (Is_Weapon) {
-    // Weapon: ambient + directional light, no lightmap
-    float Sun_Dot = max (0.0, dot (Normal, Sun_Direction)) * 0.4;
-    Color = Albedo * (vec3 (0.6) + vec3 (Sun_Dot));
-  } else {
-    // BSP lightmap (baked lighting) — 4x overbright matches Quake 3's 2x overbright + gamma
-    vec3 Lightmap_Color = texture (Lightmap, Lm_Coord).rgb * 4.0;
+    // Weapon: PBR with fixed directional light (no lightmap)
+    vec3  H     = normalize (V + Sun_Dir);
+    float N_dot_L = max (dot (Normal, Sun_Dir), 0.0);
+    float N_dot_H = max (dot (Normal, H), 0.0);
+    float V_dot_H = max (dot (V, H), 0.0);
 
-    // RT shadow ray toward sun for dynamic shadows (cull mask 0xFE excludes weapon)
+    float a2 = Rough * Rough * Rough * Rough;  // Disney α² = roughness⁴
+    float k  = (Rough + 1.0) * (Rough + 1.0) / 8.0;
+
+    float D  = a2 / (PI * pow (N_dot_H * N_dot_H * (a2 - 1.0) + 1.0, 2.0));
+    float Gl = N_dot_L / (N_dot_L * (1.0 - k) + k);
+    float Gv = N_dot_V / (N_dot_V * (1.0 - k) + k);
+    vec3  F  = F0 + (1.0 - F0) * pow (1.0 - V_dot_H, 5.0);
+    vec3  Sp = D * Gl * Gv * F / max (4.0 * N_dot_V * N_dot_L, 0.001);
+    vec3  kD = (1.0 - F) * (1.0 - Metal);
+
+    Color = (kD * Albedo / PI + Sp) * Sun_Rad * N_dot_L * 0.6 + Albedo * 0.40;
+  } else {
+    // BSP lightmap (baked GI) — Q3-faithful: 2× overbright, hard clamp to [0,1]
+    vec3 Lm = min (texture (Lightmap, Lm_Coord).rgb * 2.0, vec3 (1.0));
+
+    // RT shadow ray toward sun (cull mask 0xFE excludes weapon BLAS)
     Shadow_Factor = 0.0;
     traceRayEXT (Top_Level,
                  gl_RayFlagsTerminateOnFirstHitEXT | gl_RayFlagsSkipClosestHitShaderEXT,
-                 0xFE,                            // cull mask (skip weapon)
-                 0, 1, 1,                         // SBT offset, stride, miss index
-                 Position + Normal * 0.1,         // origin (biased along normal)
-                 0.001,                           // t_min
-                 Sun_Direction,                   // direction
-                 10000.0,                         // t_max
-                 1);                              // payload location
+                 0xFE, 0, 1, 1,
+                 Position + Normal * 0.1, 0.001, Sun_Dir, 10000.0, 1);
 
-    // Subtle sun contribution on top of lightmap (only where shadow ray reaches the sky)
-    float Sun_Contribution = max (0.0, dot (Normal, Sun_Direction)) * Shadow_Factor * 0.15;
-    Color = Albedo * (Lightmap_Color + vec3 (Sun_Contribution));
+    // Cook-Torrance specular from direct sun (grade-2 bivector contribution)
+    vec3  H       = normalize (V + Sun_Dir);
+    float N_dot_L = max (dot (Normal, Sun_Dir), 0.0);
+    float N_dot_H = max (dot (Normal, H), 0.0);
+    float V_dot_H = max (dot (V, H), 0.0);
 
-    // Subtle distance fog for depth perception
-    float Fog = 1.0 - exp (-gl_HitTEXT * 0.00012);
-    Color = mix (Color, vec3 (0.45, 0.52, 0.65), Fog);
+    float a2 = Rough * Rough * Rough * Rough;
+    float k  = (Rough + 1.0) * (Rough + 1.0) / 8.0;
+
+    float D  = a2 / (PI * pow (N_dot_H * N_dot_H * (a2 - 1.0) + 1.0, 2.0));
+    float Gl = N_dot_L / (N_dot_L * (1.0 - k) + k);
+    float Gv = N_dot_V / (N_dot_V * (1.0 - k) + k);
+    vec3  F  = F0 + (1.0 - F0) * pow (1.0 - V_dot_H, 5.0);
+    vec3  Sp = D * Gl * Gv * F / max (4.0 * N_dot_V * N_dot_L, 0.001);
+    vec3  kD = (1.0 - F) * (1.0 - Metal);
+
+    // Combine: lightmap carries baked GI (grade-0), sun adds direct PBR (grade-0 + grade-2)
+    vec3 Direct = (kD * Albedo / PI + Sp) * Sun_Rad * N_dot_L * Shadow_Factor;
+    Color = Albedo * Lm + Direct * 0.15;
+
+    // Atmospheric perspective (subtle depth fog — neutral haze)
+    float Fog = 1.0 - exp (-gl_HitTEXT * 0.00003);
+    Color = mix (Color, vec3 (0.50, 0.50, 0.55), Fog);
   }
 
   Payload = vec4 (Color, gl_HitTEXT);  // Pack hit distance into alpha for depth-of-field
@@ -6419,9 +6472,10 @@ void main () {
   // Auto-focus on center pixel depth; circle of confusion grows with distance from focus plane
   ivec2 Center_Pixel = Size / 2;
   float Focus_Depth = imageLoad (Depth_Image, Center_Pixel).r;
-  float COC = clamp (abs (Depth - Focus_Depth) / max (Focus_Depth, 1.0) * 3.0, 0.0, 4.0);
+  // Only blur behind focus (background defocus) — foreground (weapon) stays sharp
+  float COC = clamp ((Depth - Focus_Depth) / max (Focus_Depth, 1.0) * 1.5, 0.0, 2.5);
 
-  if (COC > 0.3) {
+  if (COC > 0.5) {
     // 8-tap Poisson disk scaled by circle of confusion
     vec2 Offsets[8] = vec2[8](
       vec2(-0.94201, -0.39906), vec2( 0.94558,  0.76890),
@@ -6440,11 +6494,11 @@ void main () {
   }
 
   // ── 2. Velocity-based motion blur ─────────────────────────────────────────────────────────
-  if (Params.Speed > 30.0) {
+  if (Params.Speed > 50.0) {
     vec2 Dir = vec2 (Params.Velocity_X, Params.Velocity_Z);
     float Len = length (Dir);
     if (Len > 0.001) {
-      Dir = Dir / Len * min (Params.Speed * 0.003, 2.0);
+      Dir = Dir / Len * min (Params.Speed * 0.002, 1.5);
       vec3 Sum = Color;
       float W = 1.0;
       for (int I = 1; I <= 3; I++) {
@@ -6457,25 +6511,27 @@ void main () {
     }
   }
 
-  // ── 3. Chromatic aberration (radial, lens-like, depth-weighted) ───────────────────────────
+  // ── 3. Chromatic aberration (subtle radial lens distortion) ────────────────────────────────
   vec2 From_Center = UV - 0.5;
   float Dist = length (From_Center);
-  float CA = Dist * Dist * 1.2;
+  float CA = Dist * Dist * 0.4;  // Subtle — only visible at extreme edges
   ivec2 R_Pos = clamp (Pixel + ivec2(From_Center * CA * vec2(Size)), ivec2(0), Size - 1);
   ivec2 B_Pos = clamp (Pixel - ivec2(From_Center * CA * vec2(Size)), ivec2(0), Size - 1);
   Color = mix (Color, vec3 (
     imageLoad (Color_Image, R_Pos).r,
     Color.g,
-    imageLoad (Color_Image, B_Pos).b), 0.25);
+    imageLoad (Color_Image, B_Pos).b), 0.15);
 
-  // ── 4. Vignette ───────────────────────────────────────────────────────────────────────────
-  Color *= 1.0 - Dist * Dist * 0.5;
+  // ── 4. Vignette (gentle darkening at frame edges) ──────────────────────────────────────────
+  Color *= 1.0 - Dist * Dist * 0.3;
 
-  // ── 5. Film grain (temporal, spatially varying) ───────────────────────────────────────────
-  Color += (hash (vec2(Pixel) + Params.Time * 1000.0) - 0.5) * 0.025;
+  // ── 5. Film grain (subtle temporal noise for cinematic feel) ───────────────────────────────
+  Color += (hash (vec2(Pixel) + Params.Time * 1000.0) - 0.5) * 0.012;
 
-  // ── 6. Filmic tone mapping (ACES-inspired S-curve) ────────────────────────────────────────
-  Color = Color / (Color + 0.8) * 1.1;
+  // ── 6. ACES filmic tone mapping (proper RRT + ODT approximation) ──────────────────────────
+  // Attempt faithful Narkowicz ACES fit: preserves brightness while compressing highlights
+  vec3 X = Color * 1.0;  // Exposure (balanced for desaturated clamped lightmap)
+  Color = clamp ((X * (2.51 * X + 0.03)) / (X * (2.43 * X + 0.59) + 0.14), 0.0, 1.0);
 
   imageStore (Color_Image, Pixel, vec4 (clamp (Color, 0.0, 1.0), 1.0));
 }
