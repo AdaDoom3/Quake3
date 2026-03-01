@@ -123,9 +123,6 @@ const float PLAYER_HALF_EXTENTS[3] = {15.f, 32.f, 15.f};
 // the spine is 32 - 15 = 17 units.
 #define PLAYER_CAPSULE_SPINE 17.f
 
-// Player bounding box minimum corner (symmetric on X/Z, asymmetric on Y for feet)
-const vec3 PLAYER_MINIMUMS = {-15, -24, -15};
-
 // Convex Hull Limits
 #define HULL_MAX_VERTS     256 // Per-hull vertex cap (matches GPU array size in Gpu_Hull)
 #define HULL_MAX_ADJ       16  // Maximum adjacency entries per vertex (for hill-climb support)
@@ -143,6 +140,11 @@ const vec3 PLAYER_MINIMUMS = {-15, -24, -15};
 #define WEAPON_RECOIL_AMP  -1.2f // Recoil kick magnitude (negative = pull back)
 #define WEAPON_RECOIL_DECAY 5.f  // Recoil exponential decay rate  
 
+// Forward-declared constants used in type definitions below
+#define BSP_LUMP_COUNT       17  // Total number of lumps in the BSP directory
+#define MD3_MAX_SURFACES     3   // Maximum surfaces per weapon part (body, barrel, hand)
+#define MD3_MAX_ANIM_FRAMES  30  // Maximum animation frames extracted from tag_weapon
+
 // ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 //
 // §2. Types
@@ -151,6 +153,9 @@ const vec3 PLAYER_MINIMUMS = {-15, -24, -15};
 
 // Three-component floating-point vector for positions, directions, and velocities
 typedef struct {float x, y, z;} vec3;
+
+// Player bounding box minimum corner (symmetric on X/Z, asymmetric on Y for feet)
+const vec3 PLAYER_MINIMUMS = {-15, -24, -15};
 
 // Four-component floating-point vector for homogeneous coordinates and RGBA colors
 typedef struct {float x, y, z, w;} vec4;
@@ -372,10 +377,10 @@ VkPhysicalDeviceRayTracingPipelinePropertiesKHR Raytracing_Properties; // Shader
 VULKAN_FUNCTIONS (DECLARE_VK)
 
 // Assertion to validate Vulkan return values; prints the error code, file, and line number then exits
-#define VK_CHECK(Call) do { /* Dummy loop to contain macro */ \
+#define VK_CHECK(Call) do { \
   VkResult _Result = (Call); \
-  if (_Result) {fprintf (stderr, "[vulkan] error %d at %s:%d\n", _Result, __FILE__, __LINE__); exit (1); \
-} while (0) // End macro dummy loop
+  if (_Result) {fprintf (stderr, "[vulkan] error %d at %s:%d\n", _Result, __FILE__, __LINE__); exit (1);} \
+} while (0)
 
 // GPU storage images and scene data buffers
 Gpu_Image  Raytracing_Storage_Image;                     // Storage image written by ray generation shader
@@ -539,8 +544,6 @@ VkSampler Sampler_Create_Clamping (void);
 
 // Quake 3 animated model (MD3) format
 #define MD3_MAGIC           0x33504449u // "IDP3" as a 32-bit little-endian integer
-#define MD3_MAX_SURFACES    3           // Maximum surfaces per weapon part (body, barrel, hand)
-#define MD3_MAX_ANIM_FRAMES 30          // Maximum animation frames extracted from tag_weapon
 
 // Parse a single MD3 surface's geometry (vertices, indices, texture coordinates) into the growing output arrays. An optional 12-float
 // transform (origin + 3×3 axis matrix) can pre-transform vertices and normals. Quake 3 coordinate swizzle (x,y,z)->(x,z,-y) is
@@ -577,7 +580,6 @@ Weapon_Model Weapon_Model_Load (void);
 #define BSP_INDICES          11          // Lump index: triangle mesh element indices
 #define BSP_FACES            13          // Lump index: face/surface descriptors
 #define BSP_LIGHTMAPS        14          // Lump index: 128×128 RGB lightmap pages
-#define BSP_LUMP_COUNT       17          // Total number of lumps in the BSP directory
 #define SURFACE_TYPE_PLANAR  1           // Face type: flat polygon rendered from indices
 #define SURFACE_TYPE_PATCH   2           // Face type: Bézier patch (tessellated at load time)
 #define SURFACE_TYPE_MESH    3           // Face type: triangle mesh (e.g. models in BSP)
@@ -719,9 +721,6 @@ typedef struct {
   float Centroid  [3];                            // Local-space centroid
   int   Pad;
 } Gpu_Hull;
-
-// Signed distance from point P to the plane of triangle (A, B, C) — used by Quickhull
-float QH_Dist (vec3 P, vec3 A, vec3 B, vec3 C);
 
 // Build a convex hull from a point cloud using the Quickhull algorithm.  Returns the hull
 // with deduplicated vertices and per-vertex adjacency tables for GPU hill-climbing support.
@@ -1740,7 +1739,7 @@ void Vulkan_Create_Instance () {
                                   .pApplicationName = "quake3rt",
                                   .apiVersion       = VK_API_VERSION_1_3},
                                 .enabledLayerCount       = 1,
-                                .ppEnabledLayerNames     = LAYERS,
+                                .ppEnabledLayerNames     = VALIDATION_LAYERS,
                                 .enabledExtensionCount   = Extension_Count,
                                 .ppEnabledExtensionNames = Extensions},
                               /*pAllocator  =>*/ NULL,
@@ -1959,6 +1958,26 @@ void Vulkan_Transition_Storage_Image () {
 //
 // ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 
+Vertex Convert_BSP_Vertex (const BSP_Vertex *Source) {
+
+  // Swizzle from Quake 3's Z-up coordinate system to our Y-up system: (x, y, z) becomes (x, z, -y)
+  return (Vertex){
+    .Position    = {Source->Position[0],        Source->Position[2],       -Source->Position[1]},
+    .Texture_Uv  = {Source->Texture_Coords[0],  Source->Texture_Coords[1]},
+    .Lightmap_Uv = {Source->Lightmap_Coords[0], Source->Lightmap_Coords[1]},
+    .Normal      = {Source->Normal[0],          Source->Normal[2],         -Source->Normal[1]}
+  };
+}
+
+vec3 Bezier_Evaluate (vec3 Control_A, vec3 Control_B, vec3 Control_C, float Parameter) {
+
+  // Evaluate the quadratic Bézier curve: B(t) = (1-t)²·A + 2(1-t)t·B + t²·C
+  float Inverse = 1.f - Parameter;
+  return Add (Add (Scale (Control_A, Inverse * Inverse),
+                   Scale (Control_B, 2.f * Inverse * Parameter)),
+              Scale (Control_C, Parameter * Parameter));
+}
+
 uint BSP_Tessellate_Patch (const BSP_Vertex *Control_Grid, int Patch_Width, int Patch_Height,
                           Vertex **Inout_Vertices, uint *Inout_Vertex_Count,
                           uint **Inout_Indices, uint *Inout_Index_Count) {
@@ -2057,7 +2076,7 @@ uint BSP_Tessellate_Patch (const BSP_Vertex *Control_Grid, int Patch_Width, int 
 
 } // BSP_Tessellate_Patch
 
-Scene Scene_Load_From_BSP (const char *Path, Spawn *Out_Spawn, Collision_Map *Out_Collision) {
+Scene Scene_Load_From_BSP (const char *Path, Spawn *Out_Spawn) {
 
   // Read the entire BSP file into memory
   FILE *File = fopen (Path, "rb");
@@ -2250,92 +2269,6 @@ Scene Scene_Load_From_BSP (const char *Path, Spawn *Out_Spawn, Collision_Map *Ou
   if (Out_Spawn)
     *Out_Spawn = BSP_Find_Spawn (File_Data, Header);
 
-  // Load collision data from planes, nodes, leafs, brushes, and brush sides lumps
-  if (Out_Collision) {
-    Collision_Map *Collision = Out_Collision;
-    memset (Collision, 0, sizeof (*Collision));
-
-    // Parse planes (16 bytes each: float normal[3], float distance) with coordinate swizzle
-    Collision->Plane_Count = (uint)Header->Lumps[BSP_PLANES].Length / 16;
-    Collision->Planes      = malloc (sizeof (Collision_Plane) * Collision->Plane_Count);
-    for (uint Index = 0; Index < Collision->Plane_Count; Index++) {
-      const float *Source = (const float *)(File_Data + Header->Lumps[BSP_PLANES].Offset + Index * 16);
-
-      // BUG FIX: declare and populate the Normal pointer BEFORE using it for Type and Sign_Bits
-      float *Normal = Collision->Planes[Index].Normal;
-      Normal[0] =  Source[0];
-      Normal[1] =  Source[2];
-      Normal[2] = -Source[1];
-      Collision->Planes[Index].Distance  = Source[3];
-      Collision->Planes[Index].Type      = (Normal[0] == 1.f) ? 0 : (Normal[1] == 1.f) ? 1 : (Normal[2] == 1.f) ? 2 : 3;
-      Collision->Planes[Index].Sign_Bits = (uint8_t)((Normal[0] < 0) | ((Normal[1] < 0) << 1) | ((Normal[2] < 0) << 2));
-    }
-
-    // Parse BSP nodes (36 bytes each: int plane, children[2], mins[3], maxs[3])
-    Collision->Node_Count = (uint)Header->Lumps[BSP_NODES].Length / 36;
-    Collision->Nodes      = malloc (sizeof (Collision_Node) * Collision->Node_Count);
-    for (uint Index = 0; Index < Collision->Node_Count; Index++) {
-      const int *Source = (const int *)(File_Data + Header->Lumps[BSP_NODES].Offset + Index * 36);
-      Collision->Nodes[Index].Plane_Index = Source[0];
-      Collision->Nodes[Index].Children[0] = Source[1];
-      Collision->Nodes[Index].Children[1] = Source[2];
-    }
-
-    // Parse BSP leafs (48 bytes each: cluster, area, mins[3], maxs[3], first_surface, count, first_brush, count)
-    Collision->Leaf_Count = (uint)Header->Lumps[BSP_LEAFS].Length / 48;
-    Collision->Leafs      = malloc (sizeof (Collision_Leaf) * Collision->Leaf_Count);
-    for (uint Index = 0; Index < Collision->Leaf_Count; Index++) {
-      const int *Source = (const int *)(File_Data + Header->Lumps[BSP_LEAFS].Offset + Index * 48);
-      Collision->Leafs[Index].Cluster       = Source[0];
-      Collision->Leafs[Index].Area          = Source[1];
-      Collision->Leafs[Index].First_Surface = Source[8];
-      Collision->Leafs[Index].Surface_Count = Source[9];
-      Collision->Leafs[Index].First_Brush   = Source[10];
-      Collision->Leafs[Index].Brush_Count   = Source[11];
-    }
-
-    // Copy the leaf brush indirection array verbatim (maps leaf brush ranges to brush indices)
-    Collision->Leaf_Brush_Count = (uint)Header->Lumps[BSP_LEAF_BRUSHES].Length / 4;
-    Collision->Leaf_Brushes     = malloc (sizeof (int) * Collision->Leaf_Brush_Count);
-    memcpy (Collision->Leaf_Brushes, File_Data + Header->Lumps[BSP_LEAF_BRUSHES].Offset, sizeof (int) * Collision->Leaf_Brush_Count);
-
-    // Parse brushes (12 bytes each: int first_side, side_count, shader)
-    Collision->Brush_Count = (uint)Header->Lumps[BSP_BRUSHES].Length / 12;
-    Collision->Brushes     = malloc (sizeof (Collision_Brush) * Collision->Brush_Count);
-    for (uint Index = 0; Index < Collision->Brush_Count; Index++) {
-      const int *Source = (const int *)(File_Data + Header->Lumps[BSP_BRUSHES].Offset + Index * 12);
-      Collision->Brushes[Index].First_Side   = Source[0];
-      Collision->Brushes[Index].Side_Count   = Source[1];
-      Collision->Brushes[Index].Shader_Index = Source[2];
-    }
-
-    // Parse brush sides (8 bytes each: int plane_index, shader_index)
-    Collision->Side_Count = (uint)Header->Lumps[BSP_BRUSH_SIDES].Length / 8;
-    Collision->Sides      = malloc (sizeof (Collision_Brush_Side) * Collision->Side_Count);
-    for (uint Index = 0; Index < Collision->Side_Count; Index++) {
-      const int *Source = (const int *)(File_Data + Header->Lumps[BSP_BRUSH_SIDES].Offset + Index * 8);
-      Collision->Sides[Index].Plane_Index  = Source[0];
-      Collision->Sides[Index].Shader_Index = Source[1];
-    }
-
-    // Extract the contents flags from each shader for solid-brush filtering
-    Collision->Shader_Contents = malloc (sizeof (int) * Raw_Shader_Count);
-    for (uint Shader = 0; Shader < Raw_Shader_Count; Shader++)
-      Collision->Shader_Contents[Shader] = Raw_Shaders[Shader].Contents;
-
-    // Allocate the per-brush deduplication check array (prevents testing the same brush twice per trace)
-    Collision->Brush_Checks  = calloc (Collision->Brush_Count, sizeof (uint));
-    Collision->Check_Counter = 0;
-
-    // Report the collision map statistics
-    printf ("[collision] %u planes, %u nodes, %u leafs, %u brushes, %u sides\n",
-            Collision->Plane_Count,
-            Collision->Node_Count,
-            Collision->Leaf_Count,
-            Collision->Brush_Count,
-            Collision->Side_Count);
-  }
-
   // Release the raw BSP file buffer and return the assembled scene
   free (File_Data);
   printf ("[bsp] %s: %u vertices, %u triangles, %u shaders\n", Path, Vertex_Count, Triangle_Count, Raw_Shader_Count);
@@ -2505,31 +2438,31 @@ void Weapon_Load_Textures (Weapon_Instance *Weapon) {
   Weapon->Texture_Base_Index = Texture_Count;
 
   // Grow the global texture arrays to accommodate the weapon textures
-  uint New_Total = Texture_Count + Weapon_Texture_Count;
+  uint New_Total = Texture_Count + WEAPON_TEXTURE_COUNT;
   Texture_Images   = realloc (Texture_Images,   sizeof (VkImage)        * New_Total);
   Texture_Memories = realloc (Texture_Memories,  sizeof (VkDeviceMemory) * New_Total);
   Texture_Views    = realloc (Texture_Views,     sizeof (VkImageView)    * New_Total);
 
   // Load each weapon texture from TGA, or create a grey fallback pixel
-  for (uint Index = 0; Index < Weapon_Texture_Count; Index++) {
+  for (uint Index = 0; Index < WEAPON_TEXTURE_COUNT; Index++) {
     uint Width = 0, Height = 0;
-    uint8_t *Pixels = TGA_Load (Weapon_Texture_Paths[Index], &Width, &Height);
+    uint8_t *Pixels = TGA_Load (WEAPON_TEXTURE_PATHS[Index], &Width, &Height);
     if (Pixels and Width and Height) {
       Texture_Upload (Command_Buffer, Queue, Pixels, Width, Height,
                       &Texture_Images[Texture_Count], &Texture_Memories[Texture_Count], &Texture_Views[Texture_Count]);
       free (Pixels);
-      printf ("[weapon] loaded texture %s (%ux%u)\n", Weapon_Texture_Paths[Index], Width, Height);
+      printf ("[weapon] loaded texture %s (%ux%u)\n", WEAPON_TEXTURE_PATHS[Index], Width, Height);
 
     // Texture file not found or corrupt — use a neutral grey fallback
     } else {
       uint8_t Fallback[4] = {180, 180, 180, 255};
       Texture_Upload (Command_Buffer, Queue, Fallback, 1, 1,
                       &Texture_Images[Texture_Count], &Texture_Memories[Texture_Count], &Texture_Views[Texture_Count]);
-      printf ("[weapon] fallback texture for %s\n", Weapon_Texture_Paths[Index]);
+      printf ("[weapon] fallback texture for %s\n", WEAPON_TEXTURE_PATHS[Index]);
     }
     Texture_Count++;
   }
-  printf ("[weapon] textures: base=%u, count=%u\n", Weapon->Texture_Base_Index, Weapon_Texture_Count);
+  printf ("[weapon] textures: base=%u, count=%u\n", Weapon->Texture_Base_Index, WEAPON_TEXTURE_COUNT);
 }
 
 // ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
@@ -2960,13 +2893,6 @@ void Top_Level_Rebuild (Acceleration_Structure *World, Acceleration_Structure *W
 // §12. Pipeline
 //
 // ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
-
-// Shader SPIR-V file paths (compiled offline from the glsl blocks above)
-#define SHADER_PATH_RAY_GENERATION  "shaders/raygen.spv"
-#define SHADER_PATH_CLOSEST_HIT     "shaders/closesthit.spv"
-#define SHADER_PATH_PRIMARY_MISS    "shaders/miss.spv"
-#define SHADER_PATH_SHADOW_MISS     "shaders/shadow_miss.spv"
-#define SHADER_PATH_PHYSICS_COMPUTE "shaders/physics.spv"
 
 void Raytracing_Pipeline_Create () {
 
@@ -3500,1641 +3426,448 @@ void Raytracing_Frame () {
 
 } // Raytracing_Frame
 
+
 // ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 //
-// §. Physics
+// §10. Physics
 //
-//   Six collider shapes, three ray strategies, one grade cascade.
-//   See the glsl Physics_Compute block in §13 for the shader source.
+//   Six collider shapes (sphere, capsule, AABB, cylinder, ellipsoid, HULL), three ray strategies,
+//   one grade cascade.  The support function s(d) maps unit directions to surface offsets:
 //
-//   Shapes (each defines a map S² → ℝ³ from unit directions to surface offsets):
-//     SPHERE      s(d̂) = d̂ · r                                  Projectiles, pickups
-//     CAPSULE     s(d̂) = d̂ · r + (0, sign(d̂.y) · spine, 0)     Player, NPCs
-//     AABB        s(d̂) = sign(d̂) ⊙ extents                      Crates, elevators
-//     CYLINDER    s(d̂) = (d̂.xz/‖d̂.xz‖ · r, sign(d̂.y) · h, 0)  Barrels, columns
-//     ELLIPSOID   s(d̂) = normalize(d̂ ⊘ axes) ⊙ axes · ‖...‖    Vehicles
-//     HULL        s(d̂) = argmax(v · d̂) over vertex set          Arbitrary convex models
+//     SPHERE      s(d) = d * r                                   Projectiles, pickups
+//     CAPSULE     s(d) = d * r + (0, sign(d.y) * spine, 0)      Player, NPCs
+//     AABB        s(d) = sign(d) * extents                       Crates, elevators
+//     CYLINDER    s(d) = (d.xz/||d.xz|| * r, sign(d.y) * h, 0) Barrels, columns
+//     ELLIPSOID   s(d) = normalize(d / axes) * axes              Vehicles
+//     HULL        s(d) = argmax(v . d) over vertex set           Arbitrary convex models
 //
 // ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 
-// ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
-// §11A. GPU Physics Types
-// ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+// ── §10A. Convex Hull Construction ────────────────────────────────────────────────────────────────
 
-enum { SHAPE_SPHERE, SHAPE_CAPSULE, SHAPE_AABB, SHAPE_CYLINDER, SHAPE_ELLIPSOID, SHAPE_HULL };
-
-typedef struct {                          // GPU-resident player state, std430, 112 bytes
-  float Position     [3]; float Pad_A;
-  float Velocity     [3]; float Pad_B;
-  float Yaw, Pitch;
-  int   On_Ground, Jump_Held;
-  float Ground_Normal[3]; float Pad_C;
-  int   Ground_Plane, Ducked;
-  float View_Height, Stuck_Time;
-  float Speed_Last;  int Shape;           // Previous frame speed; active collider shape
-  float Extents      [3]; float Pad_D;    // Half-extents / radii / semi-axes (shape-dependent)
-  float Spine;       float Pad_E [3];     // Capsule spine half-length (hh - radius), 0 for non-capsules
-} Gpu_Player;
-
-typedef struct {                          // Per-frame input via push constants, 48 bytes
-  int   Forward, Back, Left, Right;
-  int   Jump, Fire, Crouch, Pad;
-  float Delta_X, Delta_Y, Dt, Pad2;
-} Gpu_Input;
-
-VkPipeline            Physics_Pipeline;
-VkPipelineLayout      Physics_Pipeline_Layout;
-VkDescriptorSetLayout Physics_Descriptor_Layout;
-VkDescriptorPool      Physics_Descriptor_Pool;
-VkDescriptorSet       Physics_Descriptor_Set;
-Gpu_Buffer            Player_State_Buffer;
-
-// ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
-// §11B. Convex Hulls
-// ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
-
-#define HULL_MAX_VERTS    256 // Per-hull vertex cap (GPU array size)
-#define HULL_MAX_ADJ      16  // Max adjacency per vertex (for hill-climb)
-#define HULL_MAX_FACES    512 // Quickhull face cap
-#define HULL_MAX_ENTITIES 32  // Max simultaneous hull colliders
-
-typedef struct {                    // Single convex hull on CPU
-  vec3  Vertices  [HULL_MAX_VERTS]; // Hull vertex positions in local space
-  int   Adjacency [HULL_MAX_VERTS][HULL_MAX_ADJ]; // Per-vertex neighbor indices (-1 terminated)
-  uint  Vertex_Count;               // Number of hull vertices
-  vec3  Centroid;                   // Geometric center (for local-space offset)
-  float Bounding_Radius;            // Tight bounding sphere radius from centroid
-} Convex_Hull;
-
-typedef struct {                                 // GPU-packed hull data (uploaded to storage buffer)
-  float Vertices [HULL_MAX_VERTS][4];            // xyz + padding per vertex (std430 vec4 array)
-  int   Adjacency[HULL_MAX_VERTS][HULL_MAX_ADJ]; // Neighbor indices, -1 terminated
-  int   Count;                                   // Vertex count
-  float Radius;                                  // Bounding sphere radius
-  float Centroid [3];                            // Local-space centroid
-  int   Pad;
-} Gpu_Hull;
-
-Gpu_Buffer Hull_Storage_Buffer; // SSBO holding hull vertex + adjacency data
-
-// ── Quickhull helpers ────────────────────────────────────────────────────────────────────────────
-
-typedef struct { int A, B, C; int Dead; } QH_Face;
-typedef struct { int V0, V1, Face; } QH_Edge;
-
-// Signed distance from point P to the plane of triangle (A, B, C) — trivector magnitude
 static float QH_Dist (vec3 P, vec3 A, vec3 B, vec3 C) {
-  vec3 N = Cross (Subtract (B, A), Subtract (C, A));
-  float L = sqrtf (Dot (N, N));
-  return L > 1e-8f ? Dot (Subtract (P, A), Scale (N, 1.f / L)) : 0;
+
+  // Compute the signed distance from point P to the plane defined by triangle (A, B, C)
+  vec3 Normal = Cross (Subtract (B, A), Subtract (C, A));
+  float Length = sqrtf (Dot (Normal, Normal));
+  return Length > 1e-8f ? Dot (Subtract (P, A), Scale (Normal, 1.f / Length)) : 0;
 }
 
-// ── Quickhull: build a convex hull from a point cloud ────────────────────────────────────────────
-
 Convex_Hull Quickhull (const vec3 *Points, uint Count) {
+
   Convex_Hull Result = {0};
+
+  // Degenerate case: fewer than 4 points cannot form a tetrahedron
   if (Count < 4) {
-    for (uint i = 0; i < Count and i < HULL_MAX_VERTS; i++) Result.Vertices[Result.Vertex_Count++] = Points[i];
+    for (uint Index = 0; Index < Count and Index < HULL_MAX_VERTS; Index++)
+      Result.Vertices[Result.Vertex_Count++] = Points[Index];
     return Result;
   }
 
-  // Find the 6 extremal points (min/max per axis)
-  int Ext [6] = {0,0,0,0,0,0};
-  for (uint i = 1; i < Count; i++) {
-    if (Points[i].x < Points[Ext[0]].x) Ext[0] = i;
-    if (Points[i].x > Points[Ext[1]].x) Ext[1] = i;
-    if (Points[i].y < Points[Ext[2]].y) Ext[2] = i;
-    if (Points[i].y > Points[Ext[3]].y) Ext[3] = i;
-    if (Points[i].z < Points[Ext[4]].z) Ext[4] = i;
-    if (Points[i].z > Points[Ext[5]].z) Ext[5] = i;
+  // ── Find 6 extremal points (min/max along each axis) ──────────────────────────────────────────
+
+  int Extremals[6] = {0, 0, 0, 0, 0, 0};
+  for (uint Index = 1; Index < Count; Index++) {
+    if (Points[Index].x < Points[Extremals[0]].x) Extremals[0] = Index;
+    if (Points[Index].x > Points[Extremals[1]].x) Extremals[1] = Index;
+    if (Points[Index].y < Points[Extremals[2]].y) Extremals[2] = Index;
+    if (Points[Index].y > Points[Extremals[3]].y) Extremals[3] = Index;
+    if (Points[Index].z < Points[Extremals[4]].z) Extremals[4] = Index;
+    if (Points[Index].z > Points[Extremals[5]].z) Extremals[5] = Index;
   }
 
-  // Pick the two most distant extremal points as the initial edge
-  int P0 = Ext[0], P1 = Ext[1];
-  float Best_Dist = 0;
-  for (int i = 0; i < 6; i++) for (int j = i + 1; j < 6; j++) {
-    float D = Dot (Subtract (Points[Ext[i]], Points[Ext[j]]), Subtract (Points[Ext[i]], Points[Ext[j]]));
-    if (D > Best_Dist) { Best_Dist = D; P0 = Ext[i]; P1 = Ext[j]; }
+  // ── Select the most distant pair as the initial edge ──────────────────────────────────────────
+
+  int Point_0 = Extremals[0], Point_1 = Extremals[1];
+  float Best_Distance = 0;
+  for (int I = 0; I < 6; I++)
+    for (int J = I + 1; J < 6; J++) {
+      float Distance = Dot (Subtract (Points[Extremals[I]], Points[Extremals[J]]),
+                            Subtract (Points[Extremals[I]], Points[Extremals[J]]));
+      if (Distance > Best_Distance) { Best_Distance = Distance; Point_0 = Extremals[I]; Point_1 = Extremals[J]; }
+    }
+
+  // ── Find the third point: most distant from the initial edge ──────────────────────────────────
+
+  vec3  Edge        = Subtract (Points[Point_1], Points[Point_0]);
+  float Edge_Length2 = Dot (Edge, Edge);
+  int   Point_2     = -1;
+  Best_Distance     = 0;
+
+  for (uint Index = 0; Index < Count; Index++) {
+    if ((int)Index == Point_0 or (int)Index == Point_1) continue;
+    vec3  Vector    = Subtract (Points[Index], Points[Point_0]);
+    float Parameter = Dot (Vector, Edge) / Edge_Length2;
+    float Distance  = Dot (Subtract (Vector, Scale (Edge, Parameter)),
+                           Subtract (Vector, Scale (Edge, Parameter)));
+    if (Distance > Best_Distance) { Best_Distance = Distance; Point_2 = Index; }
+  }
+  if (Point_2 < 0) Point_2 = (Point_0 + 1) % Count;
+
+  // ── Find the fourth point: most distant from the initial triangle ─────────────────────────────
+
+  int Point_3    = -1;
+  Best_Distance  = 0;
+  for (uint Index = 0; Index < Count; Index++) {
+    if ((int)Index == Point_0 or (int)Index == Point_1 or (int)Index == Point_2) continue;
+    float Distance = fabsf (QH_Dist (Points[Index], Points[Point_0], Points[Point_1], Points[Point_2]));
+    if (Distance > Best_Distance) { Best_Distance = Distance; Point_3 = Index; }
+  }
+  if (Point_3 < 0) Point_3 = (Point_2 + 1) % Count;
+
+  // Ensure the tetrahedron has consistent winding (fourth point on the negative side)
+  if (QH_Dist (Points[Point_3], Points[Point_0], Points[Point_1], Points[Point_2]) > 0) {
+    int Temp = Point_0; Point_0 = Point_1; Point_1 = Temp;
   }
 
-  // Find the point most distant from the initial edge
-  vec3 Edge = Subtract (Points[P1], Points[P0]);
-  float Edge_Len2 = Dot (Edge, Edge);
-  int P2 = -1; Best_Dist = 0;
-  for (uint i = 0; i < Count; i++) {
-    if ((int)i == P0 or (int)i == P1) continue;
-    vec3 V = Subtract (Points[i], Points[P0]);
-    float T = Dot (V, Edge) / Edge_Len2;
-    vec3 Proj = Subtract (V, Scale (Edge, T));
-    float D = Dot (Proj, Proj);
-    if (D > Best_Dist) { Best_Dist = D; P2 = i; }
-  }
-  if (P2 < 0) P2 = (P0 + 1) % Count;
+  // ── Initialize the face array with the 4 tetrahedron faces ────────────────────────────────────
 
-  // Find the point most distant from the initial triangle
-  int P3 = -1; Best_Dist = 0;
-  for (uint i = 0; i < Count; i++) {
-    if ((int)i == P0 or (int)i == P1 or (int)i == P2) continue;
-    float D = fabsf (QH_Dist (Points[i], Points[P0], Points[P1], Points[P2]));
-    if (D > Best_Dist) { Best_Dist = D; P3 = i; }
-  }
-  if (P3 < 0) P3 = (P2 + 1) % Count;
+  QH_Face Faces[HULL_MAX_FACES];
+  int     Face_Count = 0;
 
-  // Orient the initial tetrahedron so all face normals point outward
-  if (QH_Dist (Points[P3], Points[P0], Points[P1], Points[P2]) > 0) { int T = P0; P0 = P1; P1 = T; }
+  Faces[Face_Count++] = (QH_Face){Point_0, Point_1, Point_2, 0};
+  Faces[Face_Count++] = (QH_Face){Point_0, Point_2, Point_3, 0};
+  Faces[Face_Count++] = (QH_Face){Point_0, Point_3, Point_1, 0};
+  Faces[Face_Count++] = (QH_Face){Point_1, Point_3, Point_2, 0};
 
-  // Build the initial 4 faces of the tetrahedron
-  QH_Face Faces [HULL_MAX_FACES];
-  int Face_Count = 0;
-  Faces[Face_Count++] = (QH_Face){P0, P1, P2, 0};
-  Faces[Face_Count++] = (QH_Face){P0, P2, P3, 0};
-  Faces[Face_Count++] = (QH_Face){P0, P3, P1, 0};
-  Faces[Face_Count++] = (QH_Face){P1, P3, P2, 0};
+  // ── Assign each remaining point to the face it lies farthest above ────────────────────────────
 
-  // Assign each remaining point to the face it is most above
-  int *Assigned = calloc (Count, sizeof (int));
-  for (uint i = 0; i < Count; i++) Assigned[i] = -1;
-  for (uint i = 0; i < Count; i++) {
-    if ((int)i == P0 or (int)i == P1 or (int)i == P2 or (int)i == P3) continue;
+  int *Assignments = calloc (Count, sizeof (int));
+  for (uint Index = 0; Index < Count; Index++) Assignments[Index] = -1;
+
+  for (uint Index = 0; Index < Count; Index++) {
+    if ((int)Index == Point_0 or (int)Index == Point_1 or (int)Index == Point_2 or (int)Index == Point_3) continue;
     float Best = 0;
-    for (int f = 0; f < Face_Count; f++) {
-      if (Faces[f].Dead) continue;
-      float D = QH_Dist (Points[i], Points[Faces[f].A], Points[Faces[f].B], Points[Faces[f].C]);
-      if (D > Best) { Best = D; Assigned[i] = f; }
+    for (int Face = 0; Face < Face_Count; Face++) {
+      if (Faces[Face].Dead) continue;
+      float Distance = QH_Dist (Points[Index], Points[Faces[Face].A], Points[Faces[Face].B], Points[Faces[Face].C]);
+      if (Distance > Best) { Best = Distance; Assignments[Index] = Face; }
     }
   }
 
-  // Iterative hull expansion: find the most-distant conflict point and expand the hull
+  // ── Iteratively expand the hull ───────────────────────────────────────────────────────────────
+
   for (int Iteration = 0; Iteration < (int)Count and Face_Count < HULL_MAX_FACES - 20; Iteration++) {
-    int Best_Face = -1, Best_Point = -1;
-    Best_Dist = 0;
-    for (uint i = 0; i < Count; i++) {
-      if (Assigned[i] < 0 or Faces[Assigned[i]].Dead) continue;
-      int f = Assigned[i];
-      float D = QH_Dist (Points[i], Points[Faces[f].A], Points[Faces[f].B], Points[Faces[f].C]);
-      if (D > Best_Dist) { Best_Dist = D; Best_Face = f; Best_Point = i; }
+
+    // Find the point with the greatest distance above its assigned face
+    int   Best_Face  = -1, Best_Point = -1;
+    Best_Distance = 0;
+    for (uint Index = 0; Index < Count; Index++) {
+      if (Assignments[Index] < 0 or Faces[Assignments[Index]].Dead) continue;
+      float Distance = QH_Dist (Points[Index],
+                                Points[Faces[Assignments[Index]].A],
+                                Points[Faces[Assignments[Index]].B],
+                                Points[Faces[Assignments[Index]].C]);
+      if (Distance > Best_Distance) { Best_Distance = Distance; Best_Face = Assignments[Index]; Best_Point = Index; }
     }
     if (Best_Point < 0) break;
 
-    // Mark all faces visible from the conflict point
-    int Visible [HULL_MAX_FACES]; int Visible_Count = 0;
-    for (int f = 0; f < Face_Count; f++) {
-      if (Faces[f].Dead) continue;
-      if (QH_Dist (Points[Best_Point], Points[Faces[f].A], Points[Faces[f].B], Points[Faces[f].C]) > 1e-6f)
-        Visible[Visible_Count++] = f;
+    // Find all faces visible from the selected point
+    int Visible[HULL_MAX_FACES];
+    int Visible_Count = 0;
+    for (int Face = 0; Face < Face_Count; Face++) {
+      if (Faces[Face].Dead) continue;
+      if (QH_Dist (Points[Best_Point], Points[Faces[Face].A], Points[Faces[Face].B], Points[Faces[Face].C]) > 1e-6f)
+        Visible[Visible_Count++] = Face;
     }
 
-    // Find the horizon ridge: edges between visible and non-visible faces
-    QH_Edge Horizon [HULL_MAX_FACES * 3]; int Horizon_Count = 0;
-    for (int vi = 0; vi < Visible_Count; vi++) {
-      int f = Visible[vi];
-      int Tri [3][2] = {{Faces[f].A, Faces[f].B}, {Faces[f].B, Faces[f].C}, {Faces[f].C, Faces[f].A}};
-      for (int e = 0; e < 3; e++) {
+    // Extract the horizon edges (edges shared between one visible and one non-visible face)
+    QH_Edge Horizon[HULL_MAX_FACES * 3];
+    int     Horizon_Count = 0;
+
+    for (int Vi = 0; Vi < Visible_Count; Vi++) {
+      int Face_Index = Visible[Vi];
+      int Triangle[3][2] = {{Faces[Face_Index].A, Faces[Face_Index].B},
+                            {Faces[Face_Index].B, Faces[Face_Index].C},
+                            {Faces[Face_Index].C, Faces[Face_Index].A}};
+
+      for (int Edge = 0; Edge < 3; Edge++) {
         int Shared = 0;
-        for (int vj = 0; vj < Visible_Count; vj++) {
-          if (vj == vi) continue;
-          int g = Visible[vj];
-          int Fv [3] = {Faces[g].A, Faces[g].B, Faces[g].C};
-          int Has0 = 0, Has1 = 0;
-          for (int k = 0; k < 3; k++) { Has0 |= (Fv[k] == Tri[e][0]); Has1 |= (Fv[k] == Tri[e][1]); }
-          if (Has0 and Has1) { Shared = 1; break; }
+        for (int Vj = 0; Vj < Visible_Count; Vj++) {
+          if (Vj == Vi) continue;
+          int Other = Visible[Vj];
+          int Face_Vertices[3] = {Faces[Other].A, Faces[Other].B, Faces[Other].C};
+          int Has_0 = 0, Has_1 = 0;
+          for (int K = 0; K < 3; K++) { Has_0 |= (Face_Vertices[K] == Triangle[Edge][0]); Has_1 |= (Face_Vertices[K] == Triangle[Edge][1]); }
+          if (Has_0 and Has_1) { Shared = 1; break; }
         }
-        if (not Shared) Horizon[Horizon_Count++] = (QH_Edge){Tri[e][0], Tri[e][1], f};
+        if (not Shared) Horizon[Horizon_Count++] = (QH_Edge){Triangle[Edge][0], Triangle[Edge][1], Face_Index};
       }
     }
 
-    // Kill visible faces and create new faces from the horizon to the conflict point
-    for (int vi = 0; vi < Visible_Count; vi++) Faces[Visible[vi]].Dead = 1;
+    // Mark all visible faces as dead
+    for (int Vi = 0; Vi < Visible_Count; Vi++) Faces[Visible[Vi]].Dead = 1;
+
+    // Create new faces connecting each horizon edge to the new point
     int New_Start = Face_Count;
-    for (int hi = 0; hi < Horizon_Count and Face_Count < HULL_MAX_FACES; hi++)
-      Faces[Face_Count++] = (QH_Face){Horizon[hi].V1, Horizon[hi].V0, Best_Point, 0};
+    for (int Hi = 0; Hi < Horizon_Count and Face_Count < HULL_MAX_FACES; Hi++)
+      Faces[Face_Count++] = (QH_Face){Horizon[Hi].V1, Horizon[Hi].V0, Best_Point, 0};
 
-    // Reassign orphaned points to new faces
-    Assigned[Best_Point] = -1;
-    for (uint i = 0; i < Count; i++) {
-      if (Assigned[i] < 0) continue;
-      if (not Faces[Assigned[i]].Dead) continue;
-      Assigned[i] = -1;
+    // Reassign orphaned points to the new faces
+    Assignments[Best_Point] = -1;
+    for (uint Index = 0; Index < Count; Index++) {
+      if (Assignments[Index] < 0) continue;
+      if (not Faces[Assignments[Index]].Dead) continue;
+      Assignments[Index] = -1;
       float Best = 0;
-      for (int f = New_Start; f < Face_Count; f++) {
-        float D = QH_Dist (Points[i], Points[Faces[f].A], Points[Faces[f].B], Points[Faces[f].C]);
-        if (D > Best) { Best = D; Assigned[i] = f; }
+      for (int Face = New_Start; Face < Face_Count; Face++) {
+        float Distance = QH_Dist (Points[Index], Points[Faces[Face].A], Points[Faces[Face].B], Points[Faces[Face].C]);
+        if (Distance > Best) { Best = Distance; Assignments[Index] = Face; }
       }
     }
   }
-  free (Assigned);
+  free (Assignments);
 
-  // Extract unique vertices from surviving faces
-  int Remap [HULL_MAX_FACES * 3]; memset (Remap, -1, sizeof (Remap));
-  for (int f = 0; f < Face_Count; f++) {
-    if (Faces[f].Dead) continue;
-    int Tri [3] = {Faces[f].A, Faces[f].B, Faces[f].C};
-    for (int k = 0; k < 3; k++) {
-      if (Tri[k] >= 0 and Tri[k] < (int)Count and Remap[Tri[k]] < 0) {
-        if (Result.Vertex_Count < HULL_MAX_VERTS) {
-          Remap[Tri[k]] = (int)Result.Vertex_Count;
-          Result.Vertices[Result.Vertex_Count++] = Points[Tri[k]];
-        }
+  // ── Extract unique vertices from surviving faces ──────────────────────────────────────────────
+
+  int Remap[HULL_MAX_FACES * 3];
+  memset (Remap, -1, sizeof Remap);
+
+  for (int Face = 0; Face < Face_Count; Face++) {
+    if (Faces[Face].Dead) continue;
+    int Triangle[3] = {Faces[Face].A, Faces[Face].B, Faces[Face].C};
+    for (int K = 0; K < 3; K++)
+      if (Triangle[K] >= 0 and Triangle[K] < (int)Count and Remap[Triangle[K]] < 0 and Result.Vertex_Count < HULL_MAX_VERTS) {
+        Remap[Triangle[K]] = (int)Result.Vertex_Count;
+        Result.Vertices[Result.Vertex_Count++] = Points[Triangle[K]];
+      }
+  }
+
+  // ── Build per-vertex adjacency table ──────────────────────────────────────────────────────────
+
+  memset (Result.Adjacency, -1, sizeof Result.Adjacency);
+  for (int Face = 0; Face < Face_Count; Face++) {
+    if (Faces[Face].Dead) continue;
+    int Remapped[3] = {Remap[Faces[Face].A], Remap[Faces[Face].B], Remap[Faces[Face].C]};
+    for (int Edge = 0; Edge < 3; Edge++) {
+      int Vertex_0 = Remapped[Edge], Vertex_1 = Remapped[(Edge + 1) % 3];
+      if (Vertex_0 < 0 or Vertex_1 < 0) continue;
+      for (int Slot = 0; Slot < HULL_MAX_ADJ; Slot++) {
+        if (Result.Adjacency[Vertex_0][Slot] == Vertex_1) break;
+        if (Result.Adjacency[Vertex_0][Slot] == -1) { Result.Adjacency[Vertex_0][Slot] = Vertex_1; break; }
+      }
+      for (int Slot = 0; Slot < HULL_MAX_ADJ; Slot++) {
+        if (Result.Adjacency[Vertex_1][Slot] == Vertex_0) break;
+        if (Result.Adjacency[Vertex_1][Slot] == -1) { Result.Adjacency[Vertex_1][Slot] = Vertex_0; break; }
       }
     }
   }
 
-  // Build adjacency from face connectivity
-  memset (Result.Adjacency, -1, sizeof (Result.Adjacency));
-  for (int f = 0; f < Face_Count; f++) {
-    if (Faces[f].Dead) continue;
-    int Rv [3] = {Remap[Faces[f].A], Remap[Faces[f].B], Remap[Faces[f].C]};
-    for (int e = 0; e < 3; e++) {
-      int V0 = Rv[e], V1 = Rv[(e + 1) % 3];
-      if (V0 < 0 or V1 < 0) continue;
-      for (int a = 0; a < HULL_MAX_ADJ; a++) { if (Result.Adjacency[V0][a] == V1) break; if (Result.Adjacency[V0][a] == -1) { Result.Adjacency[V0][a] = V1; break; } }
-      for (int a = 0; a < HULL_MAX_ADJ; a++) { if (Result.Adjacency[V1][a] == V0) break; if (Result.Adjacency[V1][a] == -1) { Result.Adjacency[V1][a] = V0; break; } }
-    }
-  }
+  // ── Compute centroid and bounding radius ──────────────────────────────────────────────────────
 
-  // Compute centroid and bounding radius
   Result.Centroid = Make (0, 0, 0);
-  for (uint i = 0; i < Result.Vertex_Count; i++) Result.Centroid = Add (Result.Centroid, Result.Vertices[i]);
-  if (Result.Vertex_Count) Result.Centroid = Scale (Result.Centroid, 1.f / Result.Vertex_Count);
+  for (uint Index = 0; Index < Result.Vertex_Count; Index++)
+    Result.Centroid = Add (Result.Centroid, Result.Vertices[Index]);
+  if (Result.Vertex_Count)
+    Result.Centroid = Scale (Result.Centroid, 1.f / Result.Vertex_Count);
+
   Result.Bounding_Radius = 0;
-  for (uint i = 0; i < Result.Vertex_Count; i++) {
-    float D = Dot (Subtract (Result.Vertices[i], Result.Centroid), Subtract (Result.Vertices[i], Result.Centroid));
-    if (D > Result.Bounding_Radius * Result.Bounding_Radius) Result.Bounding_Radius = sqrtf (D);
+  for (uint Index = 0; Index < Result.Vertex_Count; Index++) {
+    float Distance_Sq = Dot (Subtract (Result.Vertices[Index], Result.Centroid),
+                             Subtract (Result.Vertices[Index], Result.Centroid));
+    if (Distance_Sq > Result.Bounding_Radius * Result.Bounding_Radius)
+      Result.Bounding_Radius = sqrtf (Distance_Sq);
   }
+
   printf ("[hull] %u vertices, radius %.1f\n", Result.Vertex_Count, Result.Bounding_Radius);
   return Result;
 }
 
-Convex_Hull Hull_From_Vertices (const Vertex *Verts, uint Count) {
-  vec3 *Points = malloc (sizeof (vec3) * Count);
-  for (uint i = 0; i < Count; i++) Points[i] = Make (Verts[i].Position[0], Verts[i].Position[1], Verts[i].Position[2]);
-  Convex_Hull H = Quickhull (Points, Count);
-  free (Points);
-  return H;
+Convex_Hull Hull_From_Vertices (const Vertex *Vertices, uint Count) {
+
+  // Extract vec3 positions from the vertex array and delegate to Quickhull
+  vec3 *Positions = malloc (sizeof (vec3) * Count);
+  for (uint Index = 0; Index < Count; Index++)
+    Positions[Index] = Make (Vertices[Index].Position[0], Vertices[Index].Position[1], Vertices[Index].Position[2]);
+  Convex_Hull Hull = Quickhull (Positions, Count);
+  free (Positions);
+  return Hull;
 }
 
 void Hull_Upload (const Convex_Hull *Hull) {
+
+  // Pack the CPU-side hull into the GPU-compatible layout
   Gpu_Hull Packed = {0};
   Packed.Count  = (int)Hull->Vertex_Count;
   Packed.Radius = Hull->Bounding_Radius;
   Packed.Centroid[0] = Hull->Centroid.x;
   Packed.Centroid[1] = Hull->Centroid.y;
   Packed.Centroid[2] = Hull->Centroid.z;
-  for (uint i = 0; i < Hull->Vertex_Count; i++) {
-    Packed.Vertices[i][0] = Hull->Vertices[i].x;
-    Packed.Vertices[i][1] = Hull->Vertices[i].y;
-    Packed.Vertices[i][2] = Hull->Vertices[i].z;
-    Packed.Vertices[i][3] = 0;
-    memcpy (Packed.Adjacency[i], Hull->Adjacency[i], sizeof (int) * HULL_MAX_ADJ);
+
+  for (uint Index = 0; Index < Hull->Vertex_Count; Index++) {
+    Packed.Vertices[Index][0] = Hull->Vertices[Index].x;
+    Packed.Vertices[Index][1] = Hull->Vertices[Index].y;
+    Packed.Vertices[Index][2] = Hull->Vertices[Index].z;
+    Packed.Vertices[Index][3] = 0;
+    memcpy (Packed.Adjacency[Index], Hull->Adjacency[Index], sizeof (int) * HULL_MAX_ADJ);
   }
-  if (not Hull_Storage_Buffer.Buffer) {
+
+  // Allocate the hull storage buffer on first use, then upload the packed data
+  if (not Hull_Storage_Buffer.Buffer)
     Hull_Storage_Buffer = Buffer_Allocate (sizeof (Gpu_Hull),
       VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
       VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
-  }
-  Buffer_Upload (Hull_Storage_Buffer, &Packed, sizeof (Packed));
+  Buffer_Upload (Hull_Storage_Buffer, &Packed, sizeof Packed);
 }
 
-// ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
-// §11C. GPU Physics — Pipeline and Dispatch (with hull binding)
-// ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+// ── §10B. GPU Physics Pipeline ────────────────────────────────────────────────────────────────────
 
 void Physics_Pipeline_Create () {
-  VkDescriptorSetLayoutBinding B [] = {
-    {0, VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, 1, VK_SHADER_STAGE_COMPUTE_BIT, NULL},
-    {1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,             1, VK_SHADER_STAGE_COMPUTE_BIT, NULL},  // Vertex buffer
-    {2, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,             1, VK_SHADER_STAGE_COMPUTE_BIT, NULL},  // Index buffer
-    {3, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,             1, VK_SHADER_STAGE_COMPUTE_BIT, NULL},  // Player state
-    {4, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,             1, VK_SHADER_STAGE_COMPUTE_BIT, NULL},  // Hull data
+
+  // Define the 5 descriptor bindings for the physics compute pipeline
+  VkDescriptorSetLayoutBinding Bindings[] = {
+    {0, VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, 1, VK_SHADER_STAGE_COMPUTE_BIT, NULL}, // TLAS
+    {1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,             1, VK_SHADER_STAGE_COMPUTE_BIT, NULL}, // Vertex buffer
+    {2, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,             1, VK_SHADER_STAGE_COMPUTE_BIT, NULL}, // Index buffer
+    {3, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,             1, VK_SHADER_STAGE_COMPUTE_BIT, NULL}, // Player state
+    {4, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,             1, VK_SHADER_STAGE_COMPUTE_BIT, NULL}, // Hull data
   };
 
+  // Create the descriptor set layout with all 5 physics bindings
   VK_CHECK (vkCreateDescriptorSetLayout (Device,
-    &(VkDescriptorSetLayoutCreateInfo){.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
-      .bindingCount = 5, .pBindings = B}, NULL, &Physics_Descriptor_Layout));
+    &(VkDescriptorSetLayoutCreateInfo){
+      .sType        = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+      .bindingCount = 5,
+      .pBindings    = Bindings},
+    NULL, &Physics_Descriptor_Layout));
 
-  VkPushConstantRange Push = {VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof (Gpu_Input)};
+  // Create the pipeline layout with push constants for per-frame Gpu_Input delivery
+  VkPushConstantRange Push_Range = {VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof (Gpu_Input)};
   VK_CHECK (vkCreatePipelineLayout (Device,
-    &(VkPipelineLayoutCreateInfo){.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
-      .setLayoutCount = 1, .pSetLayouts = &Physics_Descriptor_Layout,
-      .pushConstantRangeCount = 1, .pPushConstantRanges = &Push}, NULL, &Physics_Pipeline_Layout));
+    &(VkPipelineLayoutCreateInfo){
+      .sType                  = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+      .setLayoutCount         = 1,
+      .pSetLayouts            = &Physics_Descriptor_Layout,
+      .pushConstantRangeCount = 1,
+      .pPushConstantRanges    = &Push_Range},
+    NULL, &Physics_Pipeline_Layout));
 
-  VkShaderModule M = Shader_Module_Load (SHADER_PATH_PHYSICS_COMPUTE);
+  // Load the pre-compiled physics compute shader and create the compute pipeline
+  VkShaderModule Physics_Module = Shader_Module_Load (SHADER_PATH_PHYSICS_COMPUTE);
   VK_CHECK (vkCreateComputePipelines (Device, VK_NULL_HANDLE, 1,
-    &(VkComputePipelineCreateInfo){.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
-      .stage = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
-                NULL, 0, VK_SHADER_STAGE_COMPUTE_BIT, M, "main", NULL},
-      .layout = Physics_Pipeline_Layout}, NULL, &Physics_Pipeline));
-  vkDestroyShaderModule (Device, M, NULL);
+    &(VkComputePipelineCreateInfo){
+      .sType  = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
+      .stage  = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, NULL, 0, VK_SHADER_STAGE_COMPUTE_BIT, Physics_Module, "main", NULL},
+      .layout = Physics_Pipeline_Layout},
+    NULL, &Physics_Pipeline));
+  vkDestroyShaderModule (Device, Physics_Module, NULL);
 }
 
-void Physics_Resources_Create (const Player *Init) {
+void Physics_Resources_Create (const Player *Initial_State) {
+
+  // Allocate the host-visible player state buffer for GPU read-write access each frame
   Player_State_Buffer = Buffer_Allocate (sizeof (Gpu_Player),
     VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
     VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
 
-  Gpu_Player S = {
-    .Position = {Init->Position.x, Init->Position.y, Init->Position.z},
-    .Yaw = Init->Yaw, .Pitch = Init->Pitch, .View_Height = DEFAULT_VIEW_HEIGHT,
-    .Shape = SHAPE_CAPSULE, .Extents = {15, 32, 15}, .Spine = 17};
-  Buffer_Upload (Player_State_Buffer, &S, sizeof (S));
+  // Initialize the GPU player state from the spawn point with a capsule collider
+  Gpu_Player Initial_GPU_State = {
+    .Position    = {Initial_State->Position.x, Initial_State->Position.y, Initial_State->Position.z},
+    .Yaw         = Initial_State->Yaw,
+    .Pitch       = Initial_State->Pitch,
+    .View_Height = DEFAULT_VIEW_HEIGHT,
+    .Shape       = SHAPE_CAPSULE,
+    .Extents     = {PLAYER_HALF_EXTENTS[0], PLAYER_HALF_EXTENTS[1], PLAYER_HALF_EXTENTS[2]},
+    .Spine       = PLAYER_CAPSULE_SPINE};
+  Buffer_Upload (Player_State_Buffer, &Initial_GPU_State, sizeof Initial_GPU_State);
 
-  // Allocate a dummy hull buffer (replaced when a hull is actually loaded)
+  // Initialize the hull storage buffer with a 1-vertex dummy (replaced when a real hull is loaded)
   if (not Hull_Storage_Buffer.Buffer) {
     Hull_Storage_Buffer = Buffer_Allocate (sizeof (Gpu_Hull),
       VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
       VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
-    Gpu_Hull Empty = {0}; Empty.Count = 1;
-    Empty.Vertices[0][0] = 0; Empty.Vertices[0][1] = 0; Empty.Vertices[0][2] = 0;
-    Buffer_Upload (Hull_Storage_Buffer, &Empty, sizeof (Empty));
-  }
-
-  VkDescriptorPoolSize Sz [] = {{VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, 1},
-                                 {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 4}};
-  VK_CHECK (vkCreateDescriptorPool (Device,
-    &(VkDescriptorPoolCreateInfo){.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
-      .maxSets = 1, .poolSizeCount = 2, .pPoolSizes = Sz}, NULL, &Physics_Descriptor_Pool));
-
-  VK_CHECK (vkAllocateDescriptorSets (Device,
-    &(VkDescriptorSetAllocateInfo){.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
-      .descriptorPool = Physics_Descriptor_Pool, .descriptorSetCount = 1,
-      .pSetLayouts = &Physics_Descriptor_Layout}, &Physics_Descriptor_Set));
-
-  VkWriteDescriptorSetAccelerationStructureKHR As = {
-    .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET_ACCELERATION_STRUCTURE_KHR,
-    .accelerationStructureCount = 1, .pAccelerationStructures = &Top_Level.Handle};
-  VkDescriptorBufferInfo Vb = {Vertex_Buffer.Buffer, 0, Vertex_Buffer.Size};
-  VkDescriptorBufferInfo Ib = {Index_Buffer.Buffer,  0, Index_Buffer.Size};
-  VkDescriptorBufferInfo Pb = {Player_State_Buffer.Buffer, 0, Player_State_Buffer.Size};
-  VkDescriptorBufferInfo Hb = {Hull_Storage_Buffer.Buffer, 0, Hull_Storage_Buffer.Size};
-
-  VkWriteDescriptorSet W [] = {
-    {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, &As,  Physics_Descriptor_Set, 0, 0, 1, VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, NULL, NULL},
-    {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, Physics_Descriptor_Set, 1, 0, 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, NULL, &Vb},
-    {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, Physics_Descriptor_Set, 2, 0, 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, NULL, &Ib},
-    {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, Physics_Descriptor_Set, 3, 0, 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, NULL, &Pb},
-    {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, Physics_Descriptor_Set, 4, 0, 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, NULL, &Hb},
-  };
-  vkUpdateDescriptorSets (Device, 5, W, 0, NULL);
-}
-
-Player Physics_Dispatch (Input In, float Dt) {
-  Gpu_Input G = {In.Forward, In.Back, In.Left, In.Right,
-                 In.Jump, In.Fire, In.Crouch, 0,
-                 In.Delta_X, In.Delta_Y, Dt, 0};
-
-  VK_CHECK (vkResetCommandBuffer (Command_Buffer, 0));
-  VK_CHECK (vkBeginCommandBuffer (Command_Buffer,
-    &(VkCommandBufferBeginInfo){.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
-                                .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT}));
-
-  vkCmdBindPipeline       (Command_Buffer, VK_PIPELINE_BIND_POINT_COMPUTE, Physics_Pipeline);
-  vkCmdBindDescriptorSets (Command_Buffer, VK_PIPELINE_BIND_POINT_COMPUTE, Physics_Pipeline_Layout,
-                           0, 1, &Physics_Descriptor_Set, 0, NULL);
-  vkCmdPushConstants      (Command_Buffer, Physics_Pipeline_Layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof (G), &G);
-  vkCmdDispatch           (Command_Buffer, 1, 1, 1);
-
-  // Memory barrier: ensure compute shader writes are visible to the host for readback
-  vkCmdPipelineBarrier (Command_Buffer,
-    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_HOST_BIT, 0,
-    1, &(VkMemoryBarrier){.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
-      .srcAccessM
-
-
-
-// ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
-//
-// §8. Scene — BSP Loading
-//
-// ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
-
-uint BSP_Tessellate_Patch (const BSP_Vertex *Control_Grid, int Patch_Width, int Patch_Height,
-                          Vertex **Inout_Vertices, uint *Inout_Vertex_Count,
-                          uint **Inout_Indices, uint *Inout_Index_Count) {
-
-  int Grid_Columns = (Patch_Width  - 1) / 2;                                                  // Number of 3×3 sub-patches horizontally
-  int Grid_Rows    = (Patch_Height - 1) / 2;                                                  // Number of 3×3 sub-patches vertically
-  int Level  = TESSELLATION_LEVEL;                                                             // Subdivisions per sub-patch edge
-  int Stride = Level + 1;
-
-  uint Added_Vertices = (uint)(Grid_Columns * Grid_Rows * Stride * Stride);
-  uint Added_Indices  = (uint)(Grid_Columns * Grid_Rows * Level * Level * 6);
-
-  // Grow the output vertex and index arrays to hold the tessellated patch geometry
-  *Inout_Vertices = realloc (*Inout_Vertices, sizeof (Vertex) * (*Inout_Vertex_Count + Added_Vertices));
-  *Inout_Indices  = realloc (*Inout_Indices,  sizeof (uint)    * (*Inout_Index_Count  + Added_Indices));
-
-  uint Vertex_Base  = *Inout_Vertex_Count;
-  uint Index_Cursor = *Inout_Index_Count;
-
-  // Iterate over each 3×3 sub-patch in the control grid
-  for (int Patch_Y = 0; Patch_Y < Grid_Rows; Patch_Y++) for (int Patch_X = 0; Patch_X < Grid_Columns; Patch_X++) {
-    vec3 Control_Position [3][3], Control_Normal [3][3], Control_Texture [3][3], Control_Lightmap [3][3];
-
-    // Extract 3×3 control points with coordinate swizzle (Z-up → Y-up)
-    for (int Row = 0; Row < 3; Row++)
-      for (int Column = 0; Column < 3; Column++) {
-        const BSP_Vertex *S = &Control_Grid[(Patch_Y * 2 + Row) * Patch_Width + (Patch_X * 2 + Column)];
-        Control_Position[Row][Column] = Make (S->Position[0],       S->Position[2],       -S->Position[1]);
-        Control_Normal[Row][Column]   = Make (S->Normal[0],         S->Normal[2],         -S->Normal[1]);
-        Control_Texture[Row][Column]  = Make (S->Texture_Coords[0], S->Texture_Coords[1],  0);
-        Control_Lightmap[Row][Column] = Make (S->Lightmap_Coords[0],S->Lightmap_Coords[1], 0);
-      }
-
-    uint Patch_Base = Vertex_Base + (uint)((Patch_Y * Grid_Columns + Patch_X) * Stride * Stride);
-
-    // Evaluate the bi-quadratic Bézier surface at each tessellation grid point
-    for (int V = 0; V <= Level; V++) {
-      float Pv = (float)V / Level;
-      vec3 Rp[3], Rn[3], Rt[3], Rl[3];
-      for (int R = 0; R < 3; R++) {
-        Rp[R] = Bezier_Evaluate (Control_Position [R][0], Control_Position [R][1], Control_Position [R][2], Pv);
-        Rn[R] = Bezier_Evaluate (Control_Normal   [R][0], Control_Normal   [R][1], Control_Normal   [R][2], Pv);
-        Rt[R] = Bezier_Evaluate (Control_Texture  [R][0], Control_Texture  [R][1], Control_Texture  [R][2], Pv);
-        Rl[R] = Bezier_Evaluate (Control_Lightmap [R][0], Control_Lightmap [R][1], Control_Lightmap [R][2], Pv);
-      }
-      for (int H = 0; H <= Level; H++) {
-        float Pu      = (float)H / Level;
-        vec3 Normal    = Normalize (Bezier_Evaluate (Rn[0], Rn[1], Rn[2], Pu));
-        vec3 Position  = Bezier_Evaluate (Rp[0], Rp[1], Rp[2], Pu);
-        vec3 Texture   = Bezier_Evaluate (Rt[0], Rt[1], Rt[2], Pu);
-        vec3 Lightmap  = Bezier_Evaluate (Rl[0], Rl[1], Rl[2], Pu);
-        (*Inout_Vertices)[Patch_Base + V * Stride + H] = (Vertex){
-          .Normal      = {Normal.x,   Normal.y,   Normal.z},
-          .Position    = {Position.x, Position.y, Position.z},
-          .Texture_Uv  = {Texture.x,  Texture.y},
-          .Lightmap_Uv = {Lightmap.x, Lightmap.y}};
-      }
-    }
-
-    // Generate two triangles for each quad in the tessellated grid
-    for (int V = 0; V < Level; V++) for (int H = 0; H < Level; H++) {
-      uint A = Patch_Base + V * Stride + H, B = A + 1;
-      uint C = Patch_Base + (V + 1) * Stride + H, D = C + 1;
-      (*Inout_Indices)[Index_Cursor++] = A; (*Inout_Indices)[Index_Cursor++] = C; (*Inout_Indices)[Index_Cursor++] = B;
-      (*Inout_Indices)[Index_Cursor++] = B; (*Inout_Indices)[Index_Cursor++] = C; (*Inout_Indices)[Index_Cursor++] = D;
-    }
-  }
-  *Inout_Vertex_Count += Added_Vertices;
-  *Inout_Index_Count  += Added_Indices;
-  return Added_Indices / 3;
-}
-
-Spawn BSP_Find_Spawn (const uint8_t *File_Data, const BSP_Header *Header) {
-  const char *Cursor = (const char *)(File_Data + Header->Lumps[BSP_ENTITIES].Offset);
-  const char *End    = Cursor + Header->Lumps[BSP_ENTITIES].Length;
-  Spawn Result = {.Origin = {0,0,0}, .Angle = 0};
-
-  while (Cursor < End) {
-    while (Cursor < End and *Cursor != '{') Cursor++;
-    if (Cursor >= End) break;
-    Cursor++;
-    int Is_Spawn = 0, Has_Origin = 0;
-    vec3 Origin = {0}; float Angle = 0;
-
-    while (Cursor < End and *Cursor != '}') {
-      while (Cursor < End and (*Cursor == ' ' or *Cursor == '\t' or *Cursor == '\n' or *Cursor == '\r')) Cursor++;
-      if (Cursor >= End or *Cursor == '}') break;
-      if (*Cursor != '"') { Cursor++; continue; }
-      Cursor++;
-      const char *Key = Cursor;
-      while (Cursor < End and *Cursor != '"') Cursor++;
-      int Kl = (int)(Cursor - Key);
-      if (Cursor < End) Cursor++;
-      while (Cursor < End and (*Cursor == ' ' or *Cursor == '\t')) Cursor++;
-      if (Cursor >= End or *Cursor != '"') continue;
-      Cursor++;
-      const char *Val = Cursor;
-      while (Cursor < End and *Cursor != '"') Cursor++;
-      int Vl = (int)(Cursor - Val);
-      if (Cursor < End) Cursor++;
-
-      if (Kl == 9 and memcmp (Key, "classname", 9) == 0 and Vl == 22 and memcmp (Val, "info_player_deathmatch", 22) == 0) Is_Spawn = 1;
-      if (Kl == 6 and memcmp (Key, "origin", 6) == 0) {
-        char T[64]; int L = Vl < 63 ? Vl : 63; memcpy (T, Val, L); T[L] = 0;
-        sscanf (T, "%f %f %f", &Origin.x, &Origin.y, &Origin.z); Has_Origin = 1;
-      }
-      if (Kl == 5 and memcmp (Key, "angle", 5) == 0) {
-        char T[32]; int L = Vl < 31 ? Vl : 31; memcpy (T, Val, L); T[L] = 0;
-        sscanf (T, "%f", &Angle);
-      }
-    }
-    if (Is_Spawn and Has_Origin) {
-      Result.Origin = Make (Origin.x, Origin.z, -Origin.y);                                    // Quake 3 Z-up → Y-up
-      Result.Angle  = Angle;
-      printf ("[bsp] spawn: %.0f %.0f %.0f angle %.0f\n", Result.Origin.x, Result.Origin.y, Result.Origin.z, Angle);
-      return Result;
-    }
-    if (Cursor < End) Cursor++;
-  }
-  printf ("[bsp] no spawn found, using origin\n");
-  return Result;
-}
-
-Scene Scene_Load_From_BSP (const char *Path, Spawn *Out_Spawn, Collision_Map *Out_Collision) {
-  FILE *File = fopen (Path, "rb");
-  if (not File) { fprintf (stderr, "Cannot open %s\n", Path); exit (1); }
-  fseek (File, 0, SEEK_END); long File_Size = ftell (File); rewind (File);
-  uint8_t *File_Data = malloc (File_Size);
-  fread (File_Data, 1, File_Size, File);
-  fclose (File);
-
-  BSP_Header *Header = (BSP_Header *)(File_Data);
-  assert (Header->Magic == BSP_MAGIC and Header->Version == BSP_VERSION);
-
-  BSP_Vertex *Raw_Vertices     = (BSP_Vertex *)(File_Data + Header->Lumps[BSP_VERTICES].Offset);
-  BSP_Face   *Raw_Faces        = (BSP_Face *)  (File_Data + Header->Lumps[BSP_FACES].Offset);
-  BSP_Shader *Raw_Shaders      = (BSP_Shader *)(File_Data + Header->Lumps[BSP_SHADERS].Offset);
-  int        *Raw_Indices      = (int *)       (File_Data + Header->Lumps[BSP_INDICES].Offset);
-  uint Raw_Vertex_Count = (uint)(Header->Lumps[BSP_VERTICES].Length / sizeof (BSP_Vertex));
-  uint Raw_Face_Count   = (uint)(Header->Lumps[BSP_FACES].Length    / sizeof (BSP_Face));
-  uint Raw_Shader_Count = (uint)(Header->Lumps[BSP_SHADERS].Length  / sizeof (BSP_Shader));
-
-  // ── Build lightmap atlas ───────────────────────────────────────────────────────────────────────
-  uint8_t *Lightmap_Atlas = NULL;
-  uint Lm_Size       = (uint)Header->Lumps[BSP_LIGHTMAPS].Length;
-  uint Lm_Pages      = Lm_Size / (LIGHTMAP_PAGE_SIZE * LIGHTMAP_PAGE_SIZE * 3);
-  uint Total_Pages   = Lm_Pages + 1;
-  uint Atlas_Cols = 1, Atlas_Rows = 1, Atlas_W = 0, Atlas_H = 0;
-  float White_U = 0.5f, White_V = 0.5f;
-
-  if (Lm_Pages > 0) {
-    while (Atlas_Cols * Atlas_Cols < Total_Pages) Atlas_Cols++;
-    Atlas_Rows = (Total_Pages + Atlas_Cols - 1) / Atlas_Cols;
-    Atlas_W    = Atlas_Cols * LIGHTMAP_PAGE_SIZE;
-    Atlas_H    = Atlas_Rows * LIGHTMAP_PAGE_SIZE;
-    Lightmap_Atlas = calloc (Atlas_W * Atlas_H * 4, 1);
-    const uint8_t *Lm_Data = File_Data + Header->Lumps[BSP_LIGHTMAPS].Offset;
-
-    // Copy each RGB lightmap page into its grid cell, converting RGB → RGBA
-    for (uint P = 0; P < Lm_Pages; P++) {
-      uint Col = P % Atlas_Cols, Row = P / Atlas_Cols;
-      const uint8_t *Src = Lm_Data + P * LIGHTMAP_PAGE_SIZE * LIGHTMAP_PAGE_SIZE * 3;
-      for (uint y = 0; y < LIGHTMAP_PAGE_SIZE; y++)
-      for (uint x = 0; x < LIGHTMAP_PAGE_SIZE; x++) {
-        uint Dst = ((Row * LIGHTMAP_PAGE_SIZE + y) * Atlas_W + Col * LIGHTMAP_PAGE_SIZE + x) * 4;
-        uint Si  = (y * LIGHTMAP_PAGE_SIZE + x) * 3;
-        Lightmap_Atlas[Dst] = Src[Si]; Lightmap_Atlas[Dst+1] = Src[Si+1]; Lightmap_Atlas[Dst+2] = Src[Si+2]; Lightmap_Atlas[Dst+3] = 255;
-      }
-    }
-    // White fallback page for faces with no lightmap
-    uint Wc = Lm_Pages % Atlas_Cols, Wr = Lm_Pages / Atlas_Cols;
-    for (uint y = 0; y < LIGHTMAP_PAGE_SIZE; y++)
-    for (uint x = 0; x < LIGHTMAP_PAGE_SIZE; x++) {
-      uint Dst = ((Wr * LIGHTMAP_PAGE_SIZE + y) * Atlas_W + Wc * LIGHTMAP_PAGE_SIZE + x) * 4;
-      Lightmap_Atlas[Dst] = Lightmap_Atlas[Dst+1] = Lightmap_Atlas[Dst+2] = Lightmap_Atlas[Dst+3] = 255;
-    }
-    White_U = ((float)Wc + 0.5f) / (float)Atlas_Cols;
-    White_V = ((float)Wr + 0.5f) / (float)Atlas_Rows;
-    printf ("[lightmap] %u pages -> %ux%u atlas\n", Lm_Pages, Atlas_W, Atlas_H);
-  }
-
-  // ── Convert vertices from Z-up to Y-up ────────────────────────────────────────────────────────
-  uint Vertex_Count = Raw_Vertex_Count;
-  Vertex *Vertices  = malloc (sizeof (Vertex) * Vertex_Count);
-  for (uint I = 0; I < Vertex_Count; I++) Vertices[I] = Convert_BSP_Vertex (&Raw_Vertices[I]);
-
-  uint *Indices = NULL, *Texture_Ids = NULL;
-  uint  Index_Count = 0, Triangle_Count = 0;
-
-  // ── Process faces ──────────────────────────────────────────────────────────────────────────────
-  for (uint Fi = 0; Fi < Raw_Face_Count; Fi++) {
-    const BSP_Face *F = &Raw_Faces[Fi];
-
-    if (F->Type == SURFACE_TYPE_PLANAR or F->Type == SURFACE_TYPE_MESH) {
-      uint Ft = (uint)(F->Index_Count / 3);
-      Indices     = realloc (Indices,     sizeof (uint) * (Index_Count    + F->Index_Count));
-      Texture_Ids = realloc (Texture_Ids, sizeof (uint) * (Triangle_Count + Ft));
-      for (int L = 0; L < F->Index_Count; L++)
-        Indices[Index_Count + L] = (uint)(F->First_Vertex + Raw_Indices[F->First_Index + L]);
-      for (uint T = 0; T < Ft; T++) Texture_Ids[Triangle_Count + T] = (uint)F->Shader_Index;
-      Index_Count += F->Index_Count; Triangle_Count += Ft;
-
-      // Remap lightmap UVs to atlas space
-      if (F->Lightmap_Index >= 0 and Atlas_Cols > 0) {
-        float Co = (float)((uint)F->Lightmap_Index % Atlas_Cols), Ro = (float)((uint)F->Lightmap_Index / Atlas_Cols);
-        for (int Vl = 0; Vl < F->Vertex_Count; Vl++) {
-          uint Vi = (uint)(F->First_Vertex + Vl);
-          Vertices[Vi].Lightmap_Uv[0] = (Co + Vertices[Vi].Lightmap_Uv[0]) / (float)Atlas_Cols;
-          Vertices[Vi].Lightmap_Uv[1] = (Ro + Vertices[Vi].Lightmap_Uv[1]) / (float)Atlas_Rows;
-        }
-      } else {
-        for (int Vl = 0; Vl < F->Vertex_Count; Vl++) {
-          uint Vi = (uint)(F->First_Vertex + Vl);
-          Vertices[Vi].Lightmap_Uv[0] = White_U; Vertices[Vi].Lightmap_Uv[1] = White_V;
-        }
-      }
-
-    } else if (F->Type == SURFACE_TYPE_PATCH) {
-      uint Pv = Vertex_Count, Pt = Triangle_Count;
-      Triangle_Count += BSP_Tessellate_Patch (&Raw_Vertices[F->First_Vertex], F->Patch_Width, F->Patch_Height,
-                                              &Vertices, &Vertex_Count, &Indices, &Index_Count);
-      uint Np = Triangle_Count - Pt;
-      Texture_Ids = realloc (Texture_Ids, sizeof (uint) * Triangle_Count);
-      for (uint T = 0; T < Np; T++) Texture_Ids[Pt + T] = (uint)F->Shader_Index;
-
-      if (F->Lightmap_Index >= 0 and Atlas_Cols > 0) {
-        float Co = (float)((uint)F->Lightmap_Index % Atlas_Cols), Ro = (float)((uint)F->Lightmap_Index / Atlas_Cols);
-        for (uint Vi = Pv; Vi < Vertex_Count; Vi++) {
-          Vertices[Vi].Lightmap_Uv[0] = (Co + Vertices[Vi].Lightmap_Uv[0]) / (float)Atlas_Cols;
-          Vertices[Vi].Lightmap_Uv[1] = (Ro + Vertices[Vi].Lightmap_Uv[1]) / (float)Atlas_Rows;
-        }
-      } else {
-        for (uint Vi = Pv; Vi < Vertex_Count; Vi++) {
-          Vertices[Vi].Lightmap_Uv[0] = White_U; Vertices[Vi].Lightmap_Uv[1] = White_V;
-        }
-      }
-    }
-  }
-
-  // ── Materials: hash shader names to fallback colors ────────────────────────────────────────────
-  uint Material_Count = Raw_Shader_Count;
-  vec4 *Materials          = malloc (sizeof (vec4) * Material_Count);
-  char (*Texture_Names)[64] = malloc (sizeof (char[64]) * Material_Count);
-  for (uint M = 0; M < Material_Count; M++) {
-    uint H = 5381;
-    for (int C = 0; Raw_Shaders[M].Name[C]; C++) H = H * 31 + (uint8_t)Raw_Shaders[M].Name[C];
-    Materials[M] = (vec4){0.4f + 0.35f*((H>>0&0xFF)/255.f), 0.4f + 0.35f*((H>>8&0xFF)/255.f), 0.4f + 0.35f*((H>>16&0xFF)/255.f), 1};
-    memcpy (Texture_Names[M], Raw_Shaders[M].Name, 64);
-  }
-
-  if (Out_Spawn) *Out_Spawn = BSP_Find_Spawn (File_Data, Header);
-
-  // ── Collision map ──────────────────────────────────────────────────────────────────────────────
-  if (Out_Collision) {
-    Collision_Map *C = Out_Collision;
-    memset (C, 0, sizeof (*C));
-
-    // Planes (16 bytes: float normal[3], float distance)
-    C->Plane_Count = (uint)Header->Lumps[BSP_PLANES].Length / 16;
-    C->Planes      = malloc (sizeof (Collision_Plane) * C->Plane_Count);
-    for (uint I = 0; I < C->Plane_Count; I++) {
-      const float *Src = (const float *)(File_Data + Header->Lumps[BSP_PLANES].Offset + I * 16);
-      // BUG FIX: declare Normal BEFORE using it for Type and Sign_Bits
-      float *Normal = C->Planes[I].Normal;
-      Normal[0] = Src[0]; Normal[1] = Src[2]; Normal[2] = -Src[1];
-      C->Planes[I].Distance  = Src[3];
-      C->Planes[I].Type      = (Normal[0]==1.f) ? 0 : (Normal[1]==1.f) ? 1 : (Normal[2]==1.f) ? 2 : 3;
-      C->Planes[I].Sign_Bits = (uint8_t)((Normal[0]<0) | ((Normal[1]<0)<<1) | ((Normal[2]<0)<<2));
-    }
-
-    // Nodes (36 bytes: int plane, children[2], mins[3], maxs[3])
-    C->Node_Count = (uint)Header->Lumps[BSP_NODES].Length / 36;
-    C->Nodes      = malloc (sizeof (Collision_Node) * C->Node_Count);
-    for (uint I = 0; I < C->Node_Count; I++) {
-      const int *Src = (const int *)(File_Data + Header->Lumps[BSP_NODES].Offset + I * 36);
-      C->Nodes[I].Plane_Index = Src[0]; C->Nodes[I].Children[0] = Src[1]; C->Nodes[I].Children[1] = Src[2];
-    }
-
-    // Leafs (48 bytes)
-    C->Leaf_Count = (uint)Header->Lumps[BSP_LEAFS].Length / 48;
-    C->Leafs      = malloc (sizeof (Collision_Leaf) * C->Leaf_Count);
-    for (uint I = 0; I < C->Leaf_Count; I++) {
-      const int *Src = (const int *)(File_Data + Header->Lumps[BSP_LEAFS].Offset + I * 48);
-      C->Leafs[I].Cluster = Src[0]; C->Leafs[I].Area = Src[1];
-      C->Leafs[I].First_Surface = Src[8]; C->Leafs[I].Surface_Count = Src[9];
-      C->Leafs[I].First_Brush   = Src[10]; C->Leafs[I].Brush_Count  = Src[11];
-    }
-
-    // Leaf brushes (indirection array)
-    C->Leaf_Brush_Count = (uint)Header->Lumps[BSP_LEAF_BRUSHES].Length / 4;
-    C->Leaf_Brushes     = malloc (sizeof (int) * C->Leaf_Brush_Count);
-    memcpy (C->Leaf_Brushes, File_Data + Header->Lumps[BSP_LEAF_BRUSHES].Offset, sizeof (int) * C->Leaf_Brush_Count);
-
-    // Brushes (12 bytes: first_side, side_count, shader)
-    C->Brush_Count = (uint)Header->Lumps[BSP_BRUSHES].Length / 12;
-    C->Brushes     = malloc (sizeof (Collision_Brush) * C->Brush_Count);
-    for (uint I = 0; I < C->Brush_Count; I++) {
-      const int *Src = (const int *)(File_Data + Header->Lumps[BSP_BRUSHES].Offset + I * 12);
-      C->Brushes[I].First_Side = Src[0]; C->Brushes[I].Side_Count = Src[1]; C->Brushes[I].Shader_Index = Src[2];
-    }
-
-    // Brush sides (8 bytes: plane_index, shader_index)
-    C->Side_Count = (uint)Header->Lumps[BSP_BRUSH_SIDES].Length / 8;
-    C->Sides      = malloc (sizeof (Collision_Brush_Side) * C->Side_Count);
-    for (uint I = 0; I < C->Side_Count; I++) {
-      const int *Src = (const int *)(File_Data + Header->Lumps[BSP_BRUSH_SIDES].Offset + I * 8);
-      C->Sides[I].Plane_Index = Src[0]; C->Sides[I].Shader_Index = Src[1];
-    }
-
-    C->Shader_Contents = malloc (sizeof (int) * Raw_Shader_Count);
-    for (uint S = 0; S < Raw_Shader_Count; S++) C->Shader_Contents[S] = Raw_Shaders[S].Contents;
-    C->Brush_Checks  = calloc (C->Brush_Count, sizeof (uint));
-    C->Check_Counter = 0;
-    printf ("[collision] %u planes, %u nodes, %u leafs, %u brushes, %u sides\n",
-            C->Plane_Count, C->Node_Count, C->Leaf_Count, C->Brush_Count, C->Side_Count);
-  }
-
-  free (File_Data);
-  printf ("[bsp] %s: %u vertices, %u triangles, %u shaders\n", Path, Vertex_Count, Triangle_Count, Raw_Shader_Count);
-  return (Scene){
-    .Vertices = Vertices, .Vertex_Count = Vertex_Count, .Indices = Indices, .Index_Count = Index_Count,
-    .Materials = Materials, .Material_Count = Material_Count, .Texture_Ids = Texture_Ids, .Texture_Names = Texture_Names,
-    .Lightmap_Atlas = Lightmap_Atlas, .Lightmap_Width = Atlas_W, .Lightmap_Height = Atlas_H, .Triangle_Count = Triangle_Count};
-}
-
-// ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
-//
-// §8. Scene — Texture Loading
-//
-// ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
-
-void Scene_Load_Textures (const Scene *S) {
-  Texture_Sampler  = Sampler_Create_Repeating ();
-  Texture_Count    = S->Material_Count;
-  Textures_Loaded  = 0;
-  Texture_Images   = calloc (Texture_Count, sizeof (VkImage));
-  Texture_Memories = calloc (Texture_Count, sizeof (VkDeviceMemory));
-  Texture_Views    = calloc (Texture_Count, sizeof (VkImageView));
-
-  for (uint I = 0; I < Texture_Count; I++) {
-    uint W = 0, H = 0; uint8_t *Px = NULL;
-    if (S->Texture_Names) {
-      char P[256]; snprintf (P, sizeof P, "assets/%s.tga", S->Texture_Names[I]);
-      Px = TGA_Load (P, &W, &H);
-    }
-    if (Px and W and H) {
-      Texture_Upload (Command_Buffer, Queue, Px, W, H, &Texture_Images[I], &Texture_Memories[I], &Texture_Views[I]);
-      free (Px); Textures_Loaded++;
-    } else {
-      vec4 Cl = S->Materials[I];
-      uint8_t Fb[4] = {(uint8_t)(Cl.x*255), (uint8_t)(Cl.y*255), (uint8_t)(Cl.z*255), 255};
-      Texture_Upload (Command_Buffer, Queue, Fb, 1, 1, &Texture_Images[I], &Texture_Memories[I], &Texture_Views[I]);
-    }
-  }
-
-  // Per-triangle texture ID storage buffer
-  Texture_Id_Buffer = Buffer_Stage_Upload (Command_Buffer, Queue, S->Texture_Ids,
-                                           sizeof (uint) * S->Triangle_Count, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
-  printf ("[textures] loaded %u/%u, %u fallbacks\n", Textures_Loaded, Texture_Count, Texture_Count - Textures_Loaded);
-
-  // Lightmap atlas (or 1×1 white fallback)
-  Lightmap_Sampler = Sampler_Create_Clamping ();
-  if (S->Lightmap_Atlas and S->Lightmap_Width and S->Lightmap_Height) {
-    Texture_Upload_With_Format (Command_Buffer, Queue, S->Lightmap_Atlas, S->Lightmap_Width, S->Lightmap_Height,
-                                VK_FORMAT_R8G8B8A8_UNORM, &Lightmap_Image, &Lightmap_Memory, &Lightmap_View);
-  } else {
-    uint8_t W[4] = {255,255,255,255};
-    Texture_Upload_With_Format (Command_Buffer, Queue, W, 1, 1, VK_FORMAT_R8G8B8A8_UNORM, &Lightmap_Image, &Lightmap_Memory, &Lightmap_View);
-  }
-}
-
-void Weapon_Load_Textures (Weapon_Instance *Weapon) {
-  Weapon->Texture_Base_Index = Texture_Count;
-  uint New_Total = Texture_Count + Weapon_Texture_Count;
-  Texture_Images   = realloc (Texture_Images,   sizeof (VkImage)        * New_Total);
-  Texture_Memories = realloc (Texture_Memories,  sizeof (VkDeviceMemory) * New_Total);
-  Texture_Views    = realloc (Texture_Views,     sizeof (VkImageView)    * New_Total);
-  for (uint I = 0; I < Weapon_Texture_Count; I++) {
-    uint W = 0, H = 0;
-    uint8_t *Px = TGA_Load (Weapon_Texture_Paths[I], &W, &H);
-    if (Px and W and H) {
-      Texture_Upload (Command_Buffer, Queue, Px, W, H, &Texture_Images[Texture_Count], &Texture_Memories[Texture_Count], &Texture_Views[Texture_Count]);
-      free (Px);
-    } else {
-      uint8_t Fb[4] = {180,180,180,255};
-      Texture_Upload (Command_Buffer, Queue, Fb, 1, 1, &Texture_Images[Texture_Count], &Texture_Memories[Texture_Count], &Texture_Views[Texture_Count]);
-    }
-    Texture_Count++;
-  }
-  printf ("[weapon] textures: base=%u, count=%u\n", Weapon->Texture_Base_Index, Weapon_Texture_Count);
-}
-
-// ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
-//
-// §10. Acceleration Structures
-//
-// ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
-
-Acceleration_Structure Build_World_Bottom_Level (const Scene *S) {
-  Vertex_Buffer   = Buffer_Stage_Upload (Command_Buffer, Queue, S->Vertices, sizeof (Vertex) * S->Vertex_Count,
-                      VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR);
-  Index_Buffer    = Buffer_Stage_Upload (Command_Buffer, Queue, S->Indices,  sizeof (uint)   * S->Index_Count,
-                      VK_BUFFER_USAGE_INDEX_BUFFER_BIT  | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR);
-  Material_Buffer = Buffer_Allocate (sizeof (vec4) * S->Material_Count,
-                      VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
-                      VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
-  Buffer_Upload (Material_Buffer, S->Materials, sizeof (vec4) * S->Material_Count);
-
-  VkAccelerationStructureGeometryKHR Geom = {
-    .sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR, .geometryType = VK_GEOMETRY_TYPE_TRIANGLES_KHR,
-    .flags = VK_GEOMETRY_OPAQUE_BIT_KHR,
-    .geometry.triangles = {.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_TRIANGLES_DATA_KHR,
-      .vertexFormat = VK_FORMAT_R32G32B32_SFLOAT, .vertexData.deviceAddress = Vertex_Buffer.Address,
-      .vertexStride = sizeof (Vertex), .maxVertex = S->Vertex_Count - 1,
-      .indexType = VK_INDEX_TYPE_UINT32, .indexData.deviceAddress = Index_Buffer.Address}};
-
-  VkAccelerationStructureBuildGeometryInfoKHR Bi = {
-    .sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR,
-    .type = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR,
-    .flags = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR, .geometryCount = 1, .pGeometries = &Geom};
-
-  uint Pc = S->Triangle_Count;
-  VkAccelerationStructureBuildSizesInfoKHR Sz = {.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR};
-  vkGetAccelerationStructureBuildSizes (Device, VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR, &Bi, &Pc, &Sz);
-
-  Acceleration_Structure R = {0};
-  R.Buffer = Buffer_Allocate (Sz.accelerationStructureSize,
-               VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
-               VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-  VK_CHECK (vkCreateAccelerationStructure (Device,
-    &(VkAccelerationStructureCreateInfoKHR){.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_CREATE_INFO_KHR,
-      .buffer = R.Buffer.Buffer, .size = Sz.accelerationStructureSize,
-      .type = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR}, NULL, &R.Handle));
-
-  Gpu_Buffer Scratch = Buffer_Allocate (Sz.buildScratchSize,
-                         VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
-                         VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-  Bi.dstAccelerationStructure  = R.Handle;
-  Bi.scratchData.deviceAddress = Scratch.Address;
-
-  VkAccelerationStructureBuildRangeInfoKHR Range = {.primitiveCount = Pc};
-  const VkAccelerationStructureBuildRangeInfoKHR *Rp = &Range;
-
-  VK_CHECK (vkResetCommandBuffer (Command_Buffer, 0));
-  VK_CHECK (vkBeginCommandBuffer (Command_Buffer,
-    &(VkCommandBufferBeginInfo){.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO, .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT}));
-  vkCmdBuildAccelerationStructures (Command_Buffer, 1, &Bi, &Rp);
-  VK_CHECK (vkEndCommandBuffer (Command_Buffer));
-  VK_CHECK (vkQueueSubmit (Queue, 1, &(VkSubmitInfo){.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO, .commandBufferCount = 1, .pCommandBuffers = &Command_Buffer}, VK_NULL_HANDLE));
-  VK_CHECK (vkQueueWaitIdle (Queue));
-
-  R.Address = vkGetAccelerationStructureDeviceAddress (Device,
-    &(VkAccelerationStructureDeviceAddressInfoKHR){.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_DEVICE_ADDRESS_INFO_KHR, .accelerationStructure = R.Handle});
-  vkDestroyBuffer (Device, Scratch.Buffer, NULL);
-  vkFreeMemory    (Device, Scratch.Memory, NULL);
-  return R;
-}
-
-void Weapon_Bottom_Level_Initialize (Weapon_Instance *W) {
-  if (not W->Model.Vertex_Count) return;
-  W->Transformed_Vertices = malloc (sizeof (Vertex) * W->Model.Vertex_Count);
-  memcpy (W->Transformed_Vertices, W->Model.Vertices, sizeof (Vertex) * W->Model.Vertex_Count);
-  W->Vertex_Buffer = Buffer_Allocate (sizeof (Vertex) * W->Model.Vertex_Count,
-    VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
-    VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
-  Buffer_Upload (W->Vertex_Buffer, W->Transformed_Vertices, sizeof (Vertex) * W->Model.Vertex_Count);
-
-  W->Index_Buffer      = Buffer_Stage_Upload (Command_Buffer, Queue, W->Model.Indices, sizeof (uint) * W->Model.Index_Count,
-                           VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR);
-  W->Texture_Id_Buffer = Buffer_Stage_Upload (Command_Buffer, Queue, W->Model.Texture_Ids, sizeof (uint) * W->Model.Triangle_Count,
-                           VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
-
-  VkAccelerationStructureGeometryKHR Geom = {
-    .sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR, .geometryType = VK_GEOMETRY_TYPE_TRIANGLES_KHR,
-    .flags = VK_GEOMETRY_OPAQUE_BIT_KHR,
-    .geometry.triangles = {.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_TRIANGLES_DATA_KHR,
-      .vertexFormat = VK_FORMAT_R32G32B32_SFLOAT, .vertexData.deviceAddress = W->Vertex_Buffer.Address,
-      .vertexStride = sizeof (Vertex), .maxVertex = W->Model.Vertex_Count - 1,
-      .indexType = VK_INDEX_TYPE_UINT32, .indexData.deviceAddress = W->Index_Buffer.Address}};
-
-  VkAccelerationStructureBuildGeometryInfoKHR Bi = {
-    .sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR,
-    .type = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR,
-    .flags = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_BUILD_BIT_KHR | VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_UPDATE_BIT_KHR,
-    .geometryCount = 1, .pGeometries = &Geom};
-
-  uint Pc = W->Model.Triangle_Count;
-  VkAccelerationStructureBuildSizesInfoKHR Sz = {.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR};
-  vkGetAccelerationStructureBuildSizes (Device, VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR, &Bi, &Pc, &Sz);
-
-  W->Bottom_Level.Buffer = Buffer_Allocate (Sz.accelerationStructureSize,
-    VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-  VK_CHECK (vkCreateAccelerationStructure (Device,
-    &(VkAccelerationStructureCreateInfoKHR){.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_CREATE_INFO_KHR,
-      .buffer = W->Bottom_Level.Buffer.Buffer, .size = Sz.accelerationStructureSize,
-      .type = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR}, NULL, &W->Bottom_Level.Handle));
-  W->Bottom_Level_Scratch = Buffer_Allocate (Sz.buildScratchSize,
-    VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-
-  Bi.dstAccelerationStructure = W->Bottom_Level.Handle;
-  Bi.scratchData.deviceAddress = W->Bottom_Level_Scratch.Address;
-  VkAccelerationStructureBuildRangeInfoKHR Range = {.primitiveCount = Pc};
-  const VkAccelerationStructureBuildRangeInfoKHR *Rp = &Range;
-
-  VK_CHECK (vkResetCommandBuffer (Command_Buffer, 0));
-  VK_CHECK (vkBeginCommandBuffer (Command_Buffer,
-    &(VkCommandBufferBeginInfo){.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO, .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT}));
-  vkCmdBuildAccelerationStructures (Command_Buffer, 1, &Bi, &Rp);
-  VK_CHECK (vkEndCommandBuffer (Command_Buffer));
-  VK_CHECK (vkQueueSubmit (Queue, 1, &(VkSubmitInfo){.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO, .commandBufferCount = 1, .pCommandBuffers = &Command_Buffer}, VK_NULL_HANDLE));
-  VK_CHECK (vkQueueWaitIdle (Queue));
-
-  W->Bottom_Level.Address = vkGetAccelerationStructureDeviceAddress (Device,
-    &(VkAccelerationStructureDeviceAddressInfoKHR){.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_DEVICE_ADDRESS_INFO_KHR, .accelerationStructure = W->Bottom_Level.Handle});
-  printf ("[weapon] BLAS built: %u triangles\n", Pc);
-}
-
-void Weapon_Bottom_Level_Rebuild (Weapon_Instance *W) {
-  if (not W->Model.Vertex_Count) return;
-  Buffer_Upload (W->Vertex_Buffer, W->Transformed_Vertices, sizeof (Vertex) * W->Model.Vertex_Count);
-
-  VkAccelerationStructureGeometryKHR Geom = {
-    .sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR, .geometryType = VK_GEOMETRY_TYPE_TRIANGLES_KHR,
-    .flags = VK_GEOMETRY_OPAQUE_BIT_KHR,
-    .geometry.triangles = {.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_TRIANGLES_DATA_KHR,
-      .vertexFormat = VK_FORMAT_R32G32B32_SFLOAT, .vertexData.deviceAddress = W->Vertex_Buffer.Address,
-      .vertexStride = sizeof (Vertex), .maxVertex = W->Model.Vertex_Count - 1,
-      .indexType = VK_INDEX_TYPE_UINT32, .indexData.deviceAddress = W->Index_Buffer.Address}};
-  VkAccelerationStructureBuildGeometryInfoKHR Bi = {
-    .sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR,
-    .type = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR,
-    .flags = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_BUILD_BIT_KHR | VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_UPDATE_BIT_KHR,
-    .mode = VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR,
-    .dstAccelerationStructure = W->Bottom_Level.Handle,
-    .scratchData.deviceAddress = W->Bottom_Level_Scratch.Address,
-    .geometryCount = 1, .pGeometries = &Geom};
-  VkAccelerationStructureBuildRangeInfoKHR Range = {.primitiveCount = W->Model.Triangle_Count};
-  const VkAccelerationStructureBuildRangeInfoKHR *Rp = &Range;
-
-  VK_CHECK (vkResetCommandBuffer (Command_Buffer, 0));
-  VK_CHECK (vkBeginCommandBuffer (Command_Buffer,
-    &(VkCommandBufferBeginInfo){.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO, .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT}));
-  vkCmdBuildAccelerationStructures (Command_Buffer, 1, &Bi, &Rp);
-  VK_CHECK (vkEndCommandBuffer (Command_Buffer));
-  VK_CHECK (vkQueueSubmit (Queue, 1, &(VkSubmitInfo){.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO, .commandBufferCount = 1, .pCommandBuffers = &Command_Buffer}, VK_NULL_HANDLE));
-  VK_CHECK (vkQueueWaitIdle (Queue));
-}
-
-void Top_Level_Initialize (uint Max_Instances) {
-  Top_Level_Instance_Buffer = Buffer_Allocate (sizeof (VkAccelerationStructureInstanceKHR) * Max_Instances,
-    VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
-    VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
-
-  VkAccelerationStructureGeometryKHR Geom = {
-    .sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR, .geometryType = VK_GEOMETRY_TYPE_INSTANCES_KHR,
-    .flags = VK_GEOMETRY_OPAQUE_BIT_KHR,
-    .geometry.instances = {.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_INSTANCES_DATA_KHR,
-      .arrayOfPointers = VK_FALSE, .data.deviceAddress = Top_Level_Instance_Buffer.Address}};
-  VkAccelerationStructureBuildGeometryInfoKHR Bi = {
-    .sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR,
-    .type = VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR,
-    .flags = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_BUILD_BIT_KHR, .geometryCount = 1, .pGeometries = &Geom};
-  VkAccelerationStructureBuildSizesInfoKHR Sz = {.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR};
-  vkGetAccelerationStructureBuildSizes (Device, VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR, &Bi, &Max_Instances, &Sz);
-
-  Top_Level.Buffer = Buffer_Allocate (Sz.accelerationStructureSize,
-    VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-  VK_CHECK (vkCreateAccelerationStructure (Device,
-    &(VkAccelerationStructureCreateInfoKHR){.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_CREATE_INFO_KHR,
-      .buffer = Top_Level.Buffer.Buffer, .size = Sz.accelerationStructureSize,
-      .type = VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR}, NULL, &Top_Level.Handle));
-  Top_Level_Scratch_Buffer = Buffer_Allocate (Sz.buildScratchSize,
-    VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-  Top_Level.Address = vkGetAccelerationStructureDeviceAddress (Device,
-    &(VkAccelerationStructureDeviceAddressInfoKHR){.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_DEVICE_ADDRESS_INFO_KHR, .accelerationStructure = Top_Level.Handle});
-}
-
-void Top_Level_Rebuild (Acceleration_Structure *World, Acceleration_Structure *Weapon) {
-  VkAccelerationStructureInstanceKHR Inst[2]; memset (Inst, 0, sizeof Inst);
-  Inst[0].transform.matrix[0][0] = 1.f; Inst[0].transform.matrix[1][1] = 1.f; Inst[0].transform.matrix[2][2] = 1.f;
-  Inst[0].mask = 0xFF; Inst[0].instanceCustomIndex = 0;
-  Inst[0].flags = VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR;
-  Inst[0].accelerationStructureReference = World->Address;
-  uint Ic = 1;
-  if (Weapon and Weapon->Handle) {
-    Inst[1].transform.matrix[0][0] = 1.f; Inst[1].transform.matrix[1][1] = 1.f; Inst[1].transform.matrix[2][2] = 1.f;
-    Inst[1].mask = 0x01; Inst[1].instanceCustomIndex = 1;
-    Inst[1].flags = VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR;
-    Inst[1].accelerationStructureReference = Weapon->Address; Ic = 2;
-  }
-  Buffer_Upload (Top_Level_Instance_Buffer, Inst, sizeof (VkAccelerationStructureInstanceKHR) * Ic);
-
-  VkAccelerationStructureBuildRangeInfoKHR Range = {.primitiveCount = Ic};
-  const VkAccelerationStructureBuildRangeInfoKHR *Rp = &Range;
-  VkAccelerationStructureGeometryKHR Geom = {
-    .sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR, .geometryType = VK_GEOMETRY_TYPE_INSTANCES_KHR,
-    .flags = VK_GEOMETRY_OPAQUE_BIT_KHR,
-    .geometry.instances = {.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_INSTANCES_DATA_KHR,
-      .arrayOfPointers = VK_FALSE, .data.deviceAddress = Top_Level_Instance_Buffer.Address}};
-  VkAccelerationStructureBuildGeometryInfoKHR Bi = {
-    .sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR,
-    .type = VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR,
-    .flags = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_BUILD_BIT_KHR,
-    .mode = VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR,
-    .dstAccelerationStructure = Top_Level.Handle,
-    .scratchData.deviceAddress = Top_Level_Scratch_Buffer.Address,
-    .geometryCount = 1, .pGeometries = &Geom};
-
-  VK_CHECK (vkResetCommandBuffer (Command_Buffer, 0));
-  VK_CHECK (vkBeginCommandBuffer (Command_Buffer,
-    &(VkCommandBufferBeginInfo){.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO, .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT}));
-  vkCmdBuildAccelerationStructures (Command_Buffer, 1, &Bi, &Rp);
-  VK_CHECK (vkEndCommandBuffer (Command_Buffer));
-  VK_CHECK (vkQueueSubmit (Queue, 1, &(VkSubmitInfo){.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO, .commandBufferCount = 1, .pCommandBuffers = &Command_Buffer}, VK_NULL_HANDLE));
-  VK_CHECK (vkQueueWaitIdle (Queue));
-}
-
-// ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
-//
-// §12. Pipeline
-//
-// ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
-
-#define SHADER_PATH_RAY_GENERATION  "shaders/raygen.spv"
-#define SHADER_PATH_CLOSEST_HIT     "shaders/closesthit.spv"
-#define SHADER_PATH_PRIMARY_MISS    "shaders/miss.spv"
-#define SHADER_PATH_SHADOW_MISS     "shaders/shadow_miss.spv"
-#define SHADER_PATH_PHYSICS_COMPUTE "shaders/physics.spv"
-
-// BUG FIX: single correct definition (original had duplicate file-open/size logic merged together)
-VkShaderModule Shader_Module_Load (const char *Path) {
-  FILE *File = fopen (Path, "rb");
-  if (not File) { fprintf (stderr, "Cannot open shader %s\n", Path); exit (1); }
-  fseek (File, 0, SEEK_END); long Size = ftell (File); rewind (File);
-  uint *Code = malloc (Size);
-  fread (Code, 1, Size, File);
-  fclose (File);
-  VkShaderModule Module;
-  VK_CHECK (vkCreateShaderModule (Device,
-    &(VkShaderModuleCreateInfo){.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, .codeSize = (size_t)Size, .pCode = Code},
-    NULL, &Module));
-  free (Code);
-  return Module;
-}
-
-void Raytracing_Pipeline_Create () {
-  VkDescriptorSetLayoutBinding Bindings[] = {
-    {0,  VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, 1,   VK_SHADER_STAGE_RAYGEN_BIT_KHR | VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR, NULL},
-    {1,  VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,              1,   VK_SHADER_STAGE_RAYGEN_BIT_KHR, NULL},
-    {2,  VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,             1,   VK_SHADER_STAGE_RAYGEN_BIT_KHR | VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR, NULL},
-    {3,  VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,             1,   VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR, NULL},
-    {4,  VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,             1,   VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR, NULL},
-    {5,  VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,             1,   VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR, NULL},
-    {6,  VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,             1,   VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR, NULL},
-    {7,  VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,     1,   VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR, NULL},
-    {8,  VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,             1,   VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR, NULL},
-    {9,  VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,             1,   VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR, NULL},
-    {10, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,             1,   VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR, NULL},
-    {11, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,     256, VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR, NULL},
-  };
-  VkDescriptorBindingFlags Bf[] = {0,0,0,0,0,0,0,0,0,0,0, VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT | VK_DESCRIPTOR_BINDING_VARIABLE_DESCRIPTOR_COUNT_BIT};
-  VkDescriptorSetLayoutBindingFlagsCreateInfo Bfi = {
-    .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_BINDING_FLAGS_CREATE_INFO, .bindingCount = 12, .pBindingFlags = Bf};
-  VK_CHECK (vkCreateDescriptorSetLayout (Device,
-    &(VkDescriptorSetLayoutCreateInfo){.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
-      .pNext = &Bfi, .bindingCount = 12, .pBindings = Bindings}, NULL, &Descriptor_Set_Layout));
-  VK_CHECK (vkCreatePipelineLayout (Device,
-    &(VkPipelineLayoutCreateInfo){.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
-      .setLayoutCount = 1, .pSetLayouts = &Descriptor_Set_Layout}, NULL, &Pipeline_Layout));
-
-  // Load the four SPIR-V shader modules from pre-compiled files
-  VkShaderModule Rgen = Shader_Module_Load (SHADER_PATH_RAY_GENERATION);
-  VkShaderModule Chit = Shader_Module_Load (SHADER_PATH_CLOSEST_HIT);
-  VkShaderModule Pmis = Shader_Module_Load (SHADER_PATH_PRIMARY_MISS);
-  VkShaderModule Smis = Shader_Module_Load (SHADER_PATH_SHADOW_MISS);
-
-  VkPipelineShaderStageCreateInfo St[] = {
-    {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, NULL, 0, VK_SHADER_STAGE_RAYGEN_BIT_KHR,      Rgen, "main", NULL},
-    {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, NULL, 0, VK_SHADER_STAGE_MISS_BIT_KHR,        Pmis, "main", NULL},
-    {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, NULL, 0, VK_SHADER_STAGE_MISS_BIT_KHR,        Smis, "main", NULL},
-    {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, NULL, 0, VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR, Chit, "main", NULL}};
-  VkRayTracingShaderGroupCreateInfoKHR Gr[] = {
-    {VK_STRUCTURE_TYPE_RAY_TRACING_SHADER_GROUP_CREATE_INFO_KHR, NULL, VK_RAY_TRACING_SHADER_GROUP_TYPE_GENERAL_KHR,              0, VK_SHADER_UNUSED_KHR, VK_SHADER_UNUSED_KHR, VK_SHADER_UNUSED_KHR},
-    {VK_STRUCTURE_TYPE_RAY_TRACING_SHADER_GROUP_CREATE_INFO_KHR, NULL, VK_RAY_TRACING_SHADER_GROUP_TYPE_GENERAL_KHR,              1, VK_SHADER_UNUSED_KHR, VK_SHADER_UNUSED_KHR, VK_SHADER_UNUSED_KHR},
-    {VK_STRUCTURE_TYPE_RAY_TRACING_SHADER_GROUP_CREATE_INFO_KHR, NULL, VK_RAY_TRACING_SHADER_GROUP_TYPE_GENERAL_KHR,              2, VK_SHADER_UNUSED_KHR, VK_SHADER_UNUSED_KHR, VK_SHADER_UNUSED_KHR},
-    {VK_STRUCTURE_TYPE_RAY_TRACING_SHADER_GROUP_CREATE_INFO_KHR, NULL, VK_RAY_TRACING_SHADER_GROUP_TYPE_TRIANGLES_HIT_GROUP_KHR,  VK_SHADER_UNUSED_KHR, 3, VK_SHADER_UNUSED_KHR, VK_SHADER_UNUSED_KHR}};
-
-  VK_CHECK (vkCreateRayTracingPipelines (Device, VK_NULL_HANDLE, VK_NULL_HANDLE, 1,
-    &(VkRayTracingPipelineCreateInfoKHR){.sType = VK_STRUCTURE_TYPE_RAY_TRACING_PIPELINE_CREATE_INFO_KHR,
-      .stageCount = 4, .pStages = St, .groupCount = 4, .pGroups = Gr,
-      .maxPipelineRayRecursionDepth = 2, .layout = Pipeline_Layout}, NULL, &Pipeline));
-  vkDestroyShaderModule (Device, Rgen, NULL); vkDestroyShaderModule (Device, Chit, NULL);
-  vkDestroyShaderModule (Device, Pmis, NULL); vkDestroyShaderModule (Device, Smis, NULL);
-}
-
-void Shader_Binding_Table_Create () {
-  uint Hs = Raytracing_Properties.shaderGroupHandleSize;
-  uint Ha = Raytracing_Properties.shaderGroupHandleAlignment;
-  uint Ba = Raytracing_Properties.shaderGroupBaseAlignment;
-  uint Stride = (Hs + Ha - 1) & ~(Ha - 1);
-  if (Stride < Ba) Stride = Ba;
-
-  uint Gc = 4;
-  uint8_t *H = malloc (Hs * Gc);
-  VK_CHECK (vkGetRayTracingShaderGroupHandles (Device, Pipeline, 0, Gc, Hs * Gc, H));
-  uint Ts = Stride * Gc;
-  Shader_Binding_Table_Buffer = Buffer_Allocate (Ts,
-    VK_BUFFER_USAGE_SHADER_BINDING_TABLE_BIT_KHR | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
-    VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
-
-  uint8_t *Dst; vkMapMemory (Device, Shader_Binding_Table_Buffer.Memory, 0, Ts, 0, (void**)&Dst);
-  for (uint I = 0; I < Gc; I++) memcpy (Dst + I * Stride, H + I * Hs, Hs);
-  vkUnmapMemory (Device, Shader_Binding_Table_Buffer.Memory);
-  free (H);
-
-  VkDeviceAddress Base = Shader_Binding_Table_Buffer.Address;
-  Shader_Binding_Ray_Generation = (VkStridedDeviceAddressRegionKHR){Base + 0*Stride, Stride, Stride};
-  Shader_Binding_Miss           = (VkStridedDeviceAddressRegionKHR){Base + 1*Stride, Stride, Stride * 2};
-  Shader_Binding_Hit            = (VkStridedDeviceAddressRegionKHR){Base + 3*Stride, Stride, Stride};
-  Shader_Binding_Callable       = (VkStridedDeviceAddressRegionKHR){0, 0, 0, 0};
-}
-
-void Descriptor_Set_Create (Weapon_Instance *Weapon) {
-  VkDescriptorPoolSize Ps[] = {{VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR,1}, {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,1},
-    {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,1}, {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,7}, {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,257}};
-  VK_CHECK (vkCreateDescriptorPool (Device,
-    &(VkDescriptorPoolCreateInfo){.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO, .maxSets = 1, .poolSizeCount = 5, .pPoolSizes = Ps}, NULL, &Descriptor_Pool));
-
-  uint Vc = Texture_Count;
-  VkDescriptorSetVariableDescriptorCountAllocateInfo Va = {
-    .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_VARIABLE_DESCRIPTOR_COUNT_ALLOCATE_INFO, .descriptorSetCount = 1, .pDescriptorCounts = &Vc};
-  VK_CHECK (vkAllocateDescriptorSets (Device,
-    &(VkDescriptorSetAllocateInfo){.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO, .pNext = &Va,
-      .descriptorPool = Descriptor_Pool, .descriptorSetCount = 1, .pSetLayouts = &Descriptor_Set_Layout}, &Descriptor_Set));
-
-  VkWriteDescriptorSetAccelerationStructureKHR Aw = {
-    .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET_ACCELERATION_STRUCTURE_KHR, .accelerationStructureCount = 1, .pAccelerationStructures = &Top_Level.Handle};
-  VkDescriptorImageInfo  Ii = {.imageView = Raytracing_Storage_Image.View, .imageLayout = VK_IMAGE_LAYOUT_GENERAL};
-  VkDescriptorBufferInfo Ci = {Camera_Uniform_Buffer.Buffer, 0, Camera_Uniform_Buffer.Size};
-  VkDescriptorBufferInfo Vi = {Vertex_Buffer.Buffer, 0, Vertex_Buffer.Size};
-  VkDescriptorBufferInfo Ix = {Index_Buffer.Buffer, 0, Index_Buffer.Size};
-  VkDescriptorBufferInfo Mi = {Material_Buffer.Buffer, 0, Material_Buffer.Size};
-  VkDescriptorBufferInfo Ti = {Texture_Id_Buffer.Buffer, 0, Texture_Id_Buffer.Size};
-  VkDescriptorBufferInfo Wv = {Weapon->Vertex_Buffer.Buffer, 0, Weapon->Vertex_Buffer.Size};
-  VkDescriptorBufferInfo Wi = {Weapon->Index_Buffer.Buffer, 0, Weapon->Index_Buffer.Size};
-  VkDescriptorBufferInfo Wt = {Weapon->Texture_Id_Buffer.Buffer, 0, Weapon->Texture_Id_Buffer.Size};
-  VkDescriptorImageInfo  Li = {Lightmap_Sampler, Lightmap_View, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
-  VkDescriptorImageInfo *Tx = calloc (Texture_Count, sizeof (VkDescriptorImageInfo));
-  for (uint I = 0; I < Texture_Count; I++)
-    Tx[I] = (VkDescriptorImageInfo){Texture_Sampler, Texture_Views[I], VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
-
-  VkWriteDescriptorSet W[] = {
-    {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, &Aw, Descriptor_Set, 0,0,1, VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, NULL, NULL},
-    {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, Descriptor_Set, 1,0,1, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, &Ii, NULL},
-    {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, Descriptor_Set, 2,0,1, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, NULL, &Ci},
-    {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, Descriptor_Set, 3,0,1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, NULL, &Vi},
-    {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, Descriptor_Set, 4,0,1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, NULL, &Ix},
-    {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, Descriptor_Set, 5,0,1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, NULL, &Mi},
-    {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, Descriptor_Set, 6,0,1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, NULL, &Ti},
-    {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, Descriptor_Set, 7,0,1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &Li, NULL},
-    {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, Descriptor_Set, 8,0,1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, NULL, &Wv},
-    {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, Descriptor_Set, 9,0,1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, NULL, &Wi},
-    {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, Descriptor_Set, 10,0,1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, NULL, &Wt},
-    {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, Descriptor_Set, 11,0,Texture_Count, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, Tx, NULL},
-  };
-  vkUpdateDescriptorSets (Device, 12, W, 0, NULL);
-  free (Tx);
-}
-
-// ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
-//
-// §14. Render — Camera, Weapon, Input, Frame
-//
-// ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
-
-// BUG FIX: local variable renamed from `View` to `View_Matrix` to avoid shadowing the View() function
-void Camera_Upload (Camera *St, float Fov, uint Weapon_Tex_Base) {
-  mat4 View_Matrix = View (St->Position, St->Yaw, St->Pitch);
-  mat4 Proj_Matrix = Perspective (Fov, (float)Width / Height, 0.1f, 10000.f);
-  struct { mat4 Inv_View, Inv_Proj; uint Frame, Wtb; float Pad[2]; } U;
-  U.Inv_View = Inverse_Orthogonal (View_Matrix);
-  U.Inv_Proj = Inverse_Projection (Proj_Matrix);
-  U.Frame    = St->Frame;
-  U.Wtb      = Weapon_Tex_Base;
-  Buffer_Upload (Camera_Uniform_Buffer, &U, sizeof U);
-}
-
-void Weapon_Update (Weapon_Instance *W, const Camera *Cam, float Dt, int Fire) {
-  if (not W->Model.Vertex_Count) return;
-
-  // Fire animation state machine
-  if (Fire and not W->Is_Firing) { W->Is_Firing = 1; W->Fire_Time = 0; }
-  if (W->Is_Firing) { W->Fire_Time += Dt * 10.f; if (W->Fire_Time >= 6.f) { W->Is_Firing = 0; W->Fire_Time = 0; } }
-  W->Bob_Time += Dt;
-
-  // Camera orthonormal basis from yaw and pitch
-  float Cy = cosf(Cam->Yaw), Sy = sinf(Cam->Yaw), Cp = cosf(Cam->Pitch), Sp = sinf(Cam->Pitch);
-  vec3 Fwd = Make (-Sp, Cp, -Cy * Cp);
-  vec3 Rgt = Normalize (Cross (Fwd, Make (0,1,0)));
-  vec3 Up  = Cross (Rgt, Fwd);
-
-  // Viewmodel offset with idle bob and recoil
-  float Bv = sinf(W->Bob_Time * 3.5f) * 0.4f, Bh = cosf(W->Bob_Time * 1.7f) * 0.2f;
-  float Rc = W->Is_Firing ? -1.2f * expf(-W->Fire_Time * 5.f) : 0.f;
-  vec3 Off = Add (Cam->Position, Add (Scale (Fwd, 8.f+Rc), Add (Scale (Rgt, 5.f+Bh), Scale (Up, -5.f+Bv))));
-
-  // Select animation frame
-  uint Fi = 0;
-  if (W->Model.Animation_Frame_Count > 1 and W->Is_Firing) {
-    Fi = (uint)W->Fire_Time;
-    if (Fi >= W->Model.Animation_Frame_Count) Fi = W->Model.Animation_Frame_Count - 1;
-  }
-
-  // Swizzle tag axes from Quake 3 Z-up → Y-up
-  const float *Tag = W->Model.Tag_Weapon[Fi];
-  vec3 A0 = {Tag[3], Tag[5], -Tag[4]}, A1 = {Tag[6], Tag[8], -Tag[7]}, A2 = {Tag[9], Tag[11], -Tag[10]};
-  float Ty[9] = {A0.x, A2.x, -A1.x, A0.y, A2.y, -A1.y, A0.z, A2.z, -A1.z};
-  float Cb[9] = {Fwd.x, Up.x, Rgt.x, Fwd.y, Up.y, Rgt.y, Fwd.z, Up.z, Rgt.z};
-  float Rot[9];
-  for (int R = 0; R < 3; R++) for (int C = 0; C < 3; C++)
-    Rot[R*3+C] = Cb[R*3]*Ty[C] + Cb[R*3+1]*Ty[3+C] + Cb[R*3+2]*Ty[6+C];
-  float Sc = 0.7f;
-
-  // Transform each vertex from model space to world space
-  for (uint I = 0; I < W->Model.Vertex_Count; I++) {
-    float Sx = W->Model.Vertices[I].Position[0]*Sc, Sy2 = W->Model.Vertices[I].Position[1]*Sc, Sz = W->Model.Vertices[I].Position[2]*Sc;
-    W->Transformed_Vertices[I].Position[0] = Rot[0]*Sx + Rot[1]*Sy2 + Rot[2]*Sz + Off.x;
-    W->Transformed_Vertices[I].Position[1] = Rot[3]*Sx + Rot[4]*Sy2 + Rot[5]*Sz + Off.y;
-    W->Transformed_Vertices[I].Position[2] = Rot[6]*Sx + Rot[7]*Sy2 + Rot[8]*Sz + Off.z;
-    float Nx = W->Model.Vertices[I].Normal[0], Ny = W->Model.Vertices[I].Normal[1], Nz = W->Model.Vertices[I].Normal[2];
-    W->Transformed_Vertices[I].Normal[0] = Rot[0]*Nx + Rot[1]*Ny + Rot[2]*Nz;
-    W->Transformed_Vertices[I].Normal[1] = Rot[3]*Nx + Rot[4]*Ny + Rot[5]*Nz;
-    W->Transformed_Vertices[I].Normal[2] = Rot[6]*Nx + Rot[7]*Ny + Rot[8]*Nz;
-    W->Transformed_Vertices[I].Texture_Uv[0] = W->Model.Vertices[I].Texture_Uv[0];
-    W->Transformed_Vertices[I].Texture_Uv[1] = W->Model.Vertices[I].Texture_Uv[1];
-  }
-}
-
-Input Poll_Input () {
-  Input In = {0}; SDL_Event Ev;
-  while (SDL_PollEvent (&Ev)) {
-    if (Ev.type == SDL_QUIT) Quit = 1;
-    if (Ev.type == SDL_KEYDOWN and Ev.key.keysym.sym == SDLK_ESCAPE) Quit = 1;
-    if (Ev.type == SDL_MOUSEMOTION) { In.Delta_X += Ev.motion.xrel; In.Delta_Y += Ev.motion.yrel; }
-    if (Ev.type == SDL_MOUSEBUTTONDOWN and Ev.button.button == SDL_BUTTON_LEFT) In.Fire = 1;
-  }
-  const uint8_t *Kb = SDL_GetKeyboardState (NULL);
-  In.Forward = Kb[SDL_SCANCODE_W] or Kb[SDL_SCANCODE_UP];
-  In.Back    = Kb[SDL_SCANCODE_S] or Kb[SDL_SCANCODE_DOWN];
-  In.Left    = Kb[SDL_SCANCODE_A] or Kb[SDL_SCANCODE_LEFT];
-  In.Right   = Kb[SDL_SCANCODE_D] or Kb[SDL_SCANCODE_RIGHT];
-  In.Jump    = Kb[SDL_SCANCODE_SPACE];
-  In.Crouch  = Kb[SDL_SCANCODE_LCTRL] or Kb[SDL_SCANCODE_C];
-  return In;
-}
-
-void Raytracing_Frame () {
-  VK_CHECK (vkWaitForFences (Device, 1, &Fence, VK_TRUE, UINT64_MAX));
-  uint Img;
-  VK_CHECK (vkAcquireNextImageKHR (Device, Swapchain, UINT64_MAX, Semaphore_Image_Available, VK_NULL_HANDLE, &Img));
-  VK_CHECK (vkResetFences (Device, 1, &Fence));
-  VK_CHECK (vkResetCommandBuffer (Command_Buffer, 0));
-  VK_CHECK (vkBeginCommandBuffer (Command_Buffer, &(VkCommandBufferBeginInfo){.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO}));
-
-  vkCmdBindPipeline       (Command_Buffer, VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR, Pipeline);
-  vkCmdBindDescriptorSets (Command_Buffer, VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR, Pipeline_Layout, 0, 1, &Descriptor_Set, 0, NULL);
-  vkCmdTraceRays (Command_Buffer, &Shader_Binding_Ray_Generation, &Shader_Binding_Miss, &Shader_Binding_Hit, &Shader_Binding_Callable, Width, Height, 1);
-
-  // Storage image → transfer source
-  Image_Layout_Barrier (Command_Buffer, Raytracing_Storage_Image.Image,
-    VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-    VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT,
-    VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR, VK_PIPELINE_STAGE_TRANSFER_BIT);
-
-  // Swapchain image → transfer destination
-  Image_Layout_Barrier (Command_Buffer, Swapchain_Images[Img],
-    VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-    0, VK_ACCESS_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
-
-  // Blit ray tracing result to swapchain
-  vkCmdBlitImage (Command_Buffer,
-    Raytracing_Storage_Image.Image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-    Swapchain_Images[Img], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-    1, &(VkImageBlit){
-      .srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT,0,0,1}, .srcOffsets[1] = {Width, Height, 1},
-      .dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT,0,0,1}, .dstOffsets[1] = {(int)Swapchain_Extent.width, (int)Swapchain_Extent.height, 1}},
-    VK_FILTER_LINEAR);
-
-  // Storage image back to general
-  Image_Layout_Barrier (Command_Buffer, Raytracing_Storage_Image.Image,
-    VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL,
-    VK_ACCESS_TRANSFER_READ_BIT, VK_ACCESS_SHADER_WRITE_BIT,
-    VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR);
-
-  // Swapchain image → present
-  Image_Layout_Barrier (Command_Buffer, Swapchain_Images[Img],
-    VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
-    VK_ACCESS_TRANSFER_WRITE_BIT, 0, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
-
-  VK_CHECK (vkEndCommandBuffer (Command_Buffer));
-  VkPipelineStageFlags Wait = VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR;
-  VK_CHECK (vkQueueSubmit (Queue, 1,
-    &(VkSubmitInfo){.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
-      .waitSemaphoreCount = 1, .pWaitSemaphores = &Semaphore_Image_Available, .pWaitDstStageMask = &Wait,
-      .commandBufferCount = 1, .pCommandBuffers = &Command_Buffer,
-      .signalSemaphoreCount = 1, .pSignalSemaphores = &Semaphore_Render_Finished}, Fence));
-  VK_CHECK (vkQueuePresentKHR (Queue,
-    &(VkPresentInfoKHR){.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
-      .waitSemaphoreCount = 1, .pWaitSemaphores = &Semaphore_Render_Finished,
-      .swapchainCount = 1, .pSwapchains = &Swapchain, .pImageIndices = &Img}));
-  vkQueueWaitIdle (Queue);
-}
-
-// ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
-//
-// §. Physics
-//
-//   Six collider shapes (sphere, capsule, AABB, cylinder, ellipsoid, HULL), three ray strategies,
-//   one grade cascade.  The support function s(d̂) maps unit directions to surface offsets:
-//
-//     SPHERE      s(d̂) = d̂ · r                                   Projectiles, pickups
-//     CAPSULE     s(d̂) = d̂ · r + (0, sign(d̂.y) · spine, 0)      Player, NPCs
-//     AABB        s(d̂) = sign(d̂) ⊙ extents                       Crates, elevators
-//     CYLINDER    s(d̂) = (d̂.xz/‖d̂.xz‖ · r, sign(d̂.y) · h, 0)   Barrels, columns
-//     ELLIPSOID   s(d̂) = normalize(d̂ ⊘ axes) ⊙ axes · ‖...‖     Vehicles
-//     HULL        s(d̂) = argmax(v · d̂) over vertex set            Arbitrary convex models
-//
-// ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
-
-// ── §11A. GPU Physics Types ──────────────────────────────────────────────────────────────────────
-
-enum { SHAPE_SPHERE, SHAPE_CAPSULE, SHAPE_AABB, SHAPE_CYLINDER, SHAPE_ELLIPSOID, SHAPE_HULL };
-
-typedef struct {                          // GPU-resident player state, std430, 112 bytes
-  float Position     [3]; float Pad_A;
-  float Velocity     [3]; float Pad_B;
-  float Yaw, Pitch;
-  int   On_Ground, Jump_Held;
-  float Ground_Normal[3]; float Pad_C;
-  int   Ground_Plane, Ducked;
-  float View_Height, Stuck_Time;
-  float Speed_Last;  int Shape;           // Active collider shape (0-5)
-  float Extents      [3]; float Pad_D;    // Half-extents / radii / semi-axes (shape-dependent)
-  float Spine;       float Pad_E [3];     // Capsule spine half-length (hh - radius), 0 for non-capsules
-} Gpu_Player;
-
-typedef struct {                          // Per-frame input via push constants, 48 bytes
-  int   Forward, Back, Left, Right;
-  int   Jump, Fire, Crouch, Pad;
-  float Delta_X, Delta_Y, Dt, Pad2;
-} Gpu_Input;
-
-VkPipeline            Physics_Pipeline;
-VkPipelineLayout      Physics_Pipeline_Layout;
-VkDescriptorSetLayout Physics_Descriptor_Layout;
-VkDescriptorPool      Physics_Descriptor_Pool;
-VkDescriptorSet       Physics_Descriptor_Set;
-Gpu_Buffer            Player_State_Buffer;
-
-// ── §11B. Convex Hulls ──────────────────────────────────────────────────────────────────────────
-
-#define HULL_MAX_VERTS    256
-#define HULL_MAX_ADJ      16
-#define HULL_MAX_FACES    512
-#define HULL_MAX_ENTITIES 32
-
-typedef struct {
-  vec3  Vertices  [HULL_MAX_VERTS];
-  int   Adjacency [HULL_MAX_VERTS][HULL_MAX_ADJ];
-  uint  Vertex_Count;
-  vec3  Centroid;
-  float Bounding_Radius;
-} Convex_Hull;
-
-typedef struct {
-  float Vertices [HULL_MAX_VERTS][4];
-  int   Adjacency[HULL_MAX_VERTS][HULL_MAX_ADJ];
-  int   Count;
-  float Radius;
-  float Centroid [3];
-  int   Pad;
-} Gpu_Hull;
-
-Gpu_Buffer Hull_Storage_Buffer;
-
-typedef struct { int A, B, C; int Dead; } QH_Face;
-typedef struct { int V0, V1, Face; } QH_Edge;
-
-static float QH_Dist (vec3 P, vec3 A, vec3 B, vec3 C) {
-  vec3 N = Cross (Subtract (B, A), Subtract (C, A));
-  float L = sqrtf (Dot (N, N));
-  return L > 1e-8f ? Dot (Subtract (P, A), Scale (N, 1.f / L)) : 0;
-}
-
-Convex_Hull Quickhull (const vec3 *Pts, uint Cnt) {
-  Convex_Hull R = {0};
-  if (Cnt < 4) { for (uint i = 0; i < Cnt and i < HULL_MAX_VERTS; i++) R.Vertices[R.Vertex_Count++] = Pts[i]; return R; }
-
-  // 6 extremal points → initial tetrahedron
-  int Ex[6] = {0,0,0,0,0,0};
-  for (uint i = 1; i < Cnt; i++) {
-    if (Pts[i].x < Pts[Ex[0]].x) Ex[0]=i; if (Pts[i].x > Pts[Ex[1]].x) Ex[1]=i;
-    if (Pts[i].y < Pts[Ex[2]].y) Ex[2]=i; if (Pts[i].y > Pts[Ex[3]].y) Ex[3]=i;
-    if (Pts[i].z < Pts[Ex[4]].z) Ex[4]=i; if (Pts[i].z > Pts[Ex[5]].z) Ex[5]=i;
-  }
-  int P0=Ex[0], P1=Ex[1]; float Bd = 0;
-  for (int i=0;i<6;i++) for (int j=i+1;j<6;j++) {
-    float D = Dot(Subtract(Pts[Ex[i]],Pts[Ex[j]]),Subtract(Pts[Ex[i]],Pts[Ex[j]]));
-    if (D > Bd) { Bd = D; P0 = Ex[i]; P1 = Ex[j]; }
-  }
-  vec3 Edg = Subtract(Pts[P1],Pts[P0]); float El2 = Dot(Edg,Edg);
-  int P2=-1; Bd=0;
-  for (uint i=0;i<Cnt;i++) {
-    if ((int)i==P0 or (int)i==P1) continue;
-    vec3 V = Subtract(Pts[i],Pts[P0]); float T = Dot(V,Edg)/El2;
-    float D = Dot(Subtract(V,Scale(Edg,T)),Subtract(V,Scale(Edg,T)));
-    if (D>Bd) { Bd=D; P2=i; }
-  }
-  if (P2<0) P2=(P0+1)%Cnt;
-  int P3=-1; Bd=0;
-  for (uint i=0;i<Cnt;i++) {
-    if ((int)i==P0 or (int)i==P1 or (int)i==P2) continue;
-    float D = fabsf(QH_Dist(Pts[i],Pts[P0],Pts[P1],Pts[P2]));
-    if (D>Bd) { Bd=D; P3=i; }
-  }
-  if (P3<0) P3=(P2+1)%Cnt;
-  if (QH_Dist(Pts[P3],Pts[P0],Pts[P1],Pts[P2])>0) { int T=P0; P0=P1; P1=T; }
-
-  QH_Face Fc[HULL_MAX_FACES]; int Fn=0;
-  Fc[Fn++]=(QH_Face){P0,P1,P2,0}; Fc[Fn++]=(QH_Face){P0,P2,P3,0};
-  Fc[Fn++]=(QH_Face){P0,P3,P1,0}; Fc[Fn++]=(QH_Face){P1,P3,P2,0};
-
-  int *As = calloc(Cnt,sizeof(int));
-  for (uint i=0;i<Cnt;i++) As[i]=-1;
-  for (uint i=0;i<Cnt;i++) {
-    if ((int)i==P0 or (int)i==P1 or (int)i==P2 or (int)i==P3) continue;
-    float Best=0;
-    for (int f=0;f<Fn;f++) { if (Fc[f].Dead) continue;
-      float D = QH_Dist(Pts[i],Pts[Fc[f].A],Pts[Fc[f].B],Pts[Fc[f].C]);
-      if (D>Best) { Best=D; As[i]=f; }
-    }
-  }
-
-  for (int It=0; It<(int)Cnt and Fn<HULL_MAX_FACES-20; It++) {
-    int Bf=-1,Bp=-1; Bd=0;
-    for (uint i=0;i<Cnt;i++) { if (As[i]<0 or Fc[As[i]].Dead) continue;
-      float D = QH_Dist(Pts[i],Pts[Fc[As[i]].A],Pts[Fc[As[i]].B],Pts[Fc[As[i]].C]);
-      if (D>Bd) { Bd=D; Bf=As[i]; Bp=i; }
-    }
-    if (Bp<0) break;
-
-    int Vis[HULL_MAX_FACES]; int Vc2=0;
-    for (int f=0;f<Fn;f++) { if (Fc[f].Dead) continue;
-      if (QH_Dist(Pts[Bp],Pts[Fc[f].A],Pts[Fc[f].B],Pts[Fc[f].C])>1e-6f) Vis[Vc2++]=f;
-    }
-
-    QH_Edge Hz[HULL_MAX_FACES*3]; int Hc=0;
-    for (int vi=0;vi<Vc2;vi++) { int f=Vis[vi];
-      int Tr[3][2]={{Fc[f].A,Fc[f].B},{Fc[f].B,Fc[f].C},{Fc[f].C,Fc[f].A}};
-      for (int e=0;e<3;e++) { int Sh=0;
-        for (int vj=0;vj<Vc2;vj++) { if (vj==vi) continue; int g=Vis[vj];
-          int Fv[3]={Fc[g].A,Fc[g].B,Fc[g].C}; int H0=0,H1=0;
-          for (int k=0;k<3;k++) { H0|=(Fv[k]==Tr[e][0]); H1|=(Fv[k]==Tr[e][1]); }
-          if (H0 and H1) { Sh=1; break; }
-        }
-        if (not Sh) Hz[Hc++]=(QH_Edge){Tr[e][0],Tr[e][1],f};
-      }
-    }
-    for (int vi=0;vi<Vc2;vi++) Fc[Vis[vi]].Dead=1;
-    int Ns=Fn;
-    for (int hi=0;hi<Hc and Fn<HULL_MAX_FACES;hi++) Fc[Fn++]=(QH_Face){Hz[hi].V1,Hz[hi].V0,Bp,0};
-    As[Bp]=-1;
-    for (uint i=0;i<Cnt;i++) { if (As[i]<0) continue; if (not Fc[As[i]].Dead) continue;
-      As[i]=-1; float Best=0;
-      for (int f=Ns;f<Fn;f++) { float D=QH_Dist(Pts[i],Pts[Fc[f].A],Pts[Fc[f].B],Pts[Fc[f].C]); if (D>Best){Best=D;As[i]=f;} }
-    }
-  }
-  free(As);
-
-  // Extract unique vertices
-  int Rm[HULL_MAX_FACES*3]; memset(Rm,-1,sizeof Rm);
-  for (int f=0;f<Fn;f++) { if (Fc[f].Dead) continue;
-    int Tr[3]={Fc[f].A,Fc[f].B,Fc[f].C};
-    for (int k=0;k<3;k++) if (Tr[k]>=0 and Tr[k]<(int)Cnt and Rm[Tr[k]]<0 and R.Vertex_Count<HULL_MAX_VERTS) {
-      Rm[Tr[k]]=(int)R.Vertex_Count; R.Vertices[R.Vertex_Count++]=Pts[Tr[k]];
-    }
-  }
-  // Build adjacency
-  memset(R.Adjacency,-1,sizeof R.Adjacency);
-  for (int f=0;f<Fn;f++) { if (Fc[f].Dead) continue;
-    int Rv[3]={Rm[Fc[f].A],Rm[Fc[f].B],Rm[Fc[f].C]};
-    for (int e=0;e<3;e++) { int V0=Rv[e],V1=Rv[(e+1)%3]; if (V0<0 or V1<0) continue;
-      for (int a=0;a<HULL_MAX_ADJ;a++) { if (R.Adjacency[V0][a]==V1) break; if (R.Adjacency[V0][a]==-1){R.Adjacency[V0][a]=V1;break;} }
-      for (int a=0;a<HULL_MAX_ADJ;a++) { if (R.Adjacency[V1][a]==V0) break; if (R.Adjacency[V1][a]==-1){R.Adjacency[V1][a]=V0;break;} }
-    }
-  }
-  // Centroid and bounding radius
-  R.Centroid = Make(0,0,0);
-  for (uint i=0;i<R.Vertex_Count;i++) R.Centroid = Add(R.Centroid,R.Vertices[i]);
-  if (R.Vertex_Count) R.Centroid = Scale(R.Centroid, 1.f/R.Vertex_Count);
-  R.Bounding_Radius = 0;
-  for (uint i=0;i<R.Vertex_Count;i++) {
-    float D = Dot(Subtract(R.Vertices[i],R.Centroid),Subtract(R.Vertices[i],R.Centroid));
-    if (D > R.Bounding_Radius*R.Bounding_Radius) R.Bounding_Radius = sqrtf(D);
-  }
-  printf("[hull] %u vertices, radius %.1f\n", R.Vertex_Count, R.Bounding_Radius);
-  return R;
-}
-
-Convex_Hull Hull_From_Vertices (const Vertex *V, uint C) {
-  vec3 *P = malloc(sizeof(vec3)*C);
-  for (uint i=0;i<C;i++) P[i] = Make(V[i].Position[0],V[i].Position[1],V[i].Position[2]);
-  Convex_Hull H = Quickhull(P,C); free(P); return H;
-}
-
-void Hull_Upload (const Convex_Hull *H) {
-  Gpu_Hull Pk = {0};
-  Pk.Count = (int)H->Vertex_Count; Pk.Radius = H->Bounding_Radius;
-  Pk.Centroid[0]=H->Centroid.x; Pk.Centroid[1]=H->Centroid.y; Pk.Centroid[2]=H->Centroid.z;
-  for (uint i=0;i<H->Vertex_Count;i++) {
-    Pk.Vertices[i][0]=H->Vertices[i].x; Pk.Vertices[i][1]=H->Vertices[i].y;
-    Pk.Vertices[i][2]=H->Vertices[i].z; Pk.Vertices[i][3]=0;
-    memcpy(Pk.Adjacency[i],H->Adjacency[i],sizeof(int)*HULL_MAX_ADJ);
-  }
-  if (not Hull_Storage_Buffer.Buffer)
-    Hull_Storage_Buffer = Buffer_Allocate(sizeof(Gpu_Hull),
-      VK_BUFFER_USAGE_STORAGE_BUFFER_BIT|VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
-      VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT|VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
-  Buffer_Upload(Hull_Storage_Buffer,&Pk,sizeof Pk);
-}
-
-// ── §11C. GPU Physics Pipeline (with hull binding 4) ─────────────────────────────────────────────
-
-void Physics_Pipeline_Create () {
-  VkDescriptorSetLayoutBinding B[] = {
-    {0, VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, 1, VK_SHADER_STAGE_COMPUTE_BIT, NULL},
-    {1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,             1, VK_SHADER_STAGE_COMPUTE_BIT, NULL},  // Vertex buffer
-    {2, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,             1, VK_SHADER_STAGE_COMPUTE_BIT, NULL},  // Index buffer
-    {3, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,             1, VK_SHADER_STAGE_COMPUTE_BIT, NULL},  // Player state
-    {4, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,             1, VK_SHADER_STAGE_COMPUTE_BIT, NULL},  // Hull data
-  };
-  VK_CHECK (vkCreateDescriptorSetLayout (Device,
-    &(VkDescriptorSetLayoutCreateInfo){.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
-      .bindingCount = 5, .pBindings = B}, NULL, &Physics_Descriptor_Layout));
-  VkPushConstantRange Push = {VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(Gpu_Input)};
-  VK_CHECK (vkCreatePipelineLayout (Device,
-    &(VkPipelineLayoutCreateInfo){.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
-      .setLayoutCount = 1, .pSetLayouts = &Physics_Descriptor_Layout,
-      .pushConstantRangeCount = 1, .pPushConstantRanges = &Push}, NULL, &Physics_Pipeline_Layout));
-  VkShaderModule M = Shader_Module_Load (SHADER_PATH_PHYSICS_COMPUTE);
-  VK_CHECK (vkCreateComputePipelines (Device, VK_NULL_HANDLE, 1,
-    &(VkComputePipelineCreateInfo){.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
-      .stage = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, NULL, 0, VK_SHADER_STAGE_COMPUTE_BIT, M, "main", NULL},
-      .layout = Physics_Pipeline_Layout}, NULL, &Physics_Pipeline));
-  vkDestroyShaderModule (Device, M, NULL);
-}
-
-void Physics_Resources_Create (const Player *Init) {
-  Player_State_Buffer = Buffer_Allocate (sizeof(Gpu_Player),
-    VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
-    VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
-  Gpu_Player S = {
-    .Position = {Init->Position.x, Init->Position.y, Init->Position.z},
-    .Yaw = Init->Yaw, .Pitch = Init->Pitch, .View_Height = DEFAULT_VIEW_HEIGHT,
-    .Shape = SHAPE_CAPSULE, .Extents = {15,32,15}, .Spine = 17};
-  Buffer_Upload (Player_State_Buffer, &S, sizeof S);
-
-  // Initialize hull buffer with a 1-vertex dummy (replaced when a real hull is loaded)
-  if (not Hull_Storage_Buffer.Buffer) {
-    Hull_Storage_Buffer = Buffer_Allocate (sizeof(Gpu_Hull),
-      VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
-      VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
-    Gpu_Hull Empty = {0}; Empty.Count = 1;
+    Gpu_Hull Empty = {0};
+    Empty.Count = 1;
     Buffer_Upload (Hull_Storage_Buffer, &Empty, sizeof Empty);
   }
 
-  VkDescriptorPoolSize Sz[] = {{VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR,1}, {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,4}};
+  // Allocate the physics descriptor pool and set
+  VkDescriptorPoolSize Pool_Sizes[] = {
+    {VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, 1},
+    {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,             4}};
   VK_CHECK (vkCreateDescriptorPool (Device,
-    &(VkDescriptorPoolCreateInfo){.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
-      .maxSets = 1, .poolSizeCount = 2, .pPoolSizes = Sz}, NULL, &Physics_Descriptor_Pool));
-  VK_CHECK (vkAllocateDescriptorSets (Device,
-    &(VkDescriptorSetAllocateInfo){.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
-      .descriptorPool = Physics_Descriptor_Pool, .descriptorSetCount = 1,
-      .pSetLayouts = &Physics_Descriptor_Layout}, &Physics_Descriptor_Set));
+    &(VkDescriptorPoolCreateInfo){
+      .sType         = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
+      .maxSets       = 1,
+      .poolSizeCount = 2,
+      .pPoolSizes    = Pool_Sizes},
+    NULL, &Physics_Descriptor_Pool));
 
-  VkWriteDescriptorSetAccelerationStructureKHR Aw = {
-    .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET_ACCELERATION_STRUCTURE_KHR,
-    .accelerationStructureCount = 1, .pAccelerationStructures = &Top_Level.Handle};
-  VkDescriptorBufferInfo Vb = {Vertex_Buffer.Buffer, 0, Vertex_Buffer.Size};
-  VkDescriptorBufferInfo Ib = {Index_Buffer.Buffer, 0, Index_Buffer.Size};
-  VkDescriptorBufferInfo Pb = {Player_State_Buffer.Buffer, 0, Player_State_Buffer.Size};
-  VkDescriptorBufferInfo Hb = {Hull_Storage_Buffer.Buffer, 0, Hull_Storage_Buffer.Size};
-  VkWriteDescriptorSet W[] = {
-    {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, &Aw,  Physics_Descriptor_Set, 0,0,1, VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, NULL, NULL},
-    {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, Physics_Descriptor_Set, 1,0,1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, NULL, &Vb},
-    {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, Physics_Descriptor_Set, 2,0,1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, NULL, &Ib},
-    {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, Physics_Descriptor_Set, 3,0,1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, NULL, &Pb},
-    {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, Physics_Descriptor_Set, 4,0,1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, NULL, &Hb},
+  VK_CHECK (vkAllocateDescriptorSets (Device,
+    &(VkDescriptorSetAllocateInfo){
+      .sType              = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+      .descriptorPool     = Physics_Descriptor_Pool,
+      .descriptorSetCount = 1,
+      .pSetLayouts        = &Physics_Descriptor_Layout},
+    &Physics_Descriptor_Set));
+
+  // Write all 5 descriptor bindings: TLAS, vertex buffer, index buffer, player state, hull data
+  VkWriteDescriptorSetAccelerationStructureKHR Acceleration_Write = {
+    .sType                      = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET_ACCELERATION_STRUCTURE_KHR,
+    .accelerationStructureCount = 1,
+    .pAccelerationStructures    = &Top_Level.Handle};
+  VkDescriptorBufferInfo Vertex_Info  = {Vertex_Buffer.Buffer,       0, Vertex_Buffer.Size};
+  VkDescriptorBufferInfo Index_Info   = {Index_Buffer.Buffer,        0, Index_Buffer.Size};
+  VkDescriptorBufferInfo Player_Info  = {Player_State_Buffer.Buffer, 0, Player_State_Buffer.Size};
+  VkDescriptorBufferInfo Hull_Info    = {Hull_Storage_Buffer.Buffer,  0, Hull_Storage_Buffer.Size};
+
+  VkWriteDescriptorSet Writes[] = {
+    {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, &Acceleration_Write, Physics_Descriptor_Set, 0, 0, 1, VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, NULL, NULL},
+    {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL,                Physics_Descriptor_Set, 1, 0, 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,             NULL, &Vertex_Info},
+    {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL,                Physics_Descriptor_Set, 2, 0, 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,             NULL, &Index_Info},
+    {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL,                Physics_Descriptor_Set, 3, 0, 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,             NULL, &Player_Info},
+    {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL,                Physics_Descriptor_Set, 4, 0, 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,             NULL, &Hull_Info},
   };
-  vkUpdateDescriptorSets (Device, 5, W, 0, NULL);
+  vkUpdateDescriptorSets (Device, 5, Writes, 0, NULL);
 }
 
-Player Physics_Dispatch (Input In, float Dt) {
-  Gpu_Input G = {In.Forward, In.Back, In.Left, In.Right, In.Jump, In.Fire, In.Crouch, 0, In.Delta_X, In.Delta_Y, Dt, 0};
+// ── §10C. Physics Dispatch ────────────────────────────────────────────────────────────────────────
 
+Player Physics_Dispatch (Input In, float Dt) {
+
+  // Pack the CPU input into the GPU push constant structure
+  Gpu_Input GPU_Input = {
+    In.Forward, In.Back, In.Left, In.Right,
+    In.Jump, In.Fire, In.Crouch, 0,
+    In.Delta_X, In.Delta_Y, Dt, 0};
+
+  // Record a one-shot command buffer for the physics compute dispatch
   VK_CHECK (vkResetCommandBuffer (Command_Buffer, 0));
   VK_CHECK (vkBeginCommandBuffer (Command_Buffer,
-    &(VkCommandBufferBeginInfo){.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO, .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT}));
+    &(VkCommandBufferBeginInfo){
+      .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+      .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT}));
+
+  // Bind the physics pipeline and descriptors, push the input, dispatch a single workgroup
   vkCmdBindPipeline       (Command_Buffer, VK_PIPELINE_BIND_POINT_COMPUTE, Physics_Pipeline);
-  vkCmdBindDescriptorSets (Command_Buffer, VK_PIPELINE_BIND_POINT_COMPUTE, Physics_Pipeline_Layout, 0, 1, &Physics_Descriptor_Set, 0, NULL);
-  vkCmdPushConstants      (Command_Buffer, Physics_Pipeline_Layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof G, &G);
+  vkCmdBindDescriptorSets (Command_Buffer, VK_PIPELINE_BIND_POINT_COMPUTE, Physics_Pipeline_Layout,
+                           0, 1, &Physics_Descriptor_Set, 0, NULL);
+  vkCmdPushConstants      (Command_Buffer, Physics_Pipeline_Layout, VK_SHADER_STAGE_COMPUTE_BIT,
+                           0, sizeof GPU_Input, &GPU_Input);
   vkCmdDispatch           (Command_Buffer, 1, 1, 1);
 
-  // Memory barrier: compute writes → host read
+  // Memory barrier: ensure compute shader writes are visible to the host before readback
   vkCmdPipelineBarrier (Command_Buffer,
     VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_HOST_BIT, 0,
-    1, &(VkMemoryBarrier){.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
-      .srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT, .dstAccessMask = VK_ACCESS_HOST_READ_BIT},
+    1, &(VkMemoryBarrier){
+      .sType         = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
+      .srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT,
+      .dstAccessMask = VK_ACCESS_HOST_READ_BIT},
     0, NULL, 0, NULL);
 
+  // Submit the command buffer and wait for the GPU to finish
   VK_CHECK (vkEndCommandBuffer (Command_Buffer));
   VK_CHECK (vkQueueSubmit (Queue, 1,
-    &(VkSubmitInfo){.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO, .commandBufferCount = 1, .pCommandBuffers = &Command_Buffer}, VK_NULL_HANDLE));
+    &(VkSubmitInfo){
+      .sType              = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+      .commandBufferCount = 1,
+      .pCommandBuffers    = &Command_Buffer},
+    VK_NULL_HANDLE));
   VK_CHECK (vkQueueWaitIdle (Queue));
 
-  // Read back the updated player state from the GPU
+  // Read back the updated player state from the GPU buffer
   Gpu_Player *Mapped;
-  vkMapMemory (Device, Player_State_Buffer.Memory, 0, sizeof(Gpu_Player), 0, (void**)&Mapped);
+  vkMapMemory (Device, Player_State_Buffer.Memory, 0, sizeof (Gpu_Player), 0, (void **)&Mapped);
   Player Result = {
     .Position    = Make (Mapped->Position[0], Mapped->Position[1], Mapped->Position[2]),
     .Velocity    = Make (Mapped->Velocity[0], Mapped->Velocity[1], Mapped->Velocity[2]),
@@ -5158,8 +3891,8 @@ Player Physics_Dispatch (Input In, float Dt) {
 // The physics compute shader includes:
 //   - Binding 4: hull storage buffer (Gpu_Hull layout)
 //   - hull_support_brute(): O(n) linear scan for small hulls (< 64 verts)
-//   - hull_support_hill():  O(√n) amortized hill-climbing with adjacency table
-//   - hull_support():       adaptive dispatcher (brute for n<64, hill for n≥64)
+//   - hull_support_hill():  O(sqrt(n)) amortized hill-climbing with adjacency table
+//   - hull_support():       adaptive dispatcher (brute for n<64, hill for n>=64)
 //   - shape_offset() case 5: delegates to hull_support() for SHAPE_HULL
 //   - hull adds 2 extra sweep rays in the movement and anti-movement directions
 //   - recover() uses hull support distance as expected clearance per cardinal direction
@@ -5168,22 +3901,24 @@ Player Physics_Dispatch (Input In, float Dt) {
 
 // ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 //
-// §15. Main
+// §14. Main
 //
 // ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 
 int main (int Argc, char **Argv) {
-  const char *Map_Path = (Argc > 1) ? Argv[1] : DEFAULT_MAP_PATH;
+
+  // Determine which BSP map to load (default or from command-line argument)
+  char Map_Path[256];
+  snprintf (Map_Path, sizeof Map_Path, "%smaps/%s", ASSET_ROOT, (Argc > 1) ? Argv[1] : DEFAULT_MAP);
 
   // Initialize SDL2 with video subsystem and create a Vulkan-capable window
   SDL_Init (SDL_INIT_VIDEO);
-  SDL_Window *Window = SDL_CreateWindow (ENGINE_NAME, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
-                                         Width, Height, SDL_WINDOW_VULKAN | SDL_WINDOW_SHOWN);
+  Window = SDL_CreateWindow (ENGINE_NAME, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
+                             Width, Height, SDL_WINDOW_VULKAN | SDL_WINDOW_SHOWN);
   SDL_SetRelativeMouseMode (SDL_TRUE);
 
   // Create the Vulkan instance, surface, pick a physical device, and create the logical device
-  Vulkan_Create_Instance   (Window);
-  SDL_Vulkan_CreateSurface (Window, Instance, &Surface);
+  Vulkan_Create_Instance ();
   Vulkan_Pick_Physical_Device ();
   Vulkan_Create_Logical_Device ();
 
@@ -5192,22 +3927,22 @@ int main (int Argc, char **Argv) {
   Vulkan_Create_Synchronization ();
 
   // Create the ray tracing storage image (render target)
-  Raytracing_Storage_Image = Image_Storage_Create (Width, Height, VK_FORMAT_R8G8B8A8_UNORM);
+  Raytracing_Storage_Image = Image_Storage_Create (Width, Height);
   Vulkan_Transition_Storage_Image ();
 
   // Allocate the camera uniform buffer
   Camera_Uniform_Buffer = Buffer_Allocate (sizeof (mat4) * 2 + 16,
-    VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+    VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
+    VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
 
-  // Load the BSP scene, spawn point, and collision map
-  Spawn        Spawn_Point;
-  Collision_Map Collision;
-  Scene        Scene_Data = Scene_Load_From_BSP (Map_Path, &Spawn_Point, &Collision);
+  // Load the BSP scene and spawn point (no CPU collision map — GPU handles physics via TLAS)
+  Spawn Spawn_Point;
+  Scene Scene_Data = Scene_Load_From_BSP (Map_Path, &Spawn_Point);
 
   // Load scene and weapon textures
   Scene_Load_Textures (&Scene_Data);
   Weapon_Instance Weapon = {0};
-  Weapon_Model_Load (&Weapon);
+  Weapon.Model = Weapon_Model_Load ();
   Weapon_Load_Textures (&Weapon);
 
   // Build acceleration structures (BLAS for world + weapon, then TLAS)
@@ -5216,14 +3951,16 @@ int main (int Argc, char **Argv) {
   Top_Level_Initialize (2);
   Top_Level_Rebuild (&World_Bottom_Level, &Weapon.Bottom_Level);
 
-  // Create the ray tracing pipeline, SBT, and descriptors
+  // Create the ray tracing pipeline, shader binding table, and descriptors
   Raytracing_Pipeline_Create ();
   Shader_Binding_Table_Create ();
   Descriptor_Set_Create (&Weapon);
 
   // Create the GPU physics pipeline and resources (with hull binding)
   Physics_Pipeline_Create ();
-  Player Initial_Player = {.Position = Spawn_Point.Origin, .Yaw = Spawn_Point.Angle * 3.14159f / 180.f};
+  Player Initial_Player = {
+    .Position = Spawn_Point.Origin,
+    .Yaw      = Spawn_Point.Angle * 3.14159f / 180.f};
   Physics_Resources_Create (&Initial_Player);
 
   // Optionally build a convex hull from the weapon model for hull-based collision testing
@@ -5233,10 +3970,11 @@ int main (int Argc, char **Argv) {
   printf ("[init] ready — entering game loop\n");
 
   // ── Game loop ──────────────────────────────────────────────────────────────────────────────────
-  Camera    Cam    = {.Position = Spawn_Point.Origin, .Yaw = Spawn_Point.Angle * 3.14159f / 180.f};
-  uint64_t  Last   = SDL_GetPerformanceCounter ();
-  uint64_t  Freq   = SDL_GetPerformanceFrequency ();
-  uint      Frame  = 0;
+
+  Camera   Cam   = {.Position = Spawn_Point.Origin, .Yaw = Spawn_Point.Angle * 3.14159f / 180.f};
+  uint64_t Last  = SDL_GetPerformanceCounter ();
+  uint64_t Freq  = SDL_GetPerformanceFrequency ();
+  uint     Frame = 0;
   Quit = 0;
 
   while (not Quit) {
@@ -5244,17 +3982,17 @@ int main (int Argc, char **Argv) {
     // Compute delta time from the high-resolution performance counter
     uint64_t Now = SDL_GetPerformanceCounter ();
     float    Dt  = (float)(Now - Last) / (float)Freq;
-    if (Dt > 0.05f) Dt = 0.05f; // Clamp to 20fps minimum
+    if (Dt > MAX_DELTA_TIME) Dt = MAX_DELTA_TIME;
     Last = Now;
 
     // Poll input and dispatch GPU physics
-    Input In   = Poll_Input ();
-    Player Phy = Physics_Dispatch (In, Dt);
+    Input In         = Poll_Input ();
+    Player Physics   = Physics_Dispatch (In, Dt);
 
     // Update the camera from the physics result
-    Cam.Position = Phy.Position;
-    Cam.Yaw      = Phy.Yaw;
-    Cam.Pitch    = Phy.Pitch;
+    Cam.Position = Physics.Position;
+    Cam.Yaw      = Physics.Yaw;
+    Cam.Pitch    = Physics.Pitch;
     Cam.Frame    = Frame;
 
     // Animate and rebuild the weapon viewmodel
@@ -5263,45 +4001,745 @@ int main (int Argc, char **Argv) {
     Top_Level_Rebuild (&World_Bottom_Level, &Weapon.Bottom_Level);
 
     // Upload the camera and dispatch ray tracing
-    Camera_Upload (&Cam, 90.f, Weapon.Texture_Base_Index);
+    Camera_Upload (&Cam, FIELD_OF_VIEW, Weapon.Texture_Base_Index);
     Raytracing_Frame ();
     Frame++;
   }
 
   // ── Cleanup ────────────────────────────────────────────────────────────────────────────────────
+
   vkDeviceWaitIdle (Device);
   printf ("[shutdown] %u frames rendered\n", Frame);
 
   // Free scene data
-  free (Scene_Data.Vertices);   free (Scene_Data.Indices);
-  free (Scene_Data.Materials);  free (Scene_Data.Texture_Ids);
+  free (Scene_Data.Vertices);
+  free (Scene_Data.Indices);
+  free (Scene_Data.Materials);
+  free (Scene_Data.Texture_Ids);
   free (Scene_Data.Texture_Names);
   if (Scene_Data.Lightmap_Atlas) free (Scene_Data.Lightmap_Atlas);
 
-  // Free collision map
-  free (Collision.Planes);   free (Collision.Nodes);
-  free (Collision.Leafs);    free (Collision.Leaf_Brushes);
-  free (Collision.Brushes);  free (Collision.Sides);
-  free (Collision.Shader_Contents); free (Collision.Brush_Checks);
-
-  // Destroy Vulkan objects (abbreviated — production code would destroy every handle)
-  vkDestroyPipeline       (Device, Pipeline, NULL);
-  vkDestroyPipelineLayout (Device, Pipeline_Layout, NULL);
-  vkDestroyPipeline       (Device, Physics_Pipeline, NULL);
-  vkDestroyPipelineLayout (Device, Physics_Pipeline_Layout, NULL);
-  vkDestroyDescriptorPool (Device, Descriptor_Pool, NULL);
-  vkDestroyDescriptorPool (Device, Physics_Descriptor_Pool, NULL);
+  // Destroy Vulkan objects
+  vkDestroyPipeline            (Device, Pipeline, NULL);
+  vkDestroyPipelineLayout      (Device, Pipeline_Layout, NULL);
+  vkDestroyPipeline            (Device, Physics_Pipeline, NULL);
+  vkDestroyPipelineLayout      (Device, Physics_Pipeline_Layout, NULL);
+  vkDestroyDescriptorPool      (Device, Descriptor_Pool, NULL);
+  vkDestroyDescriptorPool      (Device, Physics_Descriptor_Pool, NULL);
   vkDestroyDescriptorSetLayout (Device, Descriptor_Set_Layout, NULL);
   vkDestroyDescriptorSetLayout (Device, Physics_Descriptor_Layout, NULL);
-  vkDestroySemaphore (Device, Semaphore_Image_Available, NULL);
-  vkDestroySemaphore (Device, Semaphore_Render_Finished, NULL);
-  vkDestroyFence     (Device, Fence, NULL);
-  vkDestroyCommandPool (Device, Command_Pool, NULL);
-  vkDestroySwapchainKHR (Device, Swapchain, NULL);
-  vkDestroyDevice    (Device, NULL);
-  vkDestroySurfaceKHR (Instance, Surface, NULL);
-  vkDestroyInstance   (Instance, NULL);
+  vkDestroySemaphore           (Device, Semaphore_Image_Available, NULL);
+  vkDestroySemaphore           (Device, Semaphore_Render_Finished, NULL);
+  vkDestroyFence               (Device, Fence, NULL);
+  vkDestroyCommandPool         (Device, Command_Pool, NULL);
+  vkDestroySwapchainKHR        (Device, Swapchain, NULL);
+  vkDestroyDevice              (Device, NULL);
+  vkDestroySurfaceKHR          (Instance, Surface, NULL);
+  vkDestroyInstance            (Instance, NULL);
   SDL_DestroyWindow (Window);
   SDL_Quit ();
   return 0;
+}
+
+// ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+//
+// §12. Shaders — Embedded GLSL Source
+//
+//   The following glsl shader blocks are extracted by nob.c at build time, compiled to SPIR-V via
+//   glslangValidator --target-env vulkan1.3, and loaded at runtime via Shader_Module_Load.
+//
+// ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+
+glsl shader raygen rgen {
+#version 460
+#extension GL_EXT_ray_tracing : require
+
+layout(binding = 0) uniform accelerationStructureEXT  Top_Level;
+layout(binding = 1, rgba8) uniform image2D             Storage_Image;
+layout(binding = 2) uniform Camera_Uniform { mat4 Inverse_View; mat4 Inverse_Projection; uint Frame; uint Weapon_Texture_Base; };
+
+layout(location = 0) rayPayloadEXT vec3 Payload;
+
+void main () {
+  vec2 Pixel       = vec2 (gl_LaunchIDEXT.xy) + 0.5;
+  vec2 Uv          = Pixel / vec2 (gl_LaunchSizeEXT.xy);
+  vec2 Ndc         = Uv * 2.0 - 1.0;
+
+  // Reconstruct the world-space ray from screen coordinates using inverse camera matrices
+  vec4 Target      = Inverse_Projection * vec4 (Ndc.x, Ndc.y, 0.0, 1.0);
+  vec4 Direction   = Inverse_View * vec4 (normalize (Target.xyz / Target.w), 0.0);
+
+  Payload = vec3 (0.0);
+  traceRayEXT (Top_Level,
+               gl_RayFlagsOpaqueEXT,        // flags
+               0xFF,                          // cull mask
+               0,                             // SBT record offset
+               0,                             // SBT record stride
+               0,                             // miss index
+               (Inverse_View * vec4 (0, 0, 0, 1)).xyz,  // origin
+               0.001,                         // t_min
+               Direction.xyz,                 // direction
+               10000.0,                       // t_max
+               0);                            // payload location
+
+  imageStore (Storage_Image, ivec2 (gl_LaunchIDEXT.xy), vec4 (Payload, 1.0));
+}
+}
+
+glsl shader closesthit rchit {
+#version 460
+#extension GL_EXT_ray_tracing : require
+#extension GL_EXT_nonuniform_qualifier : require
+
+layout(binding = 0) uniform accelerationStructureEXT Top_Level;
+layout(binding = 2) uniform Camera_Uniform { mat4 Inverse_View; mat4 Inverse_Projection; uint Frame; uint Weapon_Texture_Base; };
+
+// Scene geometry
+layout(binding = 3, std430) readonly buffer Vertex_Data   { vec4 Data[]; } Vertices;
+layout(binding = 4, std430) readonly buffer Index_Data    { uint Data[]; } Indices;
+layout(binding = 5, std430) readonly buffer Material_Data { vec4 Data[]; } Materials;
+layout(binding = 6, std430) readonly buffer Tex_Id_Data   { uint Data[]; } Texture_Ids;
+layout(binding = 7)         uniform sampler2D              Lightmap;
+
+// Weapon geometry
+layout(binding = 8,  std430) readonly buffer Weapon_Vertex_Data { vec4 Data[]; } Weapon_Vertices;
+layout(binding = 9,  std430) readonly buffer Weapon_Index_Data  { uint Data[]; } Weapon_Indices;
+layout(binding = 10, std430) readonly buffer Weapon_Tex_Id_Data { uint Data[]; } Weapon_Tex_Ids;
+
+// Bindless texture array
+layout(binding = 11) uniform sampler2D Textures[];
+
+layout(location = 0) rayPayloadInEXT vec3 Payload;
+layout(location = 1) rayPayloadEXT   float Shadow_Factor;
+
+hitAttributeEXT vec2 Barycentrics;
+
+// Read a vertex attribute (48 bytes = 12 floats per vertex) from the appropriate buffer
+vec3 Read_Position   (uint I, bool W) { return W ? Weapon_Vertices.Data[I * 3 + 0].xyz : Vertices.Data[I * 3 + 0].xyz; }
+vec2 Read_Tex_Uv     (uint I, bool W) { return W ? Weapon_Vertices.Data[I * 3 + 1].xy  : Vertices.Data[I * 3 + 1].xy;  }
+vec2 Read_Lightmap_Uv(uint I, bool W) { return W ? Weapon_Vertices.Data[I * 3 + 1].zw  : Vertices.Data[I * 3 + 1].zw;  }
+vec3 Read_Normal     (uint I, bool W) { return W ? Weapon_Vertices.Data[I * 3 + 2].xyz : Vertices.Data[I * 3 + 2].xyz; }
+
+void main () {
+  // Determine if we hit the weapon (instance 1) or world geometry (instance 0)
+  bool  Is_Weapon     = (gl_InstanceCustomIndexEXT == 1);
+  uint  Primitive     = gl_PrimitiveID;
+
+  // Fetch triangle vertex indices
+  uint I0 = Is_Weapon ? Weapon_Indices.Data[Primitive * 3 + 0] : Indices.Data[Primitive * 3 + 0];
+  uint I1 = Is_Weapon ? Weapon_Indices.Data[Primitive * 3 + 1] : Indices.Data[Primitive * 3 + 1];
+  uint I2 = Is_Weapon ? Weapon_Indices.Data[Primitive * 3 + 2] : Indices.Data[Primitive * 3 + 2];
+
+  // Interpolate attributes using barycentric coordinates
+  vec3 Bary      = vec3 (1.0 - Barycentrics.x - Barycentrics.y, Barycentrics.x, Barycentrics.y);
+  vec3 Position  = Read_Position (I0, Is_Weapon) * Bary.x + Read_Position (I1, Is_Weapon) * Bary.y + Read_Position (I2, Is_Weapon) * Bary.z;
+  vec2 Tex_Coord = Read_Tex_Uv  (I0, Is_Weapon) * Bary.x + Read_Tex_Uv  (I1, Is_Weapon) * Bary.y + Read_Tex_Uv  (I2, Is_Weapon) * Bary.z;
+  vec2 Lm_Coord  = Read_Lightmap_Uv (I0, Is_Weapon) * Bary.x + Read_Lightmap_Uv (I1, Is_Weapon) * Bary.y + Read_Lightmap_Uv (I2, Is_Weapon) * Bary.z;
+  vec3 Normal    = normalize (Read_Normal (I0, Is_Weapon) * Bary.x + Read_Normal (I1, Is_Weapon) * Bary.y + Read_Normal (I2, Is_Weapon) * Bary.z);
+
+  // Fetch the texture ID for this triangle and sample the albedo
+  uint Tex_Id = Is_Weapon
+    ? Weapon_Tex_Ids.Data[Primitive] + Weapon_Texture_Base
+    : Texture_Ids.Data[Primitive];
+  vec3 Albedo  = texture (Textures[nonuniformEXT(Tex_Id)], Tex_Coord).rgb;
+
+  // Lighting: lightmap for world geometry, simple directional for weapon
+  vec3 Sun_Direction = normalize (vec3 (0.5, 0.8, 0.3));
+  vec3 Lighting;
+  if (Is_Weapon) {
+    float Diffuse = max (dot (Normal, Sun_Direction), 0.0) * 0.6 + 0.4;
+    Lighting = vec3 (Diffuse);
+  } else {
+    Lighting = texture (Lightmap, Lm_Coord).rgb;
+  }
+
+  // Trace a shadow ray toward the sun (skip weapon geometry via cull mask 0xFE)
+  Shadow_Factor = 0.0;
+  traceRayEXT (Top_Level,
+               gl_RayFlagsTerminateOnFirstHitEXT | gl_RayFlagsSkipClosestHitShaderEXT,
+               0xFE,                         // cull mask (skip weapon instance)
+               0,                             // SBT record offset
+               0,                             // SBT record stride
+               1,                             // miss index (shadow miss)
+               Position + Normal * 0.01,      // origin (biased along normal)
+               0.001,                         // t_min
+               Sun_Direction,                 // direction
+               10000.0,                       // t_max
+               1);                            // payload location
+
+  // Combine albedo, lighting, and shadow
+  float Shadow = mix (0.3, 1.0, Shadow_Factor);
+  Payload = Albedo * Lighting * Shadow;
+
+  // Apply simple tone mapping (Reinhard)
+  Payload = Payload / (Payload + 1.0);
+}
+}
+
+glsl shader miss rmiss {
+#version 460
+#extension GL_EXT_ray_tracing : require
+
+layout(location = 0) rayPayloadInEXT vec3 Payload;
+
+void main () {
+  // Procedural sky: gradient from pale horizon to deeper blue at zenith
+  float Vertical  = max (gl_WorldRayDirectionEXT.y, 0.0);
+  vec3  Horizon   = vec3 (0.7, 0.8, 0.95);
+  vec3  Zenith    = vec3 (0.2, 0.4, 0.8);
+  Payload = mix (Horizon, Zenith, pow (Vertical, 0.5));
+}
+}
+
+glsl shader shadow_miss rmiss {
+#version 460
+#extension GL_EXT_ray_tracing : require
+
+layout(location = 1) rayPayloadInEXT float Shadow_Factor;
+
+void main () {
+  // Shadow ray reached the light source without hitting anything — fully lit
+  Shadow_Factor = 1.0;
+}
+}
+
+glsl shader physics comp {
+#version 460
+#extension GL_EXT_ray_tracing : require
+#extension GL_EXT_ray_query : require
+
+// ── Descriptor bindings ────────────────────────────────────────────────────────────────────────
+
+layout(binding = 0) uniform accelerationStructureEXT Top_Level;
+layout(binding = 1, std430) readonly buffer Vertex_Data { vec4 Data[]; } Vertices;
+layout(binding = 2, std430) readonly buffer Index_Data  { uint Data[]; } Indices;
+
+layout(binding = 3, std430) buffer Player_Buffer {
+  vec3  Position;     float Pad_A;
+  vec3  Velocity;     float Pad_B;
+  float Yaw, Pitch;
+  int   On_Ground, Jump_Held;
+  vec3  Ground_Normal; float Pad_C;
+  int   Ground_Plane, Ducked;
+  float View_Height, Stuck_Time;
+  float Speed_Last;  int Shape;
+  vec3  Extents;     float Pad_D;
+  float Spine;       float Pad_E1, Pad_E2, Pad_E3;
+} Player;
+
+layout(binding = 4, std430) readonly buffer Hull_Buffer {
+  vec4  Hull_Vertices [256];
+  int   Hull_Adjacency[256][16];
+  int   Hull_Count;
+  float Hull_Radius;
+  vec3  Hull_Centroid;
+  int   Hull_Pad;
+};
+
+layout(push_constant) uniform Push {
+  int   Forward, Back, Left, Right;
+  int   Jump, Fire, Crouch, Pad;
+  float Delta_X, Delta_Y, Dt, Pad2;
+} Input;
+
+layout(local_size_x = 1) in;
+
+// ── Physics constants ──────────────────────────────────────────────────────────────────────────
+
+const float GRAVITY              = 800.0;
+const float GROUND_FRICTION      = 6.0;
+const float STOP_SPEED           = 100.0;
+const float GROUND_ACCELERATE    = 10.0;
+const float AIR_ACCELERATE       = 1.0;
+const float MAXIMUM_SPEED        = 320.0;
+const float JUMP_VELOCITY        = 270.0;
+const float STEP_SIZE            = 18.0;
+const float MINIMUM_WALK_NORMAL  = 0.7;
+const float OVERBOUNCE           = 1.001;
+const int   MAXIMUM_CLIP_PLANES  = 5;
+const float DEFAULT_VIEW_HEIGHT  = 26.0;
+const float CROUCH_VIEW_HEIGHT   = 12.0;
+const float MOUSE_SENSITIVITY    = 0.003;
+
+// ── Collider shape constants ───────────────────────────────────────────────────────────────────
+
+const int SHAPE_SPHERE    = 0;
+const int SHAPE_CAPSULE   = 1;
+const int SHAPE_AABB      = 2;
+const int SHAPE_CYLINDER  = 3;
+const int SHAPE_ELLIPSOID = 4;
+const int SHAPE_HULL      = 5;
+
+// ── Convex hull support functions ──────────────────────────────────────────────────────────────
+
+// Brute-force support: O(n) linear scan over all hull vertices.  Best for small hulls (< 64 verts).
+vec3 hull_support_brute (vec3 direction) {
+  float best_dot = -1e30;
+  int   best_idx = 0;
+  for (int i = 0; i < Hull_Count; i++) {
+    float d = dot (Hull_Vertices[i].xyz, direction);
+    if (d > best_dot) { best_dot = d; best_idx = i; }
+  }
+  return Hull_Vertices[best_idx].xyz;
+}
+
+// Hill-climbing support: O(sqrt(n)) amortized using per-vertex adjacency table.
+// Starts from vertex 0 and follows neighbors that increase dot(vertex, direction) until a
+// local maximum is reached.  On a convex hull, the local maximum IS the global maximum.
+vec3 hull_support_hill (vec3 direction) {
+  int current = 0;
+  float current_dot = dot (Hull_Vertices[0].xyz, direction);
+
+  for (int iteration = 0; iteration < 256; iteration++) {
+    int best_neighbor = -1;
+    float best_dot    = current_dot;
+
+    // Check all neighbors of the current vertex
+    for (int slot = 0; slot < 16; slot++) {
+      int neighbor = Hull_Adjacency[current][slot];
+      if (neighbor < 0) break;
+      float d = dot (Hull_Vertices[neighbor].xyz, direction);
+      if (d > best_dot) { best_dot = d; best_neighbor = neighbor; }
+    }
+
+    // If no neighbor improves the dot product, we've found the support point
+    if (best_neighbor < 0) break;
+    current     = best_neighbor;
+    current_dot = best_dot;
+  }
+  return Hull_Vertices[current].xyz;
+}
+
+// Adaptive dispatcher: brute-force for small hulls, hill-climbing for large ones
+vec3 hull_support (vec3 direction) {
+  if (Hull_Count < 64) return hull_support_brute (direction);
+  return hull_support_hill (direction);
+}
+
+// ── Shape support function ─────────────────────────────────────────────────────────────────────
+
+// Map a unit direction to the shape's surface offset (Minkowski support mapping)
+vec3 shape_offset (vec3 d) {
+  switch (Player.Shape) {
+    case SHAPE_SPHERE:
+      return d * Player.Extents.x;
+
+    case SHAPE_CAPSULE:
+      return d * Player.Extents.x + vec3 (0.0, sign(d.y) * Player.Spine, 0.0);
+
+    case SHAPE_AABB:
+      return sign(d) * Player.Extents;
+
+    case SHAPE_CYLINDER: {
+      vec2  xz    = d.xz;
+      float len   = length (xz);
+      vec2  disc  = (len > 1e-6) ? xz / len * Player.Extents.x : vec2(0.0);
+      return vec3 (disc.x, sign(d.y) * Player.Extents.y, disc.y);
+    }
+
+    case SHAPE_ELLIPSOID: {
+      vec3 scaled = d / Player.Extents;
+      float len   = length (scaled);
+      return (len > 1e-6) ? normalize(scaled) * Player.Extents : vec3(0.0);
+    }
+
+    case SHAPE_HULL:
+      return hull_support (d);
+
+    default:
+      return d * Player.Extents.x;
+  }
+}
+
+// ── Ray trace helper ───────────────────────────────────────────────────────────────────────────
+
+struct Trace_Result {
+  float Fraction;
+  vec3  Normal;
+  bool  Hit;
+};
+
+// Cast a swept shape from Origin along Direction for up to Distance units.
+// We approximate the expanded shape by casting multiple rays offset by the support function
+// in cardinal + diagonal directions, taking the nearest hit.
+Trace_Result trace_shape (vec3 Origin, vec3 Direction, float Distance) {
+  Trace_Result result;
+  result.Fraction = 1.0;
+  result.Normal   = vec3 (0.0, 1.0, 0.0);
+  result.Hit      = false;
+
+  if (Distance < 1e-6) return result;
+  vec3 dir_norm = normalize (Direction);
+
+  // 26 probe directions: 6 axes + 12 edge diagonals + 8 corner diagonals
+  const vec3 probes[26] = vec3[26](
+    vec3( 1, 0, 0), vec3(-1, 0, 0), vec3(0, 1, 0), vec3(0,-1, 0), vec3(0, 0, 1), vec3(0, 0,-1),
+    vec3( 1, 1, 0), vec3( 1,-1, 0), vec3(-1, 1, 0), vec3(-1,-1, 0),
+    vec3( 1, 0, 1), vec3( 1, 0,-1), vec3(-1, 0, 1), vec3(-1, 0,-1),
+    vec3( 0, 1, 1), vec3( 0, 1,-1), vec3( 0,-1, 1), vec3( 0,-1,-1),
+    vec3( 1, 1, 1), vec3( 1, 1,-1), vec3( 1,-1, 1), vec3( 1,-1,-1),
+    vec3(-1, 1, 1), vec3(-1, 1,-1), vec3(-1,-1, 1), vec3(-1,-1,-1)
+  );
+
+  for (int i = 0; i < 26; i++) {
+    vec3 offset = shape_offset (normalize(probes[i]));
+    vec3 ray_origin = Origin + offset;
+
+    rayQueryEXT rq;
+    rayQueryInitializeEXT (rq, Top_Level, gl_RayFlagsOpaqueEXT, 0xFF,
+                           ray_origin, 0.0, dir_norm, Distance);
+
+    while (rayQueryProceedEXT (rq)) {}
+
+    if (rayQueryGetIntersectionTypeEXT (rq, true) == gl_RayQueryCommittedIntersectionTriangleEXT) {
+      float t = rayQueryGetIntersectionTEXT (rq, true);
+      if (t < result.Fraction * Distance) {
+        // Reconstruct the triangle normal from vertices
+        uint prim = rayQueryGetIntersectionPrimitiveIndexEXT (rq, true);
+        uint i0 = Indices.Data[prim * 3 + 0];
+        uint i1 = Indices.Data[prim * 3 + 1];
+        uint i2 = Indices.Data[prim * 3 + 2];
+        vec3 v0 = Vertices.Data[i0 * 3].xyz;
+        vec3 v1 = Vertices.Data[i1 * 3].xyz;
+        vec3 v2 = Vertices.Data[i2 * 3].xyz;
+        vec3 n  = normalize (cross (v1 - v0, v2 - v0));
+
+        // Ensure the normal faces toward the ray origin
+        if (dot (n, dir_norm) > 0.0) n = -n;
+
+        result.Fraction = t / Distance;
+        result.Normal   = n;
+        result.Hit      = true;
+      }
+    }
+  }
+
+  // Additionally cast a ray offset by the movement direction's support (catches head-on impacts)
+  vec3 move_offset = shape_offset (dir_norm);
+  {
+    rayQueryEXT rq;
+    rayQueryInitializeEXT (rq, Top_Level, gl_RayFlagsOpaqueEXT, 0xFF,
+                           Origin + move_offset, 0.0, dir_norm, Distance);
+    while (rayQueryProceedEXT (rq)) {}
+    if (rayQueryGetIntersectionTypeEXT (rq, true) == gl_RayQueryCommittedIntersectionTriangleEXT) {
+      float t = rayQueryGetIntersectionTEXT (rq, true);
+      if (t < result.Fraction * Distance) {
+        uint prim = rayQueryGetIntersectionPrimitiveIndexEXT (rq, true);
+        uint i0 = Indices.Data[prim * 3 + 0];
+        uint i1 = Indices.Data[prim * 3 + 1];
+        uint i2 = Indices.Data[prim * 3 + 2];
+        vec3 v0 = Vertices.Data[i0 * 3].xyz;
+        vec3 v1 = Vertices.Data[i1 * 3].xyz;
+        vec3 v2 = Vertices.Data[i2 * 3].xyz;
+        vec3 n  = normalize (cross (v1 - v0, v2 - v0));
+        if (dot (n, dir_norm) > 0.0) n = -n;
+        result.Fraction = t / Distance;
+        result.Normal   = n;
+        result.Hit      = true;
+      }
+    }
+  }
+
+  // And the anti-movement direction's support (catches backward collisions from broad shapes)
+  vec3 anti_offset = shape_offset (-dir_norm);
+  {
+    rayQueryEXT rq;
+    rayQueryInitializeEXT (rq, Top_Level, gl_RayFlagsOpaqueEXT, 0xFF,
+                           Origin + anti_offset, 0.0, dir_norm, Distance);
+    while (rayQueryProceedEXT (rq)) {}
+    if (rayQueryGetIntersectionTypeEXT (rq, true) == gl_RayQueryCommittedIntersectionTriangleEXT) {
+      float t = rayQueryGetIntersectionTEXT (rq, true);
+      if (t < result.Fraction * Distance) {
+        uint prim = rayQueryGetIntersectionPrimitiveIndexEXT (rq, true);
+        uint i0 = Indices.Data[prim * 3 + 0];
+        uint i1 = Indices.Data[prim * 3 + 1];
+        uint i2 = Indices.Data[prim * 3 + 2];
+        vec3 v0 = Vertices.Data[i0 * 3].xyz;
+        vec3 v1 = Vertices.Data[i1 * 3].xyz;
+        vec3 v2 = Vertices.Data[i2 * 3].xyz;
+        vec3 n  = normalize (cross (v1 - v0, v2 - v0));
+        if (dot (n, dir_norm) > 0.0) n = -n;
+        result.Fraction = t / Distance;
+        result.Normal   = n;
+        result.Hit      = true;
+      }
+    }
+  }
+
+  return result;
+}
+
+// ── Ground trace ───────────────────────────────────────────────────────────────────────────────
+
+// Cast a short ray downward to detect ground contact
+void ground_trace () {
+  vec3 down_offset = shape_offset (vec3 (0, -1, 0));
+  vec3 origin      = Player.Position + down_offset;
+  float dist       = 0.5;
+
+  rayQueryEXT rq;
+  rayQueryInitializeEXT (rq, Top_Level, gl_RayFlagsOpaqueEXT, 0xFF,
+                         origin, 0.0, vec3 (0, -1, 0), dist);
+  while (rayQueryProceedEXT (rq)) {}
+
+  if (rayQueryGetIntersectionTypeEXT (rq, true) == gl_RayQueryCommittedIntersectionTriangleEXT) {
+    uint prim = rayQueryGetIntersectionPrimitiveIndexEXT (rq, true);
+    uint i0 = Indices.Data[prim * 3 + 0];
+    uint i1 = Indices.Data[prim * 3 + 1];
+    uint i2 = Indices.Data[prim * 3 + 2];
+    vec3 v0 = Vertices.Data[i0 * 3].xyz;
+    vec3 v1 = Vertices.Data[i1 * 3].xyz;
+    vec3 v2 = Vertices.Data[i2 * 3].xyz;
+    vec3 n  = normalize (cross (v1 - v0, v2 - v0));
+    if (n.y < 0.0) n = -n;
+
+    if (n.y >= MINIMUM_WALK_NORMAL) {
+      Player.On_Ground    = 1;
+      Player.Ground_Normal = n;
+      Player.Ground_Plane  = 1;
+    } else {
+      Player.On_Ground    = 0;
+      Player.Ground_Plane  = 0;
+    }
+  } else {
+    Player.On_Ground    = 0;
+    Player.Ground_Plane  = 0;
+  }
+}
+
+// ── Clip velocity ──────────────────────────────────────────────────────────────────────────────
+
+vec3 clip_velocity (vec3 vel, vec3 normal) {
+  float backoff = dot (vel, normal) * OVERBOUNCE;
+  return vel - normal * backoff;
+}
+
+// ── Slide move ─────────────────────────────────────────────────────────────────────────────────
+
+void slide_move () {
+  vec3  planes[5];
+  int   plane_count = 0;
+  vec3  vel         = Player.Velocity;
+  float time_left   = Input.Dt;
+
+  // If on ground, add the ground plane as the first clip plane
+  if (Player.On_Ground == 1) {
+    planes[plane_count++] = Player.Ground_Normal;
+    vel = clip_velocity (vel, Player.Ground_Normal);
+  }
+
+  // Iteratively trace and clip against contact planes
+  for (int bump = 0; bump < 4 && time_left > 0.001; bump++) {
+    vec3  move_dir  = vel * time_left;
+    float move_dist = length (move_dir);
+    if (move_dist < 0.001) break;
+
+    Trace_Result trace = trace_shape (Player.Position, move_dir, move_dist);
+
+    if (trace.Fraction > 0.0)
+      Player.Position += normalize(move_dir) * move_dist * trace.Fraction;
+
+    if (!trace.Hit) break;
+
+    time_left *= (1.0 - trace.Fraction);
+
+    // Avoid duplicating a plane we've already clipped against
+    bool duplicate = false;
+    for (int p = 0; p < plane_count; p++)
+      if (dot (trace.Normal, planes[p]) > 0.99) { duplicate = true; break; }
+    if (duplicate) continue;
+
+    if (plane_count < MAXIMUM_CLIP_PLANES)
+      planes[plane_count++] = trace.Normal;
+
+    // Clip velocity against all accumulated planes
+    vel = clip_velocity (vel, trace.Normal);
+
+    // If velocity points into a previously established plane, clip against both
+    for (int p = 0; p < plane_count; p++) {
+      if (dot (vel, planes[p]) >= 0.0) continue;
+      vel = clip_velocity (vel, planes[p]);
+
+      // If still heading into another plane, slide along the crease
+      for (int q = 0; q < plane_count; q++) {
+        if (q == p || dot (vel, planes[q]) >= 0.0) continue;
+        vec3 crease = cross (planes[p], planes[q]);
+        float len   = length (crease);
+        if (len > 1e-6) {
+          crease /= len;
+          vel = crease * dot (vel, crease);
+        }
+      }
+      break;
+    }
+  }
+
+  Player.Velocity = vel;
+}
+
+// ── Step move ──────────────────────────────────────────────────────────────────────────────────
+
+void step_move () {
+  // Save state before the step attempt
+  vec3 start_pos = Player.Position;
+  vec3 start_vel = Player.Velocity;
+
+  // Try a normal slide move first
+  slide_move ();
+  vec3 flat_pos = Player.Position;
+
+  // Reset and try stepping up
+  Player.Position = start_pos;
+  Player.Velocity = start_vel;
+
+  // Step up
+  Trace_Result up = trace_shape (Player.Position, vec3(0, STEP_SIZE, 0), STEP_SIZE);
+  if (up.Fraction > 0.0)
+    Player.Position.y += STEP_SIZE * up.Fraction;
+
+  // Slide forward from the raised position
+  slide_move ();
+
+  // Step down to find the ground
+  Trace_Result down = trace_shape (Player.Position, vec3(0, -STEP_SIZE, 0), STEP_SIZE);
+  if (down.Hit && down.Normal.y >= MINIMUM_WALK_NORMAL) {
+    Player.Position.y -= STEP_SIZE * down.Fraction;
+
+    // Keep the stepped result only if it moved us farther horizontally
+    vec2 step_delta = Player.Position.xz - start_pos.xz;
+    vec2 flat_delta = flat_pos.xz - start_pos.xz;
+    if (dot (step_delta, step_delta) <= dot (flat_delta, flat_delta)) {
+      Player.Position = flat_pos;
+      Player.Velocity = start_vel;
+      slide_move ();
+    }
+  } else {
+    Player.Position = flat_pos;
+  }
+}
+
+// ── Stuck recovery ─────────────────────────────────────────────────────────────────────────────
+
+void recover () {
+  // Cast rays in 6 cardinal directions and nudge the player away from walls
+  vec3 dirs[6] = vec3[6](
+    vec3(1,0,0), vec3(-1,0,0), vec3(0,1,0), vec3(0,-1,0), vec3(0,0,1), vec3(0,0,-1));
+
+  for (int i = 0; i < 6; i++) {
+    vec3 offset  = shape_offset (dirs[i]);
+    float expect = length (offset);
+
+    rayQueryEXT rq;
+    rayQueryInitializeEXT (rq, Top_Level, gl_RayFlagsOpaqueEXT, 0xFF,
+                           Player.Position, 0.0, dirs[i], expect);
+    while (rayQueryProceedEXT (rq)) {}
+
+    if (rayQueryGetIntersectionTypeEXT (rq, true) == gl_RayQueryCommittedIntersectionTriangleEXT) {
+      float t = rayQueryGetIntersectionTEXT (rq, true);
+      if (t < expect) {
+        float penetration = expect - t;
+        Player.Position -= dirs[i] * (penetration + 0.125);
+      }
+    }
+  }
+}
+
+// ── Main physics entry point ───────────────────────────────────────────────────────────────────
+
+void main () {
+
+  // ── Mouse look ────────────────────────────────────────────────────────────────────────────────
+  Player.Yaw   -= Input.Delta_X * MOUSE_SENSITIVITY;
+  Player.Pitch -= Input.Delta_Y * MOUSE_SENSITIVITY;
+  Player.Pitch  = clamp (Player.Pitch, -1.5, 1.5);
+
+  // ── Build a movement basis from yaw ───────────────────────────────────────────────────────────
+  float cy = cos (Player.Yaw), sy = sin (Player.Yaw);
+  vec3 forward = vec3 (-sy, 0, -cy);
+  vec3 right   = vec3 ( cy, 0, -sy);
+
+  // ── Compute the wish direction and speed from keyboard input ──────────────────────────────────
+  vec3 wish = vec3 (0.0);
+  if (Input.Forward == 1) wish += forward;
+  if (Input.Back    == 1) wish -= forward;
+  if (Input.Right   == 1) wish += right;
+  if (Input.Left    == 1) wish -= right;
+  float wish_speed = MAXIMUM_SPEED;
+  if (length (wish) > 0.001) wish = normalize (wish); else wish_speed = 0.0;
+
+  // ── Crouch handling ───────────────────────────────────────────────────────────────────────────
+  float target_view = DEFAULT_VIEW_HEIGHT;
+  if (Input.Crouch == 1) {
+    Player.Ducked = 1;
+    target_view = CROUCH_VIEW_HEIGHT;
+  } else {
+    Player.Ducked = 0;
+  }
+
+  // ── Ground trace ──────────────────────────────────────────────────────────────────────────────
+  ground_trace ();
+
+  // ── Apply ground or air movement ──────────────────────────────────────────────────────────────
+  if (Player.On_Ground == 1) {
+
+    // Friction
+    float speed = length (Player.Velocity);
+    if (speed > 0.1) {
+      float control = max (speed, STOP_SPEED);
+      float drop    = control * GROUND_FRICTION * Input.Dt;
+      float scale   = max (speed - drop, 0.0) / speed;
+      Player.Velocity *= scale;
+    }
+
+    // Ground acceleration (Quake 3 style)
+    float current_speed = dot (Player.Velocity, wish);
+    float add_speed     = wish_speed - current_speed;
+    if (add_speed > 0.0) {
+      float accel_speed = GROUND_ACCELERATE * wish_speed * Input.Dt;
+      if (accel_speed > add_speed) accel_speed = add_speed;
+      Player.Velocity += wish * accel_speed;
+    }
+
+    // Jump
+    if (Input.Jump == 1 && Player.Jump_Held == 0) {
+      Player.Velocity.y = JUMP_VELOCITY;
+      Player.On_Ground  = 0;
+    }
+  } else {
+    // Air acceleration (enables strafe-jumping)
+    float current_speed = dot (Player.Velocity, wish);
+    float add_speed     = wish_speed - current_speed;
+    if (add_speed > 0.0) {
+      float accel_speed = AIR_ACCELERATE * wish_speed * Input.Dt;
+      if (accel_speed > add_speed) accel_speed = add_speed;
+      Player.Velocity += wish * accel_speed;
+    }
+
+    // Gravity
+    Player.Velocity.y -= GRAVITY * Input.Dt;
+  }
+
+  // Track jump key state (prevent auto-bunny-hopping)
+  Player.Jump_Held = Input.Jump;
+
+  // ── Move and collide ──────────────────────────────────────────────────────────────────────────
+  if (Player.On_Ground == 1)
+    step_move ();
+  else
+    slide_move ();
+
+  // ── Stuck recovery ────────────────────────────────────────────────────────────────────────────
+  recover ();
+
+  // ── Re-check ground after movement ────────────────────────────────────────────────────────────
+  ground_trace ();
+
+  // ── Smoothly interpolate the view height toward the target ────────────────────────────────────
+  float delta = target_view - Player.View_Height;
+  if (abs(delta) < 0.1) Player.View_Height = target_view;
+  else Player.View_Height += delta * min (Input.Dt * 10.0, 1.0);
+
+  // ── Track speed for debugging ─────────────────────────────────────────────────────────────────
+  Player.Speed_Last = length (Player.Velocity.xz);
+}
 }
