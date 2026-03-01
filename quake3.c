@@ -5810,13 +5810,13 @@ void main () {
 
   vec3  V  = -gl_WorldRayDirectionEXT;
   vec3  Ld = normalize (vec3 (0.6, 0.9, 0.3));        // Sun direction
-  vec3  Lr = vec3 (1.1, 1.05, 0.95);                  // Sun radiance (neutral-warm)
+  vec3  Lr = vec3 (1.8, 1.6, 1.3);                    // Sun radiance — bright warm for modern look
 
   // Material heuristic — 4 ALU ops derive PBR from Q3 albedo statistics
   float Lu = dot (Albedo, vec3 (0.2126, 0.7152, 0.0722));
   float Hi = max (Albedo.r, max (Albedo.g, Albedo.b));
   float Sa = (Hi - min (Albedo.r, min (Albedo.g, Albedo.b))) / max (Hi, 1e-3);
-  float R  = mix (0.35, 0.85, Sa);
+  float R  = mix (0.2, 0.75, Sa);                     // Smoother surfaces → stronger specular highlights
   float M  = smoothstep (0.35, 0.15, Sa) * smoothstep (0.45, 0.2, Lu);
   vec3  F0 = mix (vec3 (0.04), Albedo, M);
 
@@ -5838,7 +5838,7 @@ void main () {
   vec3 Color;
 
   if (Is_Weapon) {
-    Color = (Df + Sp) * Lr * NL * 0.6 + Albedo * 0.40;
+    Color = (Df + Sp) * Lr * NL * 0.8 + Albedo * 0.30;  // Stronger PBR, less flat ambient
   } else {
     vec3 Lm = min (textureLod (Lightmap, Lm_Coord, 0.0).rgb * 2.0, vec3 (1.0));
 
@@ -5846,8 +5846,8 @@ void main () {
     traceRayEXT (Top_Level, gl_RayFlagsTerminateOnFirstHitEXT | gl_RayFlagsSkipClosestHitShaderEXT,
                  0xFE, 0, 1, 1, Position + Normal * 0.1, 0.001, Ld, 10000.0, 1);
 
-    Color = Albedo * Lm + (Df + Sp) * Lr * NL * Shadow_Factor * 0.15;
-    Color = mix (Color, vec3 (0.50, 0.50, 0.55), 1.0 - exp (-gl_HitTEXT * 3e-5));  // Fog
+    Color = Albedo * Lm + (Df + Sp) * Lr * NL * Shadow_Factor * 0.30;  // Stronger direct sun
+    Color = mix (Color, vec3 (0.52, 0.55, 0.65), 1.0 - exp (-gl_HitTEXT * 8e-5));  // Thicker atmospheric fog
   }
 
   Payload = vec4 (Color, gl_HitTEXT);  // Pack hit distance into alpha for depth-of-field
@@ -6547,7 +6547,22 @@ void main () {
     }
   }
 
-  // ── 3–6. Lens effects + tone mapping (fused for register pressure reduction) ─
+  // ── 3. Bloom: dual-radius bright extraction (16 taps, Gaussian-weighted) ────
+  // Modern engines use multi-pass Kawase/dual-filter bloom; we approximate with
+  // a single-pass 16-tap starburst at two radii.  Per-channel thresholding at 0.5
+  // extracts HDR excess, then the outer ring (12px) is half-weighted to simulate
+  // the Gaussian falloff of a real PSF (point spread function).
+  vec3 Bl = vec3 (0.0);
+  for (int I = 0; I < 8; I++) {
+    float A  = float (I) * 0.7854;                    // 2π/8 = 45° increments
+    vec2  Od = vec2 (cos (A), sin (A));
+    vec3  S1 = imageLoad (Color_Image, clamp (Pixel + ivec2 (Od * 6.0),  ivec2 (0), Size - 1)).rgb;
+    vec3  S2 = imageLoad (Color_Image, clamp (Pixel + ivec2 (Od * 12.0), ivec2 (0), Size - 1)).rgb;
+    Bl += max (S1 - 0.5, vec3 (0.0)) + max (S2 - 0.5, vec3 (0.0)) * 0.5;
+  }
+  Color += Bl * 0.03;                                 // Subtle additive bloom — avoids washout
+
+  // ── 4–7. Lens effects + tone mapping (fused for register pressure reduction) ─
   vec2  FC = UV - 0.5;                              // From-center vector
   float D2 = dot (FC, FC);                          // Squared radial distance (avoids sqrt)
   float CA = D2 * 0.4;                              // Chromatic aberration offset
