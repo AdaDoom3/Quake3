@@ -3747,15 +3747,17 @@ void Weapon_Update (Weapon_Instance *Weapon, const Camera *Camera_Data, float De
   vec3 Up      = Cross     (Right, Forward);
 
   // Compute the viewmodel offset with idle bob and recoil animations
-  float Bob_Vertical   = sinf (Weapon->Bob_Time * 3.5f) * 0.4f;
-  float Bob_Horizontal = cosf (Weapon->Bob_Time * 1.7f) * 0.2f;
-  float Recoil         = Weapon->Is_Firing ? -1.2f * expf (-Weapon->Fire_Time * 5.f) : 0.f;
+  float Bob_Vertical   = sinf (Weapon->Bob_Time * 3.5f) * 0.08f;
+  float Bob_Horizontal = cosf (Weapon->Bob_Time * 1.7f) * 0.04f;
+  float Recoil         = Weapon->Is_Firing ? -0.5f * expf (-Weapon->Fire_Time * 5.f) : 0.f;
 
-  // Final weapon position: camera origin + forward/right/up offsets with bob and recoil
+  // Final weapon position: camera origin + forward/right/up offsets with bob and recoil.
+  // Place weapon grip near camera (almost behind it) so only the barrel extends forward.
+  // Low forward offset keeps grip at the camera; barrel naturally extends into the scene.
   vec3 Offset = Add (Camera_Data->Position,
-                     Add (Scale (Forward, 8.f + Recoil),
-                          Add (Scale (Right, 5.f + Bob_Horizontal),
-                               Scale (Up,   -5.f + Bob_Vertical))));
+                     Add (Scale (Forward, 2.f + Recoil),
+                          Add (Scale (Right, 3.5f + Bob_Horizontal),
+                               Scale (Up,   -3.f + Bob_Vertical))));
 
   // Select the current animation frame from the hand model's tag_weapon data
   uint Frame_Index = 0;
@@ -3793,24 +3795,25 @@ void Weapon_Update (Weapon_Instance *Weapon, const Camera *Camera_Data, float De
                                  + Camera_Basis[Row * 3 + 1] * Tag_Y_Up[1 * 3 + Column]
                                  + Camera_Basis[Row * 3 + 2] * Tag_Y_Up[2 * 3 + Column];
 
-  // Scale the viewmodel down slightly for a better first-person perspective feel
-  float Model_Scale = 0.7f;
+  // Scale the viewmodel down — no depth hack, so we shrink the model in world space
+  float Model_Scale = 0.45f;
 
-  // Transform each vertex from model space to world space
+  // Transform each vertex from model space (Q3 Z-up) to world space (Y-up).
+  // Swizzle Q3 coords (X,Y,Z) → Y-up (X,Z,-Y) so barrel→Forward, up→Up, right→Right.
   for (uint Index = 0; Index < Weapon->Model.Vertex_Count; Index++) {
-    float Source_X = Weapon->Model.Vertices[Index].Position[0] * Model_Scale;
-    float Source_Y = Weapon->Model.Vertices[Index].Position[1] * Model_Scale;
-    float Source_Z = Weapon->Model.Vertices[Index].Position[2] * Model_Scale;
+    float Source_X =  Weapon->Model.Vertices[Index].Position[0] * Model_Scale; // Q3 X (forward/barrel)
+    float Source_Y =  Weapon->Model.Vertices[Index].Position[2] * Model_Scale; // Q3 Z (up)
+    float Source_Z = -Weapon->Model.Vertices[Index].Position[1] * Model_Scale; // Q3 -Y (right)
 
     // Apply the combined rotation and translate by the camera offset
     Weapon->Transformed_Vertices[Index].Position[0] = Rotation[0] * Source_X + Rotation[1] * Source_Y + Rotation[2] * Source_Z + Offset.x;
     Weapon->Transformed_Vertices[Index].Position[1] = Rotation[3] * Source_X + Rotation[4] * Source_Y + Rotation[5] * Source_Z + Offset.y;
     Weapon->Transformed_Vertices[Index].Position[2] = Rotation[6] * Source_X + Rotation[7] * Source_Y + Rotation[8] * Source_Z + Offset.z;
 
-    // Rotate the vertex normal by the same 3x3 rotation matrix (no translation)
-    float Normal_X = Weapon->Model.Vertices[Index].Normal[0];
-    float Normal_Y = Weapon->Model.Vertices[Index].Normal[1];
-    float Normal_Z = Weapon->Model.Vertices[Index].Normal[2];
+    // Rotate the vertex normal by the same swizzle + rotation (no translation)
+    float Normal_X =  Weapon->Model.Vertices[Index].Normal[0];
+    float Normal_Y =  Weapon->Model.Vertices[Index].Normal[2];
+    float Normal_Z = -Weapon->Model.Vertices[Index].Normal[1];
     Weapon->Transformed_Vertices[Index].Normal[0] = Rotation[0] * Normal_X + Rotation[1] * Normal_Y + Rotation[2] * Normal_Z;
     Weapon->Transformed_Vertices[Index].Normal[1] = Rotation[3] * Normal_X + Rotation[4] * Normal_Y + Rotation[5] * Normal_Z;
     Weapon->Transformed_Vertices[Index].Normal[2] = Rotation[6] * Normal_X + Rotation[7] * Normal_Y + Rotation[8] * Normal_Z;
@@ -4528,7 +4531,7 @@ int main (int Argc, char **Argv) {
   Physics_Pipeline_Create ();
   Player Initial_Player = {
     .Position = Spawn_Point.Origin,
-    .Yaw      = Spawn_Point.Angle * 3.14159f / 180.f};
+    .Yaw      = 1.5707963f - Spawn_Point.Angle * 3.14159f / 180.f}; // π/2 - angle: Q3 angle 0 = +X = our yaw π/2
   Physics_Resources_Create (&Initial_Player);
 
   // Optionally build a convex hull from the weapon model for hull-based collision testing
@@ -4539,7 +4542,8 @@ int main (int Argc, char **Argv) {
 
   // ── Game loop ──────────────────────────────────────────────────────────────────────────────────
 
-  Camera   Cam   = {.Position = Spawn_Point.Origin, .Yaw = Spawn_Point.Angle * 3.14159f / 180.f};
+  Camera   Cam   = {.Position = {Spawn_Point.Origin.x, Spawn_Point.Origin.y + DEFAULT_VIEW_HEIGHT, Spawn_Point.Origin.z},
+                     .Yaw = 1.5707963f - Spawn_Point.Angle * 3.14159f / 180.f};
   uint64_t Last  = SDL_GetPerformanceCounter ();
   uint64_t Freq  = SDL_GetPerformanceFrequency ();
   uint     Frame = 0;
@@ -4557,10 +4561,11 @@ int main (int Argc, char **Argv) {
     Input In         = Poll_Input ();
     Player Physics   = Physics_Dispatch (In, Dt);
 
-    // Update the camera from the physics result
-    Cam.Position = Physics.Position;
-    Cam.Yaw      = Physics.Yaw;
-    Cam.Pitch    = Physics.Pitch;
+    // Update the camera from the physics result — add View_Height to get eye position
+    Cam.Position   = Physics.Position;
+    Cam.Position.y += Physics.View_Height;  // Raise camera from feet to eye level (26 units standing)
+    Cam.Yaw        = Physics.Yaw;
+    Cam.Pitch      = Physics.Pitch;
     Cam.Frame    = Frame;
 
     // Animate and rebuild the weapon viewmodel
