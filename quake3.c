@@ -208,6 +208,161 @@ typedef struct {
   float Normal     [3], Padding_B;       // Surface normal; padding aligns to 16 bytes
 } Vertex;
 
+// ── BSP Entity System ────────────────────────────────────────────────────────────────────────────
+
+// Discriminant tag for BSP entities parsed from the entity lump
+typedef enum {
+  ENTITY_NONE = 0,
+
+  // Players and Spawn Points
+  ENTITY_INFO_PLAYER_DEATHMATCH,        // info_player_deathmatch — DM spawn
+  ENTITY_INFO_PLAYER_START,             // info_player_start — single-player spawn
+  ENTITY_INFO_PLAYER_INTERMISSION,      // info_player_intermission — post-match camera
+
+  // Weapons
+  ENTITY_WEAPON_GAUNTLET,               // weapon_gauntlet
+  ENTITY_WEAPON_SHOTGUN,                // weapon_shotgun
+  ENTITY_WEAPON_MACHINEGUN,             // weapon_machinegun
+  ENTITY_WEAPON_GRENADELAUNCHER,        // weapon_grenadelauncher
+  ENTITY_WEAPON_ROCKETLAUNCHER,         // weapon_rocketlauncher
+  ENTITY_WEAPON_LIGHTNING,              // weapon_lightning
+  ENTITY_WEAPON_RAILGUN,                // weapon_railgun
+  ENTITY_WEAPON_PLASMAGUN,             // weapon_plasmagun
+  ENTITY_WEAPON_BFG,                    // weapon_bfg
+
+  // Ammo
+  ENTITY_AMMO_SHELLS,                   // ammo_shells
+  ENTITY_AMMO_BULLETS,                  // ammo_bullets
+  ENTITY_AMMO_GRENADES,                 // ammo_grenades
+  ENTITY_AMMO_CELLS,                    // ammo_cells
+  ENTITY_AMMO_LIGHTNING,                // ammo_lightning
+  ENTITY_AMMO_ROCKETS,                  // ammo_rockets
+  ENTITY_AMMO_SLUGS,                    // ammo_slugs
+  ENTITY_AMMO_BFG,                      // ammo_bfg
+
+  // Health
+  ENTITY_ITEM_HEALTH_SMALL,             // item_health_small      (+5)
+  ENTITY_ITEM_HEALTH,                   // item_health            (+25)
+  ENTITY_ITEM_HEALTH_LARGE,             // item_health_large      (+50)
+  ENTITY_ITEM_HEALTH_MEGA,              // item_health_mega       (+100)
+
+  // Armor
+  ENTITY_ITEM_ARMOR_SHARD,              // item_armor_shard       (+5)
+  ENTITY_ITEM_ARMOR_COMBAT,             // item_armor_combat      (+50)
+  ENTITY_ITEM_ARMOR_BODY,               // item_armor_body        (+100)
+
+  // Powerups
+  ENTITY_ITEM_QUAD,                     // item_quad              — quad damage
+  ENTITY_ITEM_ENVIRO,                   // item_enviro            — battle suit
+  ENTITY_ITEM_HASTE,                    // item_haste             — speed
+  ENTITY_ITEM_INVIS,                    // item_invis             — invisibility
+  ENTITY_ITEM_REGEN,                    // item_regen             — regeneration
+  ENTITY_ITEM_FLIGHT,                   // item_flight            — flight
+
+  // Holdables
+  ENTITY_HOLDABLE_TELEPORTER,           // holdable_teleporter
+  ENTITY_HOLDABLE_MEDKIT,               // holdable_medkit
+
+  // Map Geometry & Logic
+  ENTITY_TRIGGER_TELEPORT,              // trigger_teleport
+  ENTITY_TRIGGER_PUSH,                  // trigger_push           — jump pad
+  ENTITY_TARGET_POSITION,               // target_position        — teleport/push destination
+  ENTITY_TARGET_SPEAKER,                // target_speaker         — ambient sound emitter
+  ENTITY_MISC_MODEL,                    // misc_model             — decorative model
+  ENTITY_LIGHT,                         // light                  — point light source
+  ENTITY_WORLDSPAWN,                    // worldspawn             — map metadata
+
+  ENTITY_KIND_COUNT
+} Entity_Kind;
+
+// BSP Entity — a union discriminated by Entity_Kind
+//
+// Parsed from the BSP entity lump's key-value text.  Every entity has at least
+// an origin and an entity kind; the union arms carry kind-specific data.
+typedef struct {
+  Entity_Kind Kind;        // Discriminant tag
+  vec3        Origin;      // World-space position (Quake 3 coords, swizzled on use)
+  float       Angle;       // Facing angle in degrees (yaw rotation)
+  int         Spawnflags;  // Bitfield: bit 0 = suspended (don't drop to floor)
+  union { // case Kind is
+
+    // when ENTITY_INFO_PLAYER_DEATHMATCH | ENTITY_INFO_PLAYER_START =>
+    struct {
+      int   Team;          // Team index for team-game modes (0 = any)
+    } spawn;
+
+    // when ENTITY_WEAPON_* =>
+    struct {
+      int   Count;         // Ammo quantity given on pickup
+      float Respawn_Time;  // Seconds until respawn (0 = default 5s)
+    } weapon;
+
+    // when ENTITY_AMMO_* =>
+    struct {
+      int   Count;         // Ammo quantity given on pickup
+    } ammo;
+
+    // when ENTITY_ITEM_HEALTH* =>
+    struct {
+      int   Amount;        // Health points restored
+    } health;
+
+    // when ENTITY_ITEM_ARMOR* =>
+    struct {
+      int   Amount;        // Armor points granted
+    } armor;
+
+    // when ENTITY_ITEM_QUAD | ENTITY_ITEM_ENVIRO | ENTITY_ITEM_HASTE |
+    //       ENTITY_ITEM_INVIS | ENTITY_ITEM_REGEN | ENTITY_ITEM_FLIGHT =>
+    struct {
+      float Duration;      // Powerup duration in seconds (0 = default 30s)
+    } powerup;
+
+    // when ENTITY_TRIGGER_TELEPORT =>
+    struct {
+      int   Target_Index;  // Index of the target_position entity
+      char  Target[64];    // Target name string (matched against target_position "targetname")
+    } teleport;
+
+    // when ENTITY_TRIGGER_PUSH =>
+    struct {
+      int   Target_Index;  // Index of the target_position entity
+      char  Target[64];    // Target name string
+    } push;
+
+    // when ENTITY_TARGET_POSITION =>
+    struct {
+      char  Targetname[64]; // Name used by triggers to reference this destination
+    } target;
+
+    // when ENTITY_TARGET_SPEAKER =>
+    struct {
+      char  Noise[64];    // Sound file path
+      int   Looping;      // Non-zero if the sound loops
+    } speaker;
+
+    // when ENTITY_MISC_MODEL =>
+    struct {
+      char  Model_Path[64]; // Path to the MD3 model
+      float Model_Scale;    // Uniform scale factor (default 1.0)
+    } model;
+
+    // when ENTITY_LIGHT =>
+    struct {
+      float Intensity;     // Light radius / intensity
+      float Color[3];      // RGB light color (0-1 range)
+    } light;
+
+    // when ENTITY_WORLDSPAWN =>
+    struct {
+      char  Message[128];  // Map title/message string
+      int   Gravity;       // Custom gravity (default 800)
+    } worldspawn;
+  };
+} BSP_Entity;
+
+#define MAX_BSP_ENTITIES 1024
+
 // Aggregate scene geometry and material data loaded from a BSP
 typedef struct {
   Vertex  *Vertices;  uint Vertex_Count;    // Vertex array and its element count
@@ -218,6 +373,8 @@ typedef struct {
   uint     Triangle_Count;                  // Total triangles (Index_Count / 3)
   uint8_t *Lightmap_Atlas;                  // Packed lightmap atlas in RGBA8 format
   uint     Lightmap_Width, Lightmap_Height; // Atlas dimensions in pixels
+  BSP_Entity Entities[MAX_BSP_ENTITIES];    // Parsed entities from the BSP entity lump
+  uint       Entity_Count;                  // Number of valid entities
 } Scene;   
 
 // Single spawn point parsed from the BSP entity lump
@@ -603,6 +760,11 @@ uint BSP_Tessellate_Patch (const BSP_Vertex *Control_Grid, int Patch_Width, int 
 // Parse the BSP entity lump to find the first info_player_deathmatch spawn point.
 // Returns the origin (swizzled to Y-up) and facing angle.
 Spawn BSP_Find_Spawn (const uint8_t *File_Data, const BSP_Header *Header);
+
+// Parse all entities from the BSP entity lump into an array of discriminated records.
+// Stores results in Out_Entities and returns the count.
+uint BSP_Parse_Entities (const uint8_t *File_Data, const BSP_Header *Header,
+                         BSP_Entity *Out_Entities, uint Max_Entities);
 
 // Load a complete scene from a Quake 3 BSP file. This parses vertices, indices, faces (planar,
 // mesh, and patch types), shader references, and lightmap pages (packed into a single atlas).
@@ -2325,17 +2487,22 @@ Scene Scene_Load_From_BSP (const char *Path, Spawn *Out_Spawn) {
   if (Out_Spawn)
     *Out_Spawn = BSP_Find_Spawn (File_Data, Header);
 
-  // Release the raw BSP file buffer and return the assembled scene
-  free (File_Data);
-  printf ("[bsp] %s: %u vertices, %u triangles, %u shaders\n", Path, Vertex_Count, Triangle_Count, Raw_Shader_Count);
-
-  return (Scene){
+  // Parse all entities from the BSP entity lump into discriminated records
+  Scene Result = {
     .Vertices        = Vertices,       .Vertex_Count    = Vertex_Count,
     .Indices         = Indices,        .Index_Count     = Index_Count,
     .Materials       = Materials,      .Material_Count  = Material_Count,
     .Texture_Ids     = Texture_Ids,    .Texture_Names   = Texture_Names,
     .Lightmap_Atlas  = Lightmap_Atlas, .Lightmap_Width  = Atlas_Width,
     .Lightmap_Height = Atlas_Height,   .Triangle_Count  = Triangle_Count};
+
+  Result.Entity_Count = BSP_Parse_Entities (File_Data, Header, Result.Entities, MAX_BSP_ENTITIES);
+
+  // Release the raw BSP file buffer and return the assembled scene
+  free (File_Data);
+  printf ("[bsp] %s: %u vertices, %u triangles, %u shaders\n", Path, Vertex_Count, Triangle_Count, Raw_Shader_Count);
+
+  return Result;
 
 } // Scene_Load_From_BSP
 
@@ -2425,6 +2592,259 @@ Spawn BSP_Find_Spawn (const uint8_t *File_Data, const BSP_Header *Header) {
   return Result;
 
 } // BSP_Find_Spawn
+
+// ═══════════════════════
+//   BSP_Parse_Entities
+// ═══════════════════════
+
+static Entity_Kind Classify_Entity (const char *Classname, int Length) {
+  // Macro for concise string matching: checks length then memcmp
+  #define MATCH(STR, KIND) \
+    if (Length == (int)sizeof(STR) - 1 && memcmp (Classname, STR, sizeof(STR) - 1) == 0) return KIND
+
+  // Spawn points
+  MATCH ("info_player_deathmatch",  ENTITY_INFO_PLAYER_DEATHMATCH);
+  MATCH ("info_player_start",       ENTITY_INFO_PLAYER_START);
+  MATCH ("info_player_intermission",ENTITY_INFO_PLAYER_INTERMISSION);
+
+  // Weapons
+  MATCH ("weapon_gauntlet",         ENTITY_WEAPON_GAUNTLET);
+  MATCH ("weapon_shotgun",          ENTITY_WEAPON_SHOTGUN);
+  MATCH ("weapon_machinegun",       ENTITY_WEAPON_MACHINEGUN);
+  MATCH ("weapon_grenadelauncher",  ENTITY_WEAPON_GRENADELAUNCHER);
+  MATCH ("weapon_rocketlauncher",   ENTITY_WEAPON_ROCKETLAUNCHER);
+  MATCH ("weapon_lightning",        ENTITY_WEAPON_LIGHTNING);
+  MATCH ("weapon_railgun",          ENTITY_WEAPON_RAILGUN);
+  MATCH ("weapon_plasmagun",        ENTITY_WEAPON_PLASMAGUN);
+  MATCH ("weapon_bfg",              ENTITY_WEAPON_BFG);
+
+  // Ammo
+  MATCH ("ammo_shells",             ENTITY_AMMO_SHELLS);
+  MATCH ("ammo_bullets",            ENTITY_AMMO_BULLETS);
+  MATCH ("ammo_grenades",           ENTITY_AMMO_GRENADES);
+  MATCH ("ammo_cells",              ENTITY_AMMO_CELLS);
+  MATCH ("ammo_lightning",          ENTITY_AMMO_LIGHTNING);
+  MATCH ("ammo_rockets",            ENTITY_AMMO_ROCKETS);
+  MATCH ("ammo_slugs",              ENTITY_AMMO_SLUGS);
+  MATCH ("ammo_bfg",                ENTITY_AMMO_BFG);
+
+  // Health
+  MATCH ("item_health_small",       ENTITY_ITEM_HEALTH_SMALL);
+  MATCH ("item_health",             ENTITY_ITEM_HEALTH);
+  MATCH ("item_health_large",       ENTITY_ITEM_HEALTH_LARGE);
+  MATCH ("item_health_mega",        ENTITY_ITEM_HEALTH_MEGA);
+
+  // Armor
+  MATCH ("item_armor_shard",        ENTITY_ITEM_ARMOR_SHARD);
+  MATCH ("item_armor_combat",       ENTITY_ITEM_ARMOR_COMBAT);
+  MATCH ("item_armor_body",         ENTITY_ITEM_ARMOR_BODY);
+
+  // Powerups
+  MATCH ("item_quad",               ENTITY_ITEM_QUAD);
+  MATCH ("item_enviro",             ENTITY_ITEM_ENVIRO);
+  MATCH ("item_haste",              ENTITY_ITEM_HASTE);
+  MATCH ("item_invis",              ENTITY_ITEM_INVIS);
+  MATCH ("item_regen",              ENTITY_ITEM_REGEN);
+  MATCH ("item_flight",             ENTITY_ITEM_FLIGHT);
+
+  // Holdables
+  MATCH ("holdable_teleporter",     ENTITY_HOLDABLE_TELEPORTER);
+  MATCH ("holdable_medkit",         ENTITY_HOLDABLE_MEDKIT);
+
+  // Map geometry & logic
+  MATCH ("trigger_teleport",        ENTITY_TRIGGER_TELEPORT);
+  MATCH ("trigger_push",            ENTITY_TRIGGER_PUSH);
+  MATCH ("target_position",         ENTITY_TARGET_POSITION);
+  MATCH ("target_speaker",          ENTITY_TARGET_SPEAKER);
+  MATCH ("misc_model",              ENTITY_MISC_MODEL);
+  MATCH ("light",                   ENTITY_LIGHT);
+  MATCH ("worldspawn",              ENTITY_WORLDSPAWN);
+
+  #undef MATCH
+  return ENTITY_NONE;
+}
+
+uint BSP_Parse_Entities (const uint8_t *File_Data, const BSP_Header *Header,
+                         BSP_Entity *Out_Entities, uint Max_Entities) {
+  const char *Text = (const char *)(File_Data + Header->Lumps[BSP_ENTITIES].Offset);
+  const char *End  = Text + Header->Lumps[BSP_ENTITIES].Length;
+  uint Count = 0;
+
+  while (Text < End && Count < Max_Entities) {
+    // Find opening brace
+    while (Text < End && *Text != '{') Text++;
+    if (Text >= End) break;
+    Text++;
+
+    // Temporary storage for this entity's key-value pairs
+    BSP_Entity Entity = {0};
+    char Classname[64]   = {0};
+    int  Classname_Len   = 0;
+    char Targetname[64]  = {0};
+    char Target[64]      = {0};
+    char Noise[64]       = {0};
+    char Model_Path[64]  = {0};
+    char Message[128]    = {0};
+    float Color[3]       = {1, 1, 1};
+    float Intensity      = 300;
+    int   Gravity        = 800;
+    int   Spawnflags     = 0;
+
+    // Parse key-value pairs
+    while (Text < End && *Text != '}') {
+      while (Text < End && (*Text == ' ' || *Text == '\t' || *Text == '\n' || *Text == '\r'))
+        Text++;
+      if (Text >= End || *Text == '}') break;
+
+      // Read quoted key
+      if (*Text != '"') { Text++; continue; }
+      Text++;
+      const char *Key = Text;
+      while (Text < End && *Text != '"') Text++;
+      int Key_Len = (int)(Text - Key);
+      if (Text < End) Text++;
+
+      // Skip whitespace
+      while (Text < End && (*Text == ' ' || *Text == '\t')) Text++;
+
+      // Read quoted value
+      if (Text >= End || *Text != '"') continue;
+      Text++;
+      const char *Val = Text;
+      while (Text < End && *Text != '"') Text++;
+      int Val_Len = (int)(Text - Val);
+      if (Text < End) Text++;
+
+      // Helper: copy value into a fixed buffer
+      #define COPY_VAL(DST, MAX) do { \
+        int _n = Val_Len < (MAX)-1 ? Val_Len : (MAX)-1; \
+        memcpy(DST, Val, _n); DST[_n] = 0; \
+      } while(0)
+
+      // Dispatch on key name
+      if (Key_Len == 9 && memcmp (Key, "classname", 9) == 0) {
+        Classname_Len = Val_Len < 63 ? Val_Len : 63;
+        memcpy (Classname, Val, Classname_Len);
+        Classname[Classname_Len] = 0;
+      }
+      else if (Key_Len == 6 && memcmp (Key, "origin", 6) == 0) {
+        char Tmp[64]; COPY_VAL(Tmp, 64);
+        sscanf (Tmp, "%f %f %f", &Entity.Origin.x, &Entity.Origin.y, &Entity.Origin.z);
+      }
+      else if (Key_Len == 5 && memcmp (Key, "angle", 5) == 0) {
+        char Tmp[32]; COPY_VAL(Tmp, 32);
+        sscanf (Tmp, "%f", &Entity.Angle);
+      }
+      else if (Key_Len == 10 && memcmp (Key, "spawnflags", 10) == 0) {
+        char Tmp[32]; COPY_VAL(Tmp, 32);
+        sscanf (Tmp, "%d", &Spawnflags);
+      }
+      else if (Key_Len == 10 && memcmp (Key, "targetname", 10) == 0) { COPY_VAL(Targetname, 64); }
+      else if (Key_Len == 6  && memcmp (Key, "target", 6)     == 0) { COPY_VAL(Target, 64);     }
+      else if (Key_Len == 5  && memcmp (Key, "noise",  5)     == 0) { COPY_VAL(Noise, 64);      }
+      else if (Key_Len == 5  && memcmp (Key, "model",  5)     == 0) { COPY_VAL(Model_Path, 64); }
+      else if (Key_Len == 7  && memcmp (Key, "message",7)     == 0) { COPY_VAL(Message, 128);   }
+      else if (Key_Len == 5  && memcmp (Key, "light",  5)     == 0) {
+        char Tmp[32]; COPY_VAL(Tmp, 32); sscanf (Tmp, "%f", &Intensity);
+      }
+      else if (Key_Len == 7 && memcmp (Key, "gravity", 7) == 0) {
+        char Tmp[32]; COPY_VAL(Tmp, 32); sscanf (Tmp, "%d", &Gravity);
+      }
+      else if (Key_Len == 6 && memcmp (Key, "_color", 6) == 0) {
+        char Tmp[64]; COPY_VAL(Tmp, 64); sscanf (Tmp, "%f %f %f", &Color[0], &Color[1], &Color[2]);
+      }
+
+      #undef COPY_VAL
+    }
+    if (Text < End) Text++; // skip closing brace
+
+    // Classify and populate the discriminated union
+    Entity.Kind       = Classify_Entity (Classname, Classname_Len);
+    Entity.Spawnflags = Spawnflags;
+
+    if (Entity.Kind == ENTITY_NONE) continue; // skip unknown entities
+
+    // Populate kind-specific fields
+    switch (Entity.Kind) {
+      case ENTITY_INFO_PLAYER_DEATHMATCH:
+      case ENTITY_INFO_PLAYER_START:
+        Entity.spawn.Team = 0;
+        break;
+      case ENTITY_WEAPON_GAUNTLET: Entity.weapon.Count = 0;  break;
+      case ENTITY_WEAPON_SHOTGUN:  Entity.weapon.Count = 10; break;
+      case ENTITY_WEAPON_MACHINEGUN: Entity.weapon.Count = 40; break;
+      case ENTITY_WEAPON_GRENADELAUNCHER: Entity.weapon.Count = 10; break;
+      case ENTITY_WEAPON_ROCKETLAUNCHER:  Entity.weapon.Count = 10; break;
+      case ENTITY_WEAPON_LIGHTNING: Entity.weapon.Count = 100; break;
+      case ENTITY_WEAPON_RAILGUN:   Entity.weapon.Count = 10; break;
+      case ENTITY_WEAPON_PLASMAGUN: Entity.weapon.Count = 50; break;
+      case ENTITY_WEAPON_BFG:       Entity.weapon.Count = 20; break;
+      case ENTITY_AMMO_SHELLS:    Entity.ammo.Count = 10; break;
+      case ENTITY_AMMO_BULLETS:   Entity.ammo.Count = 50; break;
+      case ENTITY_AMMO_GRENADES:  Entity.ammo.Count = 5;  break;
+      case ENTITY_AMMO_CELLS:     Entity.ammo.Count = 30; break;
+      case ENTITY_AMMO_LIGHTNING: Entity.ammo.Count = 60; break;
+      case ENTITY_AMMO_ROCKETS:   Entity.ammo.Count = 5;  break;
+      case ENTITY_AMMO_SLUGS:     Entity.ammo.Count = 10; break;
+      case ENTITY_AMMO_BFG:       Entity.ammo.Count = 15; break;
+      case ENTITY_ITEM_HEALTH_SMALL: Entity.health.Amount = 5;   break;
+      case ENTITY_ITEM_HEALTH:       Entity.health.Amount = 25;  break;
+      case ENTITY_ITEM_HEALTH_LARGE: Entity.health.Amount = 50;  break;
+      case ENTITY_ITEM_HEALTH_MEGA:  Entity.health.Amount = 100; break;
+      case ENTITY_ITEM_ARMOR_SHARD:  Entity.armor.Amount = 5;    break;
+      case ENTITY_ITEM_ARMOR_COMBAT: Entity.armor.Amount = 50;   break;
+      case ENTITY_ITEM_ARMOR_BODY:   Entity.armor.Amount = 100;  break;
+      case ENTITY_ITEM_QUAD: case ENTITY_ITEM_ENVIRO: case ENTITY_ITEM_HASTE:
+      case ENTITY_ITEM_INVIS: case ENTITY_ITEM_REGEN: case ENTITY_ITEM_FLIGHT:
+        Entity.powerup.Duration = 30.0f;
+        break;
+      case ENTITY_TRIGGER_TELEPORT:
+        memcpy (Entity.teleport.Target, Target, 64);
+        break;
+      case ENTITY_TRIGGER_PUSH:
+        memcpy (Entity.push.Target, Target, 64);
+        break;
+      case ENTITY_TARGET_POSITION:
+        memcpy (Entity.target.Targetname, Targetname, 64);
+        break;
+      case ENTITY_TARGET_SPEAKER:
+        memcpy (Entity.speaker.Noise, Noise, 64);
+        Entity.speaker.Looping = (Spawnflags & 1) ? 1 : 0;
+        break;
+      case ENTITY_MISC_MODEL:
+        memcpy (Entity.model.Model_Path, Model_Path, 64);
+        Entity.model.Model_Scale = 1.0f;
+        break;
+      case ENTITY_LIGHT:
+        Entity.light.Intensity = Intensity;
+        Entity.light.Color[0] = Color[0];
+        Entity.light.Color[1] = Color[1];
+        Entity.light.Color[2] = Color[2];
+        break;
+      case ENTITY_WORLDSPAWN:
+        memcpy (Entity.worldspawn.Message, Message, 128);
+        Entity.worldspawn.Gravity = Gravity;
+        break;
+      default: break;
+    }
+
+    Out_Entities[Count++] = Entity;
+  }
+
+  // Print summary
+  int N_Items = 0, N_Weapons = 0, N_Spawns = 0, N_Lights = 0;
+  for (uint I = 0; I < Count; I++) {
+    Entity_Kind K = Out_Entities[I].Kind;
+    if (K >= ENTITY_WEAPON_GAUNTLET  && K <= ENTITY_WEAPON_BFG)   N_Weapons++;
+    if (K >= ENTITY_AMMO_SHELLS      && K <= ENTITY_ITEM_FLIGHT)  N_Items++;
+    if (K == ENTITY_INFO_PLAYER_DEATHMATCH || K == ENTITY_INFO_PLAYER_START) N_Spawns++;
+    if (K == ENTITY_LIGHT) N_Lights++;
+  }
+  printf ("[bsp] entities: %u total, %d spawns, %d weapons, %d items, %d lights\n",
+          Count, N_Spawns, N_Weapons, N_Items, N_Lights);
+
+  return Count;
+}
 
 // ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 //
@@ -3322,7 +3742,7 @@ void Weapon_Update (Weapon_Instance *Weapon, const Camera *Camera_Data, float De
   float Cosine_Pitch = cosf (Camera_Data->Pitch);
   float Sine_Pitch   = sinf (Camera_Data->Pitch);
 
-  vec3 Forward = Make      (-Sine_Pitch, Cosine_Pitch, -Cosine_Yaw * Cosine_Pitch);
+  vec3 Forward = Make      (Sine_Yaw * Cosine_Pitch, -Sine_Pitch, -Cosine_Yaw * Cosine_Pitch);
   vec3 Right   = Normalize (Cross (Forward, Make (0, 1, 0)));
   vec3 Up      = Cross     (Right, Forward);
 
@@ -4300,8 +4720,8 @@ void main () {
     float Sun_Dot = max (0.0, dot (Normal, Sun_Direction)) * 0.4;
     Color = Albedo * (vec3 (0.6) + vec3 (Sun_Dot));
   } else {
-    // BSP lightmap (baked lighting) — 2.5x overbright to match Quake 3 levels
-    vec3 Lightmap_Color = texture (Lightmap, Lm_Coord).rgb * 2.5;
+    // BSP lightmap (baked lighting) — 4x overbright matches Quake 3's 2x overbright + gamma
+    vec3 Lightmap_Color = texture (Lightmap, Lm_Coord).rgb * 4.0;
 
     // RT shadow ray toward sun for dynamic shadows (cull mask 0xFE excludes weapon)
     Shadow_Factor = 0.0;
