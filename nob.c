@@ -219,7 +219,8 @@ int main(int argc, char **argv) {
         "-o", BUILD "quake3",
         BUILD "quake3.c",
         "-I/usr/include/SDL2", "-D_REENTRANT",
-        "-lSDL2", "-lvulkan", "-lm");
+        "-lSDL2", "-lvulkan", "-lm",
+        "-lopenal");
     if (!nob_cmd_run(&cmd)) return 1;
 
     return 0;

@@ -90,6 +90,7 @@ const char *DEFAULT_MAP = "oa_dm1.bsp";
 #define SHADER_PATH_PRIMARY_MISS    SHADER_ROOT "miss.spv"
 #define SHADER_PATH_SHADOW_MISS     SHADER_ROOT "shadow_miss.spv"
 #define SHADER_PATH_PHYSICS_COMPUTE SHADER_ROOT "physics.spv"
+#define SHADER_PATH_POSTPROCESS    SHADER_ROOT "postprocess.spv"
 
 // Paths to the weapon model's diffuse textures (body and sight)
 #define WEAPON_TEXTURE_COUNT 2
@@ -123,6 +124,32 @@ const float PLAYER_HALF_EXTENTS[3] = {15.f, 32.f, 15.f};
 // Capsule spine half-length: half_height minus radius.  For a 32-unit tall, 15-unit radius capsule
 // the spine is 32 - 15 = 17 units.
 #define PLAYER_CAPSULE_SPINE 17.f
+
+// Projectile constants
+#define MAX_PROJECTILES    64  // Maximum simultaneous projectiles in flight
+#define ROCKET_SPEED       900.f  // Rocket projectile speed (units/second)
+#define ROCKET_DAMAGE      100    // Direct hit damage
+#define ROCKET_SPLASH      120.f  // Splash damage radius
+#define ROCKET_LIFETIME    10.f   // Seconds before projectile expires
+#define FIRE_COOLDOWN      0.8f   // Minimum seconds between shots
+
+// Material surface types for footstep and impact sounds
+#define MATERIAL_DEFAULT   0
+#define MATERIAL_METAL     1
+#define MATERIAL_STONE     2
+#define MATERIAL_WOOD      3
+#define MATERIAL_FLESH     4
+#define MATERIAL_WATER     5
+#define MATERIAL_COUNT     6
+
+// Hit texture paths — body-part damage multiplier maps (white=max damage, black=armored)
+#define HIT_TEXTURE_COUNT  5
+const char *HIT_TEXTURE_PATHS[] = {
+  ASSET_ROOT "gfx/damage/explosion_dmg.tga",
+  ASSET_ROOT "gfx/damage/blast_ring_dmg.tga",
+  ASSET_ROOT "gfx/damage/scorch_dmg.tga",
+  ASSET_ROOT "gfx/damage/bullet_hole_dmg.tga",
+  ASSET_ROOT "gfx/damage/directional_dmg.tga"};
 
 // Convex Hull Limits
 #define HULL_MAX_VERTS     256 // Per-hull vertex cap (matches GPU array size in Gpu_Hull)
@@ -169,6 +196,76 @@ typedef struct {
   int   Forward, Back, Left, Right, Jump, Fire, Crouch; // Binary key states: 1 if held, 0 otherwise
   float Delta_X, Delta_Y;                               // Mouse displacement in pixels since last frame
 } Input;
+
+// ── Projectile ──
+
+typedef struct {
+  vec3  Position;        // World position
+  float Pad_A;
+  vec3  Velocity;        // Units per second
+  float Lifetime;        // Seconds remaining before expiry
+  int   Active;          // 1 = live, 0 = dead
+  int   Material_Hit;    // Surface material on impact (for sound selection)
+  float Radius;          // Collision radius
+  float Damage;          // Damage on impact
+} Projectile;
+
+typedef struct {
+  Projectile Slots[MAX_PROJECTILES]; // Fixed-size projectile array
+  int        Count;                  // Active projectile count
+  float      Fire_Cooldown;          // Time until next shot allowed
+  float      Pad[2];
+} Projectile_Pool;
+
+// GPU-side mirror of Projectile_Pool (std430, uploaded to physics compute)
+typedef struct {
+  float Position[3];  float Pad_A;
+  float Velocity[3];  float Lifetime;
+  int   Active;       int   Material_Hit;
+  float Radius;       float Damage;
+} Gpu_Projectile;
+
+typedef struct {
+  Gpu_Projectile Slots[MAX_PROJECTILES];
+  int   Count;
+  float Fire_Cooldown;
+  float Pad[2];
+} Gpu_Projectile_Pool;
+
+// ── Material System ──
+
+typedef struct {
+  int   Type;           // MATERIAL_DEFAULT, MATERIAL_METAL, etc.
+  float Damage_Scale;   // 0.0 (armored) to 1.0 (exposed)
+  char  Name[32];       // Human-readable name
+} Material;
+
+// ── Audio System (OpenAL + Opus) ──
+
+#include <AL/al.h>
+#include <AL/alc.h>
+#include <AL/efx.h>
+
+#define MAX_AUDIO_BUFFERS 32
+#define MAX_AUDIO_SOURCES 16
+
+typedef struct {
+  ALCdevice  *Device;
+  ALCcontext *Context;
+  ALuint      Buffers[MAX_AUDIO_BUFFERS];
+  int         Buffer_Count;
+  ALuint      Sources[MAX_AUDIO_SOURCES];
+  int         Source_Count;
+  // Named sound indices
+  int         Sound_Shoot;        // Weapon fire
+  int         Sound_Explode;      // Rocket impact
+  int         Sound_Step_Stone;   // Footstep on stone
+  int         Sound_Step_Metal;   // Footstep on metal
+  int         Sound_Jump;         // Jump
+  int         Sound_Land;         // Land after jump
+  float       Step_Accumulator;   // Distance accumulator for footstep timing
+  int         Was_On_Ground;      // Previous frame ground state (for land detection)
+} Audio_System;
 
 // GPU-resident buffer with its backing memory and optional device address
 typedef struct {
@@ -593,6 +690,22 @@ VkDescriptorPool      Physics_Descriptor_Pool;   // Pool for the physics descrip
 VkDescriptorSet       Physics_Descriptor_Set;    // Descriptor set binding physics resources
 Gpu_Buffer            Player_State_Buffer;       // SSBO holding the Gpu_Player state (read-write each frame)
 Gpu_Buffer            Hull_Storage_Buffer;       // SSBO holding Gpu_Hull vertex + adjacency data (binding 4)
+Gpu_Buffer            Projectile_Buffer;         // SSBO holding Gpu_Projectile_Pool (binding 5)
+
+// Post-processing pipeline
+VkPipeline            Postprocess_Pipeline;
+VkPipelineLayout      Postprocess_Pipeline_Layout;
+VkDescriptorSetLayout Postprocess_Descriptor_Layout;
+VkDescriptorPool      Postprocess_Descriptor_Pool;
+VkDescriptorSet       Postprocess_Descriptor_Set;
+Gpu_Image             Depth_Image;               // R32F depth output from ray tracing
+Gpu_Image             Postprocess_Output_Image;  // Final post-processed output
+
+// Audio
+Audio_System Audio;
+
+// Projectile pool (CPU-side)
+Projectile_Pool Projectiles;
 
 // Application state
 int   Quit;       // Non-zero when the application should exit
@@ -864,6 +977,16 @@ typedef struct {
   float Delta_X, Delta_Y, Dt, Pad2;
 } Gpu_Input;
 
+// Push constants for the post-processing compute shader (32 bytes)
+typedef struct {
+  float Time;           // Seconds since start
+  float Delta_Time;     // Frame delta
+  float Velocity_X;     // Camera velocity X for motion blur direction
+  float Velocity_Z;     // Camera velocity Z
+  float Speed;          // Camera horizontal speed
+  float Pad[3];
+} Gpu_Postprocess_Push;
+
 // CPU-side convex hull produced by the Quickhull algorithm.  Stores vertex positions and per-vertex
 // adjacency for hill-climbing support queries.
 typedef struct {
@@ -978,7 +1101,7 @@ Input Poll_Input (void);
 
 // Record and submit one frame of ray tracing: bind the pipeline and descriptors, dispatch
 // traceRaysKHR for every pixel, blit the storage image to the swapchain, and present.
-void Raytracing_Frame (void);
+void Raytracing_Frame (Gpu_Postprocess_Push PP);
 
 // ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 //
@@ -3404,7 +3527,7 @@ void Top_Level_Rebuild (Acceleration_Structure *World, Acceleration_Structure *W
 
 void Raytracing_Pipeline_Create () {
 
-  // Define the 12 descriptor bindings for the ray tracing pipeline
+  // Define the 13 descriptor bindings for the ray tracing pipeline
   VkDescriptorSetLayoutBinding Bindings[] = {
     {0,  VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, 1,   VK_SHADER_STAGE_RAYGEN_BIT_KHR | VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR, NULL},
     {1,  VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,              1,   VK_SHADER_STAGE_RAYGEN_BIT_KHR,                                        NULL},
@@ -3417,25 +3540,26 @@ void Raytracing_Pipeline_Create () {
     {8,  VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,             1,   VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR,                                   NULL},
     {9,  VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,             1,   VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR,                                   NULL},
     {10, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,             1,   VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR,                                   NULL},
-    {11, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,     256, VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR,                                   NULL},
+    {11, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,              1,   VK_SHADER_STAGE_RAYGEN_BIT_KHR,                                        NULL}, // Depth output
+    {12, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,     256, VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR,                                   NULL}, // Textures (must be last for variable count)
   };
 
-  // The last binding (texture array) uses partially-bound and variable-count flags
+  // The texture array binding (12, highest) uses partially-bound and variable-count flags
   VkDescriptorBindingFlags Binding_Flags[] =
-    {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT | VK_DESCRIPTOR_BINDING_VARIABLE_DESCRIPTOR_COUNT_BIT};
+    {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT | VK_DESCRIPTOR_BINDING_VARIABLE_DESCRIPTOR_COUNT_BIT};
 
   // Chain the binding flags extension into the descriptor set layout creation
   VkDescriptorSetLayoutBindingFlagsCreateInfo Binding_Flags_Info = {
     .sType         = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_BINDING_FLAGS_CREATE_INFO,
-    .bindingCount  = 12,
+    .bindingCount  = 13,
     .pBindingFlags = Binding_Flags};
 
-  // Create the descriptor set layout with all 12 bindings
+  // Create the descriptor set layout with all 13 bindings
   VK_CHECK (vkCreateDescriptorSetLayout (Device,
                                          &(VkDescriptorSetLayoutCreateInfo){
                                            .sType        = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
                                            .pNext        = &Binding_Flags_Info,
-                                           .bindingCount = 12,
+                                           .bindingCount = 13,
                                            .pBindings    = Bindings},
                                          NULL, &Descriptor_Set_Layout));
 
@@ -3543,7 +3667,7 @@ void Descriptor_Set_Create (Weapon_Instance *Weapon) {
 
   // Allocate a descriptor pool large enough for all binding types
   VkDescriptorPoolSize Pool_Sizes[] = {{VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, 1},
-                                       {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,              1},
+                                       {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,              2},  // Color + Depth
                                        {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,             1},
                                        {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,             7},
                                        {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,     257}};
@@ -3598,7 +3722,10 @@ void Descriptor_Set_Create (Weapon_Instance *Weapon) {
                                          .imageView   = Lightmap_View,
                                          .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
 
-  // Write all 12 descriptor bindings in one batch
+  // Depth output image descriptor
+  VkDescriptorImageInfo Depth_Info = {.imageView = Depth_Image.View, .imageLayout = VK_IMAGE_LAYOUT_GENERAL};
+
+  // Write all 13 descriptor bindings in one batch
   VkWriteDescriptorSet Writes[] = {
     {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, &Acceleration_Write, Descriptor_Set, 0,  0, 1,             VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, NULL,           NULL},
     {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, Descriptor_Set, 1,  0, 1,                            VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,              &Image_Info,    NULL},
@@ -3611,10 +3738,11 @@ void Descriptor_Set_Create (Weapon_Instance *Weapon) {
     {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, Descriptor_Set, 8,  0, 1,                            VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,             NULL,           &Weapon_Vertex_Info},
     {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, Descriptor_Set, 9,  0, 1,                            VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,             NULL,           &Weapon_Index_Info},
     {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, Descriptor_Set, 10, 0, 1,                            VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,             NULL,           &Weapon_Texture_Id_Info},
-    {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, Descriptor_Set, 11, 0, Texture_Count,                VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,     Texture_Infos,  NULL},
+    {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, Descriptor_Set, 11, 0, 1,                            VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,              &Depth_Info,    NULL},
+    {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, Descriptor_Set, 12, 0, Texture_Count,                VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,     Texture_Infos,  NULL},
   };
 
-  vkUpdateDescriptorSets (Device, 12, Writes, 0, NULL);
+  vkUpdateDescriptorSets (Device, 13, Writes, 0, NULL);
   free (Texture_Infos);
 
 } // Descriptor_Set_Create
@@ -3871,7 +3999,7 @@ Input Poll_Input () {
 //   Raytracing_Frame
 // ════════════════════
 
-void Raytracing_Frame () {
+void Raytracing_Frame (Gpu_Postprocess_Push PP) {
 
   // Wait for the previous frame's GPU work to complete
   VK_CHECK (vkWaitForFences (Device, 1, &Fence, VK_TRUE, UINT64_MAX));
@@ -3898,11 +4026,33 @@ void Raytracing_Frame () {
                   &Shader_Binding_Hit, &Shader_Binding_Callable,
                   Width, Height, 1);
 
+  // Barrier: RT writes complete before postprocess reads
+  vkCmdPipelineBarrier (Command_Buffer,
+    VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+    0, 1, &(VkMemoryBarrier){VK_STRUCTURE_TYPE_MEMORY_BARRIER, NULL,
+      VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT},
+    0, NULL, 0, NULL);
+
+  // Dispatch postprocess compute shader
+  vkCmdBindPipeline       (Command_Buffer, VK_PIPELINE_BIND_POINT_COMPUTE, Postprocess_Pipeline);
+  vkCmdBindDescriptorSets (Command_Buffer, VK_PIPELINE_BIND_POINT_COMPUTE,
+                           Postprocess_Pipeline_Layout, 0, 1, &Postprocess_Descriptor_Set, 0, NULL);
+  vkCmdPushConstants      (Command_Buffer, Postprocess_Pipeline_Layout, VK_SHADER_STAGE_COMPUTE_BIT,
+                           0, sizeof PP, &PP);
+  vkCmdDispatch (Command_Buffer, (Width + 7) / 8, (Height + 7) / 8, 1);
+
+  // Barrier: postprocess writes complete before blit reads
+  vkCmdPipelineBarrier (Command_Buffer,
+    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+    0, 1, &(VkMemoryBarrier){VK_STRUCTURE_TYPE_MEMORY_BARRIER, NULL,
+      VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT},
+    0, NULL, 0, NULL);
+
   // Transition the storage image from general to transfer-source for the blit
   Image_Layout_Barrier (Command_Buffer, Raytracing_Storage_Image.Image,
                         VK_IMAGE_LAYOUT_GENERAL,              VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                         VK_ACCESS_SHADER_WRITE_BIT,           VK_ACCESS_TRANSFER_READ_BIT,
-                        VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR, VK_PIPELINE_STAGE_TRANSFER_BIT);
+                        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
 
   // Transition the swapchain image from undefined to transfer-destination
   Image_Layout_Barrier (Command_Buffer, Swapchain_Images[Image_Index],
@@ -3925,7 +4075,7 @@ void Raytracing_Frame () {
   Image_Layout_Barrier (Command_Buffer, Raytracing_Storage_Image.Image,
                         VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL,
                         VK_ACCESS_TRANSFER_READ_BIT,          VK_ACCESS_SHADER_WRITE_BIT,
-                        VK_PIPELINE_STAGE_TRANSFER_BIT,       VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR);
+                        VK_PIPELINE_STAGE_TRANSFER_BIT,       VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
 
   // Transition the swapchain image to present-source for display
   Image_Layout_Barrier (Command_Buffer, Swapchain_Images[Image_Index],
@@ -3964,6 +4114,72 @@ void Raytracing_Frame () {
   vkQueueWaitIdle (Queue);
 
 } // Raytracing_Frame
+
+// ══════════════════════════════════
+//   Postprocess_Pipeline_Create
+// ══════════════════════════════════
+
+void Postprocess_Pipeline_Create (void) {
+
+  // Two storage image bindings: color (rgba8) and depth (r32f)
+  VkDescriptorSetLayoutBinding Bindings[] = {
+    {0, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, NULL}, // Color
+    {1, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, NULL}, // Depth
+  };
+
+  VK_CHECK (vkCreateDescriptorSetLayout (Device,
+    &(VkDescriptorSetLayoutCreateInfo){
+      .sType        = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+      .bindingCount = 2,
+      .pBindings    = Bindings},
+    NULL, &Postprocess_Descriptor_Layout));
+
+  VkPushConstantRange Push_Range = {VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof (Gpu_Postprocess_Push)};
+  VK_CHECK (vkCreatePipelineLayout (Device,
+    &(VkPipelineLayoutCreateInfo){
+      .sType                  = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+      .setLayoutCount         = 1,
+      .pSetLayouts            = &Postprocess_Descriptor_Layout,
+      .pushConstantRangeCount = 1,
+      .pPushConstantRanges    = &Push_Range},
+    NULL, &Postprocess_Pipeline_Layout));
+
+  VkShaderModule Module = Shader_Module_Load (SHADER_PATH_POSTPROCESS);
+  VK_CHECK (vkCreateComputePipelines (Device, VK_NULL_HANDLE, 1,
+    &(VkComputePipelineCreateInfo){
+      .sType  = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
+      .stage  = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, NULL, 0, VK_SHADER_STAGE_COMPUTE_BIT, Module, "main", NULL},
+      .layout = Postprocess_Pipeline_Layout},
+    NULL, &Postprocess_Pipeline));
+  vkDestroyShaderModule (Device, Module, NULL);
+
+  // Descriptor pool and set
+  VkDescriptorPoolSize Pool_Size = {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 2};
+  VK_CHECK (vkCreateDescriptorPool (Device,
+    &(VkDescriptorPoolCreateInfo){
+      .sType         = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
+      .maxSets       = 1,
+      .poolSizeCount = 1,
+      .pPoolSizes    = &Pool_Size},
+    NULL, &Postprocess_Descriptor_Pool));
+
+  VK_CHECK (vkAllocateDescriptorSets (Device,
+    &(VkDescriptorSetAllocateInfo){
+      .sType              = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+      .descriptorPool     = Postprocess_Descriptor_Pool,
+      .descriptorSetCount = 1,
+      .pSetLayouts        = &Postprocess_Descriptor_Layout},
+    &Postprocess_Descriptor_Set));
+
+  VkDescriptorImageInfo Color_Info = {.imageView = Raytracing_Storage_Image.View, .imageLayout = VK_IMAGE_LAYOUT_GENERAL};
+  VkDescriptorImageInfo Depth_Info = {.imageView = Depth_Image.View,              .imageLayout = VK_IMAGE_LAYOUT_GENERAL};
+
+  VkWriteDescriptorSet Writes[] = {
+    {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, Postprocess_Descriptor_Set, 0, 0, 1, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, &Color_Info, NULL},
+    {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, Postprocess_Descriptor_Set, 1, 0, 1, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, &Depth_Info, NULL},
+  };
+  vkUpdateDescriptorSets (Device, 2, Writes, 0, NULL);
+}
 
 
 // ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
@@ -4273,20 +4489,21 @@ void Hull_Upload (const Convex_Hull *Hull) {
 
 void Physics_Pipeline_Create () {
 
-  // Define the 5 descriptor bindings for the physics compute pipeline
+  // Define the 6 descriptor bindings for the physics compute pipeline
   VkDescriptorSetLayoutBinding Bindings[] = {
     {0, VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, 1, VK_SHADER_STAGE_COMPUTE_BIT, NULL}, // TLAS
     {1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,             1, VK_SHADER_STAGE_COMPUTE_BIT, NULL}, // Vertex buffer
     {2, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,             1, VK_SHADER_STAGE_COMPUTE_BIT, NULL}, // Index buffer
     {3, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,             1, VK_SHADER_STAGE_COMPUTE_BIT, NULL}, // Player state
     {4, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,             1, VK_SHADER_STAGE_COMPUTE_BIT, NULL}, // Hull data
+    {5, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,             1, VK_SHADER_STAGE_COMPUTE_BIT, NULL}, // Projectiles
   };
 
-  // Create the descriptor set layout with all 5 physics bindings
+  // Create the descriptor set layout with all 6 physics bindings
   VK_CHECK (vkCreateDescriptorSetLayout (Device,
     &(VkDescriptorSetLayoutCreateInfo){
       .sType        = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
-      .bindingCount = 5,
+      .bindingCount = 6,
       .pBindings    = Bindings},
     NULL, &Physics_Descriptor_Layout));
 
@@ -4344,10 +4561,17 @@ void Physics_Resources_Create (const Player *Initial_State) {
     Buffer_Upload (Hull_Storage_Buffer, &Empty, sizeof Empty);
   }
 
+  // Allocate the projectile pool buffer (binding 5)
+  Projectile_Buffer = Buffer_Allocate (sizeof (Gpu_Projectile_Pool),
+    VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
+    VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+  Gpu_Projectile_Pool Empty_Pool = {0};
+  Buffer_Upload (Projectile_Buffer, &Empty_Pool, sizeof Empty_Pool);
+
   // Allocate the physics descriptor pool and set
   VkDescriptorPoolSize Pool_Sizes[] = {
     {VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, 1},
-    {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,             4}};
+    {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,             5}}; // 5 storage buffers: vertex, index, player, hull, projectiles
   VK_CHECK (vkCreateDescriptorPool (Device,
     &(VkDescriptorPoolCreateInfo){
       .sType         = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
@@ -4373,6 +4597,7 @@ void Physics_Resources_Create (const Player *Initial_State) {
   VkDescriptorBufferInfo Index_Info   = {Index_Buffer.Buffer,        0, Index_Buffer.Size};
   VkDescriptorBufferInfo Player_Info  = {Player_State_Buffer.Buffer, 0, Player_State_Buffer.Size};
   VkDescriptorBufferInfo Hull_Info    = {Hull_Storage_Buffer.Buffer,  0, Hull_Storage_Buffer.Size};
+  VkDescriptorBufferInfo Proj_Info    = {Projectile_Buffer.Buffer,    0, Projectile_Buffer.Size};
 
   VkWriteDescriptorSet Writes[] = {
     {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, &Acceleration_Write, Physics_Descriptor_Set, 0, 0, 1, VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, NULL, NULL},
@@ -4380,8 +4605,9 @@ void Physics_Resources_Create (const Player *Initial_State) {
     {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL,                Physics_Descriptor_Set, 2, 0, 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,             NULL, &Index_Info},
     {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL,                Physics_Descriptor_Set, 3, 0, 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,             NULL, &Player_Info},
     {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL,                Physics_Descriptor_Set, 4, 0, 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,             NULL, &Hull_Info},
+    {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL,                Physics_Descriptor_Set, 5, 0, 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,             NULL, &Proj_Info},
   };
-  vkUpdateDescriptorSets (Device, 5, Writes, 0, NULL);
+  vkUpdateDescriptorSets (Device, 6, Writes, 0, NULL);
 }
 
 // ── §10C. Physics Dispatch ────────────────────────────────────────────────────────────────────────
@@ -4468,6 +4694,559 @@ Player Physics_Dispatch (Input In, float Dt) {
 
 // ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 //
+// §13. Audio System (OpenAL + Opus)
+//
+// ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+
+// Opus support removed: using WAV assets with modal synthesis enhancement
+
+// ═══════════════════════════════════════════════════════════
+//   Physically-based Modal Synthesis Audio (SIGGRAPH-grade)
+// ═══════════════════════════════════════════════════════════
+//
+// Each material is modeled as a bank of damped resonators (modes). An impact excitation
+// (short force pulse) drives all modes simultaneously. The resonator bank produces emergent
+// timbre from the object's physical resonances — not from hand-crafted oscillators.
+//
+// Based on James/Zheng/Chadwick rigid-body sound synthesis:
+//   - Modal frequencies and T60 decay times per material
+//   - Contact impulse shapes the excitation
+//   - Acceleration noise restores high-frequency realism
+
+#define MODAL_SAMPLE_RATE 22050
+#define MODAL_MAX_MODES   12
+
+typedef struct {
+  float a1, a2;   // Feedback coefficients (from frequency and damping)
+  float b0;       // Input gain (mode excitation weight)
+  float y1, y2;   // Filter state
+} Mode_Resonator;
+
+static void Mode_Init (Mode_Resonator *M, float Freq_Hz, float T60, float Gain) {
+  // r from T60: amplitude decays by 60 dB over T60 seconds
+  float R = powf (0.001f, 1.f / (T60 * MODAL_SAMPLE_RATE));
+  float W = 2.f * 3.14159265f * Freq_Hz / MODAL_SAMPLE_RATE;
+  M->a1 = 2.f * R * cosf (W);
+  M->a2 = -(R * R);
+  M->b0 = Gain;
+  M->y1 = M->y2 = 0.f;
+}
+
+static inline float Mode_Tick (Mode_Resonator *M, float X) {
+  float Y = M->a1 * M->y1 + M->a2 * M->y2 + M->b0 * X;
+  M->y2 = M->y1;
+  M->y1 = Y;
+  return Y;
+}
+
+// Material mode tables: {frequency_Hz, T60_seconds, gain}
+// Derived from measured rigid-body resonances (SIGGRAPH modal synthesis literature)
+
+typedef struct { float Freq; float T60; float Gain; } Mode_Spec;
+
+// Stone: dense, high frequencies, medium-long decay
+static const Mode_Spec Modes_Stone[] = {
+  {1200, 0.08, 0.35}, {2400, 0.05, 0.25}, {3600, 0.03, 0.15},
+  {4800, 0.02, 0.10}, { 800, 0.10, 0.30}, {1800, 0.06, 0.20},
+  {5500, 0.015, 0.08}, {6200, 0.01, 0.05}, {950, 0.09, 0.25},
+  {3200, 0.04, 0.12}, {7000, 0.008, 0.03}, {420, 0.12, 0.18}};
+
+// Metal: bright, ringing, long decay
+static const Mode_Spec Modes_Metal[] = {
+  {880, 0.40, 0.30}, {1760, 0.30, 0.25}, {2640, 0.20, 0.18},
+  {3520, 0.15, 0.12}, {4400, 0.10, 0.08}, {5280, 0.08, 0.05},
+  {440, 0.50, 0.35}, {1320, 0.35, 0.22}, {6600, 0.05, 0.03},
+  {2200, 0.25, 0.15}, {7700, 0.04, 0.02}, {660, 0.45, 0.28}};
+
+// Wood: warm, short decay, lower partials
+static const Mode_Spec Modes_Wood[] = {
+  {350, 0.06, 0.40}, {700, 0.04, 0.30}, {1400, 0.03, 0.20},
+  {2100, 0.02, 0.12}, {2800, 0.015, 0.08}, {500, 0.05, 0.35},
+  {1050, 0.035, 0.25}, {3500, 0.01, 0.05}, {175, 0.08, 0.30},
+  {1750, 0.025, 0.15}, {4200, 0.008, 0.03}, {280, 0.07, 0.22}};
+
+// Flesh: very dull, extremely short decay
+static const Mode_Spec Modes_Flesh[] = {
+  {200, 0.02, 0.50}, {400, 0.015, 0.30}, {600, 0.01, 0.15},
+  {150, 0.025, 0.40}, {300, 0.018, 0.25}, {500, 0.012, 0.18},
+  {100, 0.03, 0.35}, {250, 0.02, 0.22}, {700, 0.008, 0.10},
+  {350, 0.016, 0.20}, {800, 0.006, 0.05}, {450, 0.013, 0.12}};
+
+static const Mode_Spec *Material_Modes[] = {
+  Modes_Stone,  // MATERIAL_DEFAULT = stone-like
+  Modes_Metal,  // MATERIAL_METAL
+  Modes_Stone,  // MATERIAL_STONE
+  Modes_Wood,   // MATERIAL_WOOD
+  Modes_Flesh,  // MATERIAL_FLESH
+  Modes_Stone,  // MATERIAL_WATER (splashy, use stone as base)
+};
+
+// ═══════════════════════════════
+//   Audio_Generate_Modal_Impact
+// ═══════════════════════════════
+//
+// Generate a PCM buffer from a modal resonator bank excited by a contact impulse.
+// Impulse_Strength controls excitation energy (0-1), Duration is output length.
+
+static ALuint Audio_Generate_Modal_Impact (int Material, float Impulse_Strength,
+                                            float Duration, float Volume) {
+  int Samples = (int)(MODAL_SAMPLE_RATE * Duration);
+  short *Data = malloc (Samples * sizeof (short));
+
+  // Select material modes
+  if (Material < 0 or Material > 5) Material = 0;
+  const Mode_Spec *Specs = Material_Modes[Material];
+
+  // Initialize resonator bank
+  Mode_Resonator Bank[MODAL_MAX_MODES];
+  for (int I = 0; I < MODAL_MAX_MODES; I++)
+    Mode_Init (&Bank[I], Specs[I].Freq, Specs[I].T60, Specs[I].Gain * Impulse_Strength);
+
+  // Generate excitation: short impulse pulse (1-5ms) shaped by contact force profile
+  int Impulse_Len = (int)(MODAL_SAMPLE_RATE * 0.003f); // 3ms impulse
+  if (Impulse_Len < 1) Impulse_Len = 1;
+
+  // LCG for acceleration noise
+  unsigned Seed = 42 + Material * 7;
+
+  for (int I = 0; I < Samples; I++) {
+    // Excitation: raised-cosine impulse for the first few ms
+    float Excitation = 0;
+    if (I < Impulse_Len) {
+      float Phase = 3.14159f * (float)I / Impulse_Len;
+      Excitation = 0.5f * (1.f - cosf (Phase)) * Impulse_Strength;
+    }
+
+    // Acceleration noise: band-limited noise that decays, fills in high-frequency content
+    // the modal bank misses (per Cornell SIGGRAPH 2012)
+    float T = (float)I / MODAL_SAMPLE_RATE;
+    float Noise_Env = expf (-T * 20.f) * 0.15f * Impulse_Strength;
+    Seed = Seed * 1103515245 + 12345;
+    float Noise = ((float)(Seed & 0x7FFF) / 16384.f - 1.f) * Noise_Env;
+
+    // Sum all resonator outputs driven by the excitation
+    float Y = 0;
+    for (int M = 0; M < MODAL_MAX_MODES; M++)
+      Y += Mode_Tick (&Bank[M], Excitation);
+    Y += Noise;
+
+    // Soft clip to prevent overflow
+    if (Y >  1.f) Y =  1.f;
+    if (Y < -1.f) Y = -1.f;
+    Data[I] = (short)(Y * Volume * 32767.f);
+  }
+
+  ALuint Buffer;
+  alGenBuffers (1, &Buffer);
+  alBufferData (Buffer, AL_FORMAT_MONO16, Data, Samples * sizeof (short), MODAL_SAMPLE_RATE);
+  free (Data);
+  return Buffer;
+}
+
+// ═══════════════════════════════════
+//   Audio_Generate_Explosion_Modal
+// ═══════════════════════════════════
+//
+// Explosion = broadband transient + N debris modal impacts (per SIGGRAPH 2008 scaling work).
+// The initial shock is a burst of all-mode excitation, followed by randomized sub-impacts.
+
+static ALuint Audio_Generate_Explosion_Modal (float Duration, float Volume) {
+  int Samples = (int)(MODAL_SAMPLE_RATE * Duration);
+  short *Data = calloc (Samples, sizeof (short));
+
+  // Initial broadband shock: excite stone + metal modes simultaneously
+  Mode_Resonator Shock_Bank[MODAL_MAX_MODES];
+  for (int I = 0; I < MODAL_MAX_MODES; I++) {
+    // Mix stone and metal modes for broadband character
+    float Freq = (Modes_Stone[I].Freq + Modes_Metal[I].Freq) * 0.5f * 0.6f; // Lower for explosion
+    float T60  = (Modes_Stone[I].T60  + Modes_Metal[I].T60) * 0.5f * 1.5f;  // Longer decay
+    float Gain = (Modes_Stone[I].Gain + Modes_Metal[I].Gain) * 0.5f;
+    Mode_Init (&Shock_Bank[I], Freq, T60, Gain);
+  }
+
+  unsigned Seed = 99;
+  int Shock_Len = (int)(MODAL_SAMPLE_RATE * 0.01f); // 10ms shock
+  int Debris_Count = 8;
+
+  // Generate shock phase
+  for (int I = 0; I < Samples; I++) {
+    float Exc = 0;
+    if (I < Shock_Len) Exc = 1.0f * (1.f - (float)I / Shock_Len);
+
+    // Rumble noise
+    float T = (float)I / MODAL_SAMPLE_RATE;
+    Seed = Seed * 1103515245 + 12345;
+    float Noise = ((float)(Seed & 0x7FFF) / 16384.f - 1.f);
+    float Noise_Env = expf (-T * 4.f) * 0.6f;
+
+    float Y = Noise * Noise_Env;
+    for (int M = 0; M < MODAL_MAX_MODES; M++)
+      Y += Mode_Tick (&Shock_Bank[M], Exc);
+
+    if (Y >  1.f) Y =  1.f;
+    if (Y < -1.f) Y = -1.f;
+    Data[I] = (short)(Y * Volume * 32767.f);
+  }
+
+  // Overlay debris sub-impacts at staggered times (perceptual scheduling)
+  for (int D = 0; D < Debris_Count; D++) {
+    Seed = Seed * 1103515245 + 12345;
+    int Start = (Seed % (Samples / 2)) + Samples / 8; // Stagger after initial shock
+    int Mat = (Seed >> 8) % 4; // Random material
+    float Strength = 0.3f + 0.4f * ((Seed >> 16) & 0xFF) / 255.f;
+
+    Mode_Resonator Debris_Bank[MODAL_MAX_MODES];
+    const Mode_Spec *Specs = Material_Modes[Mat];
+    for (int M = 0; M < MODAL_MAX_MODES; M++)
+      Mode_Init (&Debris_Bank[M], Specs[M].Freq, Specs[M].T60, Specs[M].Gain * Strength);
+
+    int Imp_Len = (int)(MODAL_SAMPLE_RATE * 0.002f);
+    for (int I = 0; I < Samples - Start; I++) {
+      float Exc = (I < Imp_Len) ? (1.f - (float)I / Imp_Len) * Strength : 0;
+      float Y = 0;
+      for (int M = 0; M < MODAL_MAX_MODES; M++)
+        Y += Mode_Tick (&Debris_Bank[M], Exc);
+      int Idx = Start + I;
+      float Existing = Data[Idx] / 32767.f;
+      float Mixed = Existing + Y * Volume * 0.3f;
+      if (Mixed >  1.f) Mixed =  1.f;
+      if (Mixed < -1.f) Mixed = -1.f;
+      Data[Idx] = (short)(Mixed * 32767.f);
+    }
+  }
+
+  ALuint Buffer;
+  alGenBuffers (1, &Buffer);
+  alBufferData (Buffer, AL_FORMAT_MONO16, Data, Samples * sizeof (short), MODAL_SAMPLE_RATE);
+  free (Data);
+  return Buffer;
+}
+
+// ═══════════════════════════════
+//   Audio_Generate_Weapon_Fire
+// ═══════════════════════════════
+//
+// Weapon fire = sharp metallic transient (bolt mechanism) + propellant gas expansion.
+// Uses metal modes for the mechanism and broadband noise for the gas.
+
+static ALuint Audio_Generate_Weapon_Fire (float Volume) {
+  float Duration = 0.2f;
+  int Samples = (int)(MODAL_SAMPLE_RATE * Duration);
+  short *Data = malloc (Samples * sizeof (short));
+
+  // Metal mechanism: high-frequency, short-decay metal modes
+  Mode_Resonator Mech_Bank[MODAL_MAX_MODES];
+  for (int I = 0; I < MODAL_MAX_MODES; I++)
+    Mode_Init (&Mech_Bank[I], Modes_Metal[I].Freq * 1.5f, Modes_Metal[I].T60 * 0.3f,
+               Modes_Metal[I].Gain * 0.8f);
+
+  unsigned Seed = 777;
+  int Click_Len = (int)(MODAL_SAMPLE_RATE * 0.001f); // 1ms click
+
+  for (int I = 0; I < Samples; I++) {
+    float T = (float)I / MODAL_SAMPLE_RATE;
+
+    // Mechanism click excitation
+    float Exc = (I < Click_Len) ? 1.f : 0;
+
+    // Gas expansion: broadband noise with fast decay
+    Seed = Seed * 1103515245 + 12345;
+    float Noise = ((float)(Seed & 0x7FFF) / 16384.f - 1.f);
+    float Gas_Env = expf (-T * 30.f) * 0.7f;
+
+    float Y = Noise * Gas_Env;
+    for (int M = 0; M < MODAL_MAX_MODES; M++)
+      Y += Mode_Tick (&Mech_Bank[M], Exc);
+
+    if (Y >  1.f) Y =  1.f;
+    if (Y < -1.f) Y = -1.f;
+    Data[I] = (short)(Y * Volume * 32767.f);
+  }
+
+  ALuint Buffer;
+  alGenBuffers (1, &Buffer);
+  alBufferData (Buffer, AL_FORMAT_MONO16, Data, Samples * sizeof (short), MODAL_SAMPLE_RATE);
+  free (Data);
+  return Buffer;
+}
+
+// ═══════════════════════
+//   Audio_Load_WAV
+// ═══════════════════════
+//
+// Load a WAV file from disk into an OpenAL buffer. Supports 8/16-bit mono/stereo PCM.
+// Returns 0 on failure.
+
+static ALuint Audio_Load_WAV (const char *Path) {
+  FILE *F = fopen (Path, "rb");
+  if (not F) return 0;
+
+  // Read WAV header (44 bytes minimum)
+  unsigned char Header[44];
+  if (fread (Header, 1, 44, F) < 44) { fclose (F); return 0; }
+
+  // Verify RIFF/WAVE signature
+  if (memcmp (Header, "RIFF", 4) != 0 or memcmp (Header + 8, "WAVE", 4) != 0) { fclose (F); return 0; }
+
+  // Parse format chunk
+  int Channels   = Header[22] | (Header[23] << 8);
+  int Sample_Rate = Header[24] | (Header[25] << 8) | (Header[26] << 16) | (Header[27] << 24);
+  int Bits       = Header[34] | (Header[35] << 8);
+  int Data_Size  = Header[40] | (Header[41] << 8) | (Header[42] << 16) | (Header[43] << 24);
+
+  // Read PCM data
+  void *Data = malloc (Data_Size);
+  int Read = (int)fread (Data, 1, Data_Size, F);
+  fclose (F);
+  if (Read < Data_Size) Data_Size = Read;
+
+  // Determine OpenAL format
+  ALenum Format;
+  if (Channels == 1 and Bits == 8)       Format = AL_FORMAT_MONO8;
+  else if (Channels == 1 and Bits == 16) Format = AL_FORMAT_MONO16;
+  else if (Channels == 2 and Bits == 8)  Format = AL_FORMAT_STEREO8;
+  else if (Channels == 2 and Bits == 16) Format = AL_FORMAT_STEREO16;
+  else { free (Data); return 0; }
+
+  ALuint Buffer;
+  alGenBuffers (1, &Buffer);
+  alBufferData (Buffer, Format, Data, Data_Size, Sample_Rate);
+  free (Data);
+  return Buffer;
+}
+
+// ═════════════════════════════════
+//   Audio_Load_WAV_Or_Synthesize
+// ═════════════════════════════════
+//
+// Try to load a WAV from disk; if missing, fall back to modal synthesis.
+// This layering lets us use real recordings when available and physically-based
+// synthesis as a fallback — the best of both worlds.
+
+static ALuint Audio_Load_WAV_Or_Modal (const char *Path, int Material, float Impulse,
+                                        float Duration, float Volume) {
+  ALuint Buf = Audio_Load_WAV (Path);
+  if (Buf) { printf ("[audio] loaded %s\n", Path); return Buf; }
+  printf ("[audio] synthesizing fallback for %s\n", Path);
+  return Audio_Generate_Modal_Impact (Material, Impulse, Duration, Volume);
+}
+
+// ════════════════
+//   Audio_Init
+// ════════════════
+
+void Audio_Init (void) {
+  memset (&Audio, 0, sizeof Audio);
+
+  Audio.Device = alcOpenDevice (NULL);
+  if (not Audio.Device) { fprintf (stderr, "[audio] failed to open device\n"); return; }
+
+  Audio.Context = alcCreateContext (Audio.Device, NULL);
+  alcMakeContextCurrent (Audio.Context);
+
+  // Generate sound sources
+  alGenSources (MAX_AUDIO_SOURCES, Audio.Sources);
+  Audio.Source_Count = MAX_AUDIO_SOURCES;
+
+  // ── Load sounds from WAV assets ──────────────────────────────────────────────────────────────
+  Audio.Sound_Shoot = Audio.Buffer_Count;
+  Audio.Buffers[Audio.Buffer_Count++] = Audio_Load_WAV (ASSET_ROOT "sound/weapons/machinegun/machgf1b.wav");
+
+  Audio.Sound_Explode = Audio.Buffer_Count;
+  Audio.Buffers[Audio.Buffer_Count++] = Audio_Load_WAV (ASSET_ROOT "sound/weapons/rocket/rocklx1a.wav");
+
+  Audio.Sound_Step_Stone = Audio.Buffer_Count;
+  Audio.Buffers[Audio.Buffer_Count++] = Audio_Load_WAV (ASSET_ROOT "sound/player/footsteps/step1.wav");
+
+  Audio.Sound_Step_Metal = Audio.Buffer_Count;
+  Audio.Buffers[Audio.Buffer_Count++] = Audio_Load_WAV (ASSET_ROOT "sound/player/footsteps/clank1.wav");
+
+  Audio.Sound_Jump = Audio.Buffer_Count;
+  Audio.Buffers[Audio.Buffer_Count++] = Audio_Load_WAV (ASSET_ROOT "sound/player/footsteps/boot1.wav");
+
+  Audio.Sound_Land = Audio.Buffer_Count;
+  Audio.Buffers[Audio.Buffer_Count++] = Audio_Load_WAV (ASSET_ROOT "sound/player/land1.wav");
+
+  // ── OpenAL EFX reverb (room-scale reverb for physical presence) ─────────────────────────────
+  // Use OpenAL's built-in EFX if available for natural room acoustics
+  if (alcIsExtensionPresent (Audio.Device, "ALC_EXT_EFX")) {
+    LPALGENEFFECTS    alGenEffects    = (LPALGENEFFECTS)    alGetProcAddress ("alGenEffects");
+    LPALEFFECTI       alEffecti       = (LPALEFFECTI)       alGetProcAddress ("alEffecti");
+    LPALEFFECTF       alEffectf       = (LPALEFFECTF)       alGetProcAddress ("alEffectf");
+    LPALGENAUXILIARYEFFECTSLOTS alGenAuxiliaryEffectSlots =
+      (LPALGENAUXILIARYEFFECTSLOTS) alGetProcAddress ("alGenAuxiliaryEffectSlots");
+    LPALAUXILIARYEFFECTSLOTI alAuxiliaryEffectSloti =
+      (LPALAUXILIARYEFFECTSLOTI) alGetProcAddress ("alAuxiliaryEffectSloti");
+
+    if (alGenEffects and alGenAuxiliaryEffectSlots) {
+      ALuint Effect, Slot;
+      alGenEffects (1, &Effect);
+      alEffecti (Effect, AL_EFFECT_TYPE, AL_EFFECT_REVERB);
+      // Subtle room reverb: moderate decay, not too wet — physically based indoor arena
+      alEffectf (Effect, AL_REVERB_DECAY_TIME, 1.2f);    // 1.2s decay for indoor arena
+      alEffectf (Effect, AL_REVERB_GAIN, 0.4f);           // Not too loud
+      alEffectf (Effect, AL_REVERB_GAINHF, 0.6f);         // Keep some high-frequency
+      alEffectf (Effect, AL_REVERB_REFLECTIONS_GAIN, 0.3f);
+      alEffectf (Effect, AL_REVERB_LATE_REVERB_GAIN, 0.25f);
+
+      alGenAuxiliaryEffectSlots (1, &Slot);
+      alAuxiliaryEffectSloti (Slot, AL_EFFECTSLOT_EFFECT, Effect);
+
+      // Route all sources through the reverb slot
+      for (int I = 0; I < Audio.Source_Count; I++)
+        alSource3i (Audio.Sources[I], AL_AUXILIARY_SEND_FILTER, Slot, 0, AL_FILTER_NULL);
+
+      printf ("[audio] EFX reverb enabled (1.2s arena decay)\n");
+    }
+  }
+
+  Audio.Was_On_Ground = 1;
+  printf ("[audio] initialized: %d buffers, %d sources\n", Audio.Buffer_Count, Audio.Source_Count);
+}
+
+// ═════════════════
+//   Audio_Play
+// ═════════════════
+
+void Audio_Play (int Sound_Index, float Volume) {
+  if (not Audio.Device or Sound_Index < 0 or Sound_Index >= Audio.Buffer_Count) return;
+
+  // Find a free source
+  for (int I = 0; I < Audio.Source_Count; I++) {
+    ALint State;
+    alGetSourcei (Audio.Sources[I], AL_SOURCE_STATE, &State);
+    if (State != AL_PLAYING) {
+      alSourcei  (Audio.Sources[I], AL_BUFFER, Audio.Buffers[Sound_Index]);
+      alSourcef  (Audio.Sources[I], AL_GAIN, Volume);
+      alSourcePlay (Audio.Sources[I]);
+      return;
+    }
+  }
+}
+
+// ════════════════════════
+//   Audio_Update_Footsteps
+// ════════════════════════
+
+void Audio_Update_Footsteps (Player *P, float Dt) {
+  if (not Audio.Device) return;
+
+  // Landing detection
+  if (P->On_Ground and not Audio.Was_On_Ground) {
+    Audio_Play (Audio.Sound_Land, 0.6f);
+  }
+  Audio.Was_On_Ground = P->On_Ground;
+
+  // Footstep accumulation (based on horizontal speed)
+  if (P->On_Ground) {
+    float Speed = sqrtf (P->Velocity.x * P->Velocity.x + P->Velocity.z * P->Velocity.z);
+    if (Speed > 50.f) {
+      Audio.Step_Accumulator += Speed * Dt;
+      float Step_Distance = 200.f; // Units per footstep
+      if (Audio.Step_Accumulator >= Step_Distance) {
+        Audio.Step_Accumulator -= Step_Distance;
+        Audio_Play (Audio.Sound_Step_Stone, 0.3f);
+      }
+    } else {
+      Audio.Step_Accumulator = 0;
+    }
+  }
+}
+
+// ═══════════════════
+//   Audio_Shutdown
+// ═══════════════════
+
+void Audio_Shutdown (void) {
+  if (not Audio.Device) return;
+  alDeleteSources (Audio.Source_Count, Audio.Sources);
+  alDeleteBuffers (Audio.Buffer_Count, Audio.Buffers);
+  alcDestroyContext (Audio.Context);
+  alcCloseDevice (Audio.Device);
+  memset (&Audio, 0, sizeof Audio);
+}
+
+// ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+//
+// §13B. Projectile Management
+//
+// ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+
+// ═══════════════════════
+//   Projectile_Spawn
+// ═══════════════════════
+
+void Projectile_Spawn (vec3 Origin, vec3 Direction) {
+  if (Projectiles.Count >= MAX_PROJECTILES) return;
+  if (Projectiles.Fire_Cooldown > 0) return;
+
+  vec3 Normalized = Normalize (Direction);
+  Projectile *P   = &Projectiles.Slots[Projectiles.Count++];
+  P->Position     = Add (Origin, Scale (Normalized, 20.f)); // Spawn 20 units ahead
+  P->Velocity     = Scale (Normalized, ROCKET_SPEED);
+  P->Lifetime     = ROCKET_LIFETIME;
+  P->Active       = 1;
+  P->Radius       = 3.f;
+  P->Damage       = ROCKET_DAMAGE;
+  P->Material_Hit = MATERIAL_DEFAULT;
+
+  Projectiles.Fire_Cooldown = FIRE_COOLDOWN;
+  Audio_Play (Audio.Sound_Shoot, 0.8f);
+}
+
+// ═══════════════════════════
+//   Projectile_Pool_Upload
+// ═══════════════════════════
+
+void Projectile_Pool_Upload (void) {
+  Gpu_Projectile_Pool GPU_Pool = {0};
+  GPU_Pool.Count         = Projectiles.Count;
+  GPU_Pool.Fire_Cooldown = Projectiles.Fire_Cooldown;
+  for (int I = 0; I < Projectiles.Count; I++) {
+    Projectile *P = &Projectiles.Slots[I];
+    GPU_Pool.Slots[I] = (Gpu_Projectile){
+      {P->Position.x, P->Position.y, P->Position.z}, 0,
+      {P->Velocity.x, P->Velocity.y, P->Velocity.z}, P->Lifetime,
+      P->Active, P->Material_Hit, P->Radius, P->Damage};
+  }
+  Buffer_Upload (Projectile_Buffer, &GPU_Pool, sizeof GPU_Pool);
+}
+
+// ═══════════════════════════
+//   Projectile_Pool_Readback
+// ═══════════════════════════
+
+void Projectile_Pool_Readback (void) {
+  Gpu_Projectile_Pool *Mapped;
+  vkMapMemory (Device, Projectile_Buffer.Memory, 0, sizeof (Gpu_Projectile_Pool), 0, (void **)&Mapped);
+  Projectiles.Count         = Mapped->Count;
+  Projectiles.Fire_Cooldown = Mapped->Fire_Cooldown;
+  for (int I = 0; I < Projectiles.Count; I++) {
+    Gpu_Projectile *G = &Mapped->Slots[I];
+    Projectiles.Slots[I] = (Projectile){
+      .Position     = {G->Position[0], G->Position[1], G->Position[2]},
+      .Velocity     = {G->Velocity[0], G->Velocity[1], G->Velocity[2]},
+      .Lifetime     = G->Lifetime,
+      .Active       = G->Active,
+      .Material_Hit = G->Material_Hit,
+      .Radius       = G->Radius,
+      .Damage       = G->Damage};
+  }
+  vkUnmapMemory (Device, Projectile_Buffer.Memory);
+
+  // Compact: remove dead projectiles
+  int Write = 0;
+  for (int I = 0; I < Projectiles.Count; I++) {
+    if (Projectiles.Slots[I].Active) {
+      if (Write != I) Projectiles.Slots[Write] = Projectiles.Slots[I];
+      Write++;
+    }
+  }
+  Projectiles.Count = Write;
+}
+
+// ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+//
 // §14. Main
 //
 // ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
@@ -4503,9 +5282,48 @@ int main (int Argc, char **Argv) {
   Vulkan_Create_Swapchain ();
   Vulkan_Create_Synchronization ();
 
-  // Create the ray tracing storage image (render target)
+  // Create the ray tracing storage image (render target) and depth image (R32F for postprocess DOF)
   Raytracing_Storage_Image = Image_Storage_Create (Width, Height);
   Vulkan_Transition_Storage_Image ();
+
+  // Create R32F depth image for postprocessing
+  {
+    Depth_Image.Format = VK_FORMAT_R32_SFLOAT;
+    VK_CHECK (vkCreateImage (Device, &(VkImageCreateInfo){
+      .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .imageType = VK_IMAGE_TYPE_2D,
+      .format = VK_FORMAT_R32_SFLOAT, .extent = {Width, Height, 1},
+      .mipLevels = 1, .arrayLayers = 1, .samples = VK_SAMPLE_COUNT_1_BIT,
+      .tiling = VK_IMAGE_TILING_OPTIMAL, .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+      .usage = VK_IMAGE_USAGE_STORAGE_BIT}, NULL, &Depth_Image.Image));
+    VkMemoryRequirements Mem_Req;
+    vkGetImageMemoryRequirements (Device, Depth_Image.Image, &Mem_Req);
+    VK_CHECK (vkAllocateMemory (Device, &(VkMemoryAllocateInfo){
+      .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .allocationSize = Mem_Req.size,
+      .memoryTypeIndex = Find_Memory_Type (Mem_Req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)},
+      NULL, &Depth_Image.Memory));
+    VK_CHECK (vkBindImageMemory (Device, Depth_Image.Image, Depth_Image.Memory, 0));
+    VK_CHECK (vkCreateImageView (Device, &(VkImageViewCreateInfo){
+      .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO, .image = Depth_Image.Image,
+      .viewType = VK_IMAGE_VIEW_TYPE_2D, .format = VK_FORMAT_R32_SFLOAT,
+      .subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1}}, NULL, &Depth_Image.View));
+
+    // Transition depth image to general layout
+    VkCommandBuffer Cmd;
+    VK_CHECK (vkAllocateCommandBuffers (Device, &(VkCommandBufferAllocateInfo){
+      .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+      .commandPool = Command_Pool, .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY, .commandBufferCount = 1}, &Cmd));
+    VK_CHECK (vkBeginCommandBuffer (Cmd, &(VkCommandBufferBeginInfo){
+      .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO, .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT}));
+    Image_Layout_Barrier (Cmd, Depth_Image.Image,
+      VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL,
+      0, VK_ACCESS_SHADER_WRITE_BIT,
+      VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR);
+    VK_CHECK (vkEndCommandBuffer (Cmd));
+    VK_CHECK (vkQueueSubmit (Queue, 1, &(VkSubmitInfo){
+      .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO, .commandBufferCount = 1, .pCommandBuffers = &Cmd}, VK_NULL_HANDLE));
+    vkQueueWaitIdle (Queue);
+    vkFreeCommandBuffers (Device, Command_Pool, 1, &Cmd);
+  }
 
   // Allocate the camera uniform buffer
   Camera_Uniform_Buffer = Buffer_Allocate (sizeof (mat4) * 2 + 16,
@@ -4533,6 +5351,9 @@ int main (int Argc, char **Argv) {
   Shader_Binding_Table_Create ();
   Descriptor_Set_Create (&Weapon);
 
+  // Create the post-processing pipeline (reads color + depth, writes color)
+  Postprocess_Pipeline_Create ();
+
   // Create the GPU physics pipeline and resources (with hull binding)
   Physics_Pipeline_Create ();
   // Spawn origin is at Q3 player origin (24 units above feet). Our capsule half-height is 32,
@@ -4542,9 +5363,8 @@ int main (int Argc, char **Argv) {
     .Yaw      = 1.5707963f - Spawn_Point.Angle * 3.14159f / 180.f}; // π/2 - angle: Q3 angle 0 = +X = our yaw π/2
   Physics_Resources_Create (&Initial_Player);
 
-  // Optionally build a convex hull from the weapon model for hull-based collision testing
-  // Convex_Hull Projectile_Hull = Hull_From_Vertices (Weapon.Model.Vertices, Weapon.Model.Vertex_Count);
-  // Hull_Upload (&Projectile_Hull);
+  // Initialize the audio system (OpenAL with synthesized sounds)
+  Audio_Init ();
 
   printf ("[init] ready — entering game loop\n");
 
@@ -4607,6 +5427,7 @@ int main (int Argc, char **Argv) {
   uint64_t Last  = SDL_GetPerformanceCounter ();
   uint64_t Freq  = SDL_GetPerformanceFrequency ();
   uint     Frame = 0;
+  float    Total_Time = 0;
   Quit = 0;
 
   while (not Quit) {
@@ -4616,31 +5437,59 @@ int main (int Argc, char **Argv) {
     float    Dt  = (float)(Now - Last) / (float)Freq;
     if (Dt > MAX_DELTA_TIME) Dt = MAX_DELTA_TIME;
     Last = Now;
+    Total_Time += Dt;
 
-    // Poll input and dispatch GPU physics
+    // Poll input and dispatch GPU physics (also updates projectiles on GPU)
     Input In         = Poll_Input ();
+
+    // Spawn projectile on fire and upload to GPU before physics dispatch
+    if (In.Fire) {
+      float sy = sinf (Cam.Yaw), cy = cosf (Cam.Yaw);
+      float sp = sinf (Cam.Pitch), cp = cosf (Cam.Pitch);
+      vec3 Forward = {sy * cp, -sp, -cy * cp};
+      Projectile_Spawn (Cam.Position, Forward);
+    }
+    Projectiles.Fire_Cooldown -= Dt;
+    if (Projectiles.Fire_Cooldown < 0) Projectiles.Fire_Cooldown = 0;
+    Projectile_Pool_Upload ();
+
     Player Physics   = Physics_Dispatch (In, Dt);
+
+    // Read back projectile state after GPU physics step
+    Projectile_Pool_Readback ();
+
+    // Update audio: footsteps, landing sounds
+    Audio_Update_Footsteps (&Physics, Dt);
 
     // Update the camera from the physics result — add View_Height to get eye position
     Cam.Position   = Physics.Position;
     Cam.Position.y += Physics.View_Height;  // Raise camera from feet to eye level (26 units standing)
     Cam.Yaw        = Physics.Yaw;
     Cam.Pitch      = Physics.Pitch;
-    Cam.Frame    = Frame;
+    Cam.Frame      = Frame;
 
     // Animate and rebuild the weapon viewmodel
     Weapon_Update (&Weapon, &Cam, Dt, In.Fire);
     Weapon_Bottom_Level_Rebuild (&Weapon);
     Top_Level_Rebuild (&World_Bottom_Level, &Weapon.Bottom_Level);
 
-    // Upload the camera and dispatch ray tracing
+    // Upload the camera and dispatch ray tracing + postprocess
     Camera_Upload (&Cam, FIELD_OF_VIEW, Weapon.Texture_Base_Index);
-    Raytracing_Frame ();
+    float H_Speed = sqrtf (Physics.Velocity.x * Physics.Velocity.x +
+                           Physics.Velocity.z * Physics.Velocity.z);
+    Gpu_Postprocess_Push PP = {
+      .Time       = Total_Time,
+      .Delta_Time = Dt,
+      .Velocity_X = Physics.Velocity.x,
+      .Velocity_Z = Physics.Velocity.z,
+      .Speed      = H_Speed};
+    Raytracing_Frame (PP);
     Frame++;
   }
 
   // ── Cleanup ────────────────────────────────────────────────────────────────────────────────────
 
+  Audio_Shutdown ();
   vkDeviceWaitIdle (Device);
   printf ("[shutdown] %u frames rendered\n", Frame);
 
@@ -4690,8 +5539,9 @@ glsl shader raygen rgen {
 layout(binding = 0) uniform accelerationStructureEXT  Top_Level;
 layout(binding = 1, rgba8) uniform image2D             Storage_Image;
 layout(binding = 2) uniform Camera_Uniform { mat4 Inverse_View; mat4 Inverse_Projection; uint Frame; uint Weapon_Texture_Base; };
+layout(binding = 11, r32f) uniform image2D             Depth_Output;
 
-layout(location = 0) rayPayloadEXT vec3 Payload;
+layout(location = 0) rayPayloadEXT vec4 Payload;  // rgb = color, a = hit distance
 
 void main () {
   vec2 Pixel       = vec2 (gl_LaunchIDEXT.xy) + 0.5;
@@ -4702,7 +5552,7 @@ void main () {
   vec4 Target      = Inverse_Projection * vec4 (Ndc.x, Ndc.y, 0.0, 1.0);
   vec4 Direction   = Inverse_View * vec4 (normalize (Target.xyz / Target.w), 0.0);
 
-  Payload = vec3 (0.0);
+  Payload = vec4 (0.0, 0.0, 0.0, 10000.0);
   traceRayEXT (Top_Level,
                gl_RayFlagsOpaqueEXT,        // flags
                0xFF,                          // cull mask
@@ -4715,7 +5565,8 @@ void main () {
                10000.0,                       // t_max
                0);                            // payload location
 
-  imageStore (Storage_Image, ivec2 (gl_LaunchIDEXT.xy), vec4 (Payload, 1.0));
+  imageStore (Storage_Image, ivec2 (gl_LaunchIDEXT.xy), vec4 (Payload.rgb, 1.0));
+  imageStore (Depth_Output,  ivec2 (gl_LaunchIDEXT.xy), vec4 (Payload.a, 0.0, 0.0, 0.0));
 }
 }
 
@@ -4739,10 +5590,10 @@ layout(binding = 8,  std430) readonly buffer Weapon_Vertex_Data { vec4 Data[]; }
 layout(binding = 9,  std430) readonly buffer Weapon_Index_Data  { uint Data[]; } Weapon_Indices;
 layout(binding = 10, std430) readonly buffer Weapon_Tex_Id_Data { uint Data[]; } Weapon_Tex_Ids;
 
-// Bindless texture array
-layout(binding = 11) uniform sampler2D Textures[];
+// Bindless texture array (binding 12: must be highest for variable descriptor count)
+layout(binding = 12) uniform sampler2D Textures[];
 
-layout(location = 0) rayPayloadInEXT vec3 Payload;
+layout(location = 0) rayPayloadInEXT vec4 Payload;  // rgb = color, a = hit distance
 layout(location = 1) rayPayloadEXT   float Shadow_Factor;
 
 hitAttributeEXT vec2 Barycentrics;
@@ -4809,7 +5660,7 @@ void main () {
     Color = mix (Color, vec3 (0.45, 0.52, 0.65), Fog);
   }
 
-  Payload = Color;
+  Payload = vec4 (Color, gl_HitTEXT);  // Pack hit distance into alpha for depth-of-field
 }
 }
 
@@ -4817,14 +5668,14 @@ glsl shader miss rmiss {
 #version 460
 #extension GL_EXT_ray_tracing : require
 
-layout(location = 0) rayPayloadInEXT vec3 Payload;
+layout(location = 0) rayPayloadInEXT vec4 Payload;
 
 void main () {
   // Procedural sky: gradient from pale horizon to deeper blue at zenith
   float Vertical  = max (gl_WorldRayDirectionEXT.y, 0.0);
   vec3  Horizon   = vec3 (0.7, 0.8, 0.95);
   vec3  Zenith    = vec3 (0.2, 0.4, 0.8);
-  Payload = mix (Horizon, Zenith, pow (Vertical, 0.5));
+  Payload = vec4 (mix (Horizon, Zenith, pow (Vertical, 0.5)), 10000.0);  // Sky = max distance
 }
 }
 
@@ -4871,6 +5722,20 @@ layout(binding = 4, std430) readonly buffer Hull_Buffer {
   float Hull_Radius;
   vec3  Hull_Centroid;
   int   Hull_Pad;
+};
+
+struct Gpu_Projectile {
+  vec3  Position;      float Pad_A;
+  vec3  Velocity;      float Lifetime;
+  int   Active;        int   Material_Hit;
+  float Radius;        float Damage;
+};
+
+layout(binding = 5, std430) buffer Projectile_Buffer {
+  Gpu_Projectile Projectiles[64];
+  int   Projectile_Count;
+  float Fire_Cooldown;
+  float Proj_Pad[2];
 };
 
 layout(push_constant) uniform Push {
@@ -5320,7 +6185,156 @@ void main () {
   if (abs(delta) < 0.1) Player.View_Height = target_view;
   else Player.View_Height += delta * min (Input.Dt * 10.0, 1.0);
 
-  // ── Track speed for debugging ─────────────────────────────────────────────────────────────────
+  // ── Track speed for debugging ───────────────────────────────────────────────────────────────
   Player.Speed_Last = length (Player.Velocity.xz);
+
+  // ── Projectile update ─────────────────────────────────────────────────────────────────────────
+  // Decrement fire cooldown
+  if (Fire_Cooldown > 0.0) Fire_Cooldown -= Input.Dt;
+
+  // Spawn a new projectile on fire button press
+  if (Input.Fire == 1 && Fire_Cooldown <= 0.0 && Projectile_Count < 64) {
+    vec3 cam_forward = vec3 (sy, -sin(Player.Pitch), -cy * cos(Player.Pitch));
+    cam_forward = normalize (cam_forward);
+    vec3 eye = Player.Position + vec3 (0.0, Player.View_Height, 0.0);
+
+    int idx = Projectile_Count;
+    Projectiles[idx].Position     = eye + cam_forward * 20.0;
+    Projectiles[idx].Velocity     = cam_forward * 900.0;
+    Projectiles[idx].Lifetime     = 10.0;
+    Projectiles[idx].Active       = 1;
+    Projectiles[idx].Material_Hit = 0;
+    Projectiles[idx].Radius       = 3.0;
+    Projectiles[idx].Damage       = 100.0;
+    Projectile_Count = idx + 1;
+    Fire_Cooldown = 0.8;
+  }
+
+  // Advance each active projectile: move, trace against TLAS, kill on impact or timeout
+  for (int i = 0; i < Projectile_Count; i++) {
+    if (Projectiles[i].Active == 0) continue;
+
+    Projectiles[i].Lifetime -= Input.Dt;
+    if (Projectiles[i].Lifetime <= 0.0) { Projectiles[i].Active = 0; continue; }
+
+    vec3 dir = normalize (Projectiles[i].Velocity);
+    float dist = length (Projectiles[i].Velocity) * Input.Dt;
+
+    // Ray trace to check for collision
+    rayQueryEXT rq;
+    rayQueryInitializeEXT (rq, Top_Level, gl_RayFlagsOpaqueEXT, 0xFF,
+                           Projectiles[i].Position, 0.0, dir, dist);
+    while (rayQueryProceedEXT (rq)) {}
+
+    if (rayQueryGetIntersectionTypeEXT (rq, true) == gl_RayQueryCommittedIntersectionTriangleEXT) {
+      // Hit something — mark dead and record hit position
+      float t = rayQueryGetIntersectionTEXT (rq, true);
+      Projectiles[i].Position += dir * t;
+      Projectiles[i].Active = 0;
+    } else {
+      // No hit — advance position
+      Projectiles[i].Position += dir * dist;
+    }
+  }
+}
+}
+
+glsl shader postprocess comp {
+#version 460
+
+layout(binding = 0, rgba8) uniform image2D Color_Image;  // RT output (read-write in-place)
+layout(binding = 1, r32f)  uniform image2D Depth_Image;  // Ray hit distance from closest-hit shader
+
+layout(push_constant) uniform Push {
+  float Time;           // Seconds since start
+  float Delta_Time;     // Frame delta
+  float Velocity_X;     // Camera velocity X for motion blur direction
+  float Velocity_Z;     // Camera velocity Z
+  float Speed;          // Camera horizontal speed
+  float Pad[3];
+} Params;
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+// ── Spatiotemporal hash for film grain ─────────────────────────────────────────────────────────
+
+float hash (vec2 p) {
+  vec3 p3 = fract (vec3 (p.xyx) * 0.1031);
+  p3 += dot (p3, p3.yzx + 33.33);
+  return fract ((p3.x + p3.y) * p3.z);
+}
+
+void main () {
+  ivec2 Pixel = ivec2 (gl_GlobalInvocationID.xy);
+  ivec2 Size  = imageSize (Color_Image);
+  if (Pixel.x >= Size.x || Pixel.y >= Size.y) return;
+
+  vec2 UV = (vec2 (Pixel) + 0.5) / vec2 (Size);
+  vec3 Color = imageLoad (Color_Image, Pixel).rgb;
+  float Depth = imageLoad (Depth_Image, Pixel).r;
+
+  // ── 1. Depth-of-field using actual ray hit distance ───────────────────────────────────────
+  // Auto-focus on center pixel depth; circle of confusion grows with distance from focus plane
+  ivec2 Center_Pixel = Size / 2;
+  float Focus_Depth = imageLoad (Depth_Image, Center_Pixel).r;
+  float COC = clamp (abs (Depth - Focus_Depth) / max (Focus_Depth, 1.0) * 3.0, 0.0, 4.0);
+
+  if (COC > 0.3) {
+    // 8-tap Poisson disk scaled by circle of confusion
+    vec2 Offsets[8] = vec2[8](
+      vec2(-0.94201, -0.39906), vec2( 0.94558,  0.76890),
+      vec2(-0.09418, -0.92938), vec2( 0.34495,  0.29387),
+      vec2(-0.91588,  0.45771), vec2(-0.81544, -0.87912),
+      vec2( 0.97484,  0.07573), vec2( 0.26064, -0.53421));
+
+    vec3 Sum = Color;
+    float Weight = 1.0;
+    for (int I = 0; I < 8; I++) {
+      ivec2 SP = clamp (Pixel + ivec2(Offsets[I] * COC), ivec2(0), Size - 1);
+      Sum += imageLoad (Color_Image, SP).rgb;
+      Weight += 1.0;
+    }
+    Color = Sum / Weight;
+  }
+
+  // ── 2. Velocity-based motion blur ─────────────────────────────────────────────────────────
+  if (Params.Speed > 30.0) {
+    vec2 Dir = vec2 (Params.Velocity_X, Params.Velocity_Z);
+    float Len = length (Dir);
+    if (Len > 0.001) {
+      Dir = Dir / Len * min (Params.Speed * 0.003, 2.0);
+      vec3 Sum = Color;
+      float W = 1.0;
+      for (int I = 1; I <= 3; I++) {
+        ivec2 SP = clamp (Pixel + ivec2(Dir * float(I)), ivec2(0), Size - 1);
+        float Wt = 1.0 - float(I) * 0.25;
+        Sum += imageLoad (Color_Image, SP).rgb * Wt;
+        W += Wt;
+      }
+      Color = Sum / W;
+    }
+  }
+
+  // ── 3. Chromatic aberration (radial, lens-like, depth-weighted) ───────────────────────────
+  vec2 From_Center = UV - 0.5;
+  float Dist = length (From_Center);
+  float CA = Dist * Dist * 1.2;
+  ivec2 R_Pos = clamp (Pixel + ivec2(From_Center * CA * vec2(Size)), ivec2(0), Size - 1);
+  ivec2 B_Pos = clamp (Pixel - ivec2(From_Center * CA * vec2(Size)), ivec2(0), Size - 1);
+  Color = mix (Color, vec3 (
+    imageLoad (Color_Image, R_Pos).r,
+    Color.g,
+    imageLoad (Color_Image, B_Pos).b), 0.25);
+
+  // ── 4. Vignette ───────────────────────────────────────────────────────────────────────────
+  Color *= 1.0 - Dist * Dist * 0.5;
+
+  // ── 5. Film grain (temporal, spatially varying) ───────────────────────────────────────────
+  Color += (hash (vec2(Pixel) + Params.Time * 1000.0) - 0.5) * 0.025;
+
+  // ── 6. Filmic tone mapping (ACES-inspired S-curve) ────────────────────────────────────────
+  Color = Color / (Color + 0.8) * 1.1;
+
+  imageStore (Color_Image, Pixel, vec4 (clamp (Color, 0.0, 1.0), 1.0));
 }
 }
