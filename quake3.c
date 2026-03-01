@@ -70,8 +70,8 @@ const char *DEVICE_EXTENSIONS[] = {VK_KHR_SWAPCHAIN_EXTENSION_NAME,
                                    VK_KHR_RAY_QUERY_EXTENSION_NAME};
 
 // Windowing and viewport settings
-#define DEFAULT_WIDTH  1280    // Initial window width in pixels
-#define DEFAULT_HEIGHT 720     // Initial window height in pixels
+#define DEFAULT_WIDTH  320     // Initial window width in pixels (small for lavapipe performance)
+#define DEFAULT_HEIGHT 180     // Initial window height in pixels
 #define FIELD_OF_VIEW  90.f    // Vertical field-of-view in degrees
 #define NEAR_CLIP      0.1f    // Near clip plane distance
 #define FAR_CLIP       10000.f // Far clip plane distance
@@ -4478,9 +4478,15 @@ Player Physics_Dispatch (Input In, float Dt) {
 
 int main (int Argc, char **Argv) {
 
-  // Determine which BSP map to load (default or from command-line argument)
+  // Check for flags and determine BSP map path
+  int Physics_Test = 0;
+  const char *Map_Name = DEFAULT_MAP;
+  for (int I = 1; I < Argc; I++) {
+    if (strcmp (Argv[I], "--physics-test") == 0) Physics_Test = 1;
+    else Map_Name = Argv[I];
+  }
   char Map_Path[256];
-  snprintf (Map_Path, sizeof Map_Path, "%smaps/%s", ASSET_ROOT, (Argc > 1) ? Argv[1] : DEFAULT_MAP);
+  snprintf (Map_Path, sizeof Map_Path, "%smaps/%s", ASSET_ROOT, Map_Name);
 
   // Initialize SDL2 with video subsystem and create a Vulkan-capable window
   SDL_Init (SDL_INIT_VIDEO);
@@ -4529,8 +4535,10 @@ int main (int Argc, char **Argv) {
 
   // Create the GPU physics pipeline and resources (with hull binding)
   Physics_Pipeline_Create ();
+  // Spawn origin is at Q3 player origin (24 units above feet). Our capsule half-height is 32,
+  // so raise by 8 to align capsule bottom with Q3 bounding box bottom.
   Player Initial_Player = {
-    .Position = Spawn_Point.Origin,
+    .Position = {Spawn_Point.Origin.x, Spawn_Point.Origin.y + 8.f, Spawn_Point.Origin.z},
     .Yaw      = 1.5707963f - Spawn_Point.Angle * 3.14159f / 180.f}; // π/2 - angle: Q3 angle 0 = +X = our yaw π/2
   Physics_Resources_Create (&Initial_Player);
 
@@ -4540,9 +4548,61 @@ int main (int Argc, char **Argv) {
 
   printf ("[init] ready — entering game loop\n");
 
+  // ── Physics-only test mode ────────────────────────────────────────────────────────────────────
+  // Run with --physics-test to skip rendering and simulate movement at fixed 60fps.
+  // Exits after ~3 seconds of simulated time with full diagnostic output.
+  if (Physics_Test) {
+    fprintf (stderr, "[physics-test] starting physics-only test (3s simulated, fixed dt=0.016)\n");
+    float Fixed_Dt = 1.f / 60.f;  // 60fps timestep
+
+    // Phase 1: idle for 0.5s (let player settle on ground)
+    for (int I = 0; I < 30; I++) {
+      Input In = {0};
+      Player P = Physics_Dispatch (In, Fixed_Dt);
+      if (I % 10 == 0)
+        fprintf (stderr, "  [idle  %3d] pos=(%.1f,%.1f,%.1f) vel=(%.1f,%.1f,%.1f) gnd=%d\n",
+                 I, P.Position.x, P.Position.y, P.Position.z,
+                 P.Velocity.x, P.Velocity.y, P.Velocity.z, P.On_Ground);
+    }
+
+    // Phase 2: walk forward (W) for 1s
+    for (int I = 0; I < 60; I++) {
+      Input In = {.Forward = 1};
+      Player P = Physics_Dispatch (In, Fixed_Dt);
+      if (I % 15 == 0)
+        fprintf (stderr, "  [walk  %3d] pos=(%.1f,%.1f,%.1f) vel=(%.1f,%.1f,%.1f) gnd=%d\n",
+                 I, P.Position.x, P.Position.y, P.Position.z,
+                 P.Velocity.x, P.Velocity.y, P.Velocity.z, P.On_Ground);
+    }
+
+    // Phase 3: jump for 1s
+    for (int I = 0; I < 60; I++) {
+      Input In = {.Forward = 1, .Jump = (I < 3) ? 1 : 0};  // Tap jump briefly
+      Player P = Physics_Dispatch (In, Fixed_Dt);
+      if (I % 10 == 0)
+        fprintf (stderr, "  [jump  %3d] pos=(%.1f,%.1f,%.1f) vel=(%.1f,%.1f,%.1f) gnd=%d\n",
+                 I, P.Position.x, P.Position.y, P.Position.z,
+                 P.Velocity.x, P.Velocity.y, P.Velocity.z, P.On_Ground);
+    }
+
+    // Phase 4: strafe right for 0.5s
+    for (int I = 0; I < 30; I++) {
+      Input In = {.Right = 1};
+      Player P = Physics_Dispatch (In, Fixed_Dt);
+      if (I % 10 == 0)
+        fprintf (stderr, "  [strafe %2d] pos=(%.1f,%.1f,%.1f) vel=(%.1f,%.1f,%.1f) gnd=%d\n",
+                 I, P.Position.x, P.Position.y, P.Position.z,
+                 P.Velocity.x, P.Velocity.y, P.Velocity.z, P.On_Ground);
+    }
+
+    fprintf (stderr, "[physics-test] done\n");
+    vkDeviceWaitIdle (Device);
+    return 0;
+  }
+
   // ── Game loop ──────────────────────────────────────────────────────────────────────────────────
 
-  Camera   Cam   = {.Position = {Spawn_Point.Origin.x, Spawn_Point.Origin.y + DEFAULT_VIEW_HEIGHT, Spawn_Point.Origin.z},
+  Camera   Cam   = {.Position = {Spawn_Point.Origin.x, Spawn_Point.Origin.y + 8.f + DEFAULT_VIEW_HEIGHT, Spawn_Point.Origin.z},
                      .Yaw = 1.5707963f - Spawn_Point.Angle * 3.14159f / 180.f};
   uint64_t Last  = SDL_GetPerformanceCounter ();
   uint64_t Freq  = SDL_GetPerformanceFrequency ();
@@ -4948,17 +5008,13 @@ Trace_Result trace_shape (vec3 Origin, vec3 Direction, float Distance) {
   if (Distance < 1e-6) return result;
   vec3 dir_norm = normalize (Direction);
 
-  // 26 probe directions: 6 axes + 12 edge diagonals + 8 corner diagonals
-  const vec3 probes[26] = vec3[26](
+  // 7 probe directions: 6 cardinal axes + movement direction (optimized from 28 for performance)
+  vec3 probes[7] = vec3[7](
     vec3( 1, 0, 0), vec3(-1, 0, 0), vec3(0, 1, 0), vec3(0,-1, 0), vec3(0, 0, 1), vec3(0, 0,-1),
-    vec3( 1, 1, 0), vec3( 1,-1, 0), vec3(-1, 1, 0), vec3(-1,-1, 0),
-    vec3( 1, 0, 1), vec3( 1, 0,-1), vec3(-1, 0, 1), vec3(-1, 0,-1),
-    vec3( 0, 1, 1), vec3( 0, 1,-1), vec3( 0,-1, 1), vec3( 0,-1,-1),
-    vec3( 1, 1, 1), vec3( 1, 1,-1), vec3( 1,-1, 1), vec3( 1,-1,-1),
-    vec3(-1, 1, 1), vec3(-1, 1,-1), vec3(-1,-1, 1), vec3(-1,-1,-1)
+    dir_norm
   );
 
-  for (int i = 0; i < 26; i++) {
+  for (int i = 0; i < 7; i++) {
     vec3 offset = shape_offset (normalize(probes[i]));
     vec3 ray_origin = Origin + offset;
 
@@ -4984,58 +5040,6 @@ Trace_Result trace_shape (vec3 Origin, vec3 Direction, float Distance) {
         // Ensure the normal faces toward the ray origin
         if (dot (n, dir_norm) > 0.0) n = -n;
 
-        result.Fraction = t / Distance;
-        result.Normal   = n;
-        result.Hit      = true;
-      }
-    }
-  }
-
-  // Additionally cast a ray offset by the movement direction's support (catches head-on impacts)
-  vec3 move_offset = shape_offset (dir_norm);
-  {
-    rayQueryEXT rq;
-    rayQueryInitializeEXT (rq, Top_Level, gl_RayFlagsOpaqueEXT, 0xFF,
-                           Origin + move_offset, 0.0, dir_norm, Distance);
-    while (rayQueryProceedEXT (rq)) {}
-    if (rayQueryGetIntersectionTypeEXT (rq, true) == gl_RayQueryCommittedIntersectionTriangleEXT) {
-      float t = rayQueryGetIntersectionTEXT (rq, true);
-      if (t < result.Fraction * Distance) {
-        uint prim = rayQueryGetIntersectionPrimitiveIndexEXT (rq, true);
-        uint i0 = Indices.Data[prim * 3 + 0];
-        uint i1 = Indices.Data[prim * 3 + 1];
-        uint i2 = Indices.Data[prim * 3 + 2];
-        vec3 v0 = Vertices.Data[i0 * 3].xyz;
-        vec3 v1 = Vertices.Data[i1 * 3].xyz;
-        vec3 v2 = Vertices.Data[i2 * 3].xyz;
-        vec3 n  = normalize (cross (v1 - v0, v2 - v0));
-        if (dot (n, dir_norm) > 0.0) n = -n;
-        result.Fraction = t / Distance;
-        result.Normal   = n;
-        result.Hit      = true;
-      }
-    }
-  }
-
-  // And the anti-movement direction's support (catches backward collisions from broad shapes)
-  vec3 anti_offset = shape_offset (-dir_norm);
-  {
-    rayQueryEXT rq;
-    rayQueryInitializeEXT (rq, Top_Level, gl_RayFlagsOpaqueEXT, 0xFF,
-                           Origin + anti_offset, 0.0, dir_norm, Distance);
-    while (rayQueryProceedEXT (rq)) {}
-    if (rayQueryGetIntersectionTypeEXT (rq, true) == gl_RayQueryCommittedIntersectionTriangleEXT) {
-      float t = rayQueryGetIntersectionTEXT (rq, true);
-      if (t < result.Fraction * Distance) {
-        uint prim = rayQueryGetIntersectionPrimitiveIndexEXT (rq, true);
-        uint i0 = Indices.Data[prim * 3 + 0];
-        uint i1 = Indices.Data[prim * 3 + 1];
-        uint i2 = Indices.Data[prim * 3 + 2];
-        vec3 v0 = Vertices.Data[i0 * 3].xyz;
-        vec3 v1 = Vertices.Data[i1 * 3].xyz;
-        vec3 v2 = Vertices.Data[i2 * 3].xyz;
-        vec3 n  = normalize (cross (v1 - v0, v2 - v0));
-        if (dot (n, dir_norm) > 0.0) n = -n;
         result.Fraction = t / Distance;
         result.Normal   = n;
         result.Hit      = true;
@@ -5230,10 +5234,10 @@ void main () {
   Player.Pitch -= Input.Delta_Y * MOUSE_SENSITIVITY;
   Player.Pitch  = clamp (Player.Pitch, -1.5, 1.5);
 
-  // ── Build a movement basis from yaw ───────────────────────────────────────────────────────────
+  // ── Build a movement basis from yaw (must match camera: Forward = (sy, 0, -cy)) ─────────────
   float cy = cos (Player.Yaw), sy = sin (Player.Yaw);
-  vec3 forward = vec3 (-sy, 0, -cy);
-  vec3 right   = vec3 ( cy, 0, -sy);
+  vec3 forward = vec3 ( sy, 0, -cy);
+  vec3 right   = vec3 ( cy, 0,  sy);
 
   // ── Compute the wish direction and speed from keyboard input ──────────────────────────────────
   vec3 wish = vec3 (0.0);
