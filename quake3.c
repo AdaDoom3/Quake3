@@ -8248,1167 +8248,1167 @@ int main (int Argc, char **Argv) {
 // ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 
 glsl shader raygen rgen {
-#version 460
-#extension GL_EXT_ray_tracing : require
-
-layout(binding = 0) uniform accelerationStructureEXT  Top_Level;
-layout(binding = 1, rgba16f) uniform image2D            Storage_Image;
-layout(binding = 2) uniform Camera_Uniform {
-  mat4  Inverse_View; mat4 Inverse_Projection;
-  uint  Frame; uint Weapon_Texture_Base; uint PBR_Stride; uint Active_SPP;
-  vec4  Env_Sun_Dir;      // xyz = direction, w = angular_radius
-  vec4  Env_Sun_Color;    // xyz = color, w = intensity
-  vec4  Env_Sky_Zenith;   // xyz = zenith color, w = sky_intensity
-  vec4  Env_Sky_Horizon;  // xyz = horizon color, w = cos(sun_disc_size)
-  vec4  Env_Ambient_Up;   // xyz = ambient up, w = sun_disc_intensity
-  vec4  Env_Ambient_Down; // xyz = ambient down, w = fog_density
-  vec4  Env_Fog_Color;    // xyz = fog color
-};
-layout(binding = 11, r32f) uniform image2D             Depth_Output;
-
-layout(location = 0) rayPayloadEXT vec4 Payload;  // rgb = color, a = hit distance
-
-// ── Stratified sub-pixel jitter for multi-sample anti-aliasing ───────────────
-// ISA optimization: PCG integer hash replaces sin()-based hash.
-//   sin() = MUFU.SIN on NVIDIA (4 cycles, 1/SM throughput) or v_sin_f32 on AMD (4 cycles, 1/4 rate)
-//   Integer ops = IMAD/SHR/XOR on NVIDIA (1 cycle each, full-rate) or v_mul_lo_u32 on AMD (full-rate)
-// Net savings: ~8 cycles/sample from eliminating the transcendental unit bottleneck.
-// The PCG hash (O'Neill 2014) has superior statistical quality: passes TestU01 BigCrush.
-uint PCG (uint V) {
-  uint S = V * 747796405u + 2891336453u;
-  uint W = ((S >> ((S >> 28u) + 4u)) ^ S) * 277803737u;
-  return (W >> 22u) ^ W;
-}
-
-void main () {
-  // SPP from lower 8 bits; budget from upper bits (0=full quality, 255=minimal)
-  int SPP = int (Active_SPP & 0xFFu);
-  vec3  Origin     = (Inverse_View * vec4 (0, 0, 0, 1)).xyz;
-  vec3  Color_Sum  = vec3 (0.0);
-  float Depth_Sum  = 0.0;
-
-  // ISA optimization: ray direction is invariant across SPP samples (no jitter),
-  // so compute it once outside the loop. Saves 1 mat4×vec4 multiply + normalize per extra sample.
-  vec2  Pixel  = vec2 (gl_LaunchIDEXT.xy) + 0.5;
-  vec2  Uv     = Pixel / vec2 (gl_LaunchSizeEXT.xy);
-  vec2  Ndc    = Uv * 2.0 - 1.0;
-  vec4  Target    = Inverse_Projection * vec4 (Ndc.x, Ndc.y, 0.0, 1.0);
-  vec4  Direction = Inverse_View * vec4 (normalize (Target.xyz / Target.w), 0.0);
-
-  for (int S = 0; S < SPP; S++) {
-    Payload = vec4 (0.0, 0.0, 0.0, 10000.0);
-    // Mask 0xFD: primary rays see everything EXCEPT player body (bit 1 = 0x02).
-    traceRayEXT (Top_Level, gl_RayFlagsOpaqueEXT, 0xFD, 0, 0, 0,
-                 Origin, 0.001, Direction.xyz, 10000.0, 0);
-
-    Color_Sum += Payload.rgb;
-    Depth_Sum += Payload.a;
+  #version 460
+  #extension GL_EXT_ray_tracing : require
+  
+  layout(binding = 0) uniform accelerationStructureEXT  Top_Level;
+  layout(binding = 1, rgba16f) uniform image2D            Storage_Image;
+  layout(binding = 2) uniform Camera_Uniform {
+    mat4  Inverse_View; mat4 Inverse_Projection;
+    uint  Frame; uint Weapon_Texture_Base; uint PBR_Stride; uint Active_SPP;
+    vec4  Env_Sun_Dir;      // xyz = direction, w = angular_radius
+    vec4  Env_Sun_Color;    // xyz = color, w = intensity
+    vec4  Env_Sky_Zenith;   // xyz = zenith color, w = sky_intensity
+    vec4  Env_Sky_Horizon;  // xyz = horizon color, w = cos(sun_disc_size)
+    vec4  Env_Ambient_Up;   // xyz = ambient up, w = sun_disc_intensity
+    vec4  Env_Ambient_Down; // xyz = ambient down, w = fog_density
+    vec4  Env_Fog_Color;    // xyz = fog color
+  };
+  layout(binding = 11, r32f) uniform image2D             Depth_Output;
+  
+  layout(location = 0) rayPayloadEXT vec4 Payload;  // rgb = color, a = hit distance
+  
+  // ── Stratified sub-pixel jitter for multi-sample anti-aliasing ───────────────
+  // ISA optimization: PCG integer hash replaces sin()-based hash.
+  //   sin() = MUFU.SIN on NVIDIA (4 cycles, 1/SM throughput) or v_sin_f32 on AMD (4 cycles, 1/4 rate)
+  //   Integer ops = IMAD/SHR/XOR on NVIDIA (1 cycle each, full-rate) or v_mul_lo_u32 on AMD (full-rate)
+  // Net savings: ~8 cycles/sample from eliminating the transcendental unit bottleneck.
+  // The PCG hash (O'Neill 2014) has superior statistical quality: passes TestU01 BigCrush.
+  uint PCG (uint V) {
+    uint S = V * 747796405u + 2891336453u;
+    uint W = ((S >> ((S >> 28u) + 4u)) ^ S) * 277803737u;
+    return (W >> 22u) ^ W;
   }
-
-  // Average samples — on NVIDIA, the compiler fuses this into a single FMA chain
-  vec3  Final_Color = Color_Sum * (1.0 / float (SPP));
-  float Final_Depth = Depth_Sum * (1.0 / float (SPP));
-
-  imageStore (Storage_Image, ivec2 (gl_LaunchIDEXT.xy), vec4 (Final_Color, 1.0));
-  imageStore (Depth_Output,  ivec2 (gl_LaunchIDEXT.xy), vec4 (Final_Depth, 0.0, 0.0, 0.0));
-}
+  
+  void main () {
+    // SPP from lower 8 bits; budget from upper bits (0=full quality, 255=minimal)
+    int SPP = int (Active_SPP & 0xFFu);
+    vec3  Origin     = (Inverse_View * vec4 (0, 0, 0, 1)).xyz;
+    vec3  Color_Sum  = vec3 (0.0);
+    float Depth_Sum  = 0.0;
+  
+    // ISA optimization: ray direction is invariant across SPP samples (no jitter),
+    // so compute it once outside the loop. Saves 1 mat4×vec4 multiply + normalize per extra sample.
+    vec2  Pixel  = vec2 (gl_LaunchIDEXT.xy) + 0.5;
+    vec2  Uv     = Pixel / vec2 (gl_LaunchSizeEXT.xy);
+    vec2  Ndc    = Uv * 2.0 - 1.0;
+    vec4  Target    = Inverse_Projection * vec4 (Ndc.x, Ndc.y, 0.0, 1.0);
+    vec4  Direction = Inverse_View * vec4 (normalize (Target.xyz / Target.w), 0.0);
+  
+    for (int S = 0; S < SPP; S++) {
+      Payload = vec4 (0.0, 0.0, 0.0, 10000.0);
+      // Mask 0xFD: primary rays see everything EXCEPT player body (bit 1 = 0x02).
+      traceRayEXT (Top_Level, gl_RayFlagsOpaqueEXT, 0xFD, 0, 0, 0,
+                   Origin, 0.001, Direction.xyz, 10000.0, 0);
+  
+      Color_Sum += Payload.rgb;
+      Depth_Sum += Payload.a;
+    }
+  
+    // Average samples — on NVIDIA, the compiler fuses this into a single FMA chain
+    vec3  Final_Color = Color_Sum * (1.0 / float (SPP));
+    float Final_Depth = Depth_Sum * (1.0 / float (SPP));
+  
+    imageStore (Storage_Image, ivec2 (gl_LaunchIDEXT.xy), vec4 (Final_Color, 1.0));
+    imageStore (Depth_Output,  ivec2 (gl_LaunchIDEXT.xy), vec4 (Final_Depth, 0.0, 0.0, 0.0));
+  }
 }
 
 glsl shader closesthit rchit {
-#version 460
-#extension GL_EXT_ray_tracing : require
-#extension GL_EXT_ray_query : require
-#extension GL_EXT_nonuniform_qualifier : require
-
-layout(binding = 0) uniform accelerationStructureEXT Top_Level;
-layout(binding = 2) uniform Camera_Uniform {
-  mat4  Inverse_View; mat4 Inverse_Projection;
-  uint  Frame; uint Weapon_Texture_Base; uint PBR_Stride; uint Active_SPP;
-  vec4  Env_Sun_Dir;      // xyz = direction, w = angular_radius
-  vec4  Env_Sun_Color;    // xyz = color, w = intensity
-  vec4  Env_Sky_Zenith;   // xyz = zenith color, w = sky_intensity
-  vec4  Env_Sky_Horizon;  // xyz = horizon color, w = cos(sun_disc_size)
-  vec4  Env_Ambient_Up;   // xyz = ambient up, w = sun_disc_intensity
-  vec4  Env_Ambient_Down; // xyz = ambient down, w = fog_density
-  vec4  Env_Fog_Color;    // xyz = fog color
-};
-
-// Scene geometry
-layout(binding = 3, std430) readonly buffer Vertex_Data   { vec4 Data[]; } Vertices;
-layout(binding = 4, std430) readonly buffer Index_Data    { uint Data[]; } Indices;
-layout(binding = 5, std430) readonly buffer Material_Data { vec4 Data[]; } Materials;
-layout(binding = 6, std430) readonly buffer Tex_Id_Data   { uint Data[]; } Texture_Ids;
-layout(binding = 7)         uniform sampler2D              Lightmap;
-
-// Weapon geometry
-layout(binding = 8,  std430) readonly buffer Weapon_Vertex_Data { vec4 Data[]; } Weapon_Vertices;
-layout(binding = 9,  std430) readonly buffer Weapon_Index_Data  { uint Data[]; } Weapon_Indices;
-layout(binding = 10, std430) readonly buffer Weapon_Tex_Id_Data { uint Data[]; } Weapon_Tex_Ids;
-
-// Entity geometry
-layout(binding = 12, std430) readonly buffer Entity_Vertex_Data { vec4 Data[]; } Entity_Vertices;
-layout(binding = 13, std430) readonly buffer Entity_Index_Data  { uint Data[]; } Entity_Indices;
-layout(binding = 14, std430) readonly buffer Entity_Tex_Id_Data { uint Data[]; } Entity_Tex_Ids;
-
-// Bindless texture array (binding 15: must be highest for variable descriptor count)
-layout(binding = 15) uniform sampler2D Textures[];
-
-layout(location = 0) rayPayloadInEXT vec4 Payload;  // rgb = color, a = hit distance
-// Shadow rays now use inline rayQueryEXT — no payload needed (saves continuation stack)
-
-hitAttributeEXT vec2 Barycentrics;
-
-// PCG hash for stochastic effects (soft shadows, importance sampling)
-uint PCG (uint V) {
-  uint S = V * 747796405u + 2891336453u;
-  uint W = ((S >> ((S >> 28u) + 4u)) ^ S) * 277803737u;
-  return (W >> 22u) ^ W;
-}
-
-// ── ISA optimization: soft shadow ray direction (extracted to avoid code duplication) ────
-// Computes a jittered direction on a disk around the light direction for soft shadows.
-// Previously duplicated in entity + world shadow paths (~20 lines each).
-// On NVIDIA: saves ~1 KB instruction cache from deduplicated code.
-vec3 Soft_Shadow_Dir (vec3 Ld, uint Prim, uint Inst, uint Frame, float Disk_Radius) {
-  uint Seed  = PCG (Prim * 1973u + Inst * 9277u + Frame * 26699u);
-  float Ang  = float (Seed) * 2.3283064e-10 * 6.2831853;
-  float Rad  = sqrt (float (PCG (Seed)) * 2.3283064e-10) * Disk_Radius;
-  vec3 Lt    = (abs (Ld.y) < 0.99) ? normalize (cross (Ld, vec3 (0, 1, 0)))
-                                    : normalize (cross (Ld, vec3 (1, 0, 0)));
-  vec3 Lb    = cross (Ld, Lt);
-  return normalize (Ld + Lt * (cos (Ang) * Rad) + Lb * (sin (Ang) * Rad));
-}
-
-// ── Extracted shadow trace (deduplicated from entity + world paths) ────────
-// Both paths used identical rayQueryEXT code: same mask (0xFE), offset (Normal*0.1),
-// tmin (0.001), tmax (600.0), and shadow factor (1.0 : 0.05).
-// Saves ~15 lines of duplicated code + instruction cache pressure.
-float Trace_Shadow (vec3 Origin, vec3 Normal, vec3 Ld, uint Prim, uint Inst, uint Frame, float Disk_Radius) {
-  vec3 Shadow_Dir = Soft_Shadow_Dir (Ld, Prim, Inst, Frame, Disk_Radius);
-  rayQueryEXT Shadow_Query;
-  rayQueryInitializeEXT (Shadow_Query, Top_Level,
-    gl_RayFlagsTerminateOnFirstHitEXT | gl_RayFlagsOpaqueEXT,
-    0xFE, Origin + Normal * 0.1, 0.001, Shadow_Dir, 600.0);
-  rayQueryProceedEXT (Shadow_Query);
-  return (rayQueryGetIntersectionTypeEXT (Shadow_Query, true)
-    == gl_RayQueryCommittedIntersectionNoneEXT) ? 1.0 : 0.05;
-}
-
-// Read a vertex attribute (48 bytes = 12 floats per vertex) from the appropriate buffer
-// Dispatch: Instance 0 = world, 1 = weapon, 2 = entity
-vec4 Read_Raw (uint I, uint Slot, uint Instance) {
-  if (Instance == 2u) return Entity_Vertices.Data[I * 3 + Slot];
-  if (Instance == 1u) return Weapon_Vertices.Data[I * 3 + Slot];
-  return Vertices.Data[I * 3 + Slot];
-}
-vec3 Read_Position   (uint I, uint Inst) { return Read_Raw (I, 0, Inst).xyz; }
-vec2 Read_Tex_Uv     (uint I, uint Inst) { return Read_Raw (I, 1, Inst).xy;  }
-vec2 Read_Lightmap_Uv(uint I, uint Inst) { return Read_Raw (I, 1, Inst).zw;  }
-vec3 Read_Normal     (uint I, uint Inst) { return Read_Raw (I, 2, Inst).xyz; }
-
-void main () {
-  // Determine which instance we hit: 0 = world, 1 = weapon, 2 = entity
-  uint  Instance     = gl_InstanceCustomIndexEXT;
-  bool  Is_Weapon    = (Instance == 1u);
-  bool  Is_Entity     = (Instance == 2u);
-  uint  Primitive    = gl_PrimitiveID;
-
-  // Adaptive quality budget: 0.0 = full quality (60fps+), 1.0 = minimal work (< 5fps)
-  // At low fps, skip expensive operations so frames are cheaper → higher fps → TAA fills detail.
-  float Budget = float ((Active_SPP >> 8u) & 0xFFu) / 255.0;
-
-  // Fetch triangle vertex indices from the appropriate buffer
-  uint I0, I1, I2;
-  if (Is_Entity) {
-    I0 = Entity_Indices.Data[Primitive * 3 + 0];
-    I1 = Entity_Indices.Data[Primitive * 3 + 1];
-    I2 = Entity_Indices.Data[Primitive * 3 + 2];
-  } else if (Is_Weapon) {
-    I0 = Weapon_Indices.Data[Primitive * 3 + 0];
-    I1 = Weapon_Indices.Data[Primitive * 3 + 1];
-    I2 = Weapon_Indices.Data[Primitive * 3 + 2];
-  } else {
-    I0 = Indices.Data[Primitive * 3 + 0];
-    I1 = Indices.Data[Primitive * 3 + 1];
-    I2 = Indices.Data[Primitive * 3 + 2];
+  #version 460
+  #extension GL_EXT_ray_tracing : require
+  #extension GL_EXT_ray_query : require
+  #extension GL_EXT_nonuniform_qualifier : require
+  
+  layout(binding = 0) uniform accelerationStructureEXT Top_Level;
+  layout(binding = 2) uniform Camera_Uniform {
+    mat4  Inverse_View; mat4 Inverse_Projection;
+    uint  Frame; uint Weapon_Texture_Base; uint PBR_Stride; uint Active_SPP;
+    vec4  Env_Sun_Dir;      // xyz = direction, w = angular_radius
+    vec4  Env_Sun_Color;    // xyz = color, w = intensity
+    vec4  Env_Sky_Zenith;   // xyz = zenith color, w = sky_intensity
+    vec4  Env_Sky_Horizon;  // xyz = horizon color, w = cos(sun_disc_size)
+    vec4  Env_Ambient_Up;   // xyz = ambient up, w = sun_disc_intensity
+    vec4  Env_Ambient_Down; // xyz = ambient down, w = fog_density
+    vec4  Env_Fog_Color;    // xyz = fog color
+  };
+  
+  // Scene geometry
+  layout(binding = 3, std430) readonly buffer Vertex_Data   { vec4 Data[]; } Vertices;
+  layout(binding = 4, std430) readonly buffer Index_Data    { uint Data[]; } Indices;
+  layout(binding = 5, std430) readonly buffer Material_Data { vec4 Data[]; } Materials;
+  layout(binding = 6, std430) readonly buffer Tex_Id_Data   { uint Data[]; } Texture_Ids;
+  layout(binding = 7)         uniform sampler2D              Lightmap;
+  
+  // Weapon geometry
+  layout(binding = 8,  std430) readonly buffer Weapon_Vertex_Data { vec4 Data[]; } Weapon_Vertices;
+  layout(binding = 9,  std430) readonly buffer Weapon_Index_Data  { uint Data[]; } Weapon_Indices;
+  layout(binding = 10, std430) readonly buffer Weapon_Tex_Id_Data { uint Data[]; } Weapon_Tex_Ids;
+  
+  // Entity geometry
+  layout(binding = 12, std430) readonly buffer Entity_Vertex_Data { vec4 Data[]; } Entity_Vertices;
+  layout(binding = 13, std430) readonly buffer Entity_Index_Data  { uint Data[]; } Entity_Indices;
+  layout(binding = 14, std430) readonly buffer Entity_Tex_Id_Data { uint Data[]; } Entity_Tex_Ids;
+  
+  // Bindless texture array (binding 15: must be highest for variable descriptor count)
+  layout(binding = 15) uniform sampler2D Textures[];
+  
+  layout(location = 0) rayPayloadInEXT vec4 Payload;  // rgb = color, a = hit distance
+  // Shadow rays now use inline rayQueryEXT — no payload needed (saves continuation stack)
+  
+  hitAttributeEXT vec2 Barycentrics;
+  
+  // PCG hash for stochastic effects (soft shadows, importance sampling)
+  uint PCG (uint V) {
+    uint S = V * 747796405u + 2891336453u;
+    uint W = ((S >> ((S >> 28u) + 4u)) ^ S) * 277803737u;
+    return (W >> 22u) ^ W;
   }
-
-  // ── Batched vertex attribute reads ──────────────────────────────────────
-  // Read all 3 vec4 slots per vertex in one go (9 buffer reads instead of 12).
-  // Each vertex = 3 vec4: [Position.xyz, _], [TexUV.xy, LmUV.xy], [Normal.xyz, _]
-  vec3 Bary   = vec3 (1.0 - Barycentrics.x - Barycentrics.y, Barycentrics.x, Barycentrics.y);
-  vec4 V0_S0  = Read_Raw (I0, 0, Instance), V0_S1 = Read_Raw (I0, 1, Instance), V0_S2 = Read_Raw (I0, 2, Instance);
-  vec4 V1_S0  = Read_Raw (I1, 0, Instance), V1_S1 = Read_Raw (I1, 1, Instance), V1_S2 = Read_Raw (I1, 2, Instance);
-  vec4 V2_S0  = Read_Raw (I2, 0, Instance), V2_S1 = Read_Raw (I2, 1, Instance), V2_S2 = Read_Raw (I2, 2, Instance);
-  vec3 Position  = V0_S0.xyz * Bary.x + V1_S0.xyz * Bary.y + V2_S0.xyz * Bary.z;
-  vec2 Tex_Coord = V0_S1.xy  * Bary.x + V1_S1.xy  * Bary.y + V2_S1.xy  * Bary.z;
-  vec2 Lm_Coord  = V0_S1.zw  * Bary.x + V1_S1.zw  * Bary.y + V2_S1.zw  * Bary.z;
-  vec3 Normal    = normalize (V0_S2.xyz * Bary.x + V1_S2.xyz * Bary.y + V2_S2.xyz * Bary.z);
-
-  // Fetch the texture ID for this triangle and sample the albedo
-  uint Tex_Id;
-  if (Is_Entity)       Tex_Id = Entity_Tex_Ids.Data[Primitive];
-  else if (Is_Weapon) Tex_Id = Weapon_Tex_Ids.Data[Primitive] + Weapon_Texture_Base;
-  else                Tex_Id = Texture_Ids.Data[Primitive];
-
-  // ── Build tangent frame (Frisvad method) for normal mapping + parallax ────
-  // Needed before texture sampling: parallax offsets UVs, which affects all map reads.
-  // ISA optimization: Frisvad's construction produces analytically orthonormal vectors —
-  // the normalize() calls are mathematically redundant.  Removing them saves 2× (dot+rsq+3×mul)
-  // = 10 VALU instructions.  On NVIDIA, rsq is a 4-cycle MUFU op; eliminating 2 saves 8 cycles.
-  vec3 Geo_Normal = Normal;  // Preserve geometric normal for parallax
-  vec3 T_Axis, B_Axis;
-  if (Geo_Normal.z < -0.999) {
-    T_Axis = vec3 (0.0, -1.0, 0.0);
-    B_Axis = vec3 (-1.0, 0.0, 0.0);
-  } else {
-    float Inv = 1.0 / (1.0 + Geo_Normal.z);
-    T_Axis = vec3 (1.0 - Geo_Normal.x * Geo_Normal.x * Inv, -Geo_Normal.x * Geo_Normal.y * Inv, -Geo_Normal.x);
-    B_Axis = vec3 (-Geo_Normal.x * Geo_Normal.y * Inv, 1.0 - Geo_Normal.y * Geo_Normal.y * Inv, -Geo_Normal.y);
+  
+  // ── ISA optimization: soft shadow ray direction (extracted to avoid code duplication) ────
+  // Computes a jittered direction on a disk around the light direction for soft shadows.
+  // Previously duplicated in entity + world shadow paths (~20 lines each).
+  // On NVIDIA: saves ~1 KB instruction cache from deduplicated code.
+  vec3 Soft_Shadow_Dir (vec3 Ld, uint Prim, uint Inst, uint Frame, float Disk_Radius) {
+    uint Seed  = PCG (Prim * 1973u + Inst * 9277u + Frame * 26699u);
+    float Ang  = float (Seed) * 2.3283064e-10 * 6.2831853;
+    float Rad  = sqrt (float (PCG (Seed)) * 2.3283064e-10) * Disk_Radius;
+    vec3 Lt    = (abs (Ld.y) < 0.99) ? normalize (cross (Ld, vec3 (0, 1, 0)))
+                                      : normalize (cross (Ld, vec3 (1, 0, 0)));
+    vec3 Lb    = cross (Ld, Lt);
+    return normalize (Ld + Lt * (cos (Ang) * Rad) + Lb * (sin (Ang) * Rad));
   }
-
-  // ── Parallax occlusion mapping from height map ────────────────────────────
-  // Offsets texture coordinates based on the height map to simulate surface depth,
-  // giving stone mortar joints, metal rivets, and wood grain real visual depth.
-  // Uses steep parallax with 8 steps — trades 8 extra texture fetches for convincing depth.
-  // ── Driver optimization: distance-cull parallax beyond 500 units ──────────
-  // Parallax is 10+ texture fetches per pixel.  At >500 units the depth offset is
-  // sub-pixel and invisible — skipping it eliminates the majority of PBR texture work
-  // for distant surfaces (which dominate pixel count in Q3 corridors).
-  vec3  V  = -gl_WorldRayDirectionEXT;
-  float Hit_Dist = gl_HitTEXT;
-  // Adaptive parallax: 300u at full quality, 0u at Budget=1 (pure lightmap fallback).
-  float Parallax_Dist = 300.0 * (1.0 - Budget);
-  if (!Is_Weapon && !Is_Entity && Tex_Id < PBR_Stride && Hit_Dist < Parallax_Dist) {
-    // Transform view to tangent space for parallax ray marching
-    vec3 V_Tangent = vec3 (dot (V, T_Axis), dot (V, B_Axis), dot (V, Geo_Normal));
-    // Scale parallax depth: 0.03 units — subtle but visible on close surfaces
-    vec2 Parallax_Dir = V_Tangent.xy / max (V_Tangent.z, 0.1) * 0.03;
-
-    // ISA optimization: hybrid linear-binary parallax (4 coarse + 3 binary = 7 fetches)
-    // Classic steep parallax uses 8 linear steps + 1 refinement = 9 texture fetches.
-    // We do 4 coarse steps (find the crossing interval) then 3 binary search steps
-    // (bisect within that interval).  Same visual quality, 2 fewer texture fetches.
-    // On AMD RDNA: saves 2 texture pipe slots (~8 cycles at 1/4-rate TMU).
-    // On NVIDIA: saves 2 L1 texture cache probes per pixel.
-    uint Height_Tex = nonuniformEXT(Tex_Id + PBR_Stride * 5u);
-    float Layer_Depth = 1.0 / 4.0;  // 4 coarse steps
-    float Current_Depth = 0.0;
-    vec2  Current_Uv = Tex_Coord;
-    vec2  Uv_Step = -Parallax_Dir * Layer_Depth;
-    float H_Sample = textureLod (Textures[Height_Tex], Current_Uv, 0.0).r;
-
-    // Phase 1: 4 coarse linear steps to find the crossing interval
-    // ISA optimization: removed early-exit condition (Current_Depth < H_Sample).
-    // On GPU wavefronts and CPU SIMD, all lanes execute all iterations via masking anyway —
-    // the conditional just adds a branch per iteration.  With only 4 steps, always running all
-    // lets the compiler fully unroll and pipeline the texture fetches.
-    for (int Step = 0; Step < 4; Step++) {
-      Current_Uv += Uv_Step;
-      H_Sample = textureLod (Textures[Height_Tex], Current_Uv, 0.0).r;
-      Current_Depth += Layer_Depth;
+  
+  // ── Extracted shadow trace (deduplicated from entity + world paths) ────────
+  // Both paths used identical rayQueryEXT code: same mask (0xFE), offset (Normal*0.1),
+  // tmin (0.001), tmax (600.0), and shadow factor (1.0 : 0.05).
+  // Saves ~15 lines of duplicated code + instruction cache pressure.
+  float Trace_Shadow (vec3 Origin, vec3 Normal, vec3 Ld, uint Prim, uint Inst, uint Frame, float Disk_Radius) {
+    vec3 Shadow_Dir = Soft_Shadow_Dir (Ld, Prim, Inst, Frame, Disk_Radius);
+    rayQueryEXT Shadow_Query;
+    rayQueryInitializeEXT (Shadow_Query, Top_Level,
+      gl_RayFlagsTerminateOnFirstHitEXT | gl_RayFlagsOpaqueEXT,
+      0xFE, Origin + Normal * 0.1, 0.001, Shadow_Dir, 600.0);
+    rayQueryProceedEXT (Shadow_Query);
+    return (rayQueryGetIntersectionTypeEXT (Shadow_Query, true)
+      == gl_RayQueryCommittedIntersectionNoneEXT) ? 1.0 : 0.05;
+  }
+  
+  // Read a vertex attribute (48 bytes = 12 floats per vertex) from the appropriate buffer
+  // Dispatch: Instance 0 = world, 1 = weapon, 2 = entity
+  vec4 Read_Raw (uint I, uint Slot, uint Instance) {
+    if (Instance == 2u) return Entity_Vertices.Data[I * 3 + Slot];
+    if (Instance == 1u) return Weapon_Vertices.Data[I * 3 + Slot];
+    return Vertices.Data[I * 3 + Slot];
+  }
+  vec3 Read_Position   (uint I, uint Inst) { return Read_Raw (I, 0, Inst).xyz; }
+  vec2 Read_Tex_Uv     (uint I, uint Inst) { return Read_Raw (I, 1, Inst).xy;  }
+  vec2 Read_Lightmap_Uv(uint I, uint Inst) { return Read_Raw (I, 1, Inst).zw;  }
+  vec3 Read_Normal     (uint I, uint Inst) { return Read_Raw (I, 2, Inst).xyz; }
+  
+  void main () {
+    // Determine which instance we hit: 0 = world, 1 = weapon, 2 = entity
+    uint  Instance     = gl_InstanceCustomIndexEXT;
+    bool  Is_Weapon    = (Instance == 1u);
+    bool  Is_Entity     = (Instance == 2u);
+    uint  Primitive    = gl_PrimitiveID;
+  
+    // Adaptive quality budget: 0.0 = full quality (60fps+), 1.0 = minimal work (< 5fps)
+    // At low fps, skip expensive operations so frames are cheaper → higher fps → TAA fills detail.
+    float Budget = float ((Active_SPP >> 8u) & 0xFFu) / 255.0;
+  
+    // Fetch triangle vertex indices from the appropriate buffer
+    uint I0, I1, I2;
+    if (Is_Entity) {
+      I0 = Entity_Indices.Data[Primitive * 3 + 0];
+      I1 = Entity_Indices.Data[Primitive * 3 + 1];
+      I2 = Entity_Indices.Data[Primitive * 3 + 2];
+    } else if (Is_Weapon) {
+      I0 = Weapon_Indices.Data[Primitive * 3 + 0];
+      I1 = Weapon_Indices.Data[Primitive * 3 + 1];
+      I2 = Weapon_Indices.Data[Primitive * 3 + 2];
+    } else {
+      I0 = Indices.Data[Primitive * 3 + 0];
+      I1 = Indices.Data[Primitive * 3 + 1];
+      I2 = Indices.Data[Primitive * 3 + 2];
     }
-
-    // Phase 2: 3 binary search steps to refine within the crossing interval
-    vec2 Lo_Uv = Current_Uv - Uv_Step;  float Lo_D = Current_Depth - Layer_Depth;
-    vec2 Hi_Uv = Current_Uv;             float Hi_D = Current_Depth;
-    for (int B = 0; B < 3; B++) {
-      vec2  Mid_Uv = (Lo_Uv + Hi_Uv) * 0.5;
-      float Mid_D  = (Lo_D + Hi_D) * 0.5;
-      float Mid_H  = textureLod (Textures[Height_Tex], Mid_Uv, 0.0).r;
-      if (Mid_D < Mid_H) { Lo_Uv = Mid_Uv; Lo_D = Mid_D; }
-      else                { Hi_Uv = Mid_Uv; Hi_D = Mid_D; }
+  
+    // ── Batched vertex attribute reads ──────────────────────────────────────
+    // Read all 3 vec4 slots per vertex in one go (9 buffer reads instead of 12).
+    // Each vertex = 3 vec4: [Position.xyz, _], [TexUV.xy, LmUV.xy], [Normal.xyz, _]
+    vec3 Bary   = vec3 (1.0 - Barycentrics.x - Barycentrics.y, Barycentrics.x, Barycentrics.y);
+    vec4 V0_S0  = Read_Raw (I0, 0, Instance), V0_S1 = Read_Raw (I0, 1, Instance), V0_S2 = Read_Raw (I0, 2, Instance);
+    vec4 V1_S0  = Read_Raw (I1, 0, Instance), V1_S1 = Read_Raw (I1, 1, Instance), V1_S2 = Read_Raw (I1, 2, Instance);
+    vec4 V2_S0  = Read_Raw (I2, 0, Instance), V2_S1 = Read_Raw (I2, 1, Instance), V2_S2 = Read_Raw (I2, 2, Instance);
+    vec3 Position  = V0_S0.xyz * Bary.x + V1_S0.xyz * Bary.y + V2_S0.xyz * Bary.z;
+    vec2 Tex_Coord = V0_S1.xy  * Bary.x + V1_S1.xy  * Bary.y + V2_S1.xy  * Bary.z;
+    vec2 Lm_Coord  = V0_S1.zw  * Bary.x + V1_S1.zw  * Bary.y + V2_S1.zw  * Bary.z;
+    vec3 Normal    = normalize (V0_S2.xyz * Bary.x + V1_S2.xyz * Bary.y + V2_S2.xyz * Bary.z);
+  
+    // Fetch the texture ID for this triangle and sample the albedo
+    uint Tex_Id;
+    if (Is_Entity)       Tex_Id = Entity_Tex_Ids.Data[Primitive];
+    else if (Is_Weapon) Tex_Id = Weapon_Tex_Ids.Data[Primitive] + Weapon_Texture_Base;
+    else                Tex_Id = Texture_Ids.Data[Primitive];
+  
+    // ── Build tangent frame (Frisvad method) for normal mapping + parallax ────
+    // Needed before texture sampling: parallax offsets UVs, which affects all map reads.
+    // ISA optimization: Frisvad's construction produces analytically orthonormal vectors —
+    // the normalize() calls are mathematically redundant.  Removing them saves 2× (dot+rsq+3×mul)
+    // = 10 VALU instructions.  On NVIDIA, rsq is a 4-cycle MUFU op; eliminating 2 saves 8 cycles.
+    vec3 Geo_Normal = Normal;  // Preserve geometric normal for parallax
+    vec3 T_Axis, B_Axis;
+    if (Geo_Normal.z < -0.999) {
+      T_Axis = vec3 (0.0, -1.0, 0.0);
+      B_Axis = vec3 (-1.0, 0.0, 0.0);
+    } else {
+      float Inv = 1.0 / (1.0 + Geo_Normal.z);
+      T_Axis = vec3 (1.0 - Geo_Normal.x * Geo_Normal.x * Inv, -Geo_Normal.x * Geo_Normal.y * Inv, -Geo_Normal.x);
+      B_Axis = vec3 (-Geo_Normal.x * Geo_Normal.y * Inv, 1.0 - Geo_Normal.y * Geo_Normal.y * Inv, -Geo_Normal.y);
     }
-    Tex_Coord = Hi_Uv;
-  }
-
-  // ── Sample PBR texture maps ────────────────────────────────────────────────
-  // textureLod(0) bypasses gradient computation (undefined in closest-hit shaders),
-  // saving ~2 cycles/fetch on NVIDIA SM, ~1 on AMD RDNA texture pipe.
-  vec3  Albedo     = textureLod (Textures[nonuniformEXT(Tex_Id)], Tex_Coord, 0.0).rgb;
-  vec3  Normal_Map = vec3 (0.0, 0.0, 1.0);
-  float R = 0.5;
-  float M = 0.0;
-  vec3  Emissive  = vec3 (0.0);
-
-  // Sample PBR maps for world geometry, entities, and weapon.
-  // Entity textures are registered in the scene material array and have valid PBR slots.
-  // Distance LOD: beyond 1000u, normal/roughness/metalness detail is sub-pixel.
-  // Budget adaptive: shrink PBR distance threshold as fps drops (1000u→200u).
-  // Emissive is always sampled — light panels and lava must glow regardless of distance.
-  float PBR_Dist = mix (1000.0, 200.0, Budget);
-  if (!Is_Weapon && Tex_Id < PBR_Stride) {
-    // World / Entity PBR: maps laid out at [diffuse_0..N, normal_0..N, roughness_0..N, ...]
-    if (Hit_Dist < PBR_Dist) {
-      Normal_Map = textureLod (Textures[nonuniformEXT(Tex_Id + PBR_Stride)],      Tex_Coord, 0.0).rgb * 2.0 - 1.0;
-      R          = textureLod (Textures[nonuniformEXT(Tex_Id + PBR_Stride * 2u)], Tex_Coord, 0.0).r;
-      M          = textureLod (Textures[nonuniformEXT(Tex_Id + PBR_Stride * 3u)], Tex_Coord, 0.0).r;
+  
+    // ── Parallax occlusion mapping from height map ────────────────────────────
+    // Offsets texture coordinates based on the height map to simulate surface depth,
+    // giving stone mortar joints, metal rivets, and wood grain real visual depth.
+    // Uses steep parallax with 8 steps — trades 8 extra texture fetches for convincing depth.
+    // ── Driver optimization: distance-cull parallax beyond 500 units ──────────
+    // Parallax is 10+ texture fetches per pixel.  At >500 units the depth offset is
+    // sub-pixel and invisible — skipping it eliminates the majority of PBR texture work
+    // for distant surfaces (which dominate pixel count in Q3 corridors).
+    vec3  V  = -gl_WorldRayDirectionEXT;
+    float Hit_Dist = gl_HitTEXT;
+    // Adaptive parallax: 300u at full quality, 0u at Budget=1 (pure lightmap fallback).
+    float Parallax_Dist = 300.0 * (1.0 - Budget);
+    if (!Is_Weapon && !Is_Entity && Tex_Id < PBR_Stride && Hit_Dist < Parallax_Dist) {
+      // Transform view to tangent space for parallax ray marching
+      vec3 V_Tangent = vec3 (dot (V, T_Axis), dot (V, B_Axis), dot (V, Geo_Normal));
+      // Scale parallax depth: 0.03 units — subtle but visible on close surfaces
+      vec2 Parallax_Dir = V_Tangent.xy / max (V_Tangent.z, 0.1) * 0.03;
+  
+      // ISA optimization: hybrid linear-binary parallax (4 coarse + 3 binary = 7 fetches)
+      // Classic steep parallax uses 8 linear steps + 1 refinement = 9 texture fetches.
+      // We do 4 coarse steps (find the crossing interval) then 3 binary search steps
+      // (bisect within that interval).  Same visual quality, 2 fewer texture fetches.
+      // On AMD RDNA: saves 2 texture pipe slots (~8 cycles at 1/4-rate TMU).
+      // On NVIDIA: saves 2 L1 texture cache probes per pixel.
+      uint Height_Tex = nonuniformEXT(Tex_Id + PBR_Stride * 5u);
+      float Layer_Depth = 1.0 / 4.0;  // 4 coarse steps
+      float Current_Depth = 0.0;
+      vec2  Current_Uv = Tex_Coord;
+      vec2  Uv_Step = -Parallax_Dir * Layer_Depth;
+      float H_Sample = textureLod (Textures[Height_Tex], Current_Uv, 0.0).r;
+  
+      // Phase 1: 4 coarse linear steps to find the crossing interval
+      // ISA optimization: removed early-exit condition (Current_Depth < H_Sample).
+      // On GPU wavefronts and CPU SIMD, all lanes execute all iterations via masking anyway —
+      // the conditional just adds a branch per iteration.  With only 4 steps, always running all
+      // lets the compiler fully unroll and pipeline the texture fetches.
+      for (int Step = 0; Step < 4; Step++) {
+        Current_Uv += Uv_Step;
+        H_Sample = textureLod (Textures[Height_Tex], Current_Uv, 0.0).r;
+        Current_Depth += Layer_Depth;
+      }
+  
+      // Phase 2: 3 binary search steps to refine within the crossing interval
+      vec2 Lo_Uv = Current_Uv - Uv_Step;  float Lo_D = Current_Depth - Layer_Depth;
+      vec2 Hi_Uv = Current_Uv;             float Hi_D = Current_Depth;
+      for (int B = 0; B < 3; B++) {
+        vec2  Mid_Uv = (Lo_Uv + Hi_Uv) * 0.5;
+        float Mid_D  = (Lo_D + Hi_D) * 0.5;
+        float Mid_H  = textureLod (Textures[Height_Tex], Mid_Uv, 0.0).r;
+        if (Mid_D < Mid_H) { Lo_Uv = Mid_Uv; Lo_D = Mid_D; }
+        else                { Hi_Uv = Mid_Uv; Hi_D = Mid_D; }
+      }
+      Tex_Coord = Hi_Uv;
     }
-    Emissive   = textureLod (Textures[nonuniformEXT(Tex_Id + PBR_Stride * 4u)], Tex_Coord, 0.0).rgb;
-  } else if (Is_Weapon) {
-    // Weapon PBR: 6 map types × 2 surfaces, stride = 2
-    // ISA optimization: Weapon_Texture_Base + Stride*N + (Tex_Id - Weapon_Texture_Base) = Tex_Id + 2*N
-    // Eliminates 2 local variables and 4 subtractions per invocation.
-    Normal_Map = textureLod (Textures[nonuniformEXT(Tex_Id + 2u)],  Tex_Coord, 0.0).rgb * 2.0 - 1.0;
-    R          = textureLod (Textures[nonuniformEXT(Tex_Id + 4u)],  Tex_Coord, 0.0).r;
-    M          = textureLod (Textures[nonuniformEXT(Tex_Id + 6u)],  Tex_Coord, 0.0).r;
-    Emissive   = textureLod (Textures[nonuniformEXT(Tex_Id + 8u)],  Tex_Coord, 0.0).rgb;
-  } else {
-    // Fallback for textures outside the PBR material range: derive from albedo statistics
-    float Lu = dot (Albedo, vec3 (0.2126, 0.7152, 0.0722));
-    float Hi = max (Albedo.r, max (Albedo.g, Albedo.b));
-    float Sa = (Hi - min (Albedo.r, min (Albedo.g, Albedo.b))) / max (Hi, 1e-3);
-    R = mix (0.60, 0.90, 1.0 - Lu);   // Rougher default — less "wet" look on stone/brick
-    M = smoothstep (0.35, 0.15, Sa) * smoothstep (0.45, 0.2, Lu) * 0.4;
-  }
-
-  // ── Normal mapping: always apply TBN transform ─────────────────────────────
-  // ISA optimization: removed (Normal_Map != vec3(0,0,1)) branch.
-  // When Normal_Map = (0,0,1): T*0 + B*0 + N*1 = N, normalize(N) = N.
-  // Mathematically identical, eliminates divergent branch across wavefront.
-  Normal = normalize (T_Axis * Normal_Map.x + B_Axis * Normal_Map.y + Geo_Normal * Normal_Map.z);
-
-  // ── PBR material parameters ───────────────────────────────────────────────
-  vec3  F0 = mix (vec3 (0.04), Albedo, M);
-  float NV = max (dot (Normal, V), 1e-3);
-
-  // ── Direct lighting: Cook-Torrance microfacet BRDF ────────────────────────
-  vec3  Ld = normalize (Env_Sun_Dir.xyz);               // Per-scene sun direction
-  vec3  Lr = Env_Sun_Color.xyz * Env_Sun_Color.w;      // Per-scene sun radiance (color × intensity)
-  float NL  = max (dot (Normal, Ld), 0.0);
-
-  // ── Optimization: skip full BRDF when surface faces away from sun ────────
-  // When NL=0, Direct=(Df+Sp)*Lr*NL*Shadow=0 regardless of BRDF result.
-  // Skip H/NH/VH/D/Vis/F computation for back-facing surfaces (~30-40% of pixels
-  // in indoor Q3 maps).  Zero quality loss — mathematically identical output.
-  vec3  Sp  = vec3 (0.0);
-  vec3  Df  = vec3 (0.0);
-  if (NL > 0.0) {
-    vec3  H   = normalize (V + Ld);
-    float NH  = max (dot (Normal, H),  0.0);
-    float VH  = max (dot (V, H),       0.0);
-    float a   = R * R,  a2 = max (a * a, 1e-4);         // Clamp to avoid NaN at R=0
-    float k   = (R + 1.0) * (R + 1.0) * 0.125;
-
-    // GGX/Trowbridge-Reitz normal distribution
-    float Denom = NH * NH * (a2 - 1.0) + 1.0;
-    float D     = a2 / (3.14159 * Denom * Denom);
-
-    // Smith geometry (height-correlated visibility)
-    float G1_L = NL / (NL * (1.0 - k) + k);
-    float G1_V = NV / (NV * (1.0 - k) + k);
-    float Vis  = G1_L * G1_V / max (4.0 * NL * NV, 1e-4);
-
-    // Schlick Fresnel
-    float FT  = 1.0 - VH;  float T5 = FT * FT; T5 *= T5 * FT;
-    vec3  F   = F0 + (1.0 - F0) * T5;
-
-    // Final specular and diffuse terms (energy-conserving: kD = 1 - kS)
-    Sp  = D * Vis * F;
-    Df  = (1.0 - F) * (1.0 - M) * Albedo * 0.31831;  // 1/π
-  }
-
-  // ── Indirect lighting (image-based lighting approximation) ────────────────
-  // Since we don't have a cubemap, approximate ambient from a two-tone hemisphere:
-  //   Sky = cool blue overhead, Ground = warm bounce from below.
-  // This gives metallic surfaces visible reflections even in shadow.
-
-  // Hemisphere ambient diffuse (sky-ground gradient based on normal)
-  // Warm indoor bounce lighting — Q3 arenas have amber-toned fill light from torches and lava.
-  vec3  Sky_Color    = Env_Ambient_Up.xyz;                 // Per-scene ambient from above (sky contribution)
-  vec3  Ground_Color = Env_Ambient_Down.xyz;               // Per-scene ambient from below (ground bounce)
-  float Hemisphere   = Normal.y * 0.5 + 0.5;              // 0=down, 1=up
-  vec3  Ambient_Irradiance = mix (Ground_Color, Sky_Color, Hemisphere);
-
-  // Ambient specular: pre-integrated split-sum approximation (Karis 2013)
-  // Approximates ∫(BRDF * Li) with env BRDF LUT replaced by analytic fit
-  float Env_FT   = 1.0 - NV;  float Env_T5 = Env_FT * Env_FT; Env_T5 *= Env_T5 * Env_FT;
-  vec3  Env_F    = F0 + (max (vec3 (1.0 - R), F0) - F0) * Env_T5;     // Roughness-aware Fresnel
-  vec2  Env_BRDF = vec2 (1.0 - R * 0.5, R * 0.08);  // Analytic fit to DFG LUT
-  vec3  Ambient_Specular = Env_F * Env_BRDF.x + Env_BRDF.y;
-
-  // Reflect the view vector off the surface to tint specular with sky direction
-  vec3  Reflect_Dir = reflect (-V, Normal);
-  float Refl_Up     = Reflect_Dir.y * 0.5 + 0.5;
-  vec3  Env_Color   = mix (Ground_Color, Sky_Color * 1.2, Refl_Up);  // Restrained spec env — real reflections do the heavy lifting
-  vec3  Indirect_Specular = Ambient_Specular * Env_Color;
-
-  // Indirect diffuse: hemisphere ambient weighted by (1 - metallic) since metals have no diffuse
-  vec3  Indirect_Diffuse = Ambient_Irradiance * Albedo * (1.0 - M) * (1.0 - Env_F);
-
-  // ── Ray-traced reflections (full PBR re-entry via traceRayEXT) ────────────
-  // Trace a single-bounce reflection ray for surfaces that are smooth or metallic enough
-  // to show visible reflections.  The reflection intensity is governed by the environment
-  // Fresnel term (Env_F) which increases at grazing angles (the Fresnel effect that makes
-  // even dielectrics mirror-like when viewed obliquely).
-  //
-  // Recursion guard: primary rays use tmin=0.001, reflection rays use tmin=0.01.
-  // Reflection-bounce hits detect this and skip tracing another reflection to limit
-  // recursion to exactly one bounce (primary → reflection → done).
-  // ISA note: on NVIDIA Ada, traceRayEXT enables SER (Shader Execution Reordering)
-  // which re-sorts threads by material after traversal — 20-44% speedup for divergent
-  // secondary bounces.  rayQueryEXT cannot use SER.  Full re-entry also means the
-  // reflection bounce gets complete Cook-Torrance BRDF, parallax, normal mapping, etc.
-  bool  Is_Reflection_Bounce = (gl_RayTminEXT > 0.005);
-  // Reflection culling: skip on secondary bounces, very distant surfaces, or
-  // negligible Fresnel contribution (< 10% is invisible in the final composite).
-  // ── Importance-sampled stochastic reflection ──────────────────────────────
-  // BRDF-importance: smooth metals (R < 0.2, M > 0.5) get reflections every
-  // frame because they're mirror-like.  Rough/dielectric surfaces get 67%
-  // frame-gated coverage.  This puts reflection rays on shiny gun barrels,
-  // metal trim, and wet floors while skipping rough stone/wood.
-  // Note: gl_LaunchIDEXT causes lavapipe crash near traceRayEXT (driver bug),
-  // so spatial importance uses material properties, not screen position.
-  // Reflections: adaptive tmax — at low fps, trace shorter distance (same quality, less work).
-  bool  Refl_Active = !Is_Reflection_Bounce && (R < 0.55);
-  float Refl_Dist = mix (800.0, 300.0, Budget);  // Adaptive reflection distance
-  float Reflection_Weight = (!Refl_Active || Hit_Dist > Refl_Dist) ? 0.0
-    : max (max (Env_F.r, Env_F.g), Env_F.b) * (1.0 - R * R);
-  vec3  Reflection_Color  = vec3 (0.0);
-
-  if (Reflection_Weight > 0.10) {
-    vec3 Refl_Dir = reflect (-V, Normal);
-    Payload = vec4 (0.0, 0.0, 0.0, -1.0);
-    // gl_RayFlagsOpaqueEXT skips any-hit shader (all geometry is opaque) — saves
-    // ~1 cycle/leaf on NVIDIA RT cores.
-    traceRayEXT (Top_Level, gl_RayFlagsOpaqueEXT,
-                 0xFF,
-                 0, 1, 0,
-                 Position + Normal * 0.2,
-                 0.01,  // tmin=0.01 marks this as a reflection bounce
-                 Refl_Dir,
-                 mix (500.0, 200.0, Budget),  // Adaptive tmax — shorter trace at low fps
-                 0);
-    Reflection_Color = Payload.rgb;
-  }
-
-  // Blend reflection into indirect specular: replace the hemisphere approximation
-  // with actual traced reflection, weighted by the Fresnel term.
-  vec3 Traced_Specular = Env_F * mix (Indirect_Specular / max (Env_F, vec3(0.01)),
-                                       Reflection_Color,
-                                       vec3 (Reflection_Weight));
-
-  vec3 Color;
-  float Shadow_Dist = mix (600.0, 200.0, Budget);  // Adaptive shadow ray cutoff distance
-
-  if (Is_Weapon) {
-    // Weapon: direct light + boosted ambient + traced reflections.
-    vec3 Direct = (Df + Sp) * Lr * NL;
-    vec3 Wpn_Full  = Direct * 0.9 + (Indirect_Diffuse + Traced_Specular) * 1.5;
-    vec3 Wpn_Cheap = Ambient_Irradiance * Albedo * 2.5 + Albedo * max(NL, 0.3);
-    Color = mix (Wpn_Full, Wpn_Cheap, Budget);
-  } else if (Is_Entity) {
-    // Entity: direct sun + shadows + hemisphere ambient, no lightmap (MD3 models have no LM UVs)
-    float Shadow_Factor = (NL > 0.0 && !Is_Reflection_Bounce && Hit_Dist < Shadow_Dist)
-      ? Trace_Shadow (Position, Normal, Ld, Primitive, Instance, Frame, Env_Sun_Dir.w) : 1.0;
-    vec3 Direct = (Df + Sp) * Lr * NL * Shadow_Factor;
-    // Entity color: balanced ambient — not too bright (avoids glow), not too dark (avoids silhouette)
-    vec3 Entity_Full  = Direct + Indirect_Diffuse * 0.8 + Traced_Specular;
-    vec3 Entity_Cheap = Ambient_Irradiance * Albedo * 0.9 + Albedo * max(NL, 0.2) * 0.4;
-    Color = mix (Entity_Full, Entity_Cheap, Budget);
-    // Subtle saturation boost for entities — counteracts ambient washout on character models
-    float Ent_Luma = dot (Color, vec3 (0.2126, 0.7152, 0.0722));
-    Color = mix (vec3 (Ent_Luma), Color, 1.15);  // 15% saturation increase
-  } else {
-    vec3 Lm = textureLod (Lightmap, Lm_Coord, 0.0).rgb * 4.0;  // Lightmap auto-linearized via SRGB format
-
-    // ── Driver optimization: inline ray query for shadows ────────────────────
-    // rayQueryEXT runs entirely within this shader invocation — no recursion,
-    // no continuation stack, no SBT lookup for shadow_miss.  On NVIDIA this
-    // eliminates 1 warp scheduling slot per shadow test.  On AMD RDNA, ray
-    // queries bypass the shader export/import and run on the same SIMD.
-    // Bonus: shadows work on reflection bounces for free (no depth cost).
-    // ── Importance-sampled stochastic shadow ────────────────────────────────
-    // SIGGRAPH-grade importance sampling (inspired by ReSTIR / RTXDI):
-    // Allocate shadow rays where they have the MOST visual impact:
-    //   - Close surfaces (< 150u): always trace — shadow detail is most visible
-    //   - Bright sun-facing surfaces: high NL × bright albedo → near-100% coverage
-    //   - Dark/grazing surfaces: shadow barely visible → 50% coverage
-    // IGN (Jimenez 2014) provides blue-noise spatial distribution.
-    // Golden-ratio temporal offset ensures each frame's pattern is maximally
-    // decorrelated — TAA converges in fewer frames.
-    // Soft shadow factor (0.15 floor) reduces stochastic noise amplitude:
-    // a lit→shadow transition is 1.0→0.15 instead of 1.0→0.0, making the
-    // per-pixel noise 85% as large → visually much less noticeable.
-    // Adaptive shadow distance: closer surfaces always get shadows, distant ones shed at low fps.
-    float Shadow_Factor = (NL > 0.0 && !Is_Reflection_Bounce && Hit_Dist < Shadow_Dist)
-      ? Trace_Shadow (Position, Normal, Ld, Primitive, Instance, Frame, Env_Sun_Dir.w) : 1.0;
-
-    // ── Dual-path rendering with Budget blend ──────────────────────────────
-    // CHEAP PATH: Albedo × Lightmap — zero rays, zero noise, perfectly stable.
-    //   This is what Q3 originally looked like. Always computed, always available.
-    // FULL PATH:  Cook-Torrance BRDF + traced shadows + traced reflections.
-    //   Beautiful but expensive. Noisy at 1 spp without denoising.
-    // Budget blends between them: at high fps, full path dominates (gorgeous).
-    // At low fps, cheap path stabilizes the image (no noise, no ghosting).
-    vec3 Direct = (Df + Sp) * Lr * NL * Shadow_Factor;
-    vec3 Baked_GI = Albedo * Lm * (1.0 - M);
-
-    // Cheap path: just lightmap + emissive (minimal ambient to keep shadows dark)
-    vec3 Cheap = Baked_GI + Ambient_Irradiance * Albedo * 0.15 + Emissive * 5.0;
-
-    // Full path: complete PBR lighting (direct at full strength for strong light/shadow contrast)
-    vec3 Full = Baked_GI + Direct + Indirect_Diffuse + Traced_Specular + Emissive * 5.0;
-
-    // Blend: Budget is the knob. 0 = full raytraced, 1 = pure lightmap.
-    Color = mix (Full, Cheap, Budget);
-
-    // ── Dynamic environment fog ──────────────────────────────────────────────
-    // Skip fog on reflection bounces: primary ray applies fog to final color,
-    // applying it again on the reflected surface would double-fog reflections.
-    // Saves exp2 + dot + smoothstep + mix per reflected pixel.
-    if (!Is_Reflection_Bounce) {
-      float Fog_Distance  = gl_HitTEXT;
-      // Per-scene exponential fog — adds depth to corridors
-      // ISA optimization: exp2(-x * 1.442695) = exp(-x), saves 1 multiply
-      float Fog_Amount    = 1.0 - exp (-Fog_Distance * Env_Ambient_Down.w);
-      vec3  Fog_Color     = Env_Fog_Color.xyz;  // Per-scene fog color
-      Color = mix (Color, Fog_Color, Fog_Amount);
+  
+    // ── Sample PBR texture maps ────────────────────────────────────────────────
+    // textureLod(0) bypasses gradient computation (undefined in closest-hit shaders),
+    // saving ~2 cycles/fetch on NVIDIA SM, ~1 on AMD RDNA texture pipe.
+    vec3  Albedo     = textureLod (Textures[nonuniformEXT(Tex_Id)], Tex_Coord, 0.0).rgb;
+    vec3  Normal_Map = vec3 (0.0, 0.0, 1.0);
+    float R = 0.5;
+    float M = 0.0;
+    vec3  Emissive  = vec3 (0.0);
+  
+    // Sample PBR maps for world geometry, entities, and weapon.
+    // Entity textures are registered in the scene material array and have valid PBR slots.
+    // Distance LOD: beyond 1000u, normal/roughness/metalness detail is sub-pixel.
+    // Budget adaptive: shrink PBR distance threshold as fps drops (1000u→200u).
+    // Emissive is always sampled — light panels and lava must glow regardless of distance.
+    float PBR_Dist = mix (1000.0, 200.0, Budget);
+    if (!Is_Weapon && Tex_Id < PBR_Stride) {
+      // World / Entity PBR: maps laid out at [diffuse_0..N, normal_0..N, roughness_0..N, ...]
+      if (Hit_Dist < PBR_Dist) {
+        Normal_Map = textureLod (Textures[nonuniformEXT(Tex_Id + PBR_Stride)],      Tex_Coord, 0.0).rgb * 2.0 - 1.0;
+        R          = textureLod (Textures[nonuniformEXT(Tex_Id + PBR_Stride * 2u)], Tex_Coord, 0.0).r;
+        M          = textureLod (Textures[nonuniformEXT(Tex_Id + PBR_Stride * 3u)], Tex_Coord, 0.0).r;
+      }
+      Emissive   = textureLod (Textures[nonuniformEXT(Tex_Id + PBR_Stride * 4u)], Tex_Coord, 0.0).rgb;
+    } else if (Is_Weapon) {
+      // Weapon PBR: 6 map types × 2 surfaces, stride = 2
+      // ISA optimization: Weapon_Texture_Base + Stride*N + (Tex_Id - Weapon_Texture_Base) = Tex_Id + 2*N
+      // Eliminates 2 local variables and 4 subtractions per invocation.
+      Normal_Map = textureLod (Textures[nonuniformEXT(Tex_Id + 2u)],  Tex_Coord, 0.0).rgb * 2.0 - 1.0;
+      R          = textureLod (Textures[nonuniformEXT(Tex_Id + 4u)],  Tex_Coord, 0.0).r;
+      M          = textureLod (Textures[nonuniformEXT(Tex_Id + 6u)],  Tex_Coord, 0.0).r;
+      Emissive   = textureLod (Textures[nonuniformEXT(Tex_Id + 8u)],  Tex_Coord, 0.0).rgb;
+    } else {
+      // Fallback for textures outside the PBR material range: derive from albedo statistics
+      float Lu = dot (Albedo, vec3 (0.2126, 0.7152, 0.0722));
+      float Hi = max (Albedo.r, max (Albedo.g, Albedo.b));
+      float Sa = (Hi - min (Albedo.r, min (Albedo.g, Albedo.b))) / max (Hi, 1e-3);
+      R = mix (0.60, 0.90, 1.0 - Lu);   // Rougher default — less "wet" look on stone/brick
+      M = smoothstep (0.35, 0.15, Sa) * smoothstep (0.45, 0.2, Lu) * 0.4;
     }
+  
+    // ── Normal mapping: always apply TBN transform ─────────────────────────────
+    // ISA optimization: removed (Normal_Map != vec3(0,0,1)) branch.
+    // When Normal_Map = (0,0,1): T*0 + B*0 + N*1 = N, normalize(N) = N.
+    // Mathematically identical, eliminates divergent branch across wavefront.
+    Normal = normalize (T_Axis * Normal_Map.x + B_Axis * Normal_Map.y + Geo_Normal * Normal_Map.z);
+  
+    // ── PBR material parameters ───────────────────────────────────────────────
+    vec3  F0 = mix (vec3 (0.04), Albedo, M);
+    float NV = max (dot (Normal, V), 1e-3);
+  
+    // ── Direct lighting: Cook-Torrance microfacet BRDF ────────────────────────
+    vec3  Ld = normalize (Env_Sun_Dir.xyz);               // Per-scene sun direction
+    vec3  Lr = Env_Sun_Color.xyz * Env_Sun_Color.w;      // Per-scene sun radiance (color × intensity)
+    float NL  = max (dot (Normal, Ld), 0.0);
+  
+    // ── Optimization: skip full BRDF when surface faces away from sun ────────
+    // When NL=0, Direct=(Df+Sp)*Lr*NL*Shadow=0 regardless of BRDF result.
+    // Skip H/NH/VH/D/Vis/F computation for back-facing surfaces (~30-40% of pixels
+    // in indoor Q3 maps).  Zero quality loss — mathematically identical output.
+    vec3  Sp  = vec3 (0.0);
+    vec3  Df  = vec3 (0.0);
+    if (NL > 0.0) {
+      vec3  H   = normalize (V + Ld);
+      float NH  = max (dot (Normal, H),  0.0);
+      float VH  = max (dot (V, H),       0.0);
+      float a   = R * R,  a2 = max (a * a, 1e-4);         // Clamp to avoid NaN at R=0
+      float k   = (R + 1.0) * (R + 1.0) * 0.125;
+  
+      // GGX/Trowbridge-Reitz normal distribution
+      float Denom = NH * NH * (a2 - 1.0) + 1.0;
+      float D     = a2 / (3.14159 * Denom * Denom);
+  
+      // Smith geometry (height-correlated visibility)
+      float G1_L = NL / (NL * (1.0 - k) + k);
+      float G1_V = NV / (NV * (1.0 - k) + k);
+      float Vis  = G1_L * G1_V / max (4.0 * NL * NV, 1e-4);
+  
+      // Schlick Fresnel
+      float FT  = 1.0 - VH;  float T5 = FT * FT; T5 *= T5 * FT;
+      vec3  F   = F0 + (1.0 - F0) * T5;
+  
+      // Final specular and diffuse terms (energy-conserving: kD = 1 - kS)
+      Sp  = D * Vis * F;
+      Df  = (1.0 - F) * (1.0 - M) * Albedo * 0.31831;  // 1/π
+    }
+  
+    // ── Indirect lighting (image-based lighting approximation) ────────────────
+    // Since we don't have a cubemap, approximate ambient from a two-tone hemisphere:
+    //   Sky = cool blue overhead, Ground = warm bounce from below.
+    // This gives metallic surfaces visible reflections even in shadow.
+  
+    // Hemisphere ambient diffuse (sky-ground gradient based on normal)
+    // Warm indoor bounce lighting — Q3 arenas have amber-toned fill light from torches and lava.
+    vec3  Sky_Color    = Env_Ambient_Up.xyz;                 // Per-scene ambient from above (sky contribution)
+    vec3  Ground_Color = Env_Ambient_Down.xyz;               // Per-scene ambient from below (ground bounce)
+    float Hemisphere   = Normal.y * 0.5 + 0.5;              // 0=down, 1=up
+    vec3  Ambient_Irradiance = mix (Ground_Color, Sky_Color, Hemisphere);
+  
+    // Ambient specular: pre-integrated split-sum approximation (Karis 2013)
+    // Approximates ∫(BRDF * Li) with env BRDF LUT replaced by analytic fit
+    float Env_FT   = 1.0 - NV;  float Env_T5 = Env_FT * Env_FT; Env_T5 *= Env_T5 * Env_FT;
+    vec3  Env_F    = F0 + (max (vec3 (1.0 - R), F0) - F0) * Env_T5;     // Roughness-aware Fresnel
+    vec2  Env_BRDF = vec2 (1.0 - R * 0.5, R * 0.08);  // Analytic fit to DFG LUT
+    vec3  Ambient_Specular = Env_F * Env_BRDF.x + Env_BRDF.y;
+  
+    // Reflect the view vector off the surface to tint specular with sky direction
+    vec3  Reflect_Dir = reflect (-V, Normal);
+    float Refl_Up     = Reflect_Dir.y * 0.5 + 0.5;
+    vec3  Env_Color   = mix (Ground_Color, Sky_Color * 1.2, Refl_Up);  // Restrained spec env — real reflections do the heavy lifting
+    vec3  Indirect_Specular = Ambient_Specular * Env_Color;
+  
+    // Indirect diffuse: hemisphere ambient weighted by (1 - metallic) since metals have no diffuse
+    vec3  Indirect_Diffuse = Ambient_Irradiance * Albedo * (1.0 - M) * (1.0 - Env_F);
+  
+    // ── Ray-traced reflections (full PBR re-entry via traceRayEXT) ────────────
+    // Trace a single-bounce reflection ray for surfaces that are smooth or metallic enough
+    // to show visible reflections.  The reflection intensity is governed by the environment
+    // Fresnel term (Env_F) which increases at grazing angles (the Fresnel effect that makes
+    // even dielectrics mirror-like when viewed obliquely).
+    //
+    // Recursion guard: primary rays use tmin=0.001, reflection rays use tmin=0.01.
+    // Reflection-bounce hits detect this and skip tracing another reflection to limit
+    // recursion to exactly one bounce (primary → reflection → done).
+    // ISA note: on NVIDIA Ada, traceRayEXT enables SER (Shader Execution Reordering)
+    // which re-sorts threads by material after traversal — 20-44% speedup for divergent
+    // secondary bounces.  rayQueryEXT cannot use SER.  Full re-entry also means the
+    // reflection bounce gets complete Cook-Torrance BRDF, parallax, normal mapping, etc.
+    bool  Is_Reflection_Bounce = (gl_RayTminEXT > 0.005);
+    // Reflection culling: skip on secondary bounces, very distant surfaces, or
+    // negligible Fresnel contribution (< 10% is invisible in the final composite).
+    // ── Importance-sampled stochastic reflection ──────────────────────────────
+    // BRDF-importance: smooth metals (R < 0.2, M > 0.5) get reflections every
+    // frame because they're mirror-like.  Rough/dielectric surfaces get 67%
+    // frame-gated coverage.  This puts reflection rays on shiny gun barrels,
+    // metal trim, and wet floors while skipping rough stone/wood.
+    // Note: gl_LaunchIDEXT causes lavapipe crash near traceRayEXT (driver bug),
+    // so spatial importance uses material properties, not screen position.
+    // Reflections: adaptive tmax — at low fps, trace shorter distance (same quality, less work).
+    bool  Refl_Active = !Is_Reflection_Bounce && (R < 0.55);
+    float Refl_Dist = mix (800.0, 300.0, Budget);  // Adaptive reflection distance
+    float Reflection_Weight = (!Refl_Active || Hit_Dist > Refl_Dist) ? 0.0
+      : max (max (Env_F.r, Env_F.g), Env_F.b) * (1.0 - R * R);
+    vec3  Reflection_Color  = vec3 (0.0);
+  
+    if (Reflection_Weight > 0.10) {
+      vec3 Refl_Dir = reflect (-V, Normal);
+      Payload = vec4 (0.0, 0.0, 0.0, -1.0);
+      // gl_RayFlagsOpaqueEXT skips any-hit shader (all geometry is opaque) — saves
+      // ~1 cycle/leaf on NVIDIA RT cores.
+      traceRayEXT (Top_Level, gl_RayFlagsOpaqueEXT,
+                   0xFF,
+                   0, 1, 0,
+                   Position + Normal * 0.2,
+                   0.01,  // tmin=0.01 marks this as a reflection bounce
+                   Refl_Dir,
+                   mix (500.0, 200.0, Budget),  // Adaptive tmax — shorter trace at low fps
+                   0);
+      Reflection_Color = Payload.rgb;
+    }
+  
+    // Blend reflection into indirect specular: replace the hemisphere approximation
+    // with actual traced reflection, weighted by the Fresnel term.
+    vec3 Traced_Specular = Env_F * mix (Indirect_Specular / max (Env_F, vec3(0.01)),
+                                         Reflection_Color,
+                                         vec3 (Reflection_Weight));
+  
+    vec3 Color;
+    float Shadow_Dist = mix (600.0, 200.0, Budget);  // Adaptive shadow ray cutoff distance
+  
+    if (Is_Weapon) {
+      // Weapon: direct light + boosted ambient + traced reflections.
+      vec3 Direct = (Df + Sp) * Lr * NL;
+      vec3 Wpn_Full  = Direct * 0.9 + (Indirect_Diffuse + Traced_Specular) * 1.5;
+      vec3 Wpn_Cheap = Ambient_Irradiance * Albedo * 2.5 + Albedo * max(NL, 0.3);
+      Color = mix (Wpn_Full, Wpn_Cheap, Budget);
+    } else if (Is_Entity) {
+      // Entity: direct sun + shadows + hemisphere ambient, no lightmap (MD3 models have no LM UVs)
+      float Shadow_Factor = (NL > 0.0 && !Is_Reflection_Bounce && Hit_Dist < Shadow_Dist)
+        ? Trace_Shadow (Position, Normal, Ld, Primitive, Instance, Frame, Env_Sun_Dir.w) : 1.0;
+      vec3 Direct = (Df + Sp) * Lr * NL * Shadow_Factor;
+      // Entity color: balanced ambient — not too bright (avoids glow), not too dark (avoids silhouette)
+      vec3 Entity_Full  = Direct + Indirect_Diffuse * 0.8 + Traced_Specular;
+      vec3 Entity_Cheap = Ambient_Irradiance * Albedo * 0.9 + Albedo * max(NL, 0.2) * 0.4;
+      Color = mix (Entity_Full, Entity_Cheap, Budget);
+      // Subtle saturation boost for entities — counteracts ambient washout on character models
+      float Ent_Luma = dot (Color, vec3 (0.2126, 0.7152, 0.0722));
+      Color = mix (vec3 (Ent_Luma), Color, 1.15);  // 15% saturation increase
+    } else {
+      vec3 Lm = textureLod (Lightmap, Lm_Coord, 0.0).rgb * 4.0;  // Lightmap auto-linearized via SRGB format
+  
+      // ── Driver optimization: inline ray query for shadows ────────────────────
+      // rayQueryEXT runs entirely within this shader invocation — no recursion,
+      // no continuation stack, no SBT lookup for shadow_miss.  On NVIDIA this
+      // eliminates 1 warp scheduling slot per shadow test.  On AMD RDNA, ray
+      // queries bypass the shader export/import and run on the same SIMD.
+      // Bonus: shadows work on reflection bounces for free (no depth cost).
+      // ── Importance-sampled stochastic shadow ────────────────────────────────
+      // SIGGRAPH-grade importance sampling (inspired by ReSTIR / RTXDI):
+      // Allocate shadow rays where they have the MOST visual impact:
+      //   - Close surfaces (< 150u): always trace — shadow detail is most visible
+      //   - Bright sun-facing surfaces: high NL × bright albedo → near-100% coverage
+      //   - Dark/grazing surfaces: shadow barely visible → 50% coverage
+      // IGN (Jimenez 2014) provides blue-noise spatial distribution.
+      // Golden-ratio temporal offset ensures each frame's pattern is maximally
+      // decorrelated — TAA converges in fewer frames.
+      // Soft shadow factor (0.15 floor) reduces stochastic noise amplitude:
+      // a lit→shadow transition is 1.0→0.15 instead of 1.0→0.0, making the
+      // per-pixel noise 85% as large → visually much less noticeable.
+      // Adaptive shadow distance: closer surfaces always get shadows, distant ones shed at low fps.
+      float Shadow_Factor = (NL > 0.0 && !Is_Reflection_Bounce && Hit_Dist < Shadow_Dist)
+        ? Trace_Shadow (Position, Normal, Ld, Primitive, Instance, Frame, Env_Sun_Dir.w) : 1.0;
+  
+      // ── Dual-path rendering with Budget blend ──────────────────────────────
+      // CHEAP PATH: Albedo × Lightmap — zero rays, zero noise, perfectly stable.
+      //   This is what Q3 originally looked like. Always computed, always available.
+      // FULL PATH:  Cook-Torrance BRDF + traced shadows + traced reflections.
+      //   Beautiful but expensive. Noisy at 1 spp without denoising.
+      // Budget blends between them: at high fps, full path dominates (gorgeous).
+      // At low fps, cheap path stabilizes the image (no noise, no ghosting).
+      vec3 Direct = (Df + Sp) * Lr * NL * Shadow_Factor;
+      vec3 Baked_GI = Albedo * Lm * (1.0 - M);
+  
+      // Cheap path: just lightmap + emissive (minimal ambient to keep shadows dark)
+      vec3 Cheap = Baked_GI + Ambient_Irradiance * Albedo * 0.15 + Emissive * 5.0;
+  
+      // Full path: complete PBR lighting (direct at full strength for strong light/shadow contrast)
+      vec3 Full = Baked_GI + Direct + Indirect_Diffuse + Traced_Specular + Emissive * 5.0;
+  
+      // Blend: Budget is the knob. 0 = full raytraced, 1 = pure lightmap.
+      Color = mix (Full, Cheap, Budget);
+  
+      // ── Dynamic environment fog ──────────────────────────────────────────────
+      // Skip fog on reflection bounces: primary ray applies fog to final color,
+      // applying it again on the reflected surface would double-fog reflections.
+      // Saves exp2 + dot + smoothstep + mix per reflected pixel.
+      if (!Is_Reflection_Bounce) {
+        float Fog_Distance  = gl_HitTEXT;
+        // Per-scene exponential fog — adds depth to corridors
+        // ISA optimization: exp2(-x * 1.442695) = exp(-x), saves 1 multiply
+        float Fog_Amount    = 1.0 - exp (-Fog_Distance * Env_Ambient_Down.w);
+        vec3  Fog_Color     = Env_Fog_Color.xyz;  // Per-scene fog color
+        Color = mix (Color, Fog_Color, Fog_Amount);
+      }
+    }
+  
+    Payload = vec4 (Color, gl_HitTEXT);
   }
-
-  Payload = vec4 (Color, gl_HitTEXT);
-}
-}
-
-glsl shader miss rmiss {
-#version 460
-#extension GL_EXT_ray_tracing : require
-
-layout(location = 0) rayPayloadInEXT vec4 Payload;
-layout(binding = 2) uniform Camera_Uniform {
-  mat4  Inverse_View; mat4 Inverse_Projection;
-  uint  Frame; uint Weapon_Texture_Base; uint PBR_Stride; uint Active_SPP;
-  vec4  Env_Sun_Dir;      // xyz = direction, w = angular_radius
-  vec4  Env_Sun_Color;    // xyz = color, w = intensity
-  vec4  Env_Sky_Zenith;   // xyz = zenith color, w = sky_intensity
-  vec4  Env_Sky_Horizon;  // xyz = horizon color, w = cos(sun_disc_size)
-  vec4  Env_Ambient_Up;   // xyz = ambient up, w = sun_disc_intensity
-  vec4  Env_Ambient_Down; // xyz = ambient down, w = fog_density
-  vec4  Env_Fog_Color;    // xyz = fog color
-};
-
-void main () {
-  // Per-scene procedural sky with sun disc (Q2RTX-inspired)
-  vec3  Dir       = gl_WorldRayDirectionEXT;
-  float Vertical  = max (Dir.y, 0.0);
-  // ISA optimization: sqrt() is a hardware instruction (1 cycle NVIDIA/AMD), pow(x,0.5) uses log+exp (~8 cycles)
-  vec3  Sky       = mix (Env_Sky_Horizon.xyz, Env_Sky_Zenith.xyz, sqrt (Vertical));
-  Sky *= Env_Sky_Zenith.w;  // Sky intensity multiplier
-
-  // Sun disc: bright spot in the sky at sun direction (Q2RTX: physical_sky.comp)
-  // ISA optimization: Dir is already normalized (ray direction), Env_Sun_Dir.xyz normalized on CPU
-  float Sun_Cos   = dot (Dir, Env_Sun_Dir.xyz);
-  // ISA optimization: cos(disc_size) pre-computed on CPU — eliminates per-pixel transcendental
-  float Disc_Edge = Env_Sky_Horizon.w;  // Already cos(sun_disc_size) from CPU
-  float Sun_Edge  = clamp ((Sun_Cos - Disc_Edge) / (1.0 - Disc_Edge), 0.0, 1.0);
-  float Sun_Glow  = Sun_Edge * Sun_Edge; Sun_Glow *= Sun_Glow;  // x^4
-  Sky += Env_Sun_Color.xyz * Sun_Glow * Env_Ambient_Up.w;  // sun_disc_intensity
-
-  // Atmospheric haze near horizon (Mie-like forward scattering glow)
-  float Horizon_Glow = exp (-Vertical * 8.0);  // Concentrated near horizon
-  // ISA optimization: replace 2× length() + 2× division with single inversesqrt(D²·S²).
-  // dot(A/|A|, B/|B|) = dot(A,B) / (|A|·|B|) = dot(A,B) · inversesqrt(dot(A,A)·dot(B,B)).
-  // Saves 2 length + 2 div → 1 dot + 1 dot + 1 mul + 1 rsq + 1 mul (~4 MUFU cycles saved).
-  vec2  Dir_XZ = vec2 (Dir.x, Dir.z);
-  vec2  Sun_XZ = vec2 (Env_Sun_Dir.x, Env_Sun_Dir.z);
-  float Sun_Horizon = max (dot (Dir_XZ, Sun_XZ) * inversesqrt (
-    max (dot (Dir_XZ, Dir_XZ) * dot (Sun_XZ, Sun_XZ), 1e-12)), 0.0);
-  // ISA optimization: pow(x,8) → ((x²)²)² (3 muls vs transcendental)
-  float SH2 = Sun_Horizon * Sun_Horizon; float SH4 = SH2 * SH2; float SH8 = SH4 * SH4;
-  Sky += Env_Sun_Color.xyz * Horizon_Glow * SH8 * 0.3;
-
-  Payload = vec4 (Sky, 10000.0);  // Sky = max distance
-}
-}
-
-glsl shader shadow_miss rmiss {
-#version 460
-#extension GL_EXT_ray_tracing : require
-
-layout(location = 1) rayPayloadInEXT float Shadow_Factor;
-
-void main () {
-  // Shadow ray reached the light source without hitting anything — fully lit
-  Shadow_Factor = 1.0;
-}
+  }
+  
+  glsl shader miss rmiss {
+  #version 460
+  #extension GL_EXT_ray_tracing : require
+  
+  layout(location = 0) rayPayloadInEXT vec4 Payload;
+  layout(binding = 2) uniform Camera_Uniform {
+    mat4  Inverse_View; mat4 Inverse_Projection;
+    uint  Frame; uint Weapon_Texture_Base; uint PBR_Stride; uint Active_SPP;
+    vec4  Env_Sun_Dir;      // xyz = direction, w = angular_radius
+    vec4  Env_Sun_Color;    // xyz = color, w = intensity
+    vec4  Env_Sky_Zenith;   // xyz = zenith color, w = sky_intensity
+    vec4  Env_Sky_Horizon;  // xyz = horizon color, w = cos(sun_disc_size)
+    vec4  Env_Ambient_Up;   // xyz = ambient up, w = sun_disc_intensity
+    vec4  Env_Ambient_Down; // xyz = ambient down, w = fog_density
+    vec4  Env_Fog_Color;    // xyz = fog color
+  };
+  
+  void main () {
+    // Per-scene procedural sky with sun disc (Q2RTX-inspired)
+    vec3  Dir       = gl_WorldRayDirectionEXT;
+    float Vertical  = max (Dir.y, 0.0);
+    // ISA optimization: sqrt() is a hardware instruction (1 cycle NVIDIA/AMD), pow(x,0.5) uses log+exp (~8 cycles)
+    vec3  Sky       = mix (Env_Sky_Horizon.xyz, Env_Sky_Zenith.xyz, sqrt (Vertical));
+    Sky *= Env_Sky_Zenith.w;  // Sky intensity multiplier
+  
+    // Sun disc: bright spot in the sky at sun direction (Q2RTX: physical_sky.comp)
+    // ISA optimization: Dir is already normalized (ray direction), Env_Sun_Dir.xyz normalized on CPU
+    float Sun_Cos   = dot (Dir, Env_Sun_Dir.xyz);
+    // ISA optimization: cos(disc_size) pre-computed on CPU — eliminates per-pixel transcendental
+    float Disc_Edge = Env_Sky_Horizon.w;  // Already cos(sun_disc_size) from CPU
+    float Sun_Edge  = clamp ((Sun_Cos - Disc_Edge) / (1.0 - Disc_Edge), 0.0, 1.0);
+    float Sun_Glow  = Sun_Edge * Sun_Edge; Sun_Glow *= Sun_Glow;  // x^4
+    Sky += Env_Sun_Color.xyz * Sun_Glow * Env_Ambient_Up.w;  // sun_disc_intensity
+  
+    // Atmospheric haze near horizon (Mie-like forward scattering glow)
+    float Horizon_Glow = exp (-Vertical * 8.0);  // Concentrated near horizon
+    // ISA optimization: replace 2× length() + 2× division with single inversesqrt(D²·S²).
+    // dot(A/|A|, B/|B|) = dot(A,B) / (|A|·|B|) = dot(A,B) · inversesqrt(dot(A,A)·dot(B,B)).
+    // Saves 2 length + 2 div → 1 dot + 1 dot + 1 mul + 1 rsq + 1 mul (~4 MUFU cycles saved).
+    vec2  Dir_XZ = vec2 (Dir.x, Dir.z);
+    vec2  Sun_XZ = vec2 (Env_Sun_Dir.x, Env_Sun_Dir.z);
+    float Sun_Horizon = max (dot (Dir_XZ, Sun_XZ) * inversesqrt (
+      max (dot (Dir_XZ, Dir_XZ) * dot (Sun_XZ, Sun_XZ), 1e-12)), 0.0);
+    // ISA optimization: pow(x,8) → ((x²)²)² (3 muls vs transcendental)
+    float SH2 = Sun_Horizon * Sun_Horizon; float SH4 = SH2 * SH2; float SH8 = SH4 * SH4;
+    Sky += Env_Sun_Color.xyz * Horizon_Glow * SH8 * 0.3;
+  
+    Payload = vec4 (Sky, 10000.0);  // Sky = max distance
+  }
+  }
+  
+  glsl shader shadow_miss rmiss {
+  #version 460
+  #extension GL_EXT_ray_tracing : require
+  
+  layout(location = 1) rayPayloadInEXT float Shadow_Factor;
+  
+  void main () {
+    // Shadow ray reached the light source without hitting anything — fully lit
+    Shadow_Factor = 1.0;
+  }
 }
 
 glsl shader physics comp {
-#version 460
-#extension GL_EXT_ray_tracing : require
-#extension GL_EXT_ray_query : require
-
-// ── Descriptor bindings ────────────────────────────────────────────────────────────────────────
-
-layout(binding = 0) uniform accelerationStructureEXT Top_Level;
-layout(binding = 1, std430) readonly buffer Vertex_Data { vec4 Data[]; } Vertices;
-layout(binding = 2, std430) readonly buffer Index_Data  { uint Data[]; } Indices;
-
-layout(binding = 3, std430) buffer Player_Buffer {
-  vec3  Position;     float Pad_A;
-  vec3  Velocity;     float Pad_B;
-  float Yaw, Pitch;
-  int   On_Ground, Jump_Held;
-  vec3  Ground_Normal; float Pad_C;
-  int   Ground_Plane, Ducked;
-  float View_Height, Stuck_Time;
-  float Speed_Last;  int Shape;
-  vec3  Extents;     float Pad_D;
-  float Spine;       float Pad_E1, Pad_E2, Pad_E3;
-} Player;
-
-layout(binding = 4, std430) readonly buffer Hull_Buffer {
-  vec4  Hull_Vertices [256];
-  int   Hull_Adjacency[256][16];
-  int   Hull_Count;
-  float Hull_Radius;
-  vec3  Hull_Centroid;
-  int   Hull_Pad;
-};
-
-struct Gpu_Projectile {
-  vec3  Position;      float Pad_A;
-  vec3  Velocity;      float Lifetime;
-  int   Active;        int   Material_Hit;
-  float Radius;        float Damage;
-  float Hit_U, Hit_V;  // UV at impact point (for CPU-side damage map lookup)
-  int   Instance_Hit;  // TLAS instance index of the object hit (-1 = none)
-  int   Pad_B;
-};
-
-layout(binding = 5, std430) buffer Projectile_Buffer {
-  Gpu_Projectile Projectiles[64];
-  int   Projectile_Count;
-  float Fire_Cooldown;
-  float Proj_Pad[2];
-};
-
-layout(push_constant) uniform Push {
-  int   Forward, Back, Left, Right;
-  int   Jump, Fire, Crouch, Pad;
-  float Delta_X, Delta_Y, Dt, Pad2;
-} Input;
-
-layout(local_size_x = 1) in;
-
-// ── Physics constants ──────────────────────────────────────────────────────────────────────────
-
-const float GRAVITY              = 800.0;
-const float GROUND_FRICTION      = 6.0;
-const float STOP_SPEED           = 100.0;
-const float GROUND_ACCELERATE    = 10.0;
-const float AIR_ACCELERATE       = 1.0;
-const float MAXIMUM_SPEED        = 320.0;
-const float JUMP_VELOCITY        = 270.0;
-const float STEP_SIZE            = 18.0;
-const float MINIMUM_WALK_NORMAL  = 0.7;
-const float OVERBOUNCE           = 1.001;
-const int   MAXIMUM_CLIP_PLANES  = 5;
-const float DEFAULT_VIEW_HEIGHT  = 26.0;
-const float CROUCH_VIEW_HEIGHT   = 12.0;
-const float MOUSE_SENSITIVITY    = 0.003;
-
-// ── Collider shape constants ───────────────────────────────────────────────────────────────────
-
-const int SHAPE_SPHERE    = 0;
-const int SHAPE_CAPSULE   = 1;
-const int SHAPE_AABB      = 2;
-const int SHAPE_CYLINDER  = 3;
-const int SHAPE_ELLIPSOID = 4;
-const int SHAPE_HULL      = 5;
-
-// ── Convex hull support functions ──────────────────────────────────────────────────────────────
-
-// Brute-force support: O(n) linear scan over all hull vertices.  Best for small hulls (< 64 verts).
-vec3 hull_support_brute (vec3 direction) {
-  float best_dot = -1e30;
-  int   best_idx = 0;
-  for (int i = 0; i < Hull_Count; i++) {
-    float d = dot (Hull_Vertices[i].xyz, direction);
-    if (d > best_dot) { best_dot = d; best_idx = i; }
-  }
-  return Hull_Vertices[best_idx].xyz;
-}
-
-// Hill-climbing support: O(sqrt(n)) amortized using per-vertex adjacency table.
-// Starts from vertex 0 and follows neighbors that increase dot(vertex, direction) until a
-// local maximum is reached.  On a convex hull, the local maximum IS the global maximum.
-vec3 hull_support_hill (vec3 direction) {
-  int current = 0;
-  float current_dot = dot (Hull_Vertices[0].xyz, direction);
-
-  for (int iteration = 0; iteration < 256; iteration++) {
-    int best_neighbor = -1;
-    float best_dot    = current_dot;
-
-    // Check all neighbors of the current vertex
-    for (int slot = 0; slot < 16; slot++) {
-      int neighbor = Hull_Adjacency[current][slot];
-      if (neighbor < 0) break;
-      float d = dot (Hull_Vertices[neighbor].xyz, direction);
-      if (d > best_dot) { best_dot = d; best_neighbor = neighbor; }
+  #version 460
+  #extension GL_EXT_ray_tracing : require
+  #extension GL_EXT_ray_query : require
+  
+  // ── Descriptor bindings ────────────────────────────────────────────────────────────────────────
+  
+  layout(binding = 0) uniform accelerationStructureEXT Top_Level;
+  layout(binding = 1, std430) readonly buffer Vertex_Data { vec4 Data[]; } Vertices;
+  layout(binding = 2, std430) readonly buffer Index_Data  { uint Data[]; } Indices;
+  
+  layout(binding = 3, std430) buffer Player_Buffer {
+    vec3  Position;     float Pad_A;
+    vec3  Velocity;     float Pad_B;
+    float Yaw, Pitch;
+    int   On_Ground, Jump_Held;
+    vec3  Ground_Normal; float Pad_C;
+    int   Ground_Plane, Ducked;
+    float View_Height, Stuck_Time;
+    float Speed_Last;  int Shape;
+    vec3  Extents;     float Pad_D;
+    float Spine;       float Pad_E1, Pad_E2, Pad_E3;
+  } Player;
+  
+  layout(binding = 4, std430) readonly buffer Hull_Buffer {
+    vec4  Hull_Vertices [256];
+    int   Hull_Adjacency[256][16];
+    int   Hull_Count;
+    float Hull_Radius;
+    vec3  Hull_Centroid;
+    int   Hull_Pad;
+  };
+  
+  struct Gpu_Projectile {
+    vec3  Position;      float Pad_A;
+    vec3  Velocity;      float Lifetime;
+    int   Active;        int   Material_Hit;
+    float Radius;        float Damage;
+    float Hit_U, Hit_V;  // UV at impact point (for CPU-side damage map lookup)
+    int   Instance_Hit;  // TLAS instance index of the object hit (-1 = none)
+    int   Pad_B;
+  };
+  
+  layout(binding = 5, std430) buffer Projectile_Buffer {
+    Gpu_Projectile Projectiles[64];
+    int   Projectile_Count;
+    float Fire_Cooldown;
+    float Proj_Pad[2];
+  };
+  
+  layout(push_constant) uniform Push {
+    int   Forward, Back, Left, Right;
+    int   Jump, Fire, Crouch, Pad;
+    float Delta_X, Delta_Y, Dt, Pad2;
+  } Input;
+  
+  layout(local_size_x = 1) in;
+  
+  // ── Physics constants ──────────────────────────────────────────────────────────────────────────
+  
+  const float GRAVITY              = 800.0;
+  const float GROUND_FRICTION      = 6.0;
+  const float STOP_SPEED           = 100.0;
+  const float GROUND_ACCELERATE    = 10.0;
+  const float AIR_ACCELERATE       = 1.0;
+  const float MAXIMUM_SPEED        = 320.0;
+  const float JUMP_VELOCITY        = 270.0;
+  const float STEP_SIZE            = 18.0;
+  const float MINIMUM_WALK_NORMAL  = 0.7;
+  const float OVERBOUNCE           = 1.001;
+  const int   MAXIMUM_CLIP_PLANES  = 5;
+  const float DEFAULT_VIEW_HEIGHT  = 26.0;
+  const float CROUCH_VIEW_HEIGHT   = 12.0;
+  const float MOUSE_SENSITIVITY    = 0.003;
+  
+  // ── Collider shape constants ───────────────────────────────────────────────────────────────────
+  
+  const int SHAPE_SPHERE    = 0;
+  const int SHAPE_CAPSULE   = 1;
+  const int SHAPE_AABB      = 2;
+  const int SHAPE_CYLINDER  = 3;
+  const int SHAPE_ELLIPSOID = 4;
+  const int SHAPE_HULL      = 5;
+  
+  // ── Convex hull support functions ──────────────────────────────────────────────────────────────
+  
+  // Brute-force support: O(n) linear scan over all hull vertices.  Best for small hulls (< 64 verts).
+  vec3 hull_support_brute (vec3 direction) {
+    float best_dot = -1e30;
+    int   best_idx = 0;
+    for (int i = 0; i < Hull_Count; i++) {
+      float d = dot (Hull_Vertices[i].xyz, direction);
+      if (d > best_dot) { best_dot = d; best_idx = i; }
     }
-
-    // If no neighbor improves the dot product, we've found the support point
-    if (best_neighbor < 0) break;
-    current     = best_neighbor;
-    current_dot = best_dot;
+    return Hull_Vertices[best_idx].xyz;
   }
-  return Hull_Vertices[current].xyz;
-}
-
-// Adaptive dispatcher: brute-force for small hulls, hill-climbing for large ones
-vec3 hull_support (vec3 direction) {
-  if (Hull_Count < 64) return hull_support_brute (direction);
-  return hull_support_hill (direction);
-}
-
-// ── Shape support function ─────────────────────────────────────────────────────────────────────
-
-// Map a unit direction to the shape's surface offset (Minkowski support mapping)
-vec3 shape_offset (vec3 d) {
-  switch (Player.Shape) {
-    case SHAPE_SPHERE:
-      return d * Player.Extents.x;
-
-    case SHAPE_CAPSULE:
-      return d * Player.Extents.x + vec3 (0.0, sign(d.y) * Player.Spine, 0.0);
-
-    case SHAPE_AABB:
-      return sign(d) * Player.Extents;
-
-    case SHAPE_CYLINDER: {
-      vec2  xz    = d.xz;
-      float len   = length (xz);
-      vec2  disc  = (len > 1e-6) ? xz / len * Player.Extents.x : vec2(0.0);
-      return vec3 (disc.x, sign(d.y) * Player.Extents.y, disc.y);
+  
+  // Hill-climbing support: O(sqrt(n)) amortized using per-vertex adjacency table.
+  // Starts from vertex 0 and follows neighbors that increase dot(vertex, direction) until a
+  // local maximum is reached.  On a convex hull, the local maximum IS the global maximum.
+  vec3 hull_support_hill (vec3 direction) {
+    int current = 0;
+    float current_dot = dot (Hull_Vertices[0].xyz, direction);
+  
+    for (int iteration = 0; iteration < 256; iteration++) {
+      int best_neighbor = -1;
+      float best_dot    = current_dot;
+  
+      // Check all neighbors of the current vertex
+      for (int slot = 0; slot < 16; slot++) {
+        int neighbor = Hull_Adjacency[current][slot];
+        if (neighbor < 0) break;
+        float d = dot (Hull_Vertices[neighbor].xyz, direction);
+        if (d > best_dot) { best_dot = d; best_neighbor = neighbor; }
+      }
+  
+      // If no neighbor improves the dot product, we've found the support point
+      if (best_neighbor < 0) break;
+      current     = best_neighbor;
+      current_dot = best_dot;
     }
-
-    case SHAPE_ELLIPSOID: {
-      vec3 scaled = d / Player.Extents;
-      float len   = length (scaled);
-      return (len > 1e-6) ? normalize(scaled) * Player.Extents : vec3(0.0);
-    }
-
-    case SHAPE_HULL:
-      return hull_support (d);
-
-    default:
-      return d * Player.Extents.x;
+    return Hull_Vertices[current].xyz;
   }
-}
-
-// ── Ray trace helper ───────────────────────────────────────────────────────────────────────────
-
-struct Trace_Result {
-  float Fraction;
-  vec3  Normal;
-  bool  Hit;
-};
-
-// Cast a swept shape from Origin along Direction for up to Distance units.
-// We approximate the expanded shape by casting multiple rays offset by the support function
-// in cardinal + diagonal directions, taking the nearest hit.
-Trace_Result trace_shape (vec3 Origin, vec3 Direction, float Distance) {
-  Trace_Result result;
-  result.Fraction = 1.0;
-  result.Normal   = vec3 (0.0, 1.0, 0.0);
-  result.Hit      = false;
-
-  if (Distance < 1e-6) return result;
-  vec3 dir_norm = normalize (Direction);
-
-  // 7 probe directions: 6 cardinal axes + movement direction (optimized from 28 for performance)
-  vec3 probes[7] = vec3[7](
-    vec3( 1, 0, 0), vec3(-1, 0, 0), vec3(0, 1, 0), vec3(0,-1, 0), vec3(0, 0, 1), vec3(0, 0,-1),
-    dir_norm
-  );
-
-  for (int i = 0; i < 7; i++) {
-    vec3 offset = shape_offset (normalize(probes[i]));
-    vec3 ray_origin = Origin + offset;
-
-    rayQueryEXT rq;
-    rayQueryInitializeEXT (rq, Top_Level, gl_RayFlagsOpaqueEXT, 0xFF,
-                           ray_origin, 0.0, dir_norm, Distance);
-
-    while (rayQueryProceedEXT (rq)) {}
-
-    if (rayQueryGetIntersectionTypeEXT (rq, true) == gl_RayQueryCommittedIntersectionTriangleEXT) {
-      float t = rayQueryGetIntersectionTEXT (rq, true);
-      if (t < result.Fraction * Distance) {
-        // Reconstruct the triangle normal from vertices
-        uint prim = rayQueryGetIntersectionPrimitiveIndexEXT (rq, true);
-        uint i0 = Indices.Data[prim * 3 + 0];
-        uint i1 = Indices.Data[prim * 3 + 1];
-        uint i2 = Indices.Data[prim * 3 + 2];
-        vec3 v0 = Vertices.Data[i0 * 3].xyz;
-        vec3 v1 = Vertices.Data[i1 * 3].xyz;
-        vec3 v2 = Vertices.Data[i2 * 3].xyz;
-        vec3 n  = normalize (cross (v1 - v0, v2 - v0));
-
-        // Ensure the normal faces toward the ray origin
-        if (dot (n, dir_norm) > 0.0) n = -n;
-
-        result.Fraction = t / Distance;
-        result.Normal   = n;
-        result.Hit      = true;
+  
+  // Adaptive dispatcher: brute-force for small hulls, hill-climbing for large ones
+  vec3 hull_support (vec3 direction) {
+    if (Hull_Count < 64) return hull_support_brute (direction);
+    return hull_support_hill (direction);
+  }
+  
+  // ── Shape support function ─────────────────────────────────────────────────────────────────────
+  
+  // Map a unit direction to the shape's surface offset (Minkowski support mapping)
+  vec3 shape_offset (vec3 d) {
+    switch (Player.Shape) {
+      case SHAPE_SPHERE:
+        return d * Player.Extents.x;
+  
+      case SHAPE_CAPSULE:
+        return d * Player.Extents.x + vec3 (0.0, sign(d.y) * Player.Spine, 0.0);
+  
+      case SHAPE_AABB:
+        return sign(d) * Player.Extents;
+  
+      case SHAPE_CYLINDER: {
+        vec2  xz    = d.xz;
+        float len   = length (xz);
+        vec2  disc  = (len > 1e-6) ? xz / len * Player.Extents.x : vec2(0.0);
+        return vec3 (disc.x, sign(d.y) * Player.Extents.y, disc.y);
+      }
+  
+      case SHAPE_ELLIPSOID: {
+        vec3 scaled = d / Player.Extents;
+        float len   = length (scaled);
+        return (len > 1e-6) ? normalize(scaled) * Player.Extents : vec3(0.0);
+      }
+  
+      case SHAPE_HULL:
+        return hull_support (d);
+  
+      default:
+        return d * Player.Extents.x;
+    }
+  }
+  
+  // ── Ray trace helper ───────────────────────────────────────────────────────────────────────────
+  
+  struct Trace_Result {
+    float Fraction;
+    vec3  Normal;
+    bool  Hit;
+  };
+  
+  // Cast a swept shape from Origin along Direction for up to Distance units.
+  // We approximate the expanded shape by casting multiple rays offset by the support function
+  // in cardinal + diagonal directions, taking the nearest hit.
+  Trace_Result trace_shape (vec3 Origin, vec3 Direction, float Distance) {
+    Trace_Result result;
+    result.Fraction = 1.0;
+    result.Normal   = vec3 (0.0, 1.0, 0.0);
+    result.Hit      = false;
+  
+    if (Distance < 1e-6) return result;
+    vec3 dir_norm = normalize (Direction);
+  
+    // 7 probe directions: 6 cardinal axes + movement direction (optimized from 28 for performance)
+    vec3 probes[7] = vec3[7](
+      vec3( 1, 0, 0), vec3(-1, 0, 0), vec3(0, 1, 0), vec3(0,-1, 0), vec3(0, 0, 1), vec3(0, 0,-1),
+      dir_norm
+    );
+  
+    for (int i = 0; i < 7; i++) {
+      vec3 offset = shape_offset (normalize(probes[i]));
+      vec3 ray_origin = Origin + offset;
+  
+      rayQueryEXT rq;
+      rayQueryInitializeEXT (rq, Top_Level, gl_RayFlagsOpaqueEXT, 0xFF,
+                             ray_origin, 0.0, dir_norm, Distance);
+  
+      while (rayQueryProceedEXT (rq)) {}
+  
+      if (rayQueryGetIntersectionTypeEXT (rq, true) == gl_RayQueryCommittedIntersectionTriangleEXT) {
+        float t = rayQueryGetIntersectionTEXT (rq, true);
+        if (t < result.Fraction * Distance) {
+          // Reconstruct the triangle normal from vertices
+          uint prim = rayQueryGetIntersectionPrimitiveIndexEXT (rq, true);
+          uint i0 = Indices.Data[prim * 3 + 0];
+          uint i1 = Indices.Data[prim * 3 + 1];
+          uint i2 = Indices.Data[prim * 3 + 2];
+          vec3 v0 = Vertices.Data[i0 * 3].xyz;
+          vec3 v1 = Vertices.Data[i1 * 3].xyz;
+          vec3 v2 = Vertices.Data[i2 * 3].xyz;
+          vec3 n  = normalize (cross (v1 - v0, v2 - v0));
+  
+          // Ensure the normal faces toward the ray origin
+          if (dot (n, dir_norm) > 0.0) n = -n;
+  
+          result.Fraction = t / Distance;
+          result.Normal   = n;
+          result.Hit      = true;
+        }
       }
     }
+  
+    return result;
   }
-
-  return result;
-}
-
-// ── Ground trace ───────────────────────────────────────────────────────────────────────────────
-
-// Cast a short ray downward to detect ground contact
-void ground_trace () {
-  vec3 down_offset = shape_offset (vec3 (0, -1, 0));
-  vec3 origin      = Player.Position + down_offset;
-  float dist       = 0.5;
-
-  rayQueryEXT rq;
-  rayQueryInitializeEXT (rq, Top_Level, gl_RayFlagsOpaqueEXT, 0xFF,
-                         origin, 0.0, vec3 (0, -1, 0), dist);
-  while (rayQueryProceedEXT (rq)) {}
-
-  if (rayQueryGetIntersectionTypeEXT (rq, true) == gl_RayQueryCommittedIntersectionTriangleEXT) {
-    uint prim = rayQueryGetIntersectionPrimitiveIndexEXT (rq, true);
-    uint i0 = Indices.Data[prim * 3 + 0];
-    uint i1 = Indices.Data[prim * 3 + 1];
-    uint i2 = Indices.Data[prim * 3 + 2];
-    vec3 v0 = Vertices.Data[i0 * 3].xyz;
-    vec3 v1 = Vertices.Data[i1 * 3].xyz;
-    vec3 v2 = Vertices.Data[i2 * 3].xyz;
-    vec3 n  = normalize (cross (v1 - v0, v2 - v0));
-    if (n.y < 0.0) n = -n;
-
-    if (n.y >= MINIMUM_WALK_NORMAL) {
-      Player.On_Ground    = 1;
-      Player.Ground_Normal = n;
-      Player.Ground_Plane  = 1;
+  
+  // ── Ground trace ───────────────────────────────────────────────────────────────────────────────
+  
+  // Cast a short ray downward to detect ground contact
+  void ground_trace () {
+    vec3 down_offset = shape_offset (vec3 (0, -1, 0));
+    vec3 origin      = Player.Position + down_offset;
+    float dist       = 0.5;
+  
+    rayQueryEXT rq;
+    rayQueryInitializeEXT (rq, Top_Level, gl_RayFlagsOpaqueEXT, 0xFF,
+                           origin, 0.0, vec3 (0, -1, 0), dist);
+    while (rayQueryProceedEXT (rq)) {}
+  
+    if (rayQueryGetIntersectionTypeEXT (rq, true) == gl_RayQueryCommittedIntersectionTriangleEXT) {
+      uint prim = rayQueryGetIntersectionPrimitiveIndexEXT (rq, true);
+      uint i0 = Indices.Data[prim * 3 + 0];
+      uint i1 = Indices.Data[prim * 3 + 1];
+      uint i2 = Indices.Data[prim * 3 + 2];
+      vec3 v0 = Vertices.Data[i0 * 3].xyz;
+      vec3 v1 = Vertices.Data[i1 * 3].xyz;
+      vec3 v2 = Vertices.Data[i2 * 3].xyz;
+      vec3 n  = normalize (cross (v1 - v0, v2 - v0));
+      if (n.y < 0.0) n = -n;
+  
+      if (n.y >= MINIMUM_WALK_NORMAL) {
+        Player.On_Ground    = 1;
+        Player.Ground_Normal = n;
+        Player.Ground_Plane  = 1;
+      } else {
+        Player.On_Ground    = 0;
+        Player.Ground_Plane  = 0;
+      }
     } else {
       Player.On_Ground    = 0;
       Player.Ground_Plane  = 0;
     }
-  } else {
-    Player.On_Ground    = 0;
-    Player.Ground_Plane  = 0;
   }
-}
-
-// ── Clip velocity ──────────────────────────────────────────────────────────────────────────────
-
-vec3 clip_velocity (vec3 vel, vec3 normal) {
-  float backoff = dot (vel, normal) * OVERBOUNCE;
-  return vel - normal * backoff;
-}
-
-// ── Slide move ─────────────────────────────────────────────────────────────────────────────────
-
-void slide_move () {
-  vec3  planes[5];
-  int   plane_count = 0;
-  vec3  vel         = Player.Velocity;
-  float time_left   = Input.Dt;
-
-  // If on ground, add the ground plane as the first clip plane
-  if (Player.On_Ground == 1) {
-    planes[plane_count++] = Player.Ground_Normal;
-    vel = clip_velocity (vel, Player.Ground_Normal);
+  
+  // ── Clip velocity ──────────────────────────────────────────────────────────────────────────────
+  
+  vec3 clip_velocity (vec3 vel, vec3 normal) {
+    float backoff = dot (vel, normal) * OVERBOUNCE;
+    return vel - normal * backoff;
   }
-
-  // Iteratively trace and clip against contact planes
-  for (int bump = 0; bump < 4 && time_left > 0.001; bump++) {
-    vec3  move_dir  = vel * time_left;
-    float move_dist = length (move_dir);
-    if (move_dist < 0.001) break;
-
-    Trace_Result trace = trace_shape (Player.Position, move_dir, move_dist);
-
-    if (trace.Fraction > 0.0)
-      Player.Position += normalize(move_dir) * move_dist * trace.Fraction;
-
-    if (!trace.Hit) break;
-
-    time_left *= (1.0 - trace.Fraction);
-
-    // Avoid duplicating a plane we've already clipped against
-    bool duplicate = false;
-    for (int p = 0; p < plane_count; p++)
-      if (dot (trace.Normal, planes[p]) > 0.99) { duplicate = true; break; }
-    if (duplicate) continue;
-
-    if (plane_count < MAXIMUM_CLIP_PLANES)
-      planes[plane_count++] = trace.Normal;
-
-    // Clip velocity against all accumulated planes
-    vel = clip_velocity (vel, trace.Normal);
-
-    // If velocity points into a previously established plane, clip against both
-    for (int p = 0; p < plane_count; p++) {
-      if (dot (vel, planes[p]) >= 0.0) continue;
-      vel = clip_velocity (vel, planes[p]);
-
-      // If still heading into another plane, slide along the crease
-      for (int q = 0; q < plane_count; q++) {
-        if (q == p || dot (vel, planes[q]) >= 0.0) continue;
-        vec3 crease = cross (planes[p], planes[q]);
-        float len   = length (crease);
-        if (len > 1e-6) {
-          crease /= len;
-          vel = crease * dot (vel, crease);
+  
+  // ── Slide move ─────────────────────────────────────────────────────────────────────────────────
+  
+  void slide_move () {
+    vec3  planes[5];
+    int   plane_count = 0;
+    vec3  vel         = Player.Velocity;
+    float time_left   = Input.Dt;
+  
+    // If on ground, add the ground plane as the first clip plane
+    if (Player.On_Ground == 1) {
+      planes[plane_count++] = Player.Ground_Normal;
+      vel = clip_velocity (vel, Player.Ground_Normal);
+    }
+  
+    // Iteratively trace and clip against contact planes
+    for (int bump = 0; bump < 4 && time_left > 0.001; bump++) {
+      vec3  move_dir  = vel * time_left;
+      float move_dist = length (move_dir);
+      if (move_dist < 0.001) break;
+  
+      Trace_Result trace = trace_shape (Player.Position, move_dir, move_dist);
+  
+      if (trace.Fraction > 0.0)
+        Player.Position += normalize(move_dir) * move_dist * trace.Fraction;
+  
+      if (!trace.Hit) break;
+  
+      time_left *= (1.0 - trace.Fraction);
+  
+      // Avoid duplicating a plane we've already clipped against
+      bool duplicate = false;
+      for (int p = 0; p < plane_count; p++)
+        if (dot (trace.Normal, planes[p]) > 0.99) { duplicate = true; break; }
+      if (duplicate) continue;
+  
+      if (plane_count < MAXIMUM_CLIP_PLANES)
+        planes[plane_count++] = trace.Normal;
+  
+      // Clip velocity against all accumulated planes
+      vel = clip_velocity (vel, trace.Normal);
+  
+      // If velocity points into a previously established plane, clip against both
+      for (int p = 0; p < plane_count; p++) {
+        if (dot (vel, planes[p]) >= 0.0) continue;
+        vel = clip_velocity (vel, planes[p]);
+  
+        // If still heading into another plane, slide along the crease
+        for (int q = 0; q < plane_count; q++) {
+          if (q == p || dot (vel, planes[q]) >= 0.0) continue;
+          vec3 crease = cross (planes[p], planes[q]);
+          float len   = length (crease);
+          if (len > 1e-6) {
+            crease /= len;
+            vel = crease * dot (vel, crease);
+          }
+        }
+        break;
+      }
+    }
+  
+    Player.Velocity = vel;
+  }
+  
+  // ── Step move ──────────────────────────────────────────────────────────────────────────────────
+  
+  void step_move () {
+    // Save state before the step attempt
+    vec3 start_pos = Player.Position;
+    vec3 start_vel = Player.Velocity;
+  
+    // Try a normal slide move first
+    slide_move ();
+    vec3 flat_pos = Player.Position;
+  
+    // Reset and try stepping up
+    Player.Position = start_pos;
+    Player.Velocity = start_vel;
+  
+    // Step up
+    Trace_Result up = trace_shape (Player.Position, vec3(0, STEP_SIZE, 0), STEP_SIZE);
+    if (up.Fraction > 0.0)
+      Player.Position.y += STEP_SIZE * up.Fraction;
+  
+    // Slide forward from the raised position
+    slide_move ();
+  
+    // Step down to find the ground
+    Trace_Result down = trace_shape (Player.Position, vec3(0, -STEP_SIZE, 0), STEP_SIZE);
+    if (down.Hit && down.Normal.y >= MINIMUM_WALK_NORMAL) {
+      Player.Position.y -= STEP_SIZE * down.Fraction;
+  
+      // Keep the stepped result only if it moved us farther horizontally
+      vec2 step_delta = Player.Position.xz - start_pos.xz;
+      vec2 flat_delta = flat_pos.xz - start_pos.xz;
+      if (dot (step_delta, step_delta) <= dot (flat_delta, flat_delta)) {
+        Player.Position = flat_pos;
+        Player.Velocity = start_vel;
+        slide_move ();
+      }
+    } else {
+      Player.Position = flat_pos;
+    }
+  }
+  
+  // ── Stuck recovery ─────────────────────────────────────────────────────────────────────────────
+  
+  void recover () {
+    // Cast rays in 6 cardinal directions and nudge the player away from walls
+    vec3 dirs[6] = vec3[6](
+      vec3(1,0,0), vec3(-1,0,0), vec3(0,1,0), vec3(0,-1,0), vec3(0,0,1), vec3(0,0,-1));
+  
+    for (int i = 0; i < 6; i++) {
+      vec3 offset  = shape_offset (dirs[i]);
+      float expect = length (offset);
+  
+      rayQueryEXT rq;
+      rayQueryInitializeEXT (rq, Top_Level, gl_RayFlagsOpaqueEXT, 0xFF,
+                             Player.Position, 0.0, dirs[i], expect);
+      while (rayQueryProceedEXT (rq)) {}
+  
+      if (rayQueryGetIntersectionTypeEXT (rq, true) == gl_RayQueryCommittedIntersectionTriangleEXT) {
+        float t = rayQueryGetIntersectionTEXT (rq, true);
+        if (t < expect) {
+          float penetration = expect - t;
+          Player.Position -= dirs[i] * (penetration + 0.125);
         }
       }
-      break;
     }
   }
-
-  Player.Velocity = vel;
-}
-
-// ── Step move ──────────────────────────────────────────────────────────────────────────────────
-
-void step_move () {
-  // Save state before the step attempt
-  vec3 start_pos = Player.Position;
-  vec3 start_vel = Player.Velocity;
-
-  // Try a normal slide move first
-  slide_move ();
-  vec3 flat_pos = Player.Position;
-
-  // Reset and try stepping up
-  Player.Position = start_pos;
-  Player.Velocity = start_vel;
-
-  // Step up
-  Trace_Result up = trace_shape (Player.Position, vec3(0, STEP_SIZE, 0), STEP_SIZE);
-  if (up.Fraction > 0.0)
-    Player.Position.y += STEP_SIZE * up.Fraction;
-
-  // Slide forward from the raised position
-  slide_move ();
-
-  // Step down to find the ground
-  Trace_Result down = trace_shape (Player.Position, vec3(0, -STEP_SIZE, 0), STEP_SIZE);
-  if (down.Hit && down.Normal.y >= MINIMUM_WALK_NORMAL) {
-    Player.Position.y -= STEP_SIZE * down.Fraction;
-
-    // Keep the stepped result only if it moved us farther horizontally
-    vec2 step_delta = Player.Position.xz - start_pos.xz;
-    vec2 flat_delta = flat_pos.xz - start_pos.xz;
-    if (dot (step_delta, step_delta) <= dot (flat_delta, flat_delta)) {
-      Player.Position = flat_pos;
-      Player.Velocity = start_vel;
+  
+  // ── Main physics entry point ───────────────────────────────────────────────────────────────────
+  
+  void main () {
+  
+    // ── Mouse look ────────────────────────────────────────────────────────────────────────────────
+    Player.Yaw   -= Input.Delta_X * MOUSE_SENSITIVITY;
+    Player.Pitch -= Input.Delta_Y * MOUSE_SENSITIVITY;
+    Player.Pitch  = clamp (Player.Pitch, -1.5, 1.5);
+  
+    // ── Build a movement basis from yaw (must match camera: Forward = (sy, 0, -cy)) ─────────────
+    float cy = cos (Player.Yaw), sy = sin (Player.Yaw);
+    vec3 forward = vec3 ( sy, 0, -cy);
+    vec3 right   = vec3 ( cy, 0,  sy);
+  
+    // ── Compute the wish direction and speed from keyboard input ──────────────────────────────────
+    vec3 wish = vec3 (0.0);
+    if (Input.Forward == 1) wish += forward;
+    if (Input.Back    == 1) wish -= forward;
+    if (Input.Right   == 1) wish += right;
+    if (Input.Left    == 1) wish -= right;
+    float wish_speed = MAXIMUM_SPEED;
+    if (length (wish) > 0.001) wish = normalize (wish); else wish_speed = 0.0;
+  
+    // ── Crouch handling ───────────────────────────────────────────────────────────────────────────
+    float target_view = DEFAULT_VIEW_HEIGHT;
+    if (Input.Crouch == 1) {
+      Player.Ducked = 1;
+      target_view = CROUCH_VIEW_HEIGHT;
+    } else {
+      Player.Ducked = 0;
+    }
+  
+    // ── Ground trace ──────────────────────────────────────────────────────────────────────────────
+    ground_trace ();
+  
+    // ── Apply ground or air movement ──────────────────────────────────────────────────────────────
+    if (Player.On_Ground == 1) {
+  
+      // Friction
+      float speed = length (Player.Velocity);
+      if (speed > 0.1) {
+        float control = max (speed, STOP_SPEED);
+        float drop    = control * GROUND_FRICTION * Input.Dt;
+        float scale   = max (speed - drop, 0.0) / speed;
+        Player.Velocity *= scale;
+      }
+  
+      // Ground acceleration (Quake 3 style)
+      float current_speed = dot (Player.Velocity, wish);
+      float add_speed     = wish_speed - current_speed;
+      if (add_speed > 0.0) {
+        float accel_speed = GROUND_ACCELERATE * wish_speed * Input.Dt;
+        if (accel_speed > add_speed) accel_speed = add_speed;
+        Player.Velocity += wish * accel_speed;
+      }
+  
+      // Jump
+      if (Input.Jump == 1 && Player.Jump_Held == 0) {
+        Player.Velocity.y = JUMP_VELOCITY;
+        Player.On_Ground  = 0;
+      }
+    } else {
+      // Air acceleration (enables strafe-jumping)
+      float current_speed = dot (Player.Velocity, wish);
+      float add_speed     = wish_speed - current_speed;
+      if (add_speed > 0.0) {
+        float accel_speed = AIR_ACCELERATE * wish_speed * Input.Dt;
+        if (accel_speed > add_speed) accel_speed = add_speed;
+        Player.Velocity += wish * accel_speed;
+      }
+  
+      // Gravity
+      Player.Velocity.y -= GRAVITY * Input.Dt;
+    }
+  
+    // Track jump key state (prevent auto-bunny-hopping)
+    Player.Jump_Held = Input.Jump;
+  
+    // ── Move and collide ──────────────────────────────────────────────────────────────────────────
+    if (Player.On_Ground == 1)
+      step_move ();
+    else
       slide_move ();
+  
+    // ── Stuck recovery ────────────────────────────────────────────────────────────────────────────
+    recover ();
+  
+    // ── Re-check ground after movement ────────────────────────────────────────────────────────────
+    ground_trace ();
+  
+    // ── Smoothly interpolate the view height toward the target ────────────────────────────────────
+    float delta = target_view - Player.View_Height;
+    if (abs(delta) < 0.1) Player.View_Height = target_view;
+    else Player.View_Height += delta * min (Input.Dt * 10.0, 1.0);
+  
+    // ── Track speed for debugging ───────────────────────────────────────────────────────────────
+    Player.Speed_Last = length (Player.Velocity.xz);
+  
+    // ── Projectile update ─────────────────────────────────────────────────────────────────────────
+    // Decrement fire cooldown
+    if (Fire_Cooldown > 0.0) Fire_Cooldown -= Input.Dt;
+  
+    // Spawn a new projectile on fire button press
+    if (Input.Fire == 1 && Fire_Cooldown <= 0.0 && Projectile_Count < 64) {
+      vec3 cam_forward = vec3 (sy, -sin(Player.Pitch), -cy * cos(Player.Pitch));
+      cam_forward = normalize (cam_forward);
+      vec3 eye = Player.Position + vec3 (0.0, Player.View_Height, 0.0);
+  
+      int idx = Projectile_Count;
+      Projectiles[idx].Position     = eye + cam_forward * 20.0;
+      Projectiles[idx].Velocity     = cam_forward * 900.0;
+      Projectiles[idx].Lifetime     = 10.0;
+      Projectiles[idx].Active       = 1;
+      Projectiles[idx].Material_Hit = 0;
+      Projectiles[idx].Radius       = 3.0;
+      Projectiles[idx].Damage       = 100.0;
+      Projectiles[idx].Hit_U        = 0.0;
+      Projectiles[idx].Hit_V        = 0.0;
+      Projectiles[idx].Instance_Hit = -1;
+      Projectile_Count = idx + 1;
+      Fire_Cooldown = 0.8;
     }
-  } else {
-    Player.Position = flat_pos;
-  }
-}
-
-// ── Stuck recovery ─────────────────────────────────────────────────────────────────────────────
-
-void recover () {
-  // Cast rays in 6 cardinal directions and nudge the player away from walls
-  vec3 dirs[6] = vec3[6](
-    vec3(1,0,0), vec3(-1,0,0), vec3(0,1,0), vec3(0,-1,0), vec3(0,0,1), vec3(0,0,-1));
-
-  for (int i = 0; i < 6; i++) {
-    vec3 offset  = shape_offset (dirs[i]);
-    float expect = length (offset);
-
-    rayQueryEXT rq;
-    rayQueryInitializeEXT (rq, Top_Level, gl_RayFlagsOpaqueEXT, 0xFF,
-                           Player.Position, 0.0, dirs[i], expect);
-    while (rayQueryProceedEXT (rq)) {}
-
-    if (rayQueryGetIntersectionTypeEXT (rq, true) == gl_RayQueryCommittedIntersectionTriangleEXT) {
-      float t = rayQueryGetIntersectionTEXT (rq, true);
-      if (t < expect) {
-        float penetration = expect - t;
-        Player.Position -= dirs[i] * (penetration + 0.125);
+  
+    // Advance each active projectile: move, trace against TLAS, kill on impact or timeout
+    for (int i = 0; i < Projectile_Count; i++) {
+      if (Projectiles[i].Active == 0) continue;
+  
+      Projectiles[i].Lifetime -= Input.Dt;
+      if (Projectiles[i].Lifetime <= 0.0) { Projectiles[i].Active = 0; continue; }
+  
+      vec3 dir = normalize (Projectiles[i].Velocity);
+      float dist = length (Projectiles[i].Velocity) * Input.Dt;
+  
+      // Ray trace to check for collision
+      rayQueryEXT rq;
+      rayQueryInitializeEXT (rq, Top_Level, gl_RayFlagsOpaqueEXT, 0xFF,
+                             Projectiles[i].Position, 0.0, dir, dist);
+      while (rayQueryProceedEXT (rq)) {}
+  
+      if (rayQueryGetIntersectionTypeEXT (rq, true) == gl_RayQueryCommittedIntersectionTriangleEXT) {
+        // Hit something — mark dead and record hit position + UV for damage map lookup
+        float t = rayQueryGetIntersectionTEXT (rq, true);
+        Projectiles[i].Position += dir * t;
+        Projectiles[i].Active = 0;
+  
+        // Extract the instance index to identify what was hit (world vs player model)
+        Projectiles[i].Instance_Hit = rayQueryGetIntersectionInstanceCustomIndexEXT (rq, true);
+  
+        // Extract barycentrics and primitive index to compute the hit UV
+        vec2 bary = rayQueryGetIntersectionBarycentricsEXT (rq, true);
+        uint prim = rayQueryGetIntersectionPrimitiveIndexEXT (rq, true);
+  
+        // Look up the three vertex indices for the hit triangle
+        uint i0 = Indices.Data[prim * 3 + 0];
+        uint i1 = Indices.Data[prim * 3 + 1];
+        uint i2 = Indices.Data[prim * 3 + 2];
+  
+        // Read texture UVs from vertex data (vec4[1].xy = texture UV)
+        vec2 uv0 = Vertices.Data[i0 * 3 + 1].xy;
+        vec2 uv1 = Vertices.Data[i1 * 3 + 1].xy;
+        vec2 uv2 = Vertices.Data[i2 * 3 + 1].xy;
+  
+        // Interpolate UV at hit point using barycentric coordinates
+        vec3 bary3 = vec3 (1.0 - bary.x - bary.y, bary.x, bary.y);
+        vec2 hit_uv = uv0 * bary3.x + uv1 * bary3.y + uv2 * bary3.z;
+        Projectiles[i].Hit_U = hit_uv.x;
+        Projectiles[i].Hit_V = hit_uv.y;
+      } else {
+        // No hit — advance position
+        Projectiles[i].Position += dir * dist;
       }
     }
   }
-}
-
-// ── Main physics entry point ───────────────────────────────────────────────────────────────────
-
-void main () {
-
-  // ── Mouse look ────────────────────────────────────────────────────────────────────────────────
-  Player.Yaw   -= Input.Delta_X * MOUSE_SENSITIVITY;
-  Player.Pitch -= Input.Delta_Y * MOUSE_SENSITIVITY;
-  Player.Pitch  = clamp (Player.Pitch, -1.5, 1.5);
-
-  // ── Build a movement basis from yaw (must match camera: Forward = (sy, 0, -cy)) ─────────────
-  float cy = cos (Player.Yaw), sy = sin (Player.Yaw);
-  vec3 forward = vec3 ( sy, 0, -cy);
-  vec3 right   = vec3 ( cy, 0,  sy);
-
-  // ── Compute the wish direction and speed from keyboard input ──────────────────────────────────
-  vec3 wish = vec3 (0.0);
-  if (Input.Forward == 1) wish += forward;
-  if (Input.Back    == 1) wish -= forward;
-  if (Input.Right   == 1) wish += right;
-  if (Input.Left    == 1) wish -= right;
-  float wish_speed = MAXIMUM_SPEED;
-  if (length (wish) > 0.001) wish = normalize (wish); else wish_speed = 0.0;
-
-  // ── Crouch handling ───────────────────────────────────────────────────────────────────────────
-  float target_view = DEFAULT_VIEW_HEIGHT;
-  if (Input.Crouch == 1) {
-    Player.Ducked = 1;
-    target_view = CROUCH_VIEW_HEIGHT;
-  } else {
-    Player.Ducked = 0;
-  }
-
-  // ── Ground trace ──────────────────────────────────────────────────────────────────────────────
-  ground_trace ();
-
-  // ── Apply ground or air movement ──────────────────────────────────────────────────────────────
-  if (Player.On_Ground == 1) {
-
-    // Friction
-    float speed = length (Player.Velocity);
-    if (speed > 0.1) {
-      float control = max (speed, STOP_SPEED);
-      float drop    = control * GROUND_FRICTION * Input.Dt;
-      float scale   = max (speed - drop, 0.0) / speed;
-      Player.Velocity *= scale;
-    }
-
-    // Ground acceleration (Quake 3 style)
-    float current_speed = dot (Player.Velocity, wish);
-    float add_speed     = wish_speed - current_speed;
-    if (add_speed > 0.0) {
-      float accel_speed = GROUND_ACCELERATE * wish_speed * Input.Dt;
-      if (accel_speed > add_speed) accel_speed = add_speed;
-      Player.Velocity += wish * accel_speed;
-    }
-
-    // Jump
-    if (Input.Jump == 1 && Player.Jump_Held == 0) {
-      Player.Velocity.y = JUMP_VELOCITY;
-      Player.On_Ground  = 0;
-    }
-  } else {
-    // Air acceleration (enables strafe-jumping)
-    float current_speed = dot (Player.Velocity, wish);
-    float add_speed     = wish_speed - current_speed;
-    if (add_speed > 0.0) {
-      float accel_speed = AIR_ACCELERATE * wish_speed * Input.Dt;
-      if (accel_speed > add_speed) accel_speed = add_speed;
-      Player.Velocity += wish * accel_speed;
-    }
-
-    // Gravity
-    Player.Velocity.y -= GRAVITY * Input.Dt;
-  }
-
-  // Track jump key state (prevent auto-bunny-hopping)
-  Player.Jump_Held = Input.Jump;
-
-  // ── Move and collide ──────────────────────────────────────────────────────────────────────────
-  if (Player.On_Ground == 1)
-    step_move ();
-  else
-    slide_move ();
-
-  // ── Stuck recovery ────────────────────────────────────────────────────────────────────────────
-  recover ();
-
-  // ── Re-check ground after movement ────────────────────────────────────────────────────────────
-  ground_trace ();
-
-  // ── Smoothly interpolate the view height toward the target ────────────────────────────────────
-  float delta = target_view - Player.View_Height;
-  if (abs(delta) < 0.1) Player.View_Height = target_view;
-  else Player.View_Height += delta * min (Input.Dt * 10.0, 1.0);
-
-  // ── Track speed for debugging ───────────────────────────────────────────────────────────────
-  Player.Speed_Last = length (Player.Velocity.xz);
-
-  // ── Projectile update ─────────────────────────────────────────────────────────────────────────
-  // Decrement fire cooldown
-  if (Fire_Cooldown > 0.0) Fire_Cooldown -= Input.Dt;
-
-  // Spawn a new projectile on fire button press
-  if (Input.Fire == 1 && Fire_Cooldown <= 0.0 && Projectile_Count < 64) {
-    vec3 cam_forward = vec3 (sy, -sin(Player.Pitch), -cy * cos(Player.Pitch));
-    cam_forward = normalize (cam_forward);
-    vec3 eye = Player.Position + vec3 (0.0, Player.View_Height, 0.0);
-
-    int idx = Projectile_Count;
-    Projectiles[idx].Position     = eye + cam_forward * 20.0;
-    Projectiles[idx].Velocity     = cam_forward * 900.0;
-    Projectiles[idx].Lifetime     = 10.0;
-    Projectiles[idx].Active       = 1;
-    Projectiles[idx].Material_Hit = 0;
-    Projectiles[idx].Radius       = 3.0;
-    Projectiles[idx].Damage       = 100.0;
-    Projectiles[idx].Hit_U        = 0.0;
-    Projectiles[idx].Hit_V        = 0.0;
-    Projectiles[idx].Instance_Hit = -1;
-    Projectile_Count = idx + 1;
-    Fire_Cooldown = 0.8;
-  }
-
-  // Advance each active projectile: move, trace against TLAS, kill on impact or timeout
-  for (int i = 0; i < Projectile_Count; i++) {
-    if (Projectiles[i].Active == 0) continue;
-
-    Projectiles[i].Lifetime -= Input.Dt;
-    if (Projectiles[i].Lifetime <= 0.0) { Projectiles[i].Active = 0; continue; }
-
-    vec3 dir = normalize (Projectiles[i].Velocity);
-    float dist = length (Projectiles[i].Velocity) * Input.Dt;
-
-    // Ray trace to check for collision
-    rayQueryEXT rq;
-    rayQueryInitializeEXT (rq, Top_Level, gl_RayFlagsOpaqueEXT, 0xFF,
-                           Projectiles[i].Position, 0.0, dir, dist);
-    while (rayQueryProceedEXT (rq)) {}
-
-    if (rayQueryGetIntersectionTypeEXT (rq, true) == gl_RayQueryCommittedIntersectionTriangleEXT) {
-      // Hit something — mark dead and record hit position + UV for damage map lookup
-      float t = rayQueryGetIntersectionTEXT (rq, true);
-      Projectiles[i].Position += dir * t;
-      Projectiles[i].Active = 0;
-
-      // Extract the instance index to identify what was hit (world vs player model)
-      Projectiles[i].Instance_Hit = rayQueryGetIntersectionInstanceCustomIndexEXT (rq, true);
-
-      // Extract barycentrics and primitive index to compute the hit UV
-      vec2 bary = rayQueryGetIntersectionBarycentricsEXT (rq, true);
-      uint prim = rayQueryGetIntersectionPrimitiveIndexEXT (rq, true);
-
-      // Look up the three vertex indices for the hit triangle
-      uint i0 = Indices.Data[prim * 3 + 0];
-      uint i1 = Indices.Data[prim * 3 + 1];
-      uint i2 = Indices.Data[prim * 3 + 2];
-
-      // Read texture UVs from vertex data (vec4[1].xy = texture UV)
-      vec2 uv0 = Vertices.Data[i0 * 3 + 1].xy;
-      vec2 uv1 = Vertices.Data[i1 * 3 + 1].xy;
-      vec2 uv2 = Vertices.Data[i2 * 3 + 1].xy;
-
-      // Interpolate UV at hit point using barycentric coordinates
-      vec3 bary3 = vec3 (1.0 - bary.x - bary.y, bary.x, bary.y);
-      vec2 hit_uv = uv0 * bary3.x + uv1 * bary3.y + uv2 * bary3.z;
-      Projectiles[i].Hit_U = hit_uv.x;
-      Projectiles[i].Hit_V = hit_uv.y;
-    } else {
-      // No hit — advance position
-      Projectiles[i].Position += dir * dist;
-    }
-  }
-}
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -9427,351 +9427,351 @@ void main () {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 glsl shader denoise comp {
-#version 460
-
-layout(binding = 0, rgba16f) uniform image2D Input_Image;    // Read: noisy color (linear HDR)
-layout(binding = 1, rgba16f) uniform image2D Output_Image;   // Write: filtered color (linear HDR)
-layout(binding = 2, r32f)  uniform image2D Depth_Image;    // Read: hit distance for edge stopping
-
-layout(push_constant) uniform Denoise_Push {
-  int Step_Size;   // A-trous step size: 1, 2, 4 for iterations
-  int Budget_256;  // Budget × 256 (0 = full quality, 256 = cheap path)
-};
-
-layout(local_size_x = 8, local_size_y = 8) in;
-
-// 3×3 a-trous kernel weights (Gaussian-like, symmetric)
-const float Kernel[3] = float[3](1.0, 2.0 / 3.0, 1.0 / 6.0);
-
-// ── ISA optimization: depth-based normal from 3 cached depth values ────────
-// Instead of calling Depth_Normal() per sample (3 imageLoads × 9 samples = 27 loads),
-// load all depths once and compute normals from cached values.
-// Savings: 27 imageLoad → 0 extra imageLoad (normals computed from already-fetched depths).
-// On NVIDIA: imageLoad from L2 = 20-40 cycles; 27 eliminated = ~540-1080 cycles saved per pixel.
-// On AMD RDNA: image_load = ~32 cycles from L2; 27 eliminated = ~864 cycles saved per pixel.
-vec3 Normal_From_Depths (float D_C, float D_R, float D_U) {
-  return normalize (vec3 (D_C - D_R, D_C - D_U, 1.0));
-}
-
-void main () {
-  ivec2 Pixel = ivec2 (gl_GlobalInvocationID.xy);
-  ivec2 Size  = imageSize (Input_Image);
-  if (Pixel.x >= Size.x || Pixel.y >= Size.y) return;
-
-  vec3  Center_Color = imageLoad (Input_Image, Pixel).rgb;
-
-  // Skip denoising when ANY cheap path influence is present — cheap path has no noise.
-  float Budget = float (Budget_256) / 256.0;
-  if (Budget > 0.15) {
-    imageStore (Output_Image, Pixel, vec4 (Center_Color, 1.0));
-    return;
+  #version 460
+  
+  layout(binding = 0, rgba16f) uniform image2D Input_Image;    // Read: noisy color (linear HDR)
+  layout(binding = 1, rgba16f) uniform image2D Output_Image;   // Write: filtered color (linear HDR)
+  layout(binding = 2, r32f)  uniform image2D Depth_Image;    // Read: hit distance for edge stopping
+  
+  layout(push_constant) uniform Denoise_Push {
+    int Step_Size;   // A-trous step size: 1, 2, 4 for iterations
+    int Budget_256;  // Budget × 256 (0 = full quality, 256 = cheap path)
+  };
+  
+  layout(local_size_x = 8, local_size_y = 8) in;
+  
+  // 3×3 a-trous kernel weights (Gaussian-like, symmetric)
+  const float Kernel[3] = float[3](1.0, 2.0 / 3.0, 1.0 / 6.0);
+  
+  // ── ISA optimization: depth-based normal from 3 cached depth values ────────
+  // Instead of calling Depth_Normal() per sample (3 imageLoads × 9 samples = 27 loads),
+  // load all depths once and compute normals from cached values.
+  // Savings: 27 imageLoad → 0 extra imageLoad (normals computed from already-fetched depths).
+  // On NVIDIA: imageLoad from L2 = 20-40 cycles; 27 eliminated = ~540-1080 cycles saved per pixel.
+  // On AMD RDNA: image_load = ~32 cycles from L2; 27 eliminated = ~864 cycles saved per pixel.
+  vec3 Normal_From_Depths (float D_C, float D_R, float D_U) {
+    return normalize (vec3 (D_C - D_R, D_C - D_U, 1.0));
   }
-
-  // ── Batch-load all depth values for the 3×3 kernel in one shot ─────────
-  // Preload 9 depth values — center normal uses Depths[5] (right) and Depths[7] (up).
-  // Combined with 9 color loads = 18 total, vs. original 45 = 60% fewer memory ops.
-  float Depths[9];
-  ivec2 Sample_Positions[9];
-  int Idx = 0;
-  for (int Dy = -1; Dy <= 1; Dy++) {
-    for (int Dx = -1; Dx <= 1; Dx++) {
-      Sample_Positions[Idx] = clamp (Pixel + ivec2 (Dx, Dy) * Step_Size, ivec2 (0), Size - 1);
-      Depths[Idx] = imageLoad (Depth_Image, Sample_Positions[Idx]).r;
-      Idx++;
+  
+  void main () {
+    ivec2 Pixel = ivec2 (gl_GlobalInvocationID.xy);
+    ivec2 Size  = imageSize (Input_Image);
+    if (Pixel.x >= Size.x || Pixel.y >= Size.y) return;
+  
+    vec3  Center_Color = imageLoad (Input_Image, Pixel).rgb;
+  
+    // Skip denoising when ANY cheap path influence is present — cheap path has no noise.
+    float Budget = float (Budget_256) / 256.0;
+    if (Budget > 0.15) {
+      imageStore (Output_Image, Pixel, vec4 (Center_Color, 1.0));
+      return;
     }
-  }
-  float Center_Depth = Depths[4];  // Center of 3×3 = index 4
-
-  // Center normal from preloaded batch: Depths[5] = right, Depths[7] = up (at Step_Size offset).
-  // ISA optimization: eliminated 2 extra imageLoads per pixel per denoise pass (6 total across 3 passes).
-  // At larger step sizes, kernel-spaced gradients are more appropriate for the a-trous edge stopping.
-  vec3  Center_Normal = Normal_From_Depths (Center_Depth, Depths[5], Depths[7]);
-
-  float Center_Lum = log2 (1.0 + dot (Center_Color, vec3 (0.2126, 0.7152, 0.0722)));
-
-  vec3  Sum    = vec3 (0.0);
-  float Weight = 0.0;
-
-  // 3×3 sparse kernel at current step size — depths already cached
-  for (int I = 0; I < 9; I++) {
-    vec3  S_Color = imageLoad (Input_Image, Sample_Positions[I]).rgb;
-    float S_Depth = Depths[I];
-    float S_Lum   = log2 (1.0 + dot (S_Color, vec3 (0.2126, 0.7152, 0.0722)));
-
-    // Spatial weight: Gaussian kernel
-    int Dx = (I % 3) - 1, Dy = (I / 3) - 1;
-    float W_Spatial = Kernel[abs(Dx)] * Kernel[abs(Dy)];
-
-    // Depth edge stopping
-    float Depth_Diff = abs (Center_Depth - S_Depth) / max (Center_Depth, 0.1);
-    float W_Depth = exp (-Depth_Diff * 50.0);
-
-    // Normal edge stopping: compute sample normal from cached depths.
-    // Use right neighbor (I+1 if in same row) and below neighbor (I+3 if exists).
-    // Fallback: use center depth if neighbor is out of the 3×3 grid.
-    float S_D_Right = ((I % 3) < 2) ? Depths[I + 1] : S_Depth;
-    float S_D_Up    = (I < 6) ? Depths[I + 3] : S_Depth;
-    vec3  S_Normal  = Normal_From_Depths (S_Depth, S_D_Right, S_D_Up);
-    // ISA optimization: pow(x,32) → chained squaring (5 muls vs log+mul+exp transcendental)
-    // On NVIDIA: saves ~6 MUFU cycles; on AMD: saves ~8 SALU cycles per sample
-    float Ndot = max (dot (Center_Normal, S_Normal), 0.0);
-    Ndot *= Ndot; Ndot *= Ndot; Ndot *= Ndot; Ndot *= Ndot; Ndot *= Ndot;  // x^32
-    float W_Normal = Ndot;
-
-    // Luminance edge stopping
-    float Lum_Diff = abs (Center_Lum - S_Lum);
-    float W_Lum = exp (-Lum_Diff * Lum_Diff * 200.0);
-
-    float W = W_Spatial * W_Depth * W_Normal * W_Lum;
-    Sum += S_Color * W;
-    Weight += W;
-  }
-
-  vec3 Result = Sum / max (Weight, 1e-6);
-  imageStore (Output_Image, Pixel, vec4 (Result, 1.0));
-}
-}
-
-glsl shader postprocess comp {
-#version 460
-
-layout(binding = 0, rgba16f) uniform image2D Color_Image;    // RT output (linear HDR, read-write in-place)
-layout(binding = 1, r32f)   uniform image2D Depth_Image;    // Ray hit distance from closest-hit shader
-layout(binding = 2, rgba16f) uniform image2D History_Image;  // Previous frame for temporal accumulation (linear HDR)
-
-// Environment uniform for god rays sun direction (shared with closesthit camera buffer)
-// Note: postprocess binds this at set 0, binding 3 (the camera UBO)
-// We need sun direction for screen-space god rays
-
-// ── fp16 RLE-packed push constants (56 bytes) ──────────────────────────────
-// Each uint holds two half-floats via packHalf2x16 encoding.  unpackHalf2x16
-// is 1 ALU op on all modern GPUs — same cycle cost as reading a float.
-layout(push_constant) uniform Push {
-  float Time;             // Full-precision seconds since start
-  uint  Dt_Frame;         // [15:0] = half(Delta_Time), [31:16] = uint16(Frame_Count)
-  uint  Velocity;         // packHalf2x16(Velocity_X, Velocity_Z)
-  uint  Speed_Exposure;   // packHalf2x16(Speed, Exposure)
-  uint  Bloom_Vignette;   // packHalf2x16(Bloom_Strength, Vignette_Strength)
-  uint  Reproject[8];     // packHalf2x16-compressed 4×4 reprojection matrix (Proj * Prev_View * Inv_View)
-  uint  Inv_Proj_Diag;    // [15:0] = half(InvProj[0][0]), [31:16] = half(InvProj[1][1])
-  uint  Sun_Screen_Pos;   // packHalf2x16(Sun_Screen_U, Sun_Screen_V)
-  uint  Sun_Params;       // packHalf2x16(God_Ray_Intensity, Sun_On_Screen)
-} Params;
-
-layout(local_size_x = 8, local_size_y = 8) in;
-
-// ── Driver optimization: shared memory focus depth broadcast ──────────────────────────────────
-// Without shared memory, all 64 threads in the workgroup independently issue an imageLoad for
-// the same center pixel — 64 redundant L2 cache probes.  By electing a single thread to load
-// and broadcasting via shared memory, we reduce this to 1 load + 1 broadcast (which hits the
-// LDS/shared memory bank, ~4 cycles on NVIDIA, ~2 cycles on AMD RDNA).
-shared float Focus_Depth_Shared;
-
-// ── Spatiotemporal hash for film grain ─────────────────────────────────────────────────────────
-
-float hash (vec2 p) {
-  vec3 p3 = fract (vec3 (p.xyx) * 0.1031);
-  p3 += dot (p3, p3.yzx + 33.33);
-  return fract ((p3.x + p3.y) * p3.z);
-}
-
-// ── Decode compressed reprojection matrix from push constants ─────────────
-mat4 Decode_Reproject () {
-  mat4 M;
-  for (int I = 0; I < 8; I++) {
-    vec2 Pair = unpackHalf2x16 (Params.Reproject[I]);
-    M[I / 2][I % 2 * 2]     = Pair.x;
-    M[I / 2][I % 2 * 2 + 1] = Pair.y;
-  }
-  return M;
-}
-
-void main () {
-  ivec2 Pixel = ivec2 (gl_GlobalInvocationID.xy);
-  ivec2 Size  = imageSize (Color_Image);
-
-  // ── Unpack fp16 RLE push constants (1 ALU op each via unpackHalf2x16) ─────
-  float Delta_Time     = unpackHalf2x16 (Params.Dt_Frame).x;
-  uint  Frame_Count    = Params.Dt_Frame >> 16;
-  vec2  Vel            = unpackHalf2x16 (Params.Velocity);
-  vec2  SE             = unpackHalf2x16 (Params.Speed_Exposure);
-  float Speed          = SE.x;
-  float Exposure       = SE.y;
-  vec2  BV             = unpackHalf2x16 (Params.Bloom_Vignette);
-  float Bloom_Strength = BV.x;
-  float Vignette       = BV.y;
-
-  // Elect lane 0 to load focus depth, broadcast to workgroup via LDS
-  if (gl_LocalInvocationIndex == 0u)
-    Focus_Depth_Shared = imageLoad (Depth_Image, Size / 2).r;
-  barrier ();
-
-  if (Pixel.x >= Size.x || Pixel.y >= Size.y) return;
-
-  vec2 UV = (vec2 (Pixel) + 0.5) / vec2 (Size);
-  vec3 Color = imageLoad (Color_Image, Pixel).rgb;
-  float Depth = imageLoad (Depth_Image, Pixel).r;
-
-  // ── 0. Temporal accumulation (TAA) with motion-vector reprojection ─────
-  // Previous TAA blended History[Pixel] with Color[Pixel] — same screen
-  // coordinate.  When the camera translates, world geometry shifts on screen
-  // (parallax), causing the old frame's content to ghost into the new frame.
-  // Surfaces at glancing angles (like a wall beside the player) have the
-  // worst parallax and the most visible ghosting.
-  //
-  // Fix: reconstruct each pixel's view-space position from depth + inverse
-  // projection, then reproject through Prev_View * Inverse_View to find where
-  // that world point appeared last frame.  Sample history from *that* location
-  // instead of the current pixel.  Neighborhood clamping prevents stale data
-  // from bleeding in when the reprojected sample is disoccluded.
-  if (Frame_Count > 0u) {
-    // Reconstruct view-space position from NDC + linear hit distance
-    vec2  Inv_P       = unpackHalf2x16 (Params.Inv_Proj_Diag);
-    vec2  NDC         = UV * 2.0 - 1.0;
-    vec3  View_Dir    = normalize (vec3 (NDC.x * Inv_P.x, NDC.y * Inv_P.y, -1.0));
-    vec3  View_Pos    = View_Dir * Depth;
-
-    // Reproject: Proj * Prev_View * Inverse_View * View_Pos → previous clip-space
-    mat4  R           = Decode_Reproject ();
-    vec4  Prev_Clip   = R * vec4 (View_Pos, 1.0);
-    vec2  Prev_UV     = Prev_Clip.xy / Prev_Clip.w * 0.5 + 0.5;
-
-    // Fetch history from reprojected location (nearest-neighbor — imageLoad requires integer coords)
-    ivec2 Prev_Pixel  = ivec2 (Prev_UV * vec2 (Size));
-    bool  On_Screen   = all (greaterThanEqual (Prev_Pixel, ivec2 (0))) &&
-                        all (lessThan (Prev_Pixel, Size));
-
-    if (On_Screen) {
-      vec3 History = imageLoad (History_Image, Prev_Pixel).rgb;
-
-      // ── Q2RTX-inspired variance-based neighborhood clamping ────────────────
-      // Instead of simple min/max (too wide in HDR), compute mean ± k*sigma.
-      // This creates a tight, statistically-motivated clamp that rejects ghost
-      // colors aggressively while allowing natural temporal blending.
-      vec3 M1 = Color, M2 = Color * Color;  // Moments for variance computation
-      const ivec2 Offsets[4] = ivec2[4](ivec2(-1,0), ivec2(1,0), ivec2(0,-1), ivec2(0,1));
-      for (int I = 0; I < 4; I++) {
-        vec3 NS = imageLoad (Color_Image, clamp (Pixel + Offsets[I], ivec2(0), Size - 1)).rgb;
-        M1 += NS; M2 += NS * NS;
+  
+    // ── Batch-load all depth values for the 3×3 kernel in one shot ─────────
+    // Preload 9 depth values — center normal uses Depths[5] (right) and Depths[7] (up).
+    // Combined with 9 color loads = 18 total, vs. original 45 = 60% fewer memory ops.
+    float Depths[9];
+    ivec2 Sample_Positions[9];
+    int Idx = 0;
+    for (int Dy = -1; Dy <= 1; Dy++) {
+      for (int Dx = -1; Dx <= 1; Dx++) {
+        Sample_Positions[Idx] = clamp (Pixel + ivec2 (Dx, Dy) * Step_Size, ivec2 (0), Size - 1);
+        Depths[Idx] = imageLoad (Depth_Image, Sample_Positions[Idx]).r;
+        Idx++;
       }
-      M1 /= 5.0; M2 /= 5.0;
-      vec3 Sigma = sqrt (max (M2 - M1 * M1, vec3 (0.0)));
-      // Tight clamp: mean ± 1.0 sigma (Q2RTX uses ~0.5-1.5 depending on channel)
-      History = clamp (History, M1 - Sigma * 1.0, M1 + Sigma * 1.0);
-
-      // ── Q2RTX-inspired anti-lag: luminance-based history rejection ─────────
-      // If the clamped history still differs significantly from the current frame,
-      // the surface has changed (new geometry, lighting change, disocclusion).
-      // Boost alpha toward 1.0 to reject stale history aggressively.
-      float Cur_Lum  = dot (Color, vec3 (0.2126, 0.7152, 0.0722));
-      float Hist_Lum = dot (History, vec3 (0.2126, 0.7152, 0.0722));
-      float Lum_Diff = abs (Cur_Lum - Hist_Lum) / max (Cur_Lum, 0.01);
-      float Anti_Lag = clamp (Lum_Diff * 3.0, 0.0, 1.0);  // >33% luminance change → full reject
-
-      // ── Disocclusion detection ─────────────────────────────────────────────
-      vec2 Screen_Disp = vec2 (Prev_Pixel - Pixel) / vec2 (Size);
-      float Disp_Len = length (Screen_Disp);
-      float Disocclusion = clamp (Disp_Len * 20.0, 0.0, 1.0);  // >5% screen = fully rejected
-
-      // ── Temporal blend (Q2RTX-inspired two-mode system) ────────────────────
-      float Is_Static = step (Speed, 5.0);
-
-      // Static: 1/N convergence for noise-free accumulation
-      float Static_Alpha = 1.0 / max (float (Frame_Count), 1.0);
-
-      // Moving: very aggressive current-frame dominance.
-      // Q2RTX philosophy: spatial denoiser handles noise, TAA should NOT ghost.
-      float Motion      = clamp (Speed * 0.02, 0.0, 1.0);  // ISA: reciprocal multiply vs division
-      float Base        = mix (0.30, 0.95, Motion);  // Fast motion → 95% current frame
-      float Fps_Adapt   = clamp ((Delta_Time - 0.016) * 20.0, 0.0, 1.0);
-      float Moving_Alpha = max (max (max (Base, Fps_Adapt), Disocclusion), Anti_Lag);
-
-      float Alpha = mix (Moving_Alpha, Static_Alpha, Is_Static);
-      Color = mix (History, Color, Alpha);
     }
-    // Off-screen → keep current frame as-is (no history to blend)
+    float Center_Depth = Depths[4];  // Center of 3×3 = index 4
+  
+    // Center normal from preloaded batch: Depths[5] = right, Depths[7] = up (at Step_Size offset).
+    // ISA optimization: eliminated 2 extra imageLoads per pixel per denoise pass (6 total across 3 passes).
+    // At larger step sizes, kernel-spaced gradients are more appropriate for the a-trous edge stopping.
+    vec3  Center_Normal = Normal_From_Depths (Center_Depth, Depths[5], Depths[7]);
+  
+    float Center_Lum = log2 (1.0 + dot (Center_Color, vec3 (0.2126, 0.7152, 0.0722)));
+  
+    vec3  Sum    = vec3 (0.0);
+    float Weight = 0.0;
+  
+    // 3×3 sparse kernel at current step size — depths already cached
+    for (int I = 0; I < 9; I++) {
+      vec3  S_Color = imageLoad (Input_Image, Sample_Positions[I]).rgb;
+      float S_Depth = Depths[I];
+      float S_Lum   = log2 (1.0 + dot (S_Color, vec3 (0.2126, 0.7152, 0.0722)));
+  
+      // Spatial weight: Gaussian kernel
+      int Dx = (I % 3) - 1, Dy = (I / 3) - 1;
+      float W_Spatial = Kernel[abs(Dx)] * Kernel[abs(Dy)];
+  
+      // Depth edge stopping
+      float Depth_Diff = abs (Center_Depth - S_Depth) / max (Center_Depth, 0.1);
+      float W_Depth = exp (-Depth_Diff * 50.0);
+  
+      // Normal edge stopping: compute sample normal from cached depths.
+      // Use right neighbor (I+1 if in same row) and below neighbor (I+3 if exists).
+      // Fallback: use center depth if neighbor is out of the 3×3 grid.
+      float S_D_Right = ((I % 3) < 2) ? Depths[I + 1] : S_Depth;
+      float S_D_Up    = (I < 6) ? Depths[I + 3] : S_Depth;
+      vec3  S_Normal  = Normal_From_Depths (S_Depth, S_D_Right, S_D_Up);
+      // ISA optimization: pow(x,32) → chained squaring (5 muls vs log+mul+exp transcendental)
+      // On NVIDIA: saves ~6 MUFU cycles; on AMD: saves ~8 SALU cycles per sample
+      float Ndot = max (dot (Center_Normal, S_Normal), 0.0);
+      Ndot *= Ndot; Ndot *= Ndot; Ndot *= Ndot; Ndot *= Ndot; Ndot *= Ndot;  // x^32
+      float W_Normal = Ndot;
+  
+      // Luminance edge stopping
+      float Lum_Diff = abs (Center_Lum - S_Lum);
+      float W_Lum = exp (-Lum_Diff * Lum_Diff * 200.0);
+  
+      float W = W_Spatial * W_Depth * W_Normal * W_Lum;
+      Sum += S_Color * W;
+      Weight += W;
+    }
+  
+    vec3 Result = Sum / max (Weight, 1e-6);
+    imageStore (Output_Image, Pixel, vec4 (Result, 1.0));
   }
-  // Write blended result to history for next frame (pre-tonemap, linear HDR)
-  imageStore (History_Image, Pixel, vec4 (Color, 1.0));
-
-  // DOF and motion blur disabled — at low internal resolution (384×216 → 1080p)
-  // the bilinear upscale already softens the image.  Adding blur on top of that
-  // makes the output unacceptably blurry and hard to read.  These effects should
-  // be re-enabled when GPU_RT runs at native resolution.
-
-  // ── 1. Bloom: 4-tap cross bright extraction + sun rays ───────────────────
-  // Horizontal + vertical taps create a cross-shaped bloom pattern (fake god rays)
-  // Bloom threshold in linear space (0.4 linear ≈ 0.66 sRGB — bright highlights only)
-  vec3 Bl = max (imageLoad (Color_Image, clamp (Pixel + ivec2 ( 6, 0), ivec2 (0), Size - 1)).rgb - 0.4, vec3 (0.0))
-           + max (imageLoad (Color_Image, clamp (Pixel + ivec2 (-6, 0), ivec2 (0), Size - 1)).rgb - 0.4, vec3 (0.0))
-           + max (imageLoad (Color_Image, clamp (Pixel + ivec2 (0,  6), ivec2 (0), Size - 1)).rgb - 0.4, vec3 (0.0))
-           + max (imageLoad (Color_Image, clamp (Pixel + ivec2 (0, -6), ivec2 (0), Size - 1)).rgb - 0.4, vec3 (0.0));
-  Color += Bl * Bloom_Strength;
-
-  // ── 1b. Screen-space god rays (Q2RTX-inspired radial light shafts) ─────
-  // When the sun is on screen, march radially from each pixel toward the sun
-  // position, accumulating bright sky samples.  This creates volumetric-looking
-  // light shafts streaming from the sun through gaps in geometry.
-  vec2  Sun_UV  = unpackHalf2x16 (Params.Sun_Screen_Pos);
-  vec2  Sun_P   = unpackHalf2x16 (Params.Sun_Params);
-  float GR_Intensity = Sun_P.x;
-  float Sun_Visible  = Sun_P.y;
-
-  if (Sun_Visible > 0.5 && GR_Intensity > 0.0) {
-    vec2 Delta = Sun_UV - UV;
-    float Dist = length (Delta);
-    if (Dist > 0.001) {
-      vec2  Dir    = Delta / Dist;
-      // ISA optimization: incremental stepping replaces multiply-per-iteration
-      // Saves 8 float casts + 8 vec2 multiplies (replaced with 8 vec2 additions)
-      vec2  Step_Vec = Dir * (min (Dist, 0.3) / 8.0);
-      vec3  Accum  = vec3 (0.0);
-      float Falloff = 1.0;
-      vec2  Sample_UV = UV;
-      for (int S = 1; S <= 8; S++) {
-        Sample_UV += Step_Vec;
-        ivec2 Sample_Px = ivec2 (Sample_UV * vec2 (Size));
-        if (all (greaterThanEqual (Sample_Px, ivec2 (0))) && all (lessThan (Sample_Px, Size))) {
-          vec3  Sample_C = imageLoad (Color_Image, Sample_Px).rgb;
-          float Sample_D = imageLoad (Depth_Image, Sample_Px).r;
-          // Only accumulate sky/bright pixels (depth > 5000 = sky, or very bright)
-          float Is_Sky = step (5000.0, Sample_D);
-          float Bright = max (dot (Sample_C, vec3 (0.333)) - 0.3, 0.0);
-          Accum += Sample_C * max (Is_Sky, Bright * 0.5) * Falloff;
+  }
+  
+  glsl shader postprocess comp {
+  #version 460
+  
+  layout(binding = 0, rgba16f) uniform image2D Color_Image;    // RT output (linear HDR, read-write in-place)
+  layout(binding = 1, r32f)   uniform image2D Depth_Image;    // Ray hit distance from closest-hit shader
+  layout(binding = 2, rgba16f) uniform image2D History_Image;  // Previous frame for temporal accumulation (linear HDR)
+  
+  // Environment uniform for god rays sun direction (shared with closesthit camera buffer)
+  // Note: postprocess binds this at set 0, binding 3 (the camera UBO)
+  // We need sun direction for screen-space god rays
+  
+  // ── fp16 RLE-packed push constants (56 bytes) ──────────────────────────────
+  // Each uint holds two half-floats via packHalf2x16 encoding.  unpackHalf2x16
+  // is 1 ALU op on all modern GPUs — same cycle cost as reading a float.
+  layout(push_constant) uniform Push {
+    float Time;             // Full-precision seconds since start
+    uint  Dt_Frame;         // [15:0] = half(Delta_Time), [31:16] = uint16(Frame_Count)
+    uint  Velocity;         // packHalf2x16(Velocity_X, Velocity_Z)
+    uint  Speed_Exposure;   // packHalf2x16(Speed, Exposure)
+    uint  Bloom_Vignette;   // packHalf2x16(Bloom_Strength, Vignette_Strength)
+    uint  Reproject[8];     // packHalf2x16-compressed 4×4 reprojection matrix (Proj * Prev_View * Inv_View)
+    uint  Inv_Proj_Diag;    // [15:0] = half(InvProj[0][0]), [31:16] = half(InvProj[1][1])
+    uint  Sun_Screen_Pos;   // packHalf2x16(Sun_Screen_U, Sun_Screen_V)
+    uint  Sun_Params;       // packHalf2x16(God_Ray_Intensity, Sun_On_Screen)
+  } Params;
+  
+  layout(local_size_x = 8, local_size_y = 8) in;
+  
+  // ── Driver optimization: shared memory focus depth broadcast ──────────────────────────────────
+  // Without shared memory, all 64 threads in the workgroup independently issue an imageLoad for
+  // the same center pixel — 64 redundant L2 cache probes.  By electing a single thread to load
+  // and broadcasting via shared memory, we reduce this to 1 load + 1 broadcast (which hits the
+  // LDS/shared memory bank, ~4 cycles on NVIDIA, ~2 cycles on AMD RDNA).
+  shared float Focus_Depth_Shared;
+  
+  // ── Spatiotemporal hash for film grain ─────────────────────────────────────────────────────────
+  
+  float hash (vec2 p) {
+    vec3 p3 = fract (vec3 (p.xyx) * 0.1031);
+    p3 += dot (p3, p3.yzx + 33.33);
+    return fract ((p3.x + p3.y) * p3.z);
+  }
+  
+  // ── Decode compressed reprojection matrix from push constants ─────────────
+  mat4 Decode_Reproject () {
+    mat4 M;
+    for (int I = 0; I < 8; I++) {
+      vec2 Pair = unpackHalf2x16 (Params.Reproject[I]);
+      M[I / 2][I % 2 * 2]     = Pair.x;
+      M[I / 2][I % 2 * 2 + 1] = Pair.y;
+    }
+    return M;
+  }
+  
+  void main () {
+    ivec2 Pixel = ivec2 (gl_GlobalInvocationID.xy);
+    ivec2 Size  = imageSize (Color_Image);
+  
+    // ── Unpack fp16 RLE push constants (1 ALU op each via unpackHalf2x16) ─────
+    float Delta_Time     = unpackHalf2x16 (Params.Dt_Frame).x;
+    uint  Frame_Count    = Params.Dt_Frame >> 16;
+    vec2  Vel            = unpackHalf2x16 (Params.Velocity);
+    vec2  SE             = unpackHalf2x16 (Params.Speed_Exposure);
+    float Speed          = SE.x;
+    float Exposure       = SE.y;
+    vec2  BV             = unpackHalf2x16 (Params.Bloom_Vignette);
+    float Bloom_Strength = BV.x;
+    float Vignette       = BV.y;
+  
+    // Elect lane 0 to load focus depth, broadcast to workgroup via LDS
+    if (gl_LocalInvocationIndex == 0u)
+      Focus_Depth_Shared = imageLoad (Depth_Image, Size / 2).r;
+    barrier ();
+  
+    if (Pixel.x >= Size.x || Pixel.y >= Size.y) return;
+  
+    vec2 UV = (vec2 (Pixel) + 0.5) / vec2 (Size);
+    vec3 Color = imageLoad (Color_Image, Pixel).rgb;
+    float Depth = imageLoad (Depth_Image, Pixel).r;
+  
+    // ── 0. Temporal accumulation (TAA) with motion-vector reprojection ─────
+    // Previous TAA blended History[Pixel] with Color[Pixel] — same screen
+    // coordinate.  When the camera translates, world geometry shifts on screen
+    // (parallax), causing the old frame's content to ghost into the new frame.
+    // Surfaces at glancing angles (like a wall beside the player) have the
+    // worst parallax and the most visible ghosting.
+    //
+    // Fix: reconstruct each pixel's view-space position from depth + inverse
+    // projection, then reproject through Prev_View * Inverse_View to find where
+    // that world point appeared last frame.  Sample history from *that* location
+    // instead of the current pixel.  Neighborhood clamping prevents stale data
+    // from bleeding in when the reprojected sample is disoccluded.
+    if (Frame_Count > 0u) {
+      // Reconstruct view-space position from NDC + linear hit distance
+      vec2  Inv_P       = unpackHalf2x16 (Params.Inv_Proj_Diag);
+      vec2  NDC         = UV * 2.0 - 1.0;
+      vec3  View_Dir    = normalize (vec3 (NDC.x * Inv_P.x, NDC.y * Inv_P.y, -1.0));
+      vec3  View_Pos    = View_Dir * Depth;
+  
+      // Reproject: Proj * Prev_View * Inverse_View * View_Pos → previous clip-space
+      mat4  R           = Decode_Reproject ();
+      vec4  Prev_Clip   = R * vec4 (View_Pos, 1.0);
+      vec2  Prev_UV     = Prev_Clip.xy / Prev_Clip.w * 0.5 + 0.5;
+  
+      // Fetch history from reprojected location (nearest-neighbor — imageLoad requires integer coords)
+      ivec2 Prev_Pixel  = ivec2 (Prev_UV * vec2 (Size));
+      bool  On_Screen   = all (greaterThanEqual (Prev_Pixel, ivec2 (0))) &&
+                          all (lessThan (Prev_Pixel, Size));
+  
+      if (On_Screen) {
+        vec3 History = imageLoad (History_Image, Prev_Pixel).rgb;
+  
+        // ── Q2RTX-inspired variance-based neighborhood clamping ────────────────
+        // Instead of simple min/max (too wide in HDR), compute mean ± k*sigma.
+        // This creates a tight, statistically-motivated clamp that rejects ghost
+        // colors aggressively while allowing natural temporal blending.
+        vec3 M1 = Color, M2 = Color * Color;  // Moments for variance computation
+        const ivec2 Offsets[4] = ivec2[4](ivec2(-1,0), ivec2(1,0), ivec2(0,-1), ivec2(0,1));
+        for (int I = 0; I < 4; I++) {
+          vec3 NS = imageLoad (Color_Image, clamp (Pixel + Offsets[I], ivec2(0), Size - 1)).rgb;
+          M1 += NS; M2 += NS * NS;
         }
-        Falloff *= 0.85;  // Exponential decay away from sun
+        M1 /= 5.0; M2 /= 5.0;
+        vec3 Sigma = sqrt (max (M2 - M1 * M1, vec3 (0.0)));
+        // Tight clamp: mean ± 1.0 sigma (Q2RTX uses ~0.5-1.5 depending on channel)
+        History = clamp (History, M1 - Sigma * 1.0, M1 + Sigma * 1.0);
+  
+        // ── Q2RTX-inspired anti-lag: luminance-based history rejection ─────────
+        // If the clamped history still differs significantly from the current frame,
+        // the surface has changed (new geometry, lighting change, disocclusion).
+        // Boost alpha toward 1.0 to reject stale history aggressively.
+        float Cur_Lum  = dot (Color, vec3 (0.2126, 0.7152, 0.0722));
+        float Hist_Lum = dot (History, vec3 (0.2126, 0.7152, 0.0722));
+        float Lum_Diff = abs (Cur_Lum - Hist_Lum) / max (Cur_Lum, 0.01);
+        float Anti_Lag = clamp (Lum_Diff * 3.0, 0.0, 1.0);  // >33% luminance change → full reject
+  
+        // ── Disocclusion detection ─────────────────────────────────────────────
+        vec2 Screen_Disp = vec2 (Prev_Pixel - Pixel) / vec2 (Size);
+        float Disp_Len = length (Screen_Disp);
+        float Disocclusion = clamp (Disp_Len * 20.0, 0.0, 1.0);  // >5% screen = fully rejected
+  
+        // ── Temporal blend (Q2RTX-inspired two-mode system) ────────────────────
+        float Is_Static = step (Speed, 5.0);
+  
+        // Static: 1/N convergence for noise-free accumulation
+        float Static_Alpha = 1.0 / max (float (Frame_Count), 1.0);
+  
+        // Moving: very aggressive current-frame dominance.
+        // Q2RTX philosophy: spatial denoiser handles noise, TAA should NOT ghost.
+        float Motion      = clamp (Speed * 0.02, 0.0, 1.0);  // ISA: reciprocal multiply vs division
+        float Base        = mix (0.30, 0.95, Motion);  // Fast motion → 95% current frame
+        float Fps_Adapt   = clamp ((Delta_Time - 0.016) * 20.0, 0.0, 1.0);
+        float Moving_Alpha = max (max (max (Base, Fps_Adapt), Disocclusion), Anti_Lag);
+  
+        float Alpha = mix (Moving_Alpha, Static_Alpha, Is_Static);
+        Color = mix (History, Color, Alpha);
       }
-      // Fade god rays based on distance from sun center (stronger near sun)
-      float Sun_Fade = 1.0 - clamp (Dist * 2.0, 0.0, 1.0);
-      Color += Accum * GR_Intensity * Sun_Fade / 8.0;
+      // Off-screen → keep current frame as-is (no history to blend)
     }
+    // Write blended result to history for next frame (pre-tonemap, linear HDR)
+    imageStore (History_Image, Pixel, vec4 (Color, 1.0));
+  
+    // DOF and motion blur disabled — at low internal resolution (384×216 → 1080p)
+    // the bilinear upscale already softens the image.  Adding blur on top of that
+    // makes the output unacceptably blurry and hard to read.  These effects should
+    // be re-enabled when GPU_RT runs at native resolution.
+  
+    // ── 1. Bloom: 4-tap cross bright extraction + sun rays ───────────────────
+    // Horizontal + vertical taps create a cross-shaped bloom pattern (fake god rays)
+    // Bloom threshold in linear space (0.4 linear ≈ 0.66 sRGB — bright highlights only)
+    vec3 Bl = max (imageLoad (Color_Image, clamp (Pixel + ivec2 ( 6, 0), ivec2 (0), Size - 1)).rgb - 0.4, vec3 (0.0))
+             + max (imageLoad (Color_Image, clamp (Pixel + ivec2 (-6, 0), ivec2 (0), Size - 1)).rgb - 0.4, vec3 (0.0))
+             + max (imageLoad (Color_Image, clamp (Pixel + ivec2 (0,  6), ivec2 (0), Size - 1)).rgb - 0.4, vec3 (0.0))
+             + max (imageLoad (Color_Image, clamp (Pixel + ivec2 (0, -6), ivec2 (0), Size - 1)).rgb - 0.4, vec3 (0.0));
+    Color += Bl * Bloom_Strength;
+  
+    // ── 1b. Screen-space god rays (Q2RTX-inspired radial light shafts) ─────
+    // When the sun is on screen, march radially from each pixel toward the sun
+    // position, accumulating bright sky samples.  This creates volumetric-looking
+    // light shafts streaming from the sun through gaps in geometry.
+    vec2  Sun_UV  = unpackHalf2x16 (Params.Sun_Screen_Pos);
+    vec2  Sun_P   = unpackHalf2x16 (Params.Sun_Params);
+    float GR_Intensity = Sun_P.x;
+    float Sun_Visible  = Sun_P.y;
+  
+    if (Sun_Visible > 0.5 && GR_Intensity > 0.0) {
+      vec2 Delta = Sun_UV - UV;
+      float Dist = length (Delta);
+      if (Dist > 0.001) {
+        vec2  Dir    = Delta / Dist;
+        // ISA optimization: incremental stepping replaces multiply-per-iteration
+        // Saves 8 float casts + 8 vec2 multiplies (replaced with 8 vec2 additions)
+        vec2  Step_Vec = Dir * (min (Dist, 0.3) / 8.0);
+        vec3  Accum  = vec3 (0.0);
+        float Falloff = 1.0;
+        vec2  Sample_UV = UV;
+        for (int S = 1; S <= 8; S++) {
+          Sample_UV += Step_Vec;
+          ivec2 Sample_Px = ivec2 (Sample_UV * vec2 (Size));
+          if (all (greaterThanEqual (Sample_Px, ivec2 (0))) && all (lessThan (Sample_Px, Size))) {
+            vec3  Sample_C = imageLoad (Color_Image, Sample_Px).rgb;
+            float Sample_D = imageLoad (Depth_Image, Sample_Px).r;
+            // Only accumulate sky/bright pixels (depth > 5000 = sky, or very bright)
+            float Is_Sky = step (5000.0, Sample_D);
+            float Bright = max (dot (Sample_C, vec3 (0.333)) - 0.3, 0.0);
+            Accum += Sample_C * max (Is_Sky, Bright * 0.5) * Falloff;
+          }
+          Falloff *= 0.85;  // Exponential decay away from sun
+        }
+        // Fade god rays based on distance from sun center (stronger near sun)
+        float Sun_Fade = 1.0 - clamp (Dist * 2.0, 0.0, 1.0);
+        Color += Accum * GR_Intensity * Sun_Fade / 8.0;
+      }
+    }
+  
+    // ── 2. Vignette + saturation + tonemap (all in linear space) ─────────
+    vec2  FC = UV - 0.5;
+    float D2 = dot (FC, FC);
+    Color  = Color * (1.0 - D2 * Vignette);
+    Color *= Exposure;
+  
+    // Saturation boost before tonemapping: push colors away from grey
+    float Luma = dot (Color, vec3 (0.2126, 0.7152, 0.0722));
+    Color = mix (vec3 (Luma), Color, 1.35);  // 35% saturation increase — punchy colors
+  
+    Color *= vec3 (1.05, 1.01, 0.92);  // Warm grade: boost reds, cut blues slightly
+  
+    // ACES filmic tone mapping (operates on linear HDR values)
+    Color  = clamp (Color * (2.51 * Color + 0.03) / (Color * (2.43 * Color + 0.59) + 0.14), 0.0, 1.0);
+  
+    // Post-tonemap contrast: shadow deepening for rich, cinematic look.
+    // pow(1.16) darkens midtones/shadows while keeping highlights readable.
+    Color = pow (max (Color, vec3 (0.0)), vec3 (1.16));
+  
+    // ── 3. Blue-noise dithering (Q2RTX-inspired) ──────────────────────────
+    // Dither by ±0.5/255 in the output before sRGB conversion to prevent banding
+    // in dark gradients. The blit to B8G8R8A8_SRGB swapchain handles sRGB encoding.
+    float Dither = hash (vec2 (Pixel) + Params.Time * 1.618) - 0.5;  // [-0.5, 0.5]
+    Color += Dither / 255.0;
+  
+    imageStore (Color_Image, Pixel, vec4 (clamp (Color, 0.0, 1.0), 1.0));
   }
-
-  // ── 2. Vignette + saturation + tonemap (all in linear space) ─────────
-  vec2  FC = UV - 0.5;
-  float D2 = dot (FC, FC);
-  Color  = Color * (1.0 - D2 * Vignette);
-  Color *= Exposure;
-
-  // Saturation boost before tonemapping: push colors away from grey
-  float Luma = dot (Color, vec3 (0.2126, 0.7152, 0.0722));
-  Color = mix (vec3 (Luma), Color, 1.35);  // 35% saturation increase — punchy colors
-
-  Color *= vec3 (1.05, 1.01, 0.92);  // Warm grade: boost reds, cut blues slightly
-
-  // ACES filmic tone mapping (operates on linear HDR values)
-  Color  = clamp (Color * (2.51 * Color + 0.03) / (Color * (2.43 * Color + 0.59) + 0.14), 0.0, 1.0);
-
-  // Post-tonemap contrast: shadow deepening for rich, cinematic look.
-  // pow(1.16) darkens midtones/shadows while keeping highlights readable.
-  Color = pow (max (Color, vec3 (0.0)), vec3 (1.16));
-
-  // ── 3. Blue-noise dithering (Q2RTX-inspired) ──────────────────────────
-  // Dither by ±0.5/255 in the output before sRGB conversion to prevent banding
-  // in dark gradients. The blit to B8G8R8A8_SRGB swapchain handles sRGB encoding.
-  float Dither = hash (vec2 (Pixel) + Params.Time * 1.618) - 0.5;  // [-0.5, 0.5]
-  Color += Dither / 255.0;
-
-  imageStore (Color_Image, Pixel, vec4 (clamp (Color, 0.0, 1.0), 1.0));
-}
 }
