@@ -54,7 +54,7 @@ const char *ENGINE_VERSION = "0.1.0";
 // Vulkan limits and versioning
 #define VULKAN_API_VERSION       VK_API_VERSION_1_3 // Minimum Vulkan API level (synchronization2, dynamic rendering)
 #define SWAPCHAIN_MAX_IMAGES     8                  // Upper bound for swapchain image handle array
-#define DESCRIPTOR_TEXTURE_SLOTS 256                // Maximum entries in the bindless texture array (binding 11)
+#define DESCRIPTOR_TEXTURE_SLOTS 1536               // Maximum entries in the bindless texture array (binding 12) — 256 materials × 6 maps (diffuse, normal, roughness, metalness, emissive, height)
 #define RAY_RECURSION_DEPTH      2                  // Primary ray + shadow ray
 
 // Enable the Khronos validation layer for debug builds
@@ -683,6 +683,7 @@ VkImageView    *Texture_Views;    // Image views for shader sampling of each tex
 VkSampler       Texture_Sampler;  // Shared sampler with linear filtering and repeat wrap
 uint            Texture_Count;    // Total number of texture slots allocated
 uint            Textures_Loaded;  // Number of textures successfully loaded from disk
+uint            PBR_Stride;       // Stride between PBR map blocks (= scene material count)
 
 // Lightmap atlas
 VkImage        Lightmap_Image;   // Packed lightmap atlas image
@@ -1122,7 +1123,7 @@ VkShaderModule Shader_Module_Load (const char *Path);
 
 // Upload the camera uniform buffer with the inverse view and projection matrices computed from
 // the current player position, yaw, pitch, field-of-view, and aspect ratio.
-void Camera_Upload (Camera *State, float Field_Of_View, uint Weapon_Texture_Base);
+void Camera_Upload (Camera *State, float Field_Of_View, uint Weapon_Texture_Base, uint PBR_Stride_Value);
 
 // Update the weapon viewmodel's vertex positions each frame based on the camera orientation,
 // idle bob animation, and recoil animation from firing.  The transformed vertices are written
@@ -3087,31 +3088,67 @@ uint BSP_Parse_Entities (const uint8_t *File_Data, const BSP_Header *Header,
 
 void Scene_Load_Textures (const Scene *Scene_Data) {
   Texture_Sampler  = Sampler_Create_Repeating ();
-  Texture_Count    = Scene_Data->Material_Count;
-  Textures_Loaded  = 0;
-  Texture_Images   = calloc (Texture_Count, sizeof (VkImage));
-  Texture_Memories = calloc (Texture_Count, sizeof (VkDeviceMemory));
-  Texture_Views    = calloc (Texture_Count, sizeof (VkImageView));
 
-  // Load each material's TGA texture, or generate a fallback solid-color pixel
-  for (uint Index = 0; Index < Texture_Count; Index++) {
-    uint Width = 0, Height = 0;
-    uint8_t *Pixels = NULL;
-    if (Scene_Data->Texture_Names) {
-      char Path[256];
-      snprintf (Path, sizeof (Path), "assets/%s.tga", Scene_Data->Texture_Names[Index]);
-      Pixels = TGA_Load (Path, &Width, &Height);
-    }
-    if (Pixels and Width and Height) {
-      Texture_Upload (Command_Buffer, Queue, Pixels, Width, Height,
-                      &Texture_Images[Index], &Texture_Memories[Index], &Texture_Views[Index]);
-      free (Pixels);
-      Textures_Loaded++;
-    } else {
-      vec4 Color = Scene_Data->Materials[Index];
-      uint8_t Fallback[4] = {(uint8_t)(Color.x * 255), (uint8_t)(Color.y * 255), (uint8_t)(Color.z * 255), 255};
-      Texture_Upload (Command_Buffer, Queue, Fallback, 1, 1,
-                      &Texture_Images[Index], &Texture_Memories[Index], &Texture_Views[Index]);
+  // PBR texture layout in the bindless array:
+  //   [0 .. N-1]       diffuse maps
+  //   [N .. 2N-1]      normal maps    (_n.tga)
+  //   [2N .. 3N-1]     roughness maps (_r.tga)
+  //   [3N .. 4N-1]     metalness maps (_m.tga)
+  //   [4N .. 5N-1]     emissive maps  (_e.tga)
+  //   [5N .. 6N-1]     height maps    (_h.tga)
+  //   [6N ..]          weapon textures (appended later)
+  uint Material_Count = Scene_Data->Material_Count;
+  uint PBR_Slots      = Material_Count * 6;  // 6 maps per material (diffuse + 5 PBR)
+  PBR_Stride       = Material_Count;         // Distance between map blocks in the texture array
+  Texture_Count    = PBR_Slots;
+  Textures_Loaded  = 0;
+  Texture_Images   = calloc (PBR_Slots, sizeof (VkImage));
+  Texture_Memories = calloc (PBR_Slots, sizeof (VkDeviceMemory));
+  Texture_Views    = calloc (PBR_Slots, sizeof (VkImageView));
+
+  // PBR map suffixes: [0]=diffuse (no suffix), [1]=normal, [2]=roughness, [3]=metalness, [4]=emissive, [5]=height
+  const char *PBR_Suffixes[] = {"", "_n", "_r", "_m", "_e", "_h"};
+
+  // Default fallback pixels for each PBR map type
+  uint8_t Fallback_Normal[4]    = {127, 127, 255, 255};  // flat normal pointing up
+  uint8_t Fallback_Roughness[4] = {180, 180, 180, 255};  // moderate roughness ~0.7
+  uint8_t Fallback_Metalness[4] = {0,   0,   0,   255};  // non-metallic
+  uint8_t Fallback_Emissive[4]  = {0,   0,   0,   255};  // no emission
+  uint8_t Fallback_Height[4]    = {127, 127, 127, 255};  // mid-height
+  uint8_t *PBR_Fallbacks[]      = {NULL, Fallback_Normal, Fallback_Roughness, Fallback_Metalness, Fallback_Emissive, Fallback_Height};
+
+  uint PBR_Maps_Loaded = 0;
+
+  for (uint Map_Type = 0; Map_Type < 6; Map_Type++) {
+    for (uint Index = 0; Index < Material_Count; Index++) {
+      uint Slot = Map_Type * Material_Count + Index;
+      uint Width = 0, Height = 0;
+      uint8_t *Pixels = NULL;
+
+      if (Scene_Data->Texture_Names) {
+        char Path[256];
+        snprintf (Path, sizeof (Path), "assets/%s%s.tga", Scene_Data->Texture_Names[Index], PBR_Suffixes[Map_Type]);
+        Pixels = TGA_Load (Path, &Width, &Height);
+      }
+
+      if (Pixels and Width and Height) {
+        Texture_Upload (Command_Buffer, Queue, Pixels, Width, Height,
+                        &Texture_Images[Slot], &Texture_Memories[Slot], &Texture_Views[Slot]);
+        free (Pixels);
+        if (Map_Type == 0) Textures_Loaded++;
+        else PBR_Maps_Loaded++;
+      } else {
+        // Fallback: for diffuse use hashed material color, for PBR use neutral defaults
+        if (Map_Type == 0) {
+          vec4 Color = Scene_Data->Materials[Index];
+          uint8_t Fallback[4] = {(uint8_t)(Color.x * 255), (uint8_t)(Color.y * 255), (uint8_t)(Color.z * 255), 255};
+          Texture_Upload (Command_Buffer, Queue, Fallback, 1, 1,
+                          &Texture_Images[Slot], &Texture_Memories[Slot], &Texture_Views[Slot]);
+        } else {
+          Texture_Upload (Command_Buffer, Queue, PBR_Fallbacks[Map_Type], 1, 1,
+                          &Texture_Images[Slot], &Texture_Memories[Slot], &Texture_Views[Slot]);
+        }
+      }
     }
   }
 
@@ -3121,8 +3158,8 @@ void Scene_Load_Textures (const Scene *Scene_Data) {
                                            sizeof (uint) * Scene_Data->Triangle_Count,
                                            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
 
-  printf ("[textures] loaded %u/%u textures, %u fallbacks\n",
-          Textures_Loaded, Texture_Count, Texture_Count - Textures_Loaded);
+  printf ("[textures] loaded %u/%u diffuse, %u PBR maps, total %u slots\n",
+          Textures_Loaded, Material_Count, PBR_Maps_Loaded, Texture_Count);
 
   // Upload the lightmap atlas (or a 1x1 white fallback if no lightmaps exist)
   Lightmap_Sampler = Sampler_Create_Clamping ();
@@ -3667,7 +3704,7 @@ void Raytracing_Pipeline_Create () {
     {9,  VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,             1,   VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR,                                   NULL},
     {10, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,             1,   VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR,                                   NULL},
     {11, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,              1,   VK_SHADER_STAGE_RAYGEN_BIT_KHR,                                        NULL}, // Depth output
-    {12, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,     256, VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR,                                   NULL}, // Textures (must be last for variable count)
+    {12, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,     DESCRIPTOR_TEXTURE_SLOTS, VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR,           NULL}, // Textures (must be last for variable count)
   };
 
   // The texture array binding (12, highest) uses partially-bound and variable-count flags
@@ -3814,7 +3851,7 @@ void Descriptor_Set_Create (Weapon_Instance *Weapon) {
                                        {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,              2},  // Color + Depth
                                        {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,             1},
                                        {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,             7},
-                                       {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,     257}};
+                                       {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,     DESCRIPTOR_TEXTURE_SLOTS + 1}}; // +1 for lightmap
   VK_CHECK (vkCreateDescriptorPool (Device,
                                     &(VkDescriptorPoolCreateInfo){
                                       .sType         = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
@@ -3953,18 +3990,19 @@ VkShaderModule Shader_Module_Load (const char *Path) {
 // ═════════════════
 
 // BUG FIX: local variable `View` shadowed the `View()` function. Renamed to `View_Matrix`.
-void Camera_Upload (Camera *State, float Field_Of_View, uint Weapon_Texture_Base) {
+void Camera_Upload (Camera *State, float Field_Of_View, uint Weapon_Texture_Base, uint PBR_Stride_Value) {
 
   // Build the view and projection matrices from the camera state
   mat4 View_Matrix = View (State->Position, State->Yaw, State->Pitch);
   mat4 Proj_Matrix = Perspective (Field_Of_View, (float)Width / Height, 0.1f, 10000.f);
 
-  // Uniform layout matching the GPU Camera_Uniform block (std140, 160 bytes)
+  // Uniform layout matching the GPU Camera_Uniform block (std140, 176 bytes)
   struct {
     mat4  Inverse_View, Inverse_Projection;
     uint  Frame;
     uint  Weapon_Texture_Base;
-    float Padding[2];
+    uint  PBR_Stride;       // Distance between PBR map blocks (= material count)
+    float Padding[1];
   } Uniform;
 
   // Compute the inverse matrices for reconstructing world-space rays from screen coordinates
@@ -3972,6 +4010,7 @@ void Camera_Upload (Camera *State, float Field_Of_View, uint Weapon_Texture_Base
   Uniform.Inverse_Projection  = Inverse_Projection (Proj_Matrix);
   Uniform.Frame               = State->Frame;
   Uniform.Weapon_Texture_Base = Weapon_Texture_Base;
+  Uniform.PBR_Stride          = PBR_Stride_Value;
 
   // Upload the uniform data to the camera buffer
   Buffer_Upload (Camera_Uniform_Buffer, &Uniform, sizeof (Uniform));
@@ -5625,7 +5664,7 @@ int main (int Argc, char **Argv) {
     Top_Level_Rebuild (&World_Bottom_Level, &Weapon.Bottom_Level);
 
     // Upload the camera and dispatch ray tracing + postprocess
-    Camera_Upload (&Cam, FIELD_OF_VIEW, Weapon.Texture_Base_Index);
+    Camera_Upload (&Cam, FIELD_OF_VIEW, Weapon.Texture_Base_Index, PBR_Stride);
     float H_Speed = sqrtf (Physics.Velocity.x * Physics.Velocity.x +
                            Physics.Velocity.z * Physics.Velocity.z);
     Gpu_Postprocess_Push PP = {
@@ -5690,7 +5729,7 @@ glsl shader raygen rgen {
 
 layout(binding = 0) uniform accelerationStructureEXT  Top_Level;
 layout(binding = 1, rgba8) uniform image2D             Storage_Image;
-layout(binding = 2) uniform Camera_Uniform { mat4 Inverse_View; mat4 Inverse_Projection; uint Frame; uint Weapon_Texture_Base; };
+layout(binding = 2) uniform Camera_Uniform { mat4 Inverse_View; mat4 Inverse_Projection; uint Frame; uint Weapon_Texture_Base; uint PBR_Stride; };
 layout(binding = 11, r32f) uniform image2D             Depth_Output;
 
 layout(location = 0) rayPayloadEXT vec4 Payload;  // rgb = color, a = hit distance
@@ -5743,7 +5782,7 @@ glsl shader closesthit rchit {
 #extension GL_EXT_nonuniform_qualifier : require
 
 layout(binding = 0) uniform accelerationStructureEXT Top_Level;
-layout(binding = 2) uniform Camera_Uniform { mat4 Inverse_View; mat4 Inverse_Projection; uint Frame; uint Weapon_Texture_Base; };
+layout(binding = 2) uniform Camera_Uniform { mat4 Inverse_View; mat4 Inverse_Projection; uint Frame; uint Weapon_Texture_Base; uint PBR_Stride; };
 
 // Scene geometry
 layout(binding = 3, std430) readonly buffer Vertex_Data   { vec4 Data[]; } Vertices;
@@ -5792,65 +5831,101 @@ void main () {
   uint Tex_Id = Is_Weapon
     ? Weapon_Tex_Ids.Data[Primitive] + Weapon_Texture_Base
     : Texture_Ids.Data[Primitive];
-  // ── Driver optimization: explicit LOD 0 bypasses gradient computation hardware ──
-  // In closest-hit shaders, implicit LOD (texture()) is undefined because there are no
-  // screen-space derivatives.  Drivers fall back to LOD 0 anyway but waste cycles probing
-  // the gradient unit.  textureLod() with explicit LOD 0 tells the sampler to skip that
-  // path entirely, saving ~2 cycles per fetch on NVIDIA SM, ~1 on AMD RDNA texture pipe.
-  vec3 Albedo  = textureLod (Textures[nonuniformEXT(Tex_Id)], Tex_Coord, 0.0).rgb;
+  // ── Sample PBR texture maps ────────────────────────────────────────────────
+  // textureLod(0) bypasses gradient computation (undefined in closest-hit shaders),
+  // saving ~2 cycles/fetch on NVIDIA SM, ~1 on AMD RDNA texture pipe.
+  vec3  Albedo    = textureLod (Textures[nonuniformEXT(Tex_Id)],                      Tex_Coord, 0.0).rgb;
+  vec3  Normal_Map = vec3(0.0, 0.0, 1.0);
+  float R = 0.5;
+  float M = 0.0;
+  vec3  Emissive  = vec3(0.0);
 
-  // ── Grade-decomposed Cook-Torrance via Grassmann algebra ────────────────────
-  //
-  // The BRDF decomposes into Grassmann grades on the hemisphere's tangent algebra:
-  //   Grade-0 (scalar):  Lambert diffuse ∝ ρ/π
-  //   Grade-2 (bivector): GGX microfacet specular — D·Vis·F
-  // where Vis = G/(4·⟨N,V⟩·⟨N,L⟩) absorbs the Smith denominator (1 less division).
-  // Fresnel pow-5 via 3 multiplies (T²·T²·T) avoids transcendentals on NVIDIA SFU.
-  // Material heuristic: roughness/metalness from albedo saturation + luminance.
+  // Sample PBR maps only for world geometry (weapon uses heuristic)
+  if (!Is_Weapon && Tex_Id < PBR_Stride) {
+    Normal_Map = textureLod (Textures[nonuniformEXT(Tex_Id + PBR_Stride)],     Tex_Coord, 0.0).rgb * 2.0 - 1.0;
+    R          = textureLod (Textures[nonuniformEXT(Tex_Id + PBR_Stride * 2u)], Tex_Coord, 0.0).r;
+    M          = textureLod (Textures[nonuniformEXT(Tex_Id + PBR_Stride * 3u)], Tex_Coord, 0.0).r;
+    Emissive   = textureLod (Textures[nonuniformEXT(Tex_Id + PBR_Stride * 4u)], Tex_Coord, 0.0).rgb;
+  } else {
+    // Weapon/fallback: derive PBR from albedo statistics (4 ALU ops)
+    float Lu = dot (Albedo, vec3 (0.2126, 0.7152, 0.0722));
+    float Hi = max (Albedo.r, max (Albedo.g, Albedo.b));
+    float Sa = (Hi - min (Albedo.r, min (Albedo.g, Albedo.b))) / max (Hi, 1e-3);
+    R = mix (0.2, 0.75, Sa);
+    M = smoothstep (0.35, 0.15, Sa) * smoothstep (0.45, 0.2, Lu);
+  }
 
-  vec3  V  = -gl_WorldRayDirectionEXT;
-  vec3  Ld = normalize (vec3 (0.6, 0.9, 0.3));        // Sun direction
-  vec3  Lr = vec3 (1.8, 1.6, 1.3);                    // Sun radiance — bright warm for modern look
+  // ── Normal mapping: perturb geometric normal with tangent-space normal map ──
+  // Build a tangent frame from the geometric normal using the Frisvad method
+  if (Normal_Map != vec3(0.0, 0.0, 1.0)) {
+    vec3 T_Axis, B_Axis;
+    if (Normal.z < -0.999) {
+      T_Axis = vec3(0.0, -1.0, 0.0);
+      B_Axis = vec3(-1.0, 0.0, 0.0);
+    } else {
+      float Inv = 1.0 / (1.0 + Normal.z);
+      T_Axis = normalize(vec3(1.0 - Normal.x * Normal.x * Inv, -Normal.x * Normal.y * Inv, -Normal.x));
+      B_Axis = normalize(vec3(-Normal.x * Normal.y * Inv, 1.0 - Normal.y * Normal.y * Inv, -Normal.y));
+    }
+    Normal = normalize (T_Axis * Normal_Map.x + B_Axis * Normal_Map.y + Normal * Normal_Map.z);
+  }
 
-  // Material heuristic — 4 ALU ops derive PBR from Q3 albedo statistics
-  float Lu = dot (Albedo, vec3 (0.2126, 0.7152, 0.0722));
-  float Hi = max (Albedo.r, max (Albedo.g, Albedo.b));
-  float Sa = (Hi - min (Albedo.r, min (Albedo.g, Albedo.b))) / max (Hi, 1e-3);
-  float R  = mix (0.2, 0.75, Sa);                     // Smoother surfaces → stronger specular highlights
-  float M  = smoothstep (0.35, 0.15, Sa) * smoothstep (0.45, 0.2, Lu);
   vec3  F0 = mix (vec3 (0.04), Albedo, M);
 
-  // ── Factored BRDF: shared between weapon and world paths ──────────────────
+  // ── Grade-decomposed Cook-Torrance via Grassmann algebra ────────────────────
+  vec3  V  = -gl_WorldRayDirectionEXT;
+  vec3  Ld = normalize (vec3 (0.6, 0.9, 0.3));        // Sun direction
+  vec3  Lr = vec3 (1.8, 1.6, 1.3);                    // Sun radiance
+
   vec3  H   = normalize (V + Ld);
   float NL  = max (dot (Normal, Ld), 0.0);
   float NH  = max (dot (Normal, H),  0.0);
   float VH  = max (dot (V, H),       0.0);
   float NV  = max (dot (Normal, V),  1e-3);
-  float a   = R * R,  a2 = a * a;                     // Disney α = roughness², α² = roughness⁴
-  float k   = (R + 1.0) * (R + 1.0) * 0.125;         // Schlick-GGX remapping for direct light
-  float D   = a2 / (3.14159 * pow (NH * NH * (a2 - 1.0) + 1.0, 2.0));  // GGX NDF
-  float Vis = 1.0 / max ((NL * (1.0 - k) + k) * (NV * (1.0 - k) + k) * 4.0, 1e-3);  // Smith-GGX Vis
-  float T   = 1.0 - VH;  float T5 = T * T; T5 *= T5 * T;  // Schlick Fresnel power-5 (3 muls, no pow)
+  float a   = R * R,  a2 = a * a;
+  float k   = (R + 1.0) * (R + 1.0) * 0.125;
+  float D   = a2 / (3.14159 * pow (NH * NH * (a2 - 1.0) + 1.0, 2.0));
+  float Vis = 1.0 / max ((NL * (1.0 - k) + k) * (NV * (1.0 - k) + k) * 4.0, 1e-3);
+  float FT  = 1.0 - VH;  float T5 = FT * FT; T5 *= T5 * FT;
   vec3  F   = F0 + (1.0 - F0) * T5;
-  vec3  Sp  = D * Vis * F;                             // Grade-2 (bivector) specular
-  vec3  Df  = (1.0 - F) * (1.0 - M) * Albedo * 0.31831;  // Grade-0 (scalar) diffuse, 0.31831 ≈ 1/π
+  vec3  Sp  = D * Vis * F;
+  vec3  Df  = (1.0 - F) * (1.0 - M) * Albedo * 0.31831;
 
   vec3 Color;
 
   if (Is_Weapon) {
-    Color = (Df + Sp) * Lr * NL * 0.8 + Albedo * 0.30;  // Stronger PBR, less flat ambient
+    Color = (Df + Sp) * Lr * NL * 0.8 + Albedo * 0.30;
   } else {
     vec3 Lm = min (textureLod (Lightmap, Lm_Coord, 0.0).rgb * 2.0, vec3 (1.0));
 
-    Shadow_Factor = 0.0;  // RT shadow ray toward sun (cull mask 0xFE excludes weapon)
+    Shadow_Factor = 0.0;
     traceRayEXT (Top_Level, gl_RayFlagsTerminateOnFirstHitEXT | gl_RayFlagsSkipClosestHitShaderEXT,
                  0xFE, 0, 1, 1, Position + Normal * 0.1, 0.001, Ld, 10000.0, 1);
 
-    Color = Albedo * Lm + (Df + Sp) * Lr * NL * Shadow_Factor * 0.30;  // Stronger direct sun
-    Color = mix (Color, vec3 (0.52, 0.55, 0.65), 1.0 - exp (-gl_HitTEXT * 8e-5));  // Thicker atmospheric fog
+    Color = Albedo * Lm + (Df + Sp) * Lr * NL * Shadow_Factor * 0.30;
+
+    // Add emissive contribution from illumination map
+    Color += Emissive * 1.5;
+
+    // ── Dynamic environment fog ──────────────────────────────────────────────
+    // Fog color derived from the sun radiance direction and atmospheric scattering:
+    // Near-horizon: warm amber where sun hits (Mie forward scatter)
+    // Overhead: cool blue-grey (Rayleigh scatter)
+    // Depth-dependent density with height attenuation
+    float Fog_Distance  = gl_HitTEXT;
+    float Fog_Density   = 1.0 - exp (-Fog_Distance * 1.2e-4);             // thicker fog
+    vec3  Sun_Fog_Color = vec3 (0.65, 0.55, 0.45);                        // warm amber (Mie scatter toward sun)
+    vec3  Sky_Fog_Color = vec3 (0.42, 0.48, 0.58);                        // cool Rayleigh blue-grey
+    float Sun_Alignment = max (dot (normalize (gl_WorldRayDirectionEXT), Ld), 0.0);
+    Sun_Alignment = Sun_Alignment * Sun_Alignment;                         // Sharper sun-cone falloff
+    vec3  Fog_Color     = mix (Sky_Fog_Color, Sun_Fog_Color, Sun_Alignment * 0.6);
+    // Height fog: denser near ground (Y < 200), thinner up high
+    float Height_Factor = smoothstep (600.0, 100.0, Position.y) * 0.4 + 0.6;
+    Fog_Density *= Height_Factor;
+    Color = mix (Color, Fog_Color, Fog_Density);
   }
 
-  Payload = vec4 (Color, gl_HitTEXT);  // Pack hit distance into alpha for depth-of-field
+  Payload = vec4 (Color, gl_HitTEXT);
 }
 }
 
