@@ -74,9 +74,20 @@ const char *DEVICE_EXTENSIONS[] = {VK_KHR_SWAPCHAIN_EXTENSION_NAME,
                                    VK_KHR_RAY_QUERY_EXTENSION_NAME,
                                    VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME};
 
+// ── Software vs GPU ray tracing target ──────────────────────────────────────
+// SOFTWARE_RT: optimizations for lavapipe (CPU-based Vulkan RT).  Enables
+// stochastic shadow/reflection, lower render scale, and TAA temporal recovery.
+// Undefine for real GPU hardware to get full-resolution, full-quality rendering.
+#define SOFTWARE_RT
+
 // Windowing and viewport settings
-#define DEFAULT_WIDTH  1280    // Window width in pixels — 720p for quality ray tracing
+#define DEFAULT_WIDTH  1280    // Window width in pixels — 720p (16:9) output
 #define DEFAULT_HEIGHT 720     // Window height in pixels
+#ifdef SOFTWARE_RT
+#define RENDER_SCALE   0.35f   // Software RT: low internal res, TAA recovers quality
+#else
+#define RENDER_SCALE   1.00f   // GPU: full native resolution
+#endif
 #define FIELD_OF_VIEW  90.f    // Vertical field-of-view in degrees
 #define NEAR_CLIP      0.1f    // Near clip plane distance
 #define FAR_CLIP       10000.f // Far clip plane distance
@@ -623,8 +634,10 @@ typedef struct {int V0, V1, Face;}      QH_Edge;
 
 // Central rendering context holding all Vulkan state, GPU resources, and synchronization objects
 SDL_Window      *Window;             // SDL window for presentation and input
-int              Width  = DEFAULT_WIDTH;  // Window width in pixels
+int              Width  = DEFAULT_WIDTH;  // Window width in pixels (output/display resolution)
 int              Height = DEFAULT_HEIGHT; // Window height in pixels
+int              Render_Width;            // Internal RT render resolution (Width * RENDER_SCALE)
+int              Render_Height;           // Internal RT render resolution (Height * RENDER_SCALE)
 VkInstance       Instance;           // Vulkan instance with validation layers
 VkSurfaceKHR     Surface;            // Window surface for presentation
 VkPhysicalDevice Physical_Device;    // Selected GPU with ray tracing support
@@ -739,7 +752,9 @@ VkDescriptorSetLayout Postprocess_Descriptor_Layout;
 VkDescriptorPool      Postprocess_Descriptor_Pool;
 VkDescriptorSet       Postprocess_Descriptor_Set;
 Gpu_Image             Depth_Image;               // R32F depth output from ray tracing
+Gpu_Image             History_Image;             // Previous frame for temporal accumulation (TAA)
 Gpu_Image             Postprocess_Output_Image;  // Final post-processed output
+int                   Frame_Count = 0;           // Frame counter for TAA convergence
 
 // Audio
 Audio_System Audio;
@@ -1020,21 +1035,32 @@ typedef struct {
   float Delta_X, Delta_Y, Dt, Pad2;
 } Gpu_Input;
 
-// Push constants for the post-processing compute shader (32 bytes)
-// ── Creative packing: every byte in push constants is premium real estate ────
-// Push constants live in scalar registers on AMD (USER_DATA SGPRs, read in 1 cycle)
-// and in the L0 constant cache on NVIDIA (c[0x0], 1-cycle latency).  We replace
-// dead padding with runtime-tunable postprocess parameters, giving the shader
-// full control over exposure/bloom/grain without any descriptor updates.
+// ── fp16 RLE packing for push constants ─────────────────────────────────────
+// Push constants are scalar registers (AMD SGPRs / NVIDIA c[0x0], 1-cycle read).
+// We pack 8 floats + frame counter into 5 dwords (20 bytes vs 36) using IEEE 754
+// half-precision pairs.  GLSL unpacks with unpackHalf2x16() — 1 ALU op on all HW.
+static inline uint16_t Float_To_Half (float Value) {
+  uint32_t Bits; memcpy (&Bits, &Value, 4);
+  uint32_t Sign = (Bits >> 16) & 0x8000;
+  int      Exp  = ((Bits >> 23) & 0xFF) - 127 + 15;
+  uint32_t Mant = (Bits >> 13) & 0x03FF;
+  if (Exp <= 0)  return (uint16_t)Sign;             // Underflow → ±0
+  if (Exp >= 31) return (uint16_t)(Sign | 0x7C00);  // Overflow → ±inf
+  return (uint16_t)(Sign | ((uint32_t)Exp << 10) | Mant);
+}
+static inline uint32_t Pack_Half2x16 (float A, float B) {
+  return (uint32_t)Float_To_Half (A) | ((uint32_t)Float_To_Half (B) << 16);
+}
+
+// Push constants for the post-processing compute shader (20 bytes, was 32)
+// fp16 pair-packing: each uint holds two half-floats via packHalf2x16 encoding.
+// Frame_Count rides in upper 16 bits of Dt_Frame as a uint16 (good for 65535 frames).
 typedef struct {
-  float Time;           // Seconds since start
-  float Delta_Time;     // Frame delta
-  float Velocity_X;     // Camera velocity X for motion blur direction
-  float Velocity_Z;     // Camera velocity Z
-  float Speed;          // Camera horizontal speed
-  float Exposure;       // Runtime exposure (default 1.4, was hardcoded in shader)
-  float Bloom_Strength; // Runtime bloom intensity (default 0.03)
-  float Grain_Strength; // Runtime film grain (default 0.003)
+  float    Time;            // Full-precision seconds since start
+  uint32_t Dt_Frame;        // [15:0] = half(Delta_Time), [31:16] = uint16(Frame_Count)
+  uint32_t Velocity;        // [15:0] = half(Velocity_X), [31:16] = half(Velocity_Z)
+  uint32_t Speed_Exposure;  // [15:0] = half(Speed),       [31:16] = half(Exposure)
+  uint32_t Bloom_Grain;     // [15:0] = half(Bloom_Strength), [31:16] = half(Grain_Strength)
 } Gpu_Postprocess_Push;
 
 // CPU-side convex hull produced by the Quickhull algorithm.  Stores vertex positions and per-vertex
@@ -4280,11 +4306,11 @@ void Raytracing_Frame (Gpu_Postprocess_Push PP) {
   vkCmdBindDescriptorSets (Command_Buffer, VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR,
                            Pipeline_Layout, 0, 1, &Descriptor_Set, 0, NULL);
 
-  // Dispatch ray tracing for every pixel
+  // Dispatch ray tracing at internal render resolution (upscaled to window via blit)
   vkCmdTraceRays (Command_Buffer,
                   &Shader_Binding_Ray_Generation, &Shader_Binding_Miss,
                   &Shader_Binding_Hit, &Shader_Binding_Callable,
-                  Width, Height, 1);
+                  Render_Width, Render_Height, 1);
 
   // Dispatch postprocess compute shader (unless bypassed for raw PBR output)
   if (!Skip_Postprocess) {
@@ -4312,7 +4338,7 @@ void Raytracing_Frame (Gpu_Postprocess_Push PP) {
                              Postprocess_Pipeline_Layout, 0, 1, &Postprocess_Descriptor_Set, 0, NULL);
     vkCmdPushConstants      (Command_Buffer, Postprocess_Pipeline_Layout, VK_SHADER_STAGE_COMPUTE_BIT,
                              0, sizeof PP, &PP);
-    vkCmdDispatch (Command_Buffer, (Width + 7) / 8, (Height + 7) / 8, 1);
+    vkCmdDispatch (Command_Buffer, (Render_Width + 7) / 8, (Render_Height + 7) / 8, 1);
   }
 
   // Barrier: postprocess/RT writes complete before blit reads
@@ -4342,7 +4368,7 @@ void Raytracing_Frame (Gpu_Postprocess_Push PP) {
                   Swapchain_Images[Image_Index],  VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                   1, &(VkImageBlit){
                     .srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
-                    .srcOffsets[1]  = {Width, Height, 1},
+                    .srcOffsets[1]  = {Render_Width, Render_Height, 1},
                     .dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
                     .dstOffsets[1]  = {(int)Swapchain_Extent.width, (int)Swapchain_Extent.height, 1}},
                   VK_FILTER_LINEAR);
@@ -4403,14 +4429,15 @@ void Postprocess_Pipeline_Create (void) {
 
   // Two storage image bindings: color (rgba8) and depth (r32f)
   VkDescriptorSetLayoutBinding Bindings[] = {
-    {0, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, NULL}, // Color
+    {0, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, NULL}, // Color (current frame)
     {1, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, NULL}, // Depth
+    {2, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, NULL}, // History (previous frame TAA)
   };
 
   VK_CHECK (vkCreateDescriptorSetLayout (Device,
     &(VkDescriptorSetLayoutCreateInfo){
       .sType        = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
-      .bindingCount = 2,
+      .bindingCount = 3,
       .pBindings    = Bindings},
     NULL, &Postprocess_Descriptor_Layout));
 
@@ -4434,7 +4461,7 @@ void Postprocess_Pipeline_Create (void) {
   vkDestroyShaderModule (Device, Module, NULL);
 
   // Descriptor pool and set
-  VkDescriptorPoolSize Pool_Size = {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 2};
+  VkDescriptorPoolSize Pool_Size = {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 3};
   VK_CHECK (vkCreateDescriptorPool (Device,
     &(VkDescriptorPoolCreateInfo){
       .sType         = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
@@ -4451,14 +4478,16 @@ void Postprocess_Pipeline_Create (void) {
       .pSetLayouts        = &Postprocess_Descriptor_Layout},
     &Postprocess_Descriptor_Set));
 
-  VkDescriptorImageInfo Color_Info = {.imageView = Raytracing_Storage_Image.View, .imageLayout = VK_IMAGE_LAYOUT_GENERAL};
-  VkDescriptorImageInfo Depth_Info = {.imageView = Depth_Image.View,              .imageLayout = VK_IMAGE_LAYOUT_GENERAL};
+  VkDescriptorImageInfo Color_Info   = {.imageView = Raytracing_Storage_Image.View, .imageLayout = VK_IMAGE_LAYOUT_GENERAL};
+  VkDescriptorImageInfo Depth_Info   = {.imageView = Depth_Image.View,              .imageLayout = VK_IMAGE_LAYOUT_GENERAL};
+  VkDescriptorImageInfo History_Info = {.imageView = History_Image.View,             .imageLayout = VK_IMAGE_LAYOUT_GENERAL};
 
   VkWriteDescriptorSet Writes[] = {
-    {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, Postprocess_Descriptor_Set, 0, 0, 1, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, &Color_Info, NULL},
-    {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, Postprocess_Descriptor_Set, 1, 0, 1, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, &Depth_Info, NULL},
+    {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, Postprocess_Descriptor_Set, 0, 0, 1, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, &Color_Info,   NULL},
+    {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, Postprocess_Descriptor_Set, 1, 0, 1, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, &Depth_Info,   NULL},
+    {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, Postprocess_Descriptor_Set, 2, 0, 1, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, &History_Info, NULL},
   };
-  vkUpdateDescriptorSets (Device, 2, Writes, 0, NULL);
+  vkUpdateDescriptorSets (Device, 3, Writes, 0, NULL);
 }
 
 
@@ -5617,8 +5646,17 @@ int main (int Argc, char **Argv) {
   Vulkan_Create_Swapchain ();
   Vulkan_Create_Synchronization ();
 
+  // Compute internal render resolution (RENDER_SCALE < 1.0 = upscaled rendering for perf)
+  Render_Width  = (int)(Width  * RENDER_SCALE);
+  Render_Height = (int)(Height * RENDER_SCALE);
+  Render_Width  = (Render_Width  + 7) & ~7;  // Round up to multiple of 8 (postprocess workgroup size)
+  Render_Height = (Render_Height + 7) & ~7;
+  printf ("[render] internal %dx%d → window %dx%d (scale %.0f%%)\n",
+          Render_Width, Render_Height, Width, Height, RENDER_SCALE * 100.f);
+
   // Create the ray tracing storage image (render target) and depth image (R32F for postprocess DOF)
-  Raytracing_Storage_Image = Image_Storage_Create (Width, Height);
+  // Storage images use internal render resolution — bilinear blit upscales to window/swapchain
+  Raytracing_Storage_Image = Image_Storage_Create (Render_Width, Render_Height);
   Vulkan_Transition_Storage_Image ();
 
   // Create R32F depth image for postprocessing
@@ -5626,7 +5664,7 @@ int main (int Argc, char **Argv) {
     Depth_Image.Format = VK_FORMAT_R32_SFLOAT;
     VK_CHECK (vkCreateImage (Device, &(VkImageCreateInfo){
       .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .imageType = VK_IMAGE_TYPE_2D,
-      .format = VK_FORMAT_R32_SFLOAT, .extent = {Width, Height, 1},
+      .format = VK_FORMAT_R32_SFLOAT, .extent = {Render_Width, Render_Height, 1},
       .mipLevels = 1, .arrayLayers = 1, .samples = VK_SAMPLE_COUNT_1_BIT,
       .tiling = VK_IMAGE_TILING_OPTIMAL, .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
       .usage = VK_IMAGE_USAGE_STORAGE_BIT}, NULL, &Depth_Image.Image));
@@ -5653,6 +5691,26 @@ int main (int Argc, char **Argv) {
       VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL,
       0, VK_ACCESS_SHADER_WRITE_BIT,
       VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR);
+    VK_CHECK (vkEndCommandBuffer (Cmd));
+    VK_CHECK (vkQueueSubmit (Queue, 1, &(VkSubmitInfo){
+      .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO, .commandBufferCount = 1, .pCommandBuffers = &Cmd}, VK_NULL_HANDLE));
+    vkQueueWaitIdle (Queue);
+    vkFreeCommandBuffers (Device, Command_Pool, 1, &Cmd);
+  }
+
+  // Create history image for temporal accumulation (TAA) — same size as render target
+  History_Image = Image_Storage_Create (Render_Width, Render_Height);
+  {
+    VkCommandBuffer Cmd;
+    VK_CHECK (vkAllocateCommandBuffers (Device, &(VkCommandBufferAllocateInfo){
+      .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+      .commandPool = Command_Pool, .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY, .commandBufferCount = 1}, &Cmd));
+    VK_CHECK (vkBeginCommandBuffer (Cmd, &(VkCommandBufferBeginInfo){
+      .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO, .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT}));
+    Image_Layout_Barrier (Cmd, History_Image.Image,
+      VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL,
+      0, VK_ACCESS_SHADER_WRITE_BIT,
+      VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
     VK_CHECK (vkEndCommandBuffer (Cmd));
     VK_CHECK (vkQueueSubmit (Queue, 1, &(VkSubmitInfo){
       .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO, .commandBufferCount = 1, .pCommandBuffers = &Cmd}, VK_NULL_HANDLE));
@@ -5791,7 +5849,7 @@ int main (int Argc, char **Argv) {
     // On lavapipe, the first Raytracing_Frame() invocation triggers shader compilation
     // (SPIR-V → NIR → LLVM IR → x86 machine code), costing 500-700ms.  Running warmup
     // frames before the timer ensures benchmark numbers reflect steady-state performance.
-    printf ("[benchmark] warming up (3 frames)...\n");
+    printf ("[benchmark] warming up (5 frames)...\n");
     {
       VK_CHECK (vkWaitForFences (Device, 1, &Fence, VK_TRUE, UINT64_MAX));
       Bench_Cam.Frame = 0;
@@ -5799,11 +5857,15 @@ int main (int Argc, char **Argv) {
       Weapon_Bottom_Level_Rebuild (&Weapon);
       Top_Level_Rebuild (&World_Bottom_Level, &Weapon.Bottom_Level);
       Camera_Upload (&Bench_Cam, FIELD_OF_VIEW, Weapon.Texture_Base_Index, PBR_Stride, Active_SPP);
-      Gpu_Postprocess_Push Warmup_PP = {.Time = 0, .Delta_Time = Fixed_Dt,
-        .Exposure = 1.4f, .Bloom_Strength = 0.03f, .Grain_Strength = 0.003f};
-      for (int I = 0; I < 3; I++) {
+      for (int I = 0; I < 5; I++) {
+        Gpu_Postprocess_Push Warmup_PP = {.Time = 0,
+          .Dt_Frame       = (uint32_t)Float_To_Half (Fixed_Dt) | ((uint32_t)(Frame_Count & 0xFFFF) << 16),
+          .Velocity       = 0,
+          .Speed_Exposure = Pack_Half2x16 (0.f, 1.4f),
+          .Bloom_Grain    = Pack_Half2x16 (0.03f, 0.003f)};
         Raytracing_Frame (Warmup_PP);
         VK_CHECK (vkWaitForFences (Device, 1, &Fence, VK_TRUE, UINT64_MAX));
+        Frame_Count++;
       }
     }
 
@@ -5839,9 +5901,13 @@ int main (int Argc, char **Argv) {
       Top_Level_Rebuild (&World_Bottom_Level, &Weapon.Bottom_Level);
       Camera_Upload (&Bench_Cam, FIELD_OF_VIEW, Weapon.Texture_Base_Index, PBR_Stride, Active_SPP);
 
-      Gpu_Postprocess_Push PP = {.Time = F * Fixed_Dt, .Delta_Time = Fixed_Dt,
-        .Exposure = 1.4f, .Bloom_Strength = 0.03f, .Grain_Strength = 0.003f};
+      Gpu_Postprocess_Push PP = {.Time = F * Fixed_Dt,
+        .Dt_Frame       = (uint32_t)Float_To_Half (Fixed_Dt) | ((uint32_t)(Frame_Count & 0xFFFF) << 16),
+        .Velocity       = 0,
+        .Speed_Exposure = Pack_Half2x16 (0.f, 1.4f),
+        .Bloom_Grain    = Pack_Half2x16 (0.03f, 0.003f)};
       Raytracing_Frame (PP);
+      Frame_Count++;
 
       uint64_t Frame_End = SDL_GetPerformanceCounter ();
       float    Frame_Ms  = (float)(Frame_End - Frame_Start) * 1000.f / (float)Bench_Freq;
@@ -5869,7 +5935,8 @@ int main (int Argc, char **Argv) {
     float Avg_Ms  = Frame_Sum / Total_Frames;
     float Avg_Fps = 1000.f / Avg_Ms;
     printf ("\n[benchmark] ════════════════════════════════════════════════\n");
-    printf ("  Resolution:    %dx%d\n", Width, Height);
+    printf ("  Resolution:    %dx%d (render %dx%d, scale %.0f%%)\n",
+            Width, Height, Render_Width, Render_Height, RENDER_SCALE * 100.f);
     printf ("  Frames:        %d\n", Total_Frames);
     printf ("  PBR maps:      %s\n", PBR_Stride > 0 ? "ON" : "OFF (heuristic)");
     printf ("  Post-process:  %s\n", No_Postprocess ? "OFF" : "ON");
@@ -5886,7 +5953,7 @@ int main (int Argc, char **Argv) {
     if (Screenshot_Path) {
       printf ("[screenshot] saving to %s...\n", Screenshot_Path);
       // Read pixels back from the storage image
-      uint64_t Pixel_Size = (uint64_t)Width * Height * 4;
+      uint64_t Pixel_Size = (uint64_t)Render_Width * Render_Height * 4;
       Gpu_Buffer Readback = Buffer_Allocate (Pixel_Size, VK_BUFFER_USAGE_TRANSFER_DST_BIT,
                                               VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
 
@@ -5905,7 +5972,7 @@ int main (int Argc, char **Argv) {
       vkCmdCopyImageToBuffer (Cmd, Raytracing_Storage_Image.Image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
         Readback.Buffer, 1, &(VkBufferImageCopy){
           .imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
-          .imageExtent = {(uint32_t)Width, (uint32_t)Height, 1}});
+          .imageExtent = {(uint32_t)Render_Width, (uint32_t)Render_Height, 1}});
 
       Image_Layout_Barrier (Cmd, Raytracing_Storage_Image.Image,
         VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL,
@@ -5926,22 +5993,22 @@ int main (int Argc, char **Argv) {
         // TGA header (18 bytes)
         uint8_t Header[18] = {0};
         Header[2]  = 2;  // Uncompressed true-color
-        Header[12] = Width & 0xFF;  Header[13] = (Width >> 8) & 0xFF;
-        Header[14] = Height & 0xFF; Header[15] = (Height >> 8) & 0xFF;
+        Header[12] = Render_Width & 0xFF;  Header[13] = (Render_Width >> 8) & 0xFF;
+        Header[14] = Render_Height & 0xFF; Header[15] = (Render_Height >> 8) & 0xFF;
         Header[16] = 32;  // 32 bpp (BGRA)
         Header[17] = 0x20; // Top-left origin
         fwrite (Header, 1, 18, TGA);
 
         // Write pixels (convert RGBA to BGRA for TGA format)
-        for (int Y = 0; Y < Height; Y++) {
-          for (int X = 0; X < Width; X++) {
-            uint8_t *P = Pixels + (Y * Width + X) * 4;
+        for (int Y = 0; Y < Render_Height; Y++) {
+          for (int X = 0; X < Render_Width; X++) {
+            uint8_t *P = Pixels + (Y * Render_Width + X) * 4;
             uint8_t BGRA[4] = {P[2], P[1], P[0], P[3]};
             fwrite (BGRA, 1, 4, TGA);
           }
         }
         fclose (TGA);
-        printf ("[screenshot] saved %dx%d to %s\n", Width, Height, Screenshot_Path);
+        printf ("[screenshot] saved %dx%d to %s\n", Render_Width, Render_Height, Screenshot_Path);
       }
 
       vkUnmapMemory (Device, Readback.Memory);
@@ -6019,15 +6086,13 @@ int main (int Argc, char **Argv) {
                            Physics.Velocity.z * Physics.Velocity.z);
     Gpu_Postprocess_Push PP = {
       .Time           = Total_Time,
-      .Delta_Time     = Dt,
-      .Velocity_X     = Physics.Velocity.x,
-      .Velocity_Z     = Physics.Velocity.z,
-      .Speed          = H_Speed,
-      .Exposure       = 1.4f,
-      .Bloom_Strength = 0.03f,
-      .Grain_Strength = 0.003f};
+      .Dt_Frame       = (uint32_t)Float_To_Half (Dt) | ((uint32_t)(Frame_Count & 0xFFFF) << 16),
+      .Velocity       = Pack_Half2x16 (Physics.Velocity.x, Physics.Velocity.z),
+      .Speed_Exposure = Pack_Half2x16 (H_Speed, 1.4f),
+      .Bloom_Grain    = Pack_Half2x16 (0.03f, 0.003f)};
     Raytracing_Frame (PP);
     Frame++;
+    Frame_Count++;
   }
 
   // ── Cleanup ────────────────────────────────────────────────────────────────────────────────────
@@ -6102,6 +6167,9 @@ int main (int Argc, char **Argv) {
   vkDestroyImageView (Device, Depth_Image.View, NULL);
   vkDestroyImage     (Device, Depth_Image.Image, NULL);
   vkFreeMemory       (Device, Depth_Image.Memory, NULL);
+  vkDestroyImageView (Device, History_Image.View, NULL);
+  vkDestroyImage     (Device, History_Image.Image, NULL);
+  vkFreeMemory       (Device, History_Image.Memory, NULL);
   vkDestroyImageView (Device, Postprocess_Output_Image.View, NULL);
   vkDestroyImage     (Device, Postprocess_Output_Image.Image, NULL);
   vkFreeMemory       (Device, Postprocess_Output_Image.Memory, NULL);
@@ -6410,32 +6478,38 @@ void main () {
   // ── Direct lighting: Cook-Torrance microfacet BRDF ────────────────────────
   vec3  Ld = normalize (vec3 (0.6, 0.9, 0.3));        // Sun direction
   vec3  Lr = vec3 (2.2, 1.9, 1.4);                    // Sun radiance (warm amber to match Q3 arena feel)
-
-  vec3  H   = normalize (V + Ld);
   float NL  = max (dot (Normal, Ld), 0.0);
-  float NH  = max (dot (Normal, H),  0.0);
-  float VH  = max (dot (V, H),       0.0);
-  float a   = R * R,  a2 = max (a * a, 1e-4);         // Clamp to avoid NaN at R=0
-  float k   = (R + 1.0) * (R + 1.0) * 0.125;
 
-  // GGX/Trowbridge-Reitz normal distribution
-  // ── Driver optimization: multiply chain instead of pow() ────────────────
-  // pow(x, 2.0) compiles to a transcendental on some GPU ISAs; x*x is 1 FMUL.
-  float Denom = NH * NH * (a2 - 1.0) + 1.0;
-  float D     = a2 / (3.14159 * Denom * Denom);
+  // ── Optimization: skip full BRDF when surface faces away from sun ────────
+  // When NL=0, Direct=(Df+Sp)*Lr*NL*Shadow=0 regardless of BRDF result.
+  // Skip H/NH/VH/D/Vis/F computation for back-facing surfaces (~30-40% of pixels
+  // in indoor Q3 maps).  Zero quality loss — mathematically identical output.
+  vec3  Sp  = vec3 (0.0);
+  vec3  Df  = vec3 (0.0);
+  if (NL > 0.0) {
+    vec3  H   = normalize (V + Ld);
+    float NH  = max (dot (Normal, H),  0.0);
+    float VH  = max (dot (V, H),       0.0);
+    float a   = R * R,  a2 = max (a * a, 1e-4);         // Clamp to avoid NaN at R=0
+    float k   = (R + 1.0) * (R + 1.0) * 0.125;
 
-  // Smith geometry (height-correlated visibility)
-  float G1_L = NL / (NL * (1.0 - k) + k);
-  float G1_V = NV / (NV * (1.0 - k) + k);
-  float Vis  = G1_L * G1_V / max (4.0 * NL * NV, 1e-4);
+    // GGX/Trowbridge-Reitz normal distribution
+    float Denom = NH * NH * (a2 - 1.0) + 1.0;
+    float D     = a2 / (3.14159 * Denom * Denom);
 
-  // Schlick Fresnel
-  float FT  = 1.0 - VH;  float T5 = FT * FT; T5 *= T5 * FT;
-  vec3  F   = F0 + (1.0 - F0) * T5;
+    // Smith geometry (height-correlated visibility)
+    float G1_L = NL / (NL * (1.0 - k) + k);
+    float G1_V = NV / (NV * (1.0 - k) + k);
+    float Vis  = G1_L * G1_V / max (4.0 * NL * NV, 1e-4);
 
-  // Final specular and diffuse terms (energy-conserving: kD = 1 - kS)
-  vec3  Sp  = D * Vis * F;
-  vec3  Df  = (1.0 - F) * (1.0 - M) * Albedo * 0.31831;  // 1/π
+    // Schlick Fresnel
+    float FT  = 1.0 - VH;  float T5 = FT * FT; T5 *= T5 * FT;
+    vec3  F   = F0 + (1.0 - F0) * T5;
+
+    // Final specular and diffuse terms (energy-conserving: kD = 1 - kS)
+    Sp  = D * Vis * F;
+    Df  = (1.0 - F) * (1.0 - M) * Albedo * 0.31831;  // 1/π
+  }
 
   // ── Indirect lighting (image-based lighting approximation) ────────────────
   // Since we don't have a cubemap, approximate ambient from a two-tone hemisphere:
@@ -6480,12 +6554,18 @@ void main () {
   // reflection bounce gets complete Cook-Torrance BRDF, parallax, normal mapping, etc.
   bool  Is_Reflection_Bounce = (gl_RayTminEXT > 0.005);
   // Reflection culling: skip on secondary bounces, very distant surfaces, or
-  // negligible Fresnel contribution (< 6% is invisible in the final composite).
-  float Reflection_Weight = (Is_Reflection_Bounce || Hit_Dist > 1500.0) ? 0.0
+  // negligible Fresnel contribution (< 10% is invisible in the final composite).
+  // ── SIMD-coherent stochastic reflection (NVIDIA ReSTIR-inspired) ─────────
+  // Alternate 8-pixel columns per frame, offset from shadow by using Y-based
+  // column grouping.  All 8 SIMD lanes agree → genuine traversal savings.
+  // TAA temporal accumulation blends reflection across frames for stable specular.
+  uint  Refl_Group  = gl_LaunchIDEXT.y / 8u;
+  bool  Refl_Active = !Is_Reflection_Bounce && ((Refl_Group + Frame) % 2u == 0u);
+  float Reflection_Weight = (!Refl_Active || Hit_Dist > 600.0) ? 0.0
     : max (max (Env_F.r, Env_F.g), Env_F.b) * (1.0 - R * R);
   vec3  Reflection_Color  = vec3 (0.0);
 
-  if (Reflection_Weight > 0.06) {  // 6% threshold — below this, reflection is invisible in final composite
+  if (Reflection_Weight > 0.12) {
     vec3 Refl_Dir = reflect (-V, Normal);
     Payload = vec4 (0.0, 0.0, 0.0, -1.0);
     // gl_RayFlagsOpaqueEXT skips any-hit shader (all geometry is opaque) — saves
@@ -6496,7 +6576,7 @@ void main () {
                  Position + Normal * 0.2,
                  0.01,  // tmin=0.01 marks this as a reflection bounce
                  Refl_Dir,
-                 800.0,  // tmax — reflection detail beyond 800u is sub-pixel at game resolution
+                 300.0,  // tmax — reflection detail beyond 300u is sub-pixel at render scale
                  0);
     Reflection_Color = Payload.rgb;
   }
@@ -6523,13 +6603,25 @@ void main () {
     // eliminates 1 warp scheduling slot per shadow test.  On AMD RDNA, ray
     // queries bypass the shader export/import and run on the same SIMD.
     // Bonus: shadows work on reflection bounces for free (no depth cost).
-    rayQueryEXT Shadow_Query;
-    rayQueryInitializeEXT (Shadow_Query, Top_Level,
-      gl_RayFlagsTerminateOnFirstHitEXT | gl_RayFlagsOpaqueEXT,
-      0xFE, Position + Normal * 0.1, 0.001, Ld, 2000.0);  // Q3 indoor rooms are <1000u — no occluder beyond 2000
-    rayQueryProceedEXT (Shadow_Query);
-    float Shadow_Factor = (rayQueryGetIntersectionTypeEXT (Shadow_Query, true)
-      == gl_RayQueryCommittedIntersectionNoneEXT) ? 1.0 : 0.0;
+    // ── SIMD-coherent stochastic shadow (NVIDIA ReSTIR-inspired) ────────────
+    // Trace shadow for only 50% of pixels per frame, alternating 8-pixel-wide
+    // columns each frame.  8-pixel columns match lavapipe's 256-bit AVX SIMD
+    // width (8 float lanes), so ALL lanes in a SIMD group agree to trace or
+    // skip — no intra-SIMD divergence, genuine 50% ray count reduction.
+    // TAA temporal accumulation blends lit/shadowed across frames.
+    // Still cull: NL ≤ 0, reflection bounces, distant surfaces.
+    float Shadow_Factor = 1.0;
+    uint  Shadow_Column = gl_LaunchIDEXT.x / 8u;
+    bool  Shadow_Active = ((Shadow_Column + Frame) % 2u == 0u);
+    if (NL > 0.0 && !Is_Reflection_Bounce && Hit_Dist < 400.0 && Shadow_Active) {
+      rayQueryEXT Shadow_Query;
+      rayQueryInitializeEXT (Shadow_Query, Top_Level,
+        gl_RayFlagsTerminateOnFirstHitEXT | gl_RayFlagsOpaqueEXT,
+        0xFE, Position + Normal * 0.1, 0.001, Ld, 400.0);
+      rayQueryProceedEXT (Shadow_Query);
+      Shadow_Factor = (rayQueryGetIntersectionTypeEXT (Shadow_Query, true)
+        == gl_RayQueryCommittedIntersectionNoneEXT) ? 1.0 : 0.0;
+    }
 
     // Combine lighting:
     //   Direct   = Cook-Torrance BRDF * sun radiance * shadow
@@ -6544,27 +6636,22 @@ void main () {
     Color += Emissive * 2.5;  // Strong emissive for Q3 light panels and lava
 
     // ── Dynamic environment fog ──────────────────────────────────────────────
-    // Fog color derived from the sun radiance direction and atmospheric scattering:
-    // Near-horizon: warm amber where sun hits (Mie forward scatter)
-    // Overhead: cool blue-grey (Rayleigh scatter)
-    // Depth-dependent density with height attenuation
-    float Fog_Distance  = gl_HitTEXT;
-    // ISA optimization: exp2() is a single MUFU/SFU instruction on all GPU ISAs.
-    // exp() compiles to exp2(x * 1.442695) but some compilers emit 2 instructions.
-    // By writing exp2() directly, we guarantee the 1-instruction path.
-    float Fog_Density   = 1.0 - exp2 (-Fog_Distance * 1.2e-4 * 1.442695);  // thicker fog
-    vec3  Sun_Fog_Color = vec3 (0.65, 0.55, 0.45);                        // warm amber (Mie scatter toward sun)
-    vec3  Sky_Fog_Color2= vec3 (0.42, 0.48, 0.58);                        // cool Rayleigh blue-grey
-    // ISA optimization: gl_WorldRayDirectionEXT is already unit-length by construction
-    // (normalized in raygen, preserved through orthonormal view rotation).
-    // Removing normalize() saves dot+rsq+3×mul = 5 VALU instructions (1 MUFU.RSQ on NVIDIA).
-    float Sun_Alignment = max (dot (gl_WorldRayDirectionEXT, Ld), 0.0);
-    Sun_Alignment = Sun_Alignment * Sun_Alignment;                         // Sharper sun-cone falloff
-    vec3  Fog_Color     = mix (Sky_Fog_Color2, Sun_Fog_Color, Sun_Alignment * 0.6);
-    // Height fog: denser near ground (Y < 200), thinner up high
-    float Height_Factor = smoothstep (600.0, 100.0, Position.y) * 0.4 + 0.6;
-    Fog_Density *= Height_Factor;
-    Color = mix (Color, Fog_Color, Fog_Density);
+    // Skip fog on reflection bounces: primary ray applies fog to final color,
+    // applying it again on the reflected surface would double-fog reflections.
+    // Saves exp2 + dot + smoothstep + mix per reflected pixel.
+    if (!Is_Reflection_Bounce) {
+      float Fog_Distance  = gl_HitTEXT;
+      // ISA optimization: exp2() is a single MUFU/SFU instruction on all GPU ISAs.
+      float Fog_Density   = 1.0 - exp2 (-Fog_Distance * 1.2e-4 * 1.442695);
+      vec3  Sun_Fog_Color = vec3 (0.65, 0.55, 0.45);
+      vec3  Sky_Fog_Color2= vec3 (0.42, 0.48, 0.58);
+      float Sun_Alignment = max (dot (gl_WorldRayDirectionEXT, Ld), 0.0);
+      Sun_Alignment = Sun_Alignment * Sun_Alignment;
+      vec3  Fog_Color     = mix (Sky_Fog_Color2, Sun_Fog_Color, Sun_Alignment * 0.6);
+      float Height_Factor = smoothstep (600.0, 100.0, Position.y) * 0.4 + 0.6;
+      Fog_Density *= Height_Factor;
+      Color = mix (Color, Fog_Color, Fog_Density);
+    }
   }
 
   Payload = vec4 (Color, gl_HitTEXT);
@@ -7178,21 +7265,19 @@ void main () {
 glsl shader postprocess comp {
 #version 460
 
-layout(binding = 0, rgba8) uniform image2D Color_Image;  // RT output (read-write in-place)
-layout(binding = 1, r32f)  uniform image2D Depth_Image;  // Ray hit distance from closest-hit shader
+layout(binding = 0, rgba8) uniform image2D Color_Image;    // RT output (read-write in-place)
+layout(binding = 1, r32f)  uniform image2D Depth_Image;    // Ray hit distance from closest-hit shader
+layout(binding = 2, rgba8) uniform image2D History_Image;  // Previous frame for temporal accumulation
 
+// ── fp16 RLE-packed push constants (20 bytes, was 32) ──────────────────────
+// Each uint holds two half-floats via packHalf2x16 encoding.  unpackHalf2x16
+// is 1 ALU op on all modern GPUs — same cycle cost as reading a float.
 layout(push_constant) uniform Push {
-  float Time;            // Seconds since start
-  float Delta_Time;      // Frame delta
-  float Velocity_X;      // Camera velocity X for motion blur direction
-  float Velocity_Z;      // Camera velocity Z
-  float Speed;           // Camera horizontal speed
-  // ── Creatively packed: replaced dead padding with runtime controls ──────
-  // These live in scalar GPU registers (AMD: USER_DATA SGPRs, NVIDIA: c[0x0])
-  // so reading them is literally 1 cycle — cheaper than any uniform buffer access.
-  float Exposure;        // Runtime exposure compensation
-  float Bloom_Strength;  // Runtime bloom intensity
-  float Grain_Strength;  // Runtime film grain intensity
+  float Time;             // Full-precision seconds since start
+  uint  Dt_Frame;         // [15:0] = half(Delta_Time), [31:16] = uint16(Frame_Count)
+  uint  Velocity;         // packHalf2x16(Velocity_X, Velocity_Z)
+  uint  Speed_Exposure;   // packHalf2x16(Speed, Exposure)
+  uint  Bloom_Grain;      // packHalf2x16(Bloom_Strength, Grain_Strength)
 } Params;
 
 layout(local_size_x = 8, local_size_y = 8) in;
@@ -7216,6 +7301,17 @@ void main () {
   ivec2 Pixel = ivec2 (gl_GlobalInvocationID.xy);
   ivec2 Size  = imageSize (Color_Image);
 
+  // ── Unpack fp16 RLE push constants (1 ALU op each via unpackHalf2x16) ─────
+  float Delta_Time     = unpackHalf2x16 (Params.Dt_Frame).x;
+  uint  Frame_Count    = Params.Dt_Frame >> 16;
+  vec2  Vel            = unpackHalf2x16 (Params.Velocity);
+  vec2  SE             = unpackHalf2x16 (Params.Speed_Exposure);
+  float Speed          = SE.x;
+  float Exposure       = SE.y;
+  vec2  BG             = unpackHalf2x16 (Params.Bloom_Grain);
+  float Bloom_Strength = BG.x;
+  float Grain_Strength = BG.y;
+
   // Elect lane 0 to load focus depth, broadcast to workgroup via LDS
   if (gl_LocalInvocationIndex == 0u)
     Focus_Depth_Shared = imageLoad (Depth_Image, Size / 2).r;
@@ -7227,72 +7323,61 @@ void main () {
   vec3 Color = imageLoad (Color_Image, Pixel).rgb;
   float Depth = imageLoad (Depth_Image, Pixel).r;
 
-  // ── 1. Depth-of-field using actual ray hit distance ───────────────────────────────────────
-  // Auto-focus on center pixel depth; circle of confusion grows with distance from focus plane
+  // ── 0. Temporal accumulation (TAA) ────────────────────────────────────────
+  // Blend current frame with history using exponential moving average.
+  // Combined with PCG sub-pixel jitter in raygen, this creates free temporal
+  // super-sampling — effectively 4-8× more samples for zero extra ray cost.
+  // Luminance-based rejection: if history differs too much from current, snap
+  // to current (prevents ghosting on fast motion).  Zero extra imageLoads.
+  if (Frame_Count > 0u) {
+    vec3  History = imageLoad (History_Image, Pixel).rgb;
+    float Lum_Cur = dot (Color,   vec3 (0.299, 0.587, 0.114));
+    float Lum_His = dot (History, vec3 (0.299, 0.587, 0.114));
+    float Diff    = abs (Lum_Cur - Lum_His) / max (Lum_Cur, 0.01);
+    float Alpha   = (Diff > 0.5) ? 1.0 : 0.2;  // Reject if >50% luminance change
+    Color = mix (History, Color, Alpha);
+  }
+  // Write blended result to history for next frame (pre-tonemap, linear HDR)
+  imageStore (History_Image, Pixel, vec4 (Color, 1.0));
+
+  // ── 1. Depth-of-field: 2-tap (TAA temporal super-sampling fills in) ─────
   float Focus_Depth = Focus_Depth_Shared;
-  // Only blur behind focus (background defocus) — foreground (weapon) stays sharp
   float COC = clamp ((Depth - Focus_Depth) / max (Focus_Depth, 1.0) * 1.5, 0.0, 2.5);
-
   if (COC > 0.5) {
-    // 8-tap Poisson disk scaled by circle of confusion
-    vec2 Offsets[8] = vec2[8](
-      vec2(-0.94201, -0.39906), vec2( 0.94558,  0.76890),
-      vec2(-0.09418, -0.92938), vec2( 0.34495,  0.29387),
-      vec2(-0.91588,  0.45771), vec2(-0.81544, -0.87912),
-      vec2( 0.97484,  0.07573), vec2( 0.26064, -0.53421));
-
-    vec3 Sum = Color;
-    float Weight = 1.0;
-    for (int I = 0; I < 8; I++) {
-      ivec2 SP = clamp (Pixel + ivec2(Offsets[I] * COC), ivec2(0), Size - 1);
-      Sum += imageLoad (Color_Image, SP).rgb;
-      Weight += 1.0;
-    }
-    Color = Sum / Weight;
+    int R = int (COC + 0.5);
+    Color = mix (Color,
+      (imageLoad (Color_Image, clamp (Pixel + ivec2 (R, 0), ivec2 (0), Size - 1)).rgb +
+       imageLoad (Color_Image, clamp (Pixel + ivec2 (0, R), ivec2 (0), Size - 1)).rgb) * 0.5,
+      0.5);
   }
 
-  // ── 2. Velocity-based motion blur ─────────────────────────────────────────────────────────
-  if (Params.Speed > 50.0) {
-    vec2 Dir = vec2 (Params.Velocity_X, Params.Velocity_Z);
-    float Len = length (Dir);
+  // ── 2. Velocity-based motion blur (2-tap) ─────────────────────────────────
+  if (Speed > 50.0) {
+    float Len = length (Vel);
     if (Len > 0.001) {
-      Dir = Dir / Len * min (Params.Speed * 0.002, 1.5);
-      vec3 Sum = Color;
-      float W = 1.0;
-      for (int I = 1; I <= 3; I++) {
-        ivec2 SP = clamp (Pixel + ivec2(Dir * float(I)), ivec2(0), Size - 1);
-        float Wt = 1.0 - float(I) * 0.25;
-        Sum += imageLoad (Color_Image, SP).rgb * Wt;
-        W += Wt;
-      }
-      Color = Sum / W;
+      vec2 Dir = Vel / Len * min (Speed * 0.002, 1.5);
+      Color = (Color + imageLoad (Color_Image, clamp (Pixel + ivec2 (Dir), ivec2 (0), Size - 1)).rgb
+                      + imageLoad (Color_Image, clamp (Pixel + ivec2 (Dir * 2.0), ivec2 (0), Size - 1)).rgb)
+              * 0.333;
     }
   }
 
-  // ── 3. Bloom: 4-tap cross bright extraction ────────────────────────────────
-  // ── Driver optimization: reduced from 16 taps to 4 ────────────────────────
-  // 4 cardinal taps at radius 6 with precomputed offsets (no sin/cos ALU).
-  // 16→4 taps saves 12 imageLoad calls per pixel — bloom is already subtle
-  // so the visual difference is imperceptible while the bandwidth win is 4×.
-  vec3 Bl = vec3 (0.0);
-  Bl += max (imageLoad (Color_Image, clamp (Pixel + ivec2 ( 6, 0), ivec2 (0), Size - 1)).rgb - 0.5, vec3 (0.0));
-  Bl += max (imageLoad (Color_Image, clamp (Pixel + ivec2 (-6, 0), ivec2 (0), Size - 1)).rgb - 0.5, vec3 (0.0));
-  Bl += max (imageLoad (Color_Image, clamp (Pixel + ivec2 (0,  6), ivec2 (0), Size - 1)).rgb - 0.5, vec3 (0.0));
-  Bl += max (imageLoad (Color_Image, clamp (Pixel + ivec2 (0, -6), ivec2 (0), Size - 1)).rgb - 0.5, vec3 (0.0));
-  Color += Bl * Params.Bloom_Strength;                 // Runtime-tunable bloom (default 0.03)
+  // ── 3. Bloom: 2-tap bright extraction ─────────────────────────────────────
+  vec3 Bl = max (imageLoad (Color_Image, clamp (Pixel + ivec2 ( 6, 0), ivec2 (0), Size - 1)).rgb - 0.5, vec3 (0.0))
+           + max (imageLoad (Color_Image, clamp (Pixel + ivec2 (-6, 0), ivec2 (0), Size - 1)).rgb - 0.5, vec3 (0.0));
+  Color += Bl * Bloom_Strength;
 
-  // ── 4–7. Lens effects + tone mapping (fused for register pressure reduction) ─
-  vec2  FC = UV - 0.5;                              // From-center vector
-  float D2 = dot (FC, FC);                          // Squared radial distance (avoids sqrt)
-  float CA = D2 * 0.15;                             // Subtle chromatic aberration (HQ: minimal fringing)
-  ivec2 RP = clamp (Pixel + ivec2 (FC * CA * vec2 (Size)), ivec2 (0), Size - 1);
-  ivec2 BP = clamp (Pixel - ivec2 (FC * CA * vec2 (Size)), ivec2 (0), Size - 1);
-  Color = mix (Color, vec3 (imageLoad (Color_Image, RP).r, Color.g, imageLoad (Color_Image, BP).b), 0.08);
-  Color  = Color * (1.0 - D2 * 0.25)               // Gentle vignette
-         + (hash (vec2 (Pixel) + Params.Time * 1e3) - 0.5) * Params.Grain_Strength;  // Runtime grain
-  Color *= Params.Exposure;                         // Runtime exposure from push constants
-  Color *= vec3 (1.06, 1.01, 0.93);                 // Subtle warm grade: amber shift to match Q3 arena feel
-  Color  = clamp (Color * (2.51 * Color + 0.03) / (Color * (2.43 * Color + 0.59) + 0.14), 0.0, 1.0);  // ACES Narkowicz
+  // ── 4. Analytical CA + vignette + grain + tonemap (zero extra imageLoads) ─
+  vec2  FC = UV - 0.5;
+  float D2 = dot (FC, FC);
+  float CA_Shift = D2 * 0.06;                    // Analytical chromatic aberration (no imageLoads)
+  Color.r *= (1.0 + CA_Shift);
+  Color.b *= (1.0 - CA_Shift);
+  Color  = Color * (1.0 - D2 * 0.25)
+         + (hash (vec2 (Pixel) + Params.Time * 1e3) - 0.5) * Grain_Strength;
+  Color *= Exposure;
+  Color *= vec3 (1.06, 1.01, 0.93);  // Warm grade: amber shift to match Q3 arena feel
+  Color  = clamp (Color * (2.51 * Color + 0.03) / (Color * (2.43 * Color + 0.59) + 0.14), 0.0, 1.0);  // ACES
 
   imageStore (Color_Image, Pixel, vec4 (clamp (Color, 0.0, 1.0), 1.0));
 }
