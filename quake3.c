@@ -142,14 +142,41 @@ const float PLAYER_HALF_EXTENTS[3] = {15.f, 32.f, 15.f};
 #define MATERIAL_WATER     5
 #define MATERIAL_COUNT     6
 
-// Hit texture paths — body-part damage multiplier maps (white=max damage, black=armored)
-#define HIT_TEXTURE_COUNT  5
-const char *HIT_TEXTURE_PATHS[] = {
-  ASSET_ROOT "gfx/damage/explosion_dmg.tga",
-  ASSET_ROOT "gfx/damage/blast_ring_dmg.tga",
-  ASSET_ROOT "gfx/damage/scorch_dmg.tga",
-  ASSET_ROOT "gfx/damage/bullet_hole_dmg.tga",
-  ASSET_ROOT "gfx/damage/directional_dmg.tga"};
+// Body-part damage multiplier maps: grayscale TGA textures UV-mapped to player models.
+// Brightness = damage multiplier: 255 = critical (exposed head/eyes), 0 = heavy armor.
+// Each player model has per-texture damage maps (head, upper, lower) that follow its UV layout.
+// The maps encode anatomical vulnerability: face/eyes = critical, exposed flesh = high,
+// fabric/scales = medium, metal armor = low, robot chassis = minimal.
+typedef struct {
+  const char *Model_Name;              // Player model directory name
+  const char *Damage_Maps[6];          // Up to 6 damage map TGA paths per model (NULL-terminated)
+  int         Damage_Map_Count;        // Number of damage maps for this model
+} Model_Damage_Entry;
+
+#define DAMAGE_MODEL_COUNT 14
+const Model_Damage_Entry DAMAGE_MAP_REGISTRY[DAMAGE_MODEL_COUNT] = {
+  {"grism",     {ASSET_ROOT "models/players/grism/enkiskin_dmg.tga"},                                                                                                               1},
+  {"sarge",     {ASSET_ROOT "models/players/grism/enkiskin_dmg.tga"},                                                                                                               1},
+  {"liz",       {ASSET_ROOT "models/players/liz/h_head_dmg.tga", ASSET_ROOT "models/players/liz/u_torso_dmg.tga", ASSET_ROOT "models/players/liz/l_legs_dmg.tga"},                  3},
+  {"major",     {ASSET_ROOT "models/players/major/head_dmg.tga", ASSET_ROOT "models/players/major/torso_dmg.tga", ASSET_ROOT "models/players/major/lower_dmg.tga"},                  3},
+  {"tony",      {ASSET_ROOT "models/players/tony/head_dmg.tga", ASSET_ROOT "models/players/tony/suit_dmg.tga"},                                                                     2},
+  {"assassin",  {ASSET_ROOT "models/players/assassin/upper_dmg.tga", ASSET_ROOT "models/players/assassin/lower_dmg.tga"},                                                           2},
+  {"smarine",   {ASSET_ROOT "models/players/smarine/2h_head_dmg.tga", ASSET_ROOT "models/players/smarine/2u_torso_dmg.tga", ASSET_ROOT "models/players/smarine/2l_legs_dmg.tga"},   3},
+  {"beret",     {ASSET_ROOT "models/players/beret/skin1_dmg.tga", ASSET_ROOT "models/players/beret/skin2_dmg.tga"},                                                                 2},
+  {"gargoyle",  {ASSET_ROOT "models/players/gargoyle/bared_dmg.tga"},                                                                                                               1},
+  {"penguin",   {ASSET_ROOT "models/players/penguin/skin_dmg.tga"},                                                                                                                  1},
+  {"sergei",    {ASSET_ROOT "models/players/sergei/face_dmg.tga", ASSET_ROOT "models/players/sergei/hairs_dmg.tga", ASSET_ROOT "models/players/sergei/skin_dmg.tga"},                3},
+  {"skelebot",  {ASSET_ROOT "models/players/skelebot/skin1_dmg.tga", ASSET_ROOT "models/players/skelebot/skin2_dmg.tga"},                                                           2},
+  {"merman",    {ASSET_ROOT "models/players/merman/skin_dmg.tga", ASSET_ROOT "models/players/merman/fins_dmg.tga", ASSET_ROOT "models/players/merman/brac_dmg.tga"},                3},
+  {"kyonshi",   {ASSET_ROOT "models/players/kyonshi/skin_dmg.tga", ASSET_ROOT "models/players/kyonshi/torso_dmg.tga", ASSET_ROOT "models/players/kyonshi/hair_dmg.tga",
+                 ASSET_ROOT "models/players/kyonshi/eyes_dmg.tga", ASSET_ROOT "models/players/kyonshi/lower_dmg.tga"},                                                              5},
+};
+
+// Sorceress and additional entries use a separate constant to keep the registry clean
+const Model_Damage_Entry DAMAGE_MAP_EXTRA[] = {
+  {"sorceress", {ASSET_ROOT "models/players/sorceress/drowhead_dmg.tga", ASSET_ROOT "models/players/sorceress/drowbody_dmg.tga", ASSET_ROOT "models/players/sorceress/rings_dmg.tga"}, 3},
+};
+#define DAMAGE_EXTRA_COUNT 1
 
 // Convex Hull Limits
 #define HULL_MAX_VERTS     256 // Per-hull vertex cap (matches GPU array size in Gpu_Hull)
@@ -207,7 +234,10 @@ typedef struct {
   int   Active;          // 1 = live, 0 = dead
   int   Material_Hit;    // Surface material on impact (for sound selection)
   float Radius;          // Collision radius
-  float Damage;          // Damage on impact
+  float Damage;          // Base damage on impact (before body-part multiplier)
+  float Hit_U, Hit_V;    // UV coordinates at impact point (for damage map sampling)
+  int   Instance_Hit;    // TLAS instance index of hit object (-1 = none, 0 = world, 1 = weapon, >=2 = player)
+  int   Pad_B;           // Alignment padding
 } Projectile;
 
 typedef struct {
@@ -223,6 +253,9 @@ typedef struct {
   float Velocity[3];  float Lifetime;
   int   Active;       int   Material_Hit;
   float Radius;       float Damage;
+  float Hit_U, Hit_V; // UV at impact point (written by GPU on hit)
+  int   Instance_Hit; // TLAS instance that was hit (-1 = none)
+  int   Pad_B;
 } Gpu_Projectile;
 
 typedef struct {
@@ -1769,6 +1802,78 @@ uint8_t *TGA_Load (const char *Path, uint *Out_Width, uint *Out_Height) {
   return Output;
 
 } // Tga_Load
+
+// ═══════════════════════════════════
+//   Damage_Map_Sample
+// ═══════════════════════════════════
+//
+// Load a damage map TGA and sample it at normalized UV coordinates (0-1 range).
+// Returns a damage multiplier in [0.0, 1.0] where 0.0 = fully armored, 1.0 = critical.
+// The damage map is loaded on demand and cached in a static table.
+
+#define DAMAGE_CACHE_MAX 64
+
+typedef struct {
+  char     Path[256];
+  uint8_t *Pixels;
+  uint     Width, Height;
+} Damage_Map_Cache_Entry;
+
+static Damage_Map_Cache_Entry Damage_Cache[DAMAGE_CACHE_MAX];
+static int                     Damage_Cache_Count = 0;
+
+float Damage_Map_Sample (const char *Path, float U, float V) {
+  // Find or load the damage map
+  Damage_Map_Cache_Entry *Entry = NULL;
+  for (int I = 0; I < Damage_Cache_Count; I++) {
+    if (strcmp (Damage_Cache[I].Path, Path) == 0) { Entry = &Damage_Cache[I]; break; }
+  }
+
+  if (!Entry && Damage_Cache_Count < DAMAGE_CACHE_MAX) {
+    Entry = &Damage_Cache[Damage_Cache_Count++];
+    strncpy (Entry->Path, Path, sizeof (Entry->Path) - 1);
+    Entry->Pixels = TGA_Load (Path, &Entry->Width, &Entry->Height);
+    if (!Entry->Pixels) { Damage_Cache_Count--; return 0.5f; }
+  }
+  if (!Entry || !Entry->Pixels) return 0.5f;
+
+  // Wrap UVs to [0,1] and sample the grayscale damage value
+  U = U - floorf (U); V = V - floorf (V);
+  uint X = (uint)(U * (Entry->Width  - 1));
+  uint Y = (uint)(V * (Entry->Height - 1));
+  if (X >= Entry->Width)  X = Entry->Width  - 1;
+  if (Y >= Entry->Height) Y = Entry->Height - 1;
+
+  // TGA pixels are RGBA, damage map is grayscale so just read R channel
+  uint Idx = (Y * Entry->Width + X) * 4;
+  float Brightness = Entry->Pixels[Idx] / 255.0f;
+  return Brightness; // 0.0 = armored, 1.0 = critical
+}
+
+// Look up the damage map path for a given model name and body part index (0=head, 1=upper, 2=lower)
+const char *Damage_Map_For_Model (const char *Model_Name, int Part_Index) {
+  for (int I = 0; I < DAMAGE_MODEL_COUNT; I++) {
+    if (strcmp (DAMAGE_MAP_REGISTRY[I].Model_Name, Model_Name) == 0) {
+      if (Part_Index < DAMAGE_MAP_REGISTRY[I].Damage_Map_Count)
+        return DAMAGE_MAP_REGISTRY[I].Damage_Maps[Part_Index];
+      return DAMAGE_MAP_REGISTRY[I].Damage_Maps[0]; // Fallback to first map
+    }
+  }
+  for (int I = 0; I < DAMAGE_EXTRA_COUNT; I++) {
+    if (strcmp (DAMAGE_MAP_EXTRA[I].Model_Name, Model_Name) == 0) {
+      if (Part_Index < DAMAGE_MAP_EXTRA[I].Damage_Map_Count)
+        return DAMAGE_MAP_EXTRA[I].Damage_Maps[Part_Index];
+      return DAMAGE_MAP_EXTRA[I].Damage_Maps[0];
+    }
+  }
+  return NULL; // Unknown model
+}
+
+// Free all cached damage map pixel data
+void Damage_Cache_Free (void) {
+  for (int I = 0; I < Damage_Cache_Count; I++) free (Damage_Cache[I].Pixels);
+  Damage_Cache_Count = 0;
+}
 
 // ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 //
@@ -5189,6 +5294,9 @@ void Projectile_Spawn (vec3 Origin, vec3 Direction) {
   P->Radius       = 3.f;
   P->Damage       = ROCKET_DAMAGE;
   P->Material_Hit = MATERIAL_DEFAULT;
+  P->Hit_U        = 0.f;
+  P->Hit_V        = 0.f;
+  P->Instance_Hit = -1;
 
   Projectiles.Fire_Cooldown = FIRE_COOLDOWN;
   Audio_Play (Audio.Sound_Shoot, 0.8f);
@@ -5207,7 +5315,8 @@ void Projectile_Pool_Upload (void) {
     GPU_Pool.Slots[I] = (Gpu_Projectile){
       {P->Position.x, P->Position.y, P->Position.z}, 0,
       {P->Velocity.x, P->Velocity.y, P->Velocity.z}, P->Lifetime,
-      P->Active, P->Material_Hit, P->Radius, P->Damage};
+      P->Active, P->Material_Hit, P->Radius, P->Damage,
+      P->Hit_U, P->Hit_V, P->Instance_Hit, 0};
   }
   Buffer_Upload (Projectile_Buffer, &GPU_Pool, sizeof GPU_Pool);
 }
@@ -5230,7 +5339,10 @@ void Projectile_Pool_Readback (void) {
       .Active       = G->Active,
       .Material_Hit = G->Material_Hit,
       .Radius       = G->Radius,
-      .Damage       = G->Damage};
+      .Damage       = G->Damage,
+      .Hit_U        = G->Hit_U,
+      .Hit_V        = G->Hit_V,
+      .Instance_Hit = G->Instance_Hit};
   }
   vkUnmapMemory (Device, Projectile_Buffer.Memory);
 
@@ -5490,6 +5602,7 @@ int main (int Argc, char **Argv) {
   // ── Cleanup ────────────────────────────────────────────────────────────────────────────────────
 
   Audio_Shutdown ();
+  Damage_Cache_Free ();
   vkDeviceWaitIdle (Device);
   printf ("[shutdown] %u frames rendered\n", Frame);
 
@@ -5729,6 +5842,9 @@ struct Gpu_Projectile {
   vec3  Velocity;      float Lifetime;
   int   Active;        int   Material_Hit;
   float Radius;        float Damage;
+  float Hit_U, Hit_V;  // UV at impact point (for CPU-side damage map lookup)
+  int   Instance_Hit;  // TLAS instance index of the object hit (-1 = none)
+  int   Pad_B;
 };
 
 layout(binding = 5, std430) buffer Projectile_Buffer {
@@ -6206,6 +6322,9 @@ void main () {
     Projectiles[idx].Material_Hit = 0;
     Projectiles[idx].Radius       = 3.0;
     Projectiles[idx].Damage       = 100.0;
+    Projectiles[idx].Hit_U        = 0.0;
+    Projectiles[idx].Hit_V        = 0.0;
+    Projectiles[idx].Instance_Hit = -1;
     Projectile_Count = idx + 1;
     Fire_Cooldown = 0.8;
   }
@@ -6227,10 +6346,33 @@ void main () {
     while (rayQueryProceedEXT (rq)) {}
 
     if (rayQueryGetIntersectionTypeEXT (rq, true) == gl_RayQueryCommittedIntersectionTriangleEXT) {
-      // Hit something — mark dead and record hit position
+      // Hit something — mark dead and record hit position + UV for damage map lookup
       float t = rayQueryGetIntersectionTEXT (rq, true);
       Projectiles[i].Position += dir * t;
       Projectiles[i].Active = 0;
+
+      // Extract the instance index to identify what was hit (world vs player model)
+      Projectiles[i].Instance_Hit = rayQueryGetIntersectionInstanceCustomIndexEXT (rq, true);
+
+      // Extract barycentrics and primitive index to compute the hit UV
+      vec2 bary = rayQueryGetIntersectionBarycentricsEXT (rq, true);
+      uint prim = rayQueryGetIntersectionPrimitiveIndexEXT (rq, true);
+
+      // Look up the three vertex indices for the hit triangle
+      uint i0 = Indices.Data[prim * 3 + 0];
+      uint i1 = Indices.Data[prim * 3 + 1];
+      uint i2 = Indices.Data[prim * 3 + 2];
+
+      // Read texture UVs from vertex data (vec4[1].xy = texture UV)
+      vec2 uv0 = Vertices.Data[i0 * 3 + 1].xy;
+      vec2 uv1 = Vertices.Data[i1 * 3 + 1].xy;
+      vec2 uv2 = Vertices.Data[i2 * 3 + 1].xy;
+
+      // Interpolate UV at hit point using barycentric coordinates
+      vec3 bary3 = vec3 (1.0 - bary.x - bary.y, bary.x, bary.y);
+      vec2 hit_uv = uv0 * bary3.x + uv1 * bary3.y + uv2 * bary3.z;
+      Projectiles[i].Hit_U = hit_uv.x;
+      Projectiles[i].Hit_V = hit_uv.y;
     } else {
       // No hit — advance position
       Projectiles[i].Position += dir * dist;
