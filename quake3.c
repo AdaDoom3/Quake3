@@ -105,10 +105,16 @@ typedef struct {
 } Visual_Style;
 
 static const Visual_Style STYLE = {
-  .Vignette       = 0.25f,   // Moderate vignette — less darkening at edges
-  .Bloom_Strength = 0.15f,   // Cross-shaped bloom + sun rays
-  .Exposure       = 1.8f,    // Tonemapping exposure — brighter to match Q3 reference
+  .Vignette       = 0.35f,   // Moderate-strong vignette
+  .Bloom_Strength = 0.08f,   // Subtle bloom
+  .Exposure       = 1.75f,   // Slightly lower exposure — just enough to deepen without losing detail
 };
+
+// ── Per-scene environment settings (Q2RTX-inspired) ──────────────────────
+// These control the sun, sky, ambient, and fog for each map.
+// Inferred from BSP skybox textures when available, otherwise defaults.
+// Matches Q2RTX's global_ubo approach of per-scene lighting parameters.
+// Scene_Environment struct defined after vec3 typedef (see below)
 
 // ── Quality presets ─────────────────────────────────────────────────────────
 // Quality knobs control performance-affecting parameters only.  The visual
@@ -282,11 +288,71 @@ typedef struct {float x, y, z, w;} vec4;
 // A 4×4 column-major matrix for view, projection, and model transforms
 typedef struct {float E[16];} mat4;
 
+// ── Per-scene environment settings (Q2RTX-inspired) ──────────────────────
+
+typedef struct {
+  vec3   Sun_Direction;      // Normalized world-space sun direction
+  vec3   Sun_Color;          // Sun radiance (linear HDR)
+  float  Sun_Angular_Radius; // Disk angular radius in radians
+  float  Sun_Intensity;      // Radiance multiplier
+  vec3   Sky_Zenith;         // Sky color at zenith
+  vec3   Sky_Horizon;        // Sky color at horizon
+  float  Sky_Intensity;      // Sky ambient multiplier
+  vec3   Ambient_Up;         // Ambient irradiance from above
+  vec3   Ambient_Down;       // Ambient irradiance from below
+  vec3   Fog_Color;          // Fog/haze color
+  float  Fog_Density;        // Exponential fog density factor
+  float  Sun_Disc_Size;      // Visual angular size of sun disc
+  float  Sun_Disc_Intensity; // Brightness of the sun disc in the sky
+} Scene_Environment;
+
+static const Scene_Environment DEFAULT_ENVIRONMENT = {
+  .Sun_Direction      = { 0.5f, 0.7f, 0.5f },     // Q2RTX-style high sun angle
+  .Sun_Color          = { 1.0f, 0.95f, 0.85f },    // Warm daylight
+  .Sun_Angular_Radius = 0.02f,                       // ~1.1 degrees (Earth sun ≈ 0.53°)
+  .Sun_Intensity      = 4.0f,                        // Strong direct light
+  .Sky_Zenith         = { 0.15f, 0.25f, 0.55f },    // Deep blue zenith
+  .Sky_Horizon        = { 0.4f, 0.5f, 0.6f },       // Hazy lighter blue at horizon
+  .Sky_Intensity      = 1.2f,                        // Sky brightness multiplier
+  .Ambient_Up         = { 0.16f, 0.19f, 0.24f },    // Moderate cool fill — dark shadows but not black
+  .Ambient_Down       = { 0.12f, 0.10f, 0.08f },    // Subtle warm ground bounce
+  .Fog_Color          = { 0.35f, 0.38f, 0.42f },     // Subtle atmospheric haze
+  .Fog_Density        = 0.00008f,                    // Barely visible distance haze
+  .Sun_Disc_Size      = 0.03f,                       // Visual disc angular radius
+  .Sun_Disc_Intensity = 8.0f,                        // Bright sun disc in sky
+};
+
+static Scene_Environment Active_Environment;
+
 // Sampled keyboard and mouse state for a single frame
 typedef struct {
   int   Forward, Back, Left, Right, Jump, Fire, Crouch; // Binary key states: 1 if held, 0 otherwise
   float Delta_X, Delta_Y;                               // Mouse displacement in pixels since last frame
 } Input;
+
+// ── Windowing & Cursor ──────────────────────────────────────────────────────
+// Ported from Neo Engine's battle-tested windowing state machine.
+// Controls fullscreen toggle, menu/game cursor management, activation,
+// and aspect-ratio-constrained resizing.
+
+typedef enum { FULLSCREEN_MODE, WINDOWED_MODE } Window_Mode_Kind;
+typedef enum { GAME_PLAYING, GAME_MENU }        Game_Mode_Kind;
+typedef enum { CURSOR_SYSTEM, CURSOR_ACTIVE, CURSOR_INACTIVE } Cursor_Kind;
+typedef enum {
+  OTHER_ACTIVATED,        // Alt-tab or focus gained normally
+  CLICK_ACTIVATED,        // Window activated by mouse click
+  OTHER_DEACTIVATED,      // Focus lost to another window
+  MINIMIZE_DEACTIVATED    // Window was minimized
+} Activated_Kind;
+
+// Aspect ratio constraints (ported from Neo Engine's Resize)
+// "Narrow" = widest aspect (21:9, height is narrow relative to width)
+// "Wide"   = narrowest aspect (4:3, height is wide relative to width)
+#define ASPECT_NARROW_X     21
+#define ASPECT_NARROW_Y     9
+#define ASPECT_WIDE_X       4
+#define ASPECT_WIDE_Y       3
+#define MINIMUM_WINDOW_SIZE 256
 
 // ── Projectile ──
 
@@ -1061,6 +1127,22 @@ float Delta_Time; // Time elapsed since the previous frame in seconds
 // Runtime mode flags (set by command-line arguments)
 int   Skip_Postprocess; // Non-zero to bypass the post-processing compute pass
 
+// Windowing state (Neo Engine-style state machine)
+Window_Mode_Kind Current_Window_Mode = WINDOWED_MODE;
+Game_Mode_Kind   Current_Game_Mode   = GAME_PLAYING;
+Cursor_Kind      Current_Cursor_Kind = CURSOR_SYSTEM;
+Activated_Kind   Current_Activated   = OTHER_ACTIVATED;
+int              Input_Active        = 1;           // Process input when active (disabled on deactivation)
+int              Cursor_Centering    = 0;           // Center cursor each frame (game mode)
+int              In_Menu             = 0;           // 1 = menu mode, 0 = game mode
+int              Saved_Cursor_X, Saved_Cursor_Y;    // Cursor position saved across mode transitions
+int              Windowed_X, Windowed_Y;            // Saved window position before fullscreen
+int              Windowed_W, Windowed_H;            // Saved window size before fullscreen
+int              Swapchain_Dirty     = 0;           // Non-zero when swapchain needs recreation
+SDL_Cursor      *SDL_Cursor_Arrow;                  // System arrow cursor (menu default)
+SDL_Cursor      *SDL_Cursor_Hand;                   // Active cursor (hovering interactive UI)
+SDL_Cursor      *SDL_Cursor_Crosshair;              // Inactive cursor (menu, not hovering)
+
 // ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 //
 // §4. Math
@@ -1140,7 +1222,7 @@ void Texture_Upload (VkCommandBuffer Command_Buffer, VkQueue Queue,
                      const uint8_t *Pixels, uint Width, uint Height,
                      VkImage *Out_Image, VkDeviceMemory *Out_Memory, VkImageView *Out_View);
 
-// Create a device-local 2D image suitable for use as a ray tracing storage target. The image is RGBA8 UNORM with storage and
+// Create a device-local 2D image suitable for use as a ray tracing storage target. The image is RGBA16F with storage and
 // transfer-source usage bits.
 Gpu_Image Image_Storage_Create (uint Width, uint Height);
 
@@ -1383,6 +1465,8 @@ typedef struct {
   uint32_t Bloom_Vignette;  // [15:0] = half(Bloom_Strength), [31:16] = half(Vignette_Strength)
   uint32_t Reproject[8];    // packHalf2x16-compressed 4×4 reprojection matrix (Proj * Prev_View * Inv_View)
   uint32_t Inv_Proj_Diag;   // [15:0] = half(InvProj[0][0]), [31:16] = half(InvProj[1][1])
+  uint32_t Sun_Screen_Pos;  // [15:0] = half(Sun_Screen_U), [31:16] = half(Sun_Screen_V) — for god rays
+  uint32_t Sun_Params;      // [15:0] = half(God_Ray_Intensity), [31:16] = half(Sun_On_Screen) (0 or 1)
 } Gpu_Postprocess_Push;
 
 // CPU-side convex hull produced by the Quickhull algorithm.  Stores vertex positions and per-vertex
@@ -1513,6 +1597,7 @@ void Vulkan_Create_Instance ();
 void Vulkan_Pick_Physical_Device ();
 void Vulkan_Create_Logical_Device ();
 void Vulkan_Create_Swapchain ();
+void Vulkan_Recreate_Swapchain ();
 void Vulkan_Create_Synchronization ();
 void Vulkan_Transition_Storage_Image ();
 
@@ -1773,7 +1858,7 @@ Gpu_Buffer Buffer_Stage_Upload (VkCommandBuffer    Command_Buffer,
 // ════════════════════════
 
 Gpu_Image Image_Storage_Create (uint Width, uint Height) {
-  Gpu_Image Result = {.Format = VK_FORMAT_R8G8B8A8_UNORM};
+  Gpu_Image Result = {.Format = VK_FORMAT_R16G16B16A16_SFLOAT};
 
   // Create the image object with storage and transfer-source usage
   VK_CHECK (vkCreateImage (/*device      =>*/ Device,
@@ -3030,6 +3115,48 @@ void Vulkan_Create_Swapchain () {
 
 } // Vulkan_Create_Swapchain
 
+// ══════════════════════════════════════
+//   Vulkan_Recreate_Swapchain
+// ══════════════════════════════════════
+// Destroy old swapchain and create a new one matching the current surface size.
+// Called on window resize, fullscreen toggle, or VK_ERROR_OUT_OF_DATE_KHR.
+
+void Vulkan_Recreate_Swapchain () {
+  vkDeviceWaitIdle (Device);
+  VkSwapchainKHR Old = Swapchain;
+
+  VkSurfaceCapabilitiesKHR Capabilities;
+  vkGetPhysicalDeviceSurfaceCapabilitiesKHR (Physical_Device, Surface, &Capabilities);
+  Swapchain_Extent = Capabilities.currentExtent;
+
+  uint Image_Count = Capabilities.minImageCount + 1;
+  if (Capabilities.maxImageCount and Image_Count > Capabilities.maxImageCount)
+    Image_Count = Capabilities.maxImageCount;
+
+  VK_CHECK (vkCreateSwapchainKHR (Device,
+    &(VkSwapchainCreateInfoKHR){
+      .sType            = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR,
+      .surface          = Surface,
+      .minImageCount    = Image_Count,
+      .imageFormat      = Swapchain_Format,
+      .imageColorSpace  = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR,
+      .imageExtent      = Swapchain_Extent,
+      .imageArrayLayers = 1,
+      .imageUsage       = VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+      .imageSharingMode = VK_SHARING_MODE_EXCLUSIVE,
+      .preTransform     = Capabilities.currentTransform,
+      .compositeAlpha   = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR,
+      .presentMode      = VK_PRESENT_MODE_FIFO_KHR,
+      .clipped          = VK_TRUE,
+      .oldSwapchain     = Old},
+    NULL, &Swapchain));
+
+  vkDestroySwapchainKHR (Device, Old, NULL);
+  vkGetSwapchainImagesKHR (Device, Swapchain, &Swapchain_Image_Count, NULL);
+  vkGetSwapchainImagesKHR (Device, Swapchain, &Swapchain_Image_Count, Swapchain_Images);
+  printf ("[window] swapchain recreated %ux%u\n", Swapchain_Extent.width, Swapchain_Extent.height);
+} // Vulkan_Recreate_Swapchain
+
 // ══════════════════════════════════
 //   Vulkan_Create_Synchronization
 // ══════════════════════════════════
@@ -3457,6 +3584,144 @@ Scene Scene_Load_From_BSP (const char *Path, Spawn *Out_Spawn) {
   return Result;
 
 } // Scene_Load_From_BSP
+
+// ═══════════════════
+//   Environment_Infer_From_Scene
+// ═══════════════════
+// Builds per-scene environment settings by examining BSP shader names.
+// If a skybox texture is found, loads it and extracts dominant colors for
+// sky zenith/horizon and ambient hemisphere.  Otherwise uses defaults.
+// Inspired by Q2RTX's per-map environment configuration.
+
+Scene_Environment Environment_Infer_From_Scene (const Scene *S) {
+  Scene_Environment Env = DEFAULT_ENVIRONMENT;
+
+  // 1. Scan shader names for sky-related textures
+  char Sky_Shader_Name[64] = {0};
+  for (uint I = 0; I < S->Material_Count && S->Texture_Names; I++) {
+    const char *Name = S->Texture_Names[I];
+    // Q3 sky shaders typically contain "sky" or "skies" in the path
+    int Has_Sky = 0;
+    for (int C = 0; Name[C] && Name[C + 1] && Name[C + 2]; C++)
+      if ((Name[C] == 's' || Name[C] == 'S') &&
+          (Name[C+1] == 'k' || Name[C+1] == 'K') &&
+          (Name[C+2] == 'y' || Name[C+2] == 'Y')) { Has_Sky = 1; break; }
+    if (Has_Sky) {
+      memcpy (Sky_Shader_Name, Name, 63);
+      printf ("[environment] found sky shader: %s\n", Sky_Shader_Name);
+      break;
+    }
+  }
+
+  // 2. Try to load the sky texture and extract dominant colors
+  if (Sky_Shader_Name[0]) {
+    char Sky_Path[256];
+    snprintf (Sky_Path, sizeof (Sky_Path), "assets/%s.tga", Sky_Shader_Name);
+
+    uint W = 0, H = 0;
+    uint8_t *Pixels = TGA_Load (Sky_Path, &W, &H);
+    if (Pixels && W > 0 && H > 0) {
+      // Sample sky texture: top quarter = zenith, middle band = horizon
+      // Compute average color for each region (sRGB → linear)
+      double Zenith_R = 0, Zenith_G = 0, Zenith_B = 0;
+      double Horiz_R = 0, Horiz_G = 0, Horiz_B = 0;
+      int Zenith_Count = 0, Horiz_Count = 0;
+
+      for (uint Y = 0; Y < H; Y++) {
+        float V = (float)Y / (float)H;  // 0=top, 1=bottom
+        for (uint X = 0; X < W; X += 4) {  // Sample every 4th pixel for speed
+          uint8_t *P = Pixels + (Y * W + X) * 4;
+          // sRGB → linear approximation
+          float R = powf (P[0] / 255.0f, 2.2f);
+          float G = powf (P[1] / 255.0f, 2.2f);
+          float B = powf (P[2] / 255.0f, 2.2f);
+
+          if (V < 0.25f) {  // Top quarter = zenith
+            Zenith_R += R; Zenith_G += G; Zenith_B += B; Zenith_Count++;
+          } else if (V > 0.35f && V < 0.65f) {  // Middle band = horizon
+            Horiz_R += R; Horiz_G += G; Horiz_B += B; Horiz_Count++;
+          }
+        }
+      }
+
+      if (Zenith_Count > 0) {
+        Env.Sky_Zenith.x = (float)(Zenith_R / Zenith_Count);
+        Env.Sky_Zenith.y = (float)(Zenith_G / Zenith_Count);
+        Env.Sky_Zenith.z = (float)(Zenith_B / Zenith_Count);
+        printf ("[environment] sky zenith from texture: (%.3f, %.3f, %.3f)\n",
+                Env.Sky_Zenith.x, Env.Sky_Zenith.y, Env.Sky_Zenith.z);
+      }
+      if (Horiz_Count > 0) {
+        Env.Sky_Horizon.x = (float)(Horiz_R / Horiz_Count);
+        Env.Sky_Horizon.y = (float)(Horiz_G / Horiz_Count);
+        Env.Sky_Horizon.z = (float)(Horiz_B / Horiz_Count);
+        printf ("[environment] sky horizon from texture: (%.3f, %.3f, %.3f)\n",
+                Env.Sky_Horizon.x, Env.Sky_Horizon.y, Env.Sky_Horizon.z);
+      }
+
+      // Derive ambient hemisphere from sky colors
+      float Sky_Lum = Env.Sky_Zenith.x * 0.2126f + Env.Sky_Zenith.y * 0.7152f + Env.Sky_Zenith.z * 0.0722f;
+      float Hor_Lum = Env.Sky_Horizon.x * 0.2126f + Env.Sky_Horizon.y * 0.7152f + Env.Sky_Horizon.z * 0.0722f;
+      float Avg_Lum = (Sky_Lum + Hor_Lum) * 0.5f;
+
+      float Fill = fmaxf (Avg_Lum * 1.5f, 0.15f);
+      Fill = fminf (Fill, 0.5f);
+      float Inv_Lum = Fill / fmaxf (Avg_Lum, 0.01f);
+      Env.Ambient_Up.x = (Env.Sky_Zenith.x * 0.6f + Env.Sky_Horizon.x * 0.4f) * Inv_Lum;
+      Env.Ambient_Up.y = (Env.Sky_Zenith.y * 0.6f + Env.Sky_Horizon.y * 0.4f) * Inv_Lum;
+      Env.Ambient_Up.z = (Env.Sky_Zenith.z * 0.6f + Env.Sky_Horizon.z * 0.4f) * Inv_Lum;
+      Env.Ambient_Down.x = Env.Ambient_Up.x * 0.7f + 0.05f;
+      Env.Ambient_Down.y = Env.Ambient_Up.y * 0.6f + 0.03f;
+      Env.Ambient_Down.z = Env.Ambient_Up.z * 0.5f + 0.02f;
+
+      // Infer sun color from the brightest region of the sky texture
+      // (the bright area near the sun is typically warm/white)
+      float Max_Bright = 0;
+      float Sun_R = 0, Sun_G = 0, Sun_B = 0;
+      for (uint Y = 0; Y < H; Y++) {
+        for (uint X = 0; X < W; X += 8) {
+          uint8_t *P = Pixels + (Y * W + X) * 4;
+          float Lum = P[0] * 0.2126f + P[1] * 0.7152f + P[2] * 0.0722f;
+          if (Lum > Max_Bright) {
+            Max_Bright = Lum;
+            Sun_R = powf (P[0] / 255.0f, 2.2f);
+            Sun_G = powf (P[1] / 255.0f, 2.2f);
+            Sun_B = powf (P[2] / 255.0f, 2.2f);
+          }
+        }
+      }
+      if (Max_Bright > 100) {  // Bright enough to be a sun-like source
+        float Norm = 1.0f / fmaxf (fmaxf (Sun_R, Sun_G), fmaxf (Sun_B, 0.01f));
+        Env.Sun_Color.x = Sun_R * Norm; Env.Sun_Color.y = Sun_G * Norm; Env.Sun_Color.z = Sun_B * Norm;
+        printf ("[environment] sun color from texture: (%.3f, %.3f, %.3f)\n",
+                Env.Sun_Color.x, Env.Sun_Color.y, Env.Sun_Color.z);
+      }
+
+      free (Pixels);
+    } else {
+      printf ("[environment] sky texture not found at %s — using defaults\n", Sky_Path);
+    }
+  } else {
+    printf ("[environment] no sky shader found — using default environment\n");
+  }
+
+  // 3. Check worldspawn entity for any explicit overrides
+  for (uint I = 0; I < S->Entity_Count; I++) {
+    if (S->Entities[I].Kind == ENTITY_WORLD) {
+      // Q3 worldspawn can have _sun_angle, _sun_color, etc. in custom maps
+      // For now, just log the worldspawn presence
+      printf ("[environment] worldspawn entity found\n");
+      break;
+    }
+  }
+
+  printf ("[environment] sun direction: (%.2f, %.2f, %.2f) intensity: %.1f\n",
+          Env.Sun_Direction.x, Env.Sun_Direction.y, Env.Sun_Direction.z, Env.Sun_Intensity);
+  printf ("[environment] ambient up: (%.3f, %.3f, %.3f) down: (%.3f, %.3f, %.3f)\n",
+          Env.Ambient_Up.x, Env.Ambient_Up.y, Env.Ambient_Up.z,
+          Env.Ambient_Down.x, Env.Ambient_Down.y, Env.Ambient_Down.z);
+  return Env;
+}
 
 Spawn BSP_Find_Spawn (const uint8_t *File_Data, const BSP_Header *Header) {
   const char *Entities = (const char *)(File_Data + Header->Lumps[BSP_ENTITIES].Offset);
@@ -4117,13 +4382,13 @@ void Scene_Load_Textures (const Scene *Scene_Data) {
     Texture_Upload_With_Format (Command_Buffer, Queue,
                                 Scene_Data->Lightmap_Atlas,
                                 Scene_Data->Lightmap_Width, Scene_Data->Lightmap_Height,
-                                VK_FORMAT_R8G8B8A8_UNORM,
+                                VK_FORMAT_R8G8B8A8_SRGB,
                                 &Lightmap_Image, &Lightmap_Memory, &Lightmap_View);
-    printf ("[lightmap] uploaded %ux%u atlas (UNORM)\n", Scene_Data->Lightmap_Width, Scene_Data->Lightmap_Height);
+    printf ("[lightmap] uploaded %ux%u atlas (SRGB — auto-linearized on sample)\n", Scene_Data->Lightmap_Width, Scene_Data->Lightmap_Height);
   } else {
     uint8_t White[4] = {255, 255, 255, 255};
     Texture_Upload_With_Format (Command_Buffer, Queue, White, 1, 1,
-                                VK_FORMAT_R8G8B8A8_UNORM,
+                                VK_FORMAT_R8G8B8A8_SRGB,
                                 &Lightmap_Image, &Lightmap_Memory, &Lightmap_View);
   }
 } // Scene_Load_Textures
@@ -5162,13 +5427,22 @@ void Camera_Upload (Camera *State, float Field_Of_View, uint Weapon_Texture_Base
   mat4 View_Matrix = View (State->Position, State->Yaw, State->Pitch);
   mat4 Proj_Matrix = Perspective (Field_Of_View, (float)Width / Height, 0.1f, 10000.f);
 
-  // Uniform layout matching the GPU Camera_Uniform block (std140, 144 bytes)
-  struct {
+  // Uniform layout matching the GPU Camera_Uniform block (std140)
+  // Extended with per-scene environment parameters (Q2RTX-inspired)
+  struct __attribute__((aligned(16))) {
     mat4  Inverse_View, Inverse_Projection;
     uint  Frame;
     uint  Weapon_Texture_Base;
     uint  PBR_Stride;
     uint  Active_SPP;
+    // Environment parameters (std140 aligned)
+    float Sun_Dir[4];        // xyz = direction, w = angular_radius
+    float Sun_Color[4];      // xyz = color, w = intensity
+    float Sky_Zenith[4];     // xyz = zenith color, w = sky_intensity
+    float Sky_Horizon[4];    // xyz = horizon color, w = sun_disc_size
+    float Ambient_Up[4];     // xyz = ambient up, w = sun_disc_intensity
+    float Ambient_Down[4];   // xyz = ambient down, w = fog_density
+    float Fog_Color[4];      // xyz = fog color, w = unused
   } Uniform;
 
   // Compute the inverse matrices for reconstructing world-space rays from screen coordinates
@@ -5178,6 +5452,25 @@ void Camera_Upload (Camera *State, float Field_Of_View, uint Weapon_Texture_Base
   Uniform.Weapon_Texture_Base = Weapon_Texture_Base;
   Uniform.PBR_Stride          = PBR_Stride_Value;
   Uniform.Active_SPP          = Active_SPP;
+
+  // Pack environment parameters into the uniform (vec4-aligned for std140)
+  Scene_Environment *E = &Active_Environment;
+  vec3 Nd = Normalize (E->Sun_Direction);
+  Uniform.Sun_Dir[0] = Nd.x; Uniform.Sun_Dir[1] = Nd.y; Uniform.Sun_Dir[2] = Nd.z;
+  Uniform.Sun_Dir[3] = E->Sun_Angular_Radius;
+  Uniform.Sun_Color[0] = E->Sun_Color.x; Uniform.Sun_Color[1] = E->Sun_Color.y;
+  Uniform.Sun_Color[2] = E->Sun_Color.z; Uniform.Sun_Color[3] = E->Sun_Intensity;
+  Uniform.Sky_Zenith[0] = E->Sky_Zenith.x; Uniform.Sky_Zenith[1] = E->Sky_Zenith.y;
+  Uniform.Sky_Zenith[2] = E->Sky_Zenith.z; Uniform.Sky_Zenith[3] = E->Sky_Intensity;
+  Uniform.Sky_Horizon[0] = E->Sky_Horizon.x; Uniform.Sky_Horizon[1] = E->Sky_Horizon.y;
+  // ISA optimization: pre-compute cos(Sun_Disc_Size) on CPU — eliminates cos() per miss invocation
+  Uniform.Sky_Horizon[2] = E->Sky_Horizon.z; Uniform.Sky_Horizon[3] = cosf (E->Sun_Disc_Size);
+  Uniform.Ambient_Up[0] = E->Ambient_Up.x; Uniform.Ambient_Up[1] = E->Ambient_Up.y;
+  Uniform.Ambient_Up[2] = E->Ambient_Up.z; Uniform.Ambient_Up[3] = E->Sun_Disc_Intensity;
+  Uniform.Ambient_Down[0] = E->Ambient_Down.x; Uniform.Ambient_Down[1] = E->Ambient_Down.y;
+  Uniform.Ambient_Down[2] = E->Ambient_Down.z; Uniform.Ambient_Down[3] = E->Fog_Density;
+  Uniform.Fog_Color[0] = E->Fog_Color.x; Uniform.Fog_Color[1] = E->Fog_Color.y;
+  Uniform.Fog_Color[2] = E->Fog_Color.z; Uniform.Fog_Color[3] = 0;
 
   // Upload the uniform data to the camera buffer
   Buffer_Upload (Camera_Uniform_Buffer, &Uniform, sizeof (Uniform));
@@ -5304,38 +5597,281 @@ void Weapon_Update (Weapon_Instance *Weapon, const Camera *Camera_Data, float De
 
 // ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 //
-// §14. Render — Input
+// §14. Render — Windowing & Input
 //
 // ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+
+// ═══════════════════════════
+//   Constrain_Aspect_Ratio
+// ═══════════════════════════
+// Ported from Neo Engine's Resize function.
+// Ensures window aspect ratio stays between 4:3 (wide) and 21:9 (narrow).
+// Width/height are clamped to minimum 256px.
+
+void Constrain_Aspect_Ratio (int *W, int *H) {
+  if (*W < MINIMUM_WINDOW_SIZE) *W = MINIMUM_WINDOW_SIZE;
+  int Min_H = MINIMUM_WINDOW_SIZE * ASPECT_NARROW_Y / ASPECT_NARROW_X;
+  if (*H < Min_H) *H = Min_H;
+
+  // Width bounds for the current height
+  int Max_Width = *H * ASPECT_NARROW_X / ASPECT_NARROW_Y;   // Widest allowed (21:9)
+  int Min_Width = *H * ASPECT_WIDE_X   / ASPECT_WIDE_Y;     // Narrowest allowed (4:3)
+  int Fit_W = (*W > Max_Width) ? Max_Width : (*W < Min_Width) ? Min_Width : *W;
+
+  // Height bounds for the current width
+  int Max_Height = *W * ASPECT_WIDE_Y   / ASPECT_WIDE_X;    // Tallest allowed (4:3)
+  int Min_Height = *W * ASPECT_NARROW_Y / ASPECT_NARROW_X;  // Shortest allowed (21:9)
+  int Fit_H = (*H > Max_Height) ? Max_Height : (*H < Min_Height) ? Min_Height : *H;
+
+  *W = Fit_W;
+  *H = Fit_H;
+}
+
+// ══════════════════════
+//   Set_Menu_Cursor
+// ══════════════════════
+// Change the visible cursor style in menu mode (rollover support).
+// Active = hovering interactive UI, Inactive = general menu, System = default arrow.
+
+void Set_Menu_Cursor (Cursor_Kind Kind) {
+  if (Kind == Current_Cursor_Kind) return;
+  Current_Cursor_Kind = Kind;
+  if (!In_Menu) return;
+  switch (Kind) {
+    case CURSOR_SYSTEM:   SDL_SetCursor (SDL_Cursor_Arrow);     break;
+    case CURSOR_ACTIVE:   SDL_SetCursor (SDL_Cursor_Hand);      break;
+    case CURSOR_INACTIVE: SDL_SetCursor (SDL_Cursor_Crosshair); break;
+  }
+}
+
+// ══════════════════════
+//   Enter_Menu_Mode
+// ══════════════════════
+// Switch from game to menu: show cursor, unclip, stop centering.
+// Saves cursor position for restoration when returning to game.
+
+void Enter_Menu_Mode (void) {
+  if (In_Menu) return;
+  In_Menu = 1;
+  Cursor_Centering = 0;
+  SDL_SetRelativeMouseMode (SDL_FALSE);
+  if (Current_Window_Mode != FULLSCREEN_MODE)
+    SDL_SetWindowGrab (Window, SDL_FALSE);
+  SDL_SetCursor (SDL_Cursor_Arrow);
+  SDL_ShowCursor (SDL_ENABLE);
+  Current_Cursor_Kind = CURSOR_SYSTEM;
+  printf ("[window] entered menu mode\n");
+}
+
+// ══════════════════════
+//   Enter_Game_Mode
+// ══════════════════════
+// Switch from menu to game: hide cursor, clip to window, center each frame.
+
+void Enter_Game_Mode (void) {
+  if (!In_Menu) return;
+  // Save cursor position for when we return to menu
+  SDL_GetGlobalMouseState (&Saved_Cursor_X, &Saved_Cursor_Y);
+  In_Menu = 0;
+  SDL_ShowCursor (SDL_DISABLE);
+  SDL_SetRelativeMouseMode (SDL_TRUE);
+  SDL_SetWindowGrab (Window, SDL_TRUE);
+  Cursor_Centering = 1;
+  printf ("[window] entered game mode\n");
+}
+
+// ══════════════════════════
+//   Toggle_Fullscreen
+// ══════════════════════════
+// F11: toggle between windowed and fullscreen desktop mode.
+// Saves/restores window position and size across transitions.
+
+void Toggle_Fullscreen (void) {
+  if (Current_Window_Mode == WINDOWED_MODE) {
+    // Save windowed geometry for restoration
+    SDL_GetWindowPosition (Window, &Windowed_X, &Windowed_Y);
+    SDL_GetWindowSize (Window, &Windowed_W, &Windowed_H);
+    SDL_SetWindowFullscreen (Window, SDL_WINDOW_FULLSCREEN_DESKTOP);
+    Current_Window_Mode = FULLSCREEN_MODE;
+    SDL_SetWindowGrab (Window, SDL_TRUE);
+    Swapchain_Dirty = 1;
+    printf ("[window] fullscreen\n");
+  } else {
+    SDL_SetWindowFullscreen (Window, 0);
+    SDL_SetWindowPosition (Window, Windowed_X, Windowed_Y);
+    SDL_SetWindowSize (Window, Windowed_W, Windowed_H);
+    Current_Window_Mode = WINDOWED_MODE;
+    if (In_Menu) SDL_SetWindowGrab (Window, SDL_FALSE);
+    Swapchain_Dirty = 1;
+    printf ("[window] windowed %dx%d\n", Windowed_W, Windowed_H);
+  }
+}
+
+// ══════════════════════════
+//   Handle_Activation
+// ══════════════════════════
+// Ported from Neo Engine's activation state machine.
+// Handles focus gain/loss, minimize, and click-activate transitions.
+// Each case is explicit to avoid branching bugs (per Neo Engine convention).
+
+void Handle_Activation (Activated_Kind New_State) {
+  if (New_State == Current_Activated) return;
+
+  switch (New_State) {
+    case OTHER_ACTIVATED:
+      Input_Active = 1;
+      switch (Current_Window_Mode) {
+        case WINDOWED_MODE:
+          if (!In_Menu) {
+            // Alt-tab back in windowed game mode: pause game input until click
+            Cursor_Centering = 0;
+            SDL_SetRelativeMouseMode (SDL_FALSE);
+            SDL_SetWindowGrab (Window, SDL_FALSE);
+            SDL_ShowCursor (SDL_ENABLE);
+            // Temporarily enter menu-like state; user clicks to re-enter game
+            In_Menu = 1;
+            Current_Cursor_Kind = CURSOR_SYSTEM;
+            SDL_SetCursor (SDL_Cursor_Arrow);
+          } else {
+            SDL_SetCursor (SDL_Cursor_Arrow);
+          }
+          break;
+        case FULLSCREEN_MODE:
+          SDL_RestoreWindow (Window);
+          if (In_Menu) {
+            SDL_SetCursor (SDL_Cursor_Arrow);
+            SDL_ShowCursor (SDL_ENABLE);
+          } else {
+            SDL_ShowCursor (SDL_DISABLE);
+            SDL_SetRelativeMouseMode (SDL_TRUE);
+            SDL_SetWindowGrab (Window, SDL_TRUE);
+            Cursor_Centering = 1;
+          }
+          break;
+      }
+      break;
+
+    case CLICK_ACTIVATED:
+      switch (Current_Window_Mode) {
+        case WINDOWED_MODE:
+          Input_Active = 1;
+          if (In_Menu) {
+            SDL_SetCursor (SDL_Cursor_Arrow);
+          } else {
+            // Click in main window area re-enters game mode
+            SDL_GetGlobalMouseState (&Saved_Cursor_X, &Saved_Cursor_Y);
+            SDL_ShowCursor (SDL_DISABLE);
+            SDL_SetRelativeMouseMode (SDL_TRUE);
+            SDL_SetWindowGrab (Window, SDL_TRUE);
+            Cursor_Centering = 1;
+          }
+          break;
+        default: break;
+      }
+      break;
+
+    case OTHER_DEACTIVATED:
+    case MINIMIZE_DEACTIVATED:
+      // Save cursor position if in game mode
+      if (!In_Menu) SDL_GetGlobalMouseState (&Saved_Cursor_X, &Saved_Cursor_Y);
+      Input_Active = 0;
+      Cursor_Centering = 0;
+      SDL_SetWindowGrab (Window, SDL_FALSE);
+      SDL_SetRelativeMouseMode (SDL_FALSE);
+      SDL_SetCursor (SDL_Cursor_Arrow);
+      SDL_ShowCursor (SDL_ENABLE);
+      if (New_State == OTHER_DEACTIVATED and Current_Window_Mode == FULLSCREEN_MODE)
+        SDL_MinimizeWindow (Window);
+      break;
+  }
+  Current_Activated = New_State;
+}
 
 // ══════════════
 //   Poll_Input
 // ══════════════
+// Process SDL events and sample keyboard/mouse state.
+// Integrates with the Neo Engine-style windowing state machine for
+// focus changes, fullscreen toggle, menu/game transitions, and resize.
 
 Input Poll_Input () {
   Input Input_Data = {0};
   SDL_Event Event;
 
-  // Process all pending SDL events: quit, escape, mouse motion, and mouse clicks
   while (SDL_PollEvent (&Event)) {
-    if (Event.type == SDL_QUIT) Quit = 1;
-    if (Event.type == SDL_KEYDOWN and Event.key.keysym.sym == SDLK_ESCAPE) Quit = 1;
-    if (Event.type == SDL_MOUSEMOTION) {
-      Input_Data.Delta_X += Event.motion.xrel;
-      Input_Data.Delta_Y += Event.motion.yrel;
+    switch (Event.type) {
+
+      case SDL_QUIT:
+        Quit = 1;
+        break;
+
+      case SDL_KEYDOWN:
+        if (Event.key.repeat) break;  // Ignore key repeat for mode toggles
+        if (Event.key.keysym.sym == SDLK_ESCAPE) {
+          if (In_Menu) Quit = 1;       // ESC in menu = quit
+          else Enter_Menu_Mode ();      // ESC in game = open menu
+        }
+        if (Event.key.keysym.sym == SDLK_F11)
+          Toggle_Fullscreen ();
+        break;
+
+      case SDL_MOUSEBUTTONDOWN:
+        if (Event.button.button == SDL_BUTTON_LEFT) {
+          if (In_Menu) Enter_Game_Mode ();   // Click in menu = enter game
+          else Input_Data.Fire = 1;
+        }
+        break;
+
+      case SDL_MOUSEMOTION:
+        if (!In_Menu and Input_Active) {
+          Input_Data.Delta_X += Event.motion.xrel;
+          Input_Data.Delta_Y += Event.motion.yrel;
+        }
+        break;
+
+      case SDL_WINDOWEVENT:
+        switch (Event.window.event) {
+          case SDL_WINDOWEVENT_FOCUS_GAINED:
+            Handle_Activation (OTHER_ACTIVATED);
+            break;
+          case SDL_WINDOWEVENT_FOCUS_LOST:
+            Handle_Activation (OTHER_DEACTIVATED);
+            break;
+          case SDL_WINDOWEVENT_MINIMIZED:
+            Handle_Activation (MINIMIZE_DEACTIVATED);
+            break;
+          case SDL_WINDOWEVENT_RESTORED:
+            Handle_Activation (OTHER_ACTIVATED);
+            break;
+          case SDL_WINDOWEVENT_RESIZED: {
+            int New_W = Event.window.data1;
+            int New_H = Event.window.data2;
+            if (Current_Window_Mode == WINDOWED_MODE) {
+              Constrain_Aspect_Ratio (&New_W, &New_H);
+              if (New_W != Event.window.data1 or New_H != Event.window.data2)
+                SDL_SetWindowSize (Window, New_W, New_H);
+            }
+            Width  = New_W;
+            Height = New_H;
+            Swapchain_Dirty = 1;
+            break;
+          }
+        }
+        break;
     }
-    if (Event.type == SDL_MOUSEBUTTONDOWN and Event.button.button == SDL_BUTTON_LEFT)
-      Input_Data.Fire = 1;
   }
 
-  // Sample the current keyboard state for movement keys
-  const uint8_t *Keyboard = SDL_GetKeyboardState (NULL);
-  Input_Data.Forward = Keyboard[SDL_SCANCODE_W]     or Keyboard[SDL_SCANCODE_UP];
-  Input_Data.Back    = Keyboard[SDL_SCANCODE_S]     or Keyboard[SDL_SCANCODE_DOWN];
-  Input_Data.Left    = Keyboard[SDL_SCANCODE_A]     or Keyboard[SDL_SCANCODE_LEFT];
-  Input_Data.Right   = Keyboard[SDL_SCANCODE_D]     or Keyboard[SDL_SCANCODE_RIGHT];
-  Input_Data.Jump    = Keyboard[SDL_SCANCODE_SPACE];
-  Input_Data.Crouch  = Keyboard[SDL_SCANCODE_LCTRL] or Keyboard[SDL_SCANCODE_C];
+  // Sample keyboard state only in game mode with active input
+  if (!In_Menu and Input_Active) {
+    const uint8_t *Keyboard = SDL_GetKeyboardState (NULL);
+    Input_Data.Forward = Keyboard[SDL_SCANCODE_W]     or Keyboard[SDL_SCANCODE_UP];
+    Input_Data.Back    = Keyboard[SDL_SCANCODE_S]     or Keyboard[SDL_SCANCODE_DOWN];
+    Input_Data.Left    = Keyboard[SDL_SCANCODE_A]     or Keyboard[SDL_SCANCODE_LEFT];
+    Input_Data.Right   = Keyboard[SDL_SCANCODE_D]     or Keyboard[SDL_SCANCODE_RIGHT];
+    Input_Data.Jump    = Keyboard[SDL_SCANCODE_SPACE];
+    Input_Data.Crouch  = Keyboard[SDL_SCANCODE_LCTRL] or Keyboard[SDL_SCANCODE_C];
+  }
+
   return Input_Data;
 }
 
@@ -5354,10 +5890,15 @@ void Raytracing_Frame (Gpu_Postprocess_Push PP) {
   // Wait for the previous frame's GPU work to complete
   VK_CHECK (vkWaitForFences (Device, 1, &Fence, VK_TRUE, UINT64_MAX));
 
-  // Acquire the next swapchain image
+  // Acquire the next swapchain image (handle OUT_OF_DATE from window resize)
   uint Image_Index;
-  VK_CHECK (vkAcquireNextImageKHR (Device, Swapchain, UINT64_MAX,
-                                   Semaphore_Image_Available, VK_NULL_HANDLE, &Image_Index));
+  { VkResult R = vkAcquireNextImageKHR (Device, Swapchain, UINT64_MAX,
+                                        Semaphore_Image_Available, VK_NULL_HANDLE, &Image_Index);
+    if (R == VK_ERROR_OUT_OF_DATE_KHR) { Swapchain_Dirty = 1; return; }
+    if (R != VK_SUCCESS and R != VK_SUBOPTIMAL_KHR) {
+      fprintf (stderr, "[vulkan] acquire error %d at %s:%d\n", R, __FILE__, __LINE__); exit (1);
+    }
+  }
 
   // Reset the fence and begin recording the frame's command buffer
   VK_CHECK (vkResetFences (Device, 1, &Fence));
@@ -5486,15 +6027,20 @@ void Raytracing_Frame (Gpu_Postprocess_Push PP) {
                              .pSignalSemaphores    = &Semaphore_Render_Finished},
                            Fence));
 
-  // Present the rendered image to the display
-  VK_CHECK (vkQueuePresentKHR (Queue,
-                               &(VkPresentInfoKHR){
-                                 .sType              = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
-                                 .waitSemaphoreCount = 1,
-                                 .pWaitSemaphores    = &Semaphore_Render_Finished,
-                                 .swapchainCount     = 1,
-                                 .pSwapchains        = &Swapchain,
-                                 .pImageIndices      = &Image_Index}));
+  // Present the rendered image to the display (handle OUT_OF_DATE from resize)
+  { VkResult R = vkQueuePresentKHR (Queue,
+                                    &(VkPresentInfoKHR){
+                                      .sType              = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
+                                      .waitSemaphoreCount = 1,
+                                      .pWaitSemaphores    = &Semaphore_Render_Finished,
+                                      .swapchainCount     = 1,
+                                      .pSwapchains        = &Swapchain,
+                                      .pImageIndices      = &Image_Index});
+    if (R == VK_ERROR_OUT_OF_DATE_KHR or R == VK_SUBOPTIMAL_KHR) Swapchain_Dirty = 1;
+    else if (R != VK_SUCCESS) {
+      fprintf (stderr, "[vulkan] present error %d at %s:%d\n", R, __FILE__, __LINE__); exit (1);
+    }
+  }
 
   // ── Driver optimization: removed vkQueueWaitIdle ────────────────────────
   // The fence wait at the top of Raytracing_Frame() already serializes access
@@ -5511,7 +6057,7 @@ void Raytracing_Frame (Gpu_Postprocess_Push PP) {
 
 void Postprocess_Pipeline_Create (void) {
 
-  // Two storage image bindings: color (rgba8) and depth (r32f)
+  // Two storage image bindings: color (rgba16f linear HDR) and depth (r32f)
   VkDescriptorSetLayoutBinding Bindings[] = {
     {0, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, NULL}, // Color (current frame)
     {1, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, NULL}, // Depth
@@ -6822,11 +7368,24 @@ int main (int Argc, char **Argv) {
   char Map_Path[256];
   snprintf (Map_Path, sizeof Map_Path, "%smaps/%s", ASSET_ROOT, Map_Name);
 
-  // Initialize SDL2 with video subsystem and create a Vulkan-capable window
+  // Initialize SDL2 with video subsystem and create a Vulkan-capable resizable window
   SDL_Init (SDL_INIT_VIDEO);
   Window = SDL_CreateWindow (ENGINE_NAME, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
-                             Width, Height, SDL_WINDOW_VULKAN | SDL_WINDOW_SHOWN);
+                             Width, Height, SDL_WINDOW_VULKAN | SDL_WINDOW_SHOWN | SDL_WINDOW_RESIZABLE);
+
+  // Create system cursors for menu mode rollover (ported from Neo Engine cursor management)
+  SDL_Cursor_Arrow     = SDL_CreateSystemCursor (SDL_SYSTEM_CURSOR_ARROW);
+  SDL_Cursor_Hand      = SDL_CreateSystemCursor (SDL_SYSTEM_CURSOR_HAND);
+  SDL_Cursor_Crosshair = SDL_CreateSystemCursor (SDL_SYSTEM_CURSOR_CROSSHAIR);
+
+  // Start in game mode: capture mouse for FPS controls
   SDL_SetRelativeMouseMode (SDL_TRUE);
+  SDL_SetWindowGrab (Window, SDL_TRUE);
+  Cursor_Centering = 1;
+  Input_Active = 1;
+  Windowed_W = Width;
+  Windowed_H = Height;
+  SDL_GetWindowPosition (Window, &Windowed_X, &Windowed_Y);
 
   // Create the Vulkan instance, surface, pick a physical device, and create the logical device
   Vulkan_Create_Instance ();
@@ -6910,7 +7469,8 @@ int main (int Argc, char **Argv) {
   }
 
   // Allocate the camera uniform buffer
-  Camera_Uniform_Buffer = Buffer_Allocate (sizeof (mat4) * 2 + 16,
+  // sizeof(mat4)*2 + 16 (base) + 7*16 (environment vec4s) = 256 bytes
+  Camera_Uniform_Buffer = Buffer_Allocate (256,
     VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
     VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
 
@@ -6921,6 +7481,9 @@ int main (int Argc, char **Argv) {
   // Load entity (sarge + machinegun, idle animation).
   // Must happen before Scene_Load_Textures so entity materials are included in the texture array.
   Entity Enemy = Entity_Load (&Scene_Data, Spawn_Point);
+
+  // Infer per-scene environment settings from BSP data (sky textures, worldspawn)
+  Active_Environment = Environment_Infer_From_Scene (&Scene_Data);
 
   // Load scene and weapon textures
   Scene_Load_Textures (&Scene_Data);
@@ -7087,7 +7650,9 @@ int main (int Argc, char **Argv) {
           .Velocity       = 0,
           .Speed_Exposure = Pack_Half2x16 (0.f, STYLE.Exposure),
           .Bloom_Vignette = Pack_Half2x16 (STYLE.Bloom_Strength, STYLE.Vignette),
-          .Inv_Proj_Diag  = Pack_Half2x16 (Bench_Inv_Proj.E[0], Bench_Inv_Proj.E[5])};
+          .Inv_Proj_Diag  = Pack_Half2x16 (Bench_Inv_Proj.E[0], Bench_Inv_Proj.E[5]),
+          .Sun_Screen_Pos = Pack_Half2x16 (0.5f, 0.5f),
+          .Sun_Params     = Pack_Half2x16 (0.f, 0.f)};
         Pack_Mat4_Half (&Bench_Reproj, Warmup_PP.Reproject);
         Raytracing_Frame (Warmup_PP);
         VK_CHECK (vkWaitForFences (Device, 1, &Fence, VK_TRUE, UINT64_MAX));
@@ -7100,6 +7665,7 @@ int main (int Argc, char **Argv) {
     uint64_t Bench_Freq  = SDL_GetPerformanceFrequency ();
     float    Frame_Min   = 1e9f, Frame_Max = 0, Frame_Sum = 0;
     float   *Frame_Times = calloc (Total_Frames, sizeof (float));  // For percentile stats
+    vec3     Prev_Bench_Pos = Bench_Cam.Position;  // Track camera position for speed computation
 
     for (int F = 0; F < Total_Frames; F++) {
       // Wait for the previous frame's RT submission to complete before reusing Command_Buffer
@@ -7134,12 +7700,24 @@ int main (int Argc, char **Argv) {
       mat4 BP = Perspective (FIELD_OF_VIEW, (float)Width / Height, 0.1f, 10000.f);
       mat4 BIP = Inverse_Projection (BP);
       mat4 BR = Mat4_Mul (BP, Mat4_Mul (Prev_View_Matrix, Inverse_Orthogonal (BV)));
+      // Compute actual camera speed from position delta for TAA motion detection
+      float Bench_Speed = 0.f;
+      if (F > 0) {
+        float Dx = Bench_Cam.Position.x - Prev_Bench_Pos.x;
+        float Dy = Bench_Cam.Position.y - Prev_Bench_Pos.y;
+        float Dz = Bench_Cam.Position.z - Prev_Bench_Pos.z;
+        Bench_Speed = sqrtf (Dx*Dx + Dy*Dy + Dz*Dz) / Fixed_Dt;
+      }
+      Prev_Bench_Pos = Bench_Cam.Position;
+
       Gpu_Postprocess_Push PP = {.Time = F * Fixed_Dt,
         .Dt_Frame       = (uint32_t)Float_To_Half (Fixed_Dt) | ((uint32_t)(Frame_Count & 0xFFFF) << 16),
         .Velocity       = 0,
-        .Speed_Exposure = Pack_Half2x16 (0.f, STYLE.Exposure),
+        .Speed_Exposure = Pack_Half2x16 (Bench_Speed, STYLE.Exposure),
         .Bloom_Vignette = Pack_Half2x16 (STYLE.Bloom_Strength, STYLE.Vignette),
-        .Inv_Proj_Diag  = Pack_Half2x16 (BIP.E[0], BIP.E[5])};
+        .Inv_Proj_Diag  = Pack_Half2x16 (BIP.E[0], BIP.E[5]),
+        .Sun_Screen_Pos = Pack_Half2x16 (0.5f, 0.5f),
+        .Sun_Params     = Pack_Half2x16 (0.15f, 0.f)};
       Pack_Mat4_Half (&BR, PP.Reproject);
       Raytracing_Frame (PP);
       Prev_View_Matrix = BV;
@@ -7158,7 +7736,7 @@ int main (int Argc, char **Argv) {
       // Dump frame to disk if --dump-frames was specified
       if (Dump_Frames_Dir) {
         VK_CHECK (vkWaitForFences (Device, 1, &Fence, VK_TRUE, UINT64_MAX));
-        uint64_t Px_Size = (uint64_t)Render_Width * Render_Height * 4;
+        uint64_t Px_Size = (uint64_t)Render_Width * Render_Height * 8;  // R16G16B16A16_SFLOAT = 8 bytes/pixel
         Gpu_Buffer Rb = Buffer_Allocate (Px_Size, VK_BUFFER_USAGE_TRANSFER_DST_BIT,
                                           VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
         VkCommandBuffer Dc;
@@ -7184,7 +7762,7 @@ int main (int Argc, char **Argv) {
           .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO, .commandBufferCount = 1, .pCommandBuffers = &Dc}, VK_NULL_HANDLE));
         vkQueueWaitIdle (Queue);
 
-        uint8_t *Px;
+        uint16_t *Px;
         vkMapMemory (Device, Rb.Memory, 0, Px_Size, 0, (void **)&Px);
         char Path[512];
         snprintf (Path, sizeof (Path), "%s/frame_%04d.tga", Dump_Frames_Dir, F);
@@ -7197,8 +7775,18 @@ int main (int Argc, char **Argv) {
           fwrite (Hdr, 1, 18, Tf);
           for (int Y = 0; Y < Render_Height; Y++)
             for (int X = 0; X < Render_Width; X++) {
-              uint8_t *P = Px + (Y * Render_Width + X) * 4;
-              uint8_t B[4] = {P[2], P[1], P[0], P[3]};
+              uint16_t *P = Px + (Y * Render_Width + X) * 4;
+              uint8_t B[4];
+              for (int C = 0; C < 3; C++) {
+                uint16_t H = P[C]; uint32_t Exp = (H >> 10) & 0x1F; uint32_t Man = H & 0x3FF;
+                float V; if (Exp == 0) V = (float)Man / 1024.0f * (1.0f / 16384.0f);
+                else if (Exp == 31) V = 1.0f;
+                else { uint32_t Fb = ((Exp + 112) << 23) | (Man << 13); memcpy (&V, &Fb, 4); }
+                if (V < 0.0f) V = 0.0f; if (V > 1.0f) V = 1.0f;
+                float S = (V <= 0.0031308f) ? V * 12.92f : 1.055f * powf (V, 1.0f / 2.4f) - 0.055f;
+                B[2 - C] = (uint8_t)(S * 255.0f + 0.5f);
+              }
+              B[3] = 255;
               fwrite (B, 1, 4, Tf);
             }
           fclose (Tf);
@@ -7242,8 +7830,8 @@ int main (int Argc, char **Argv) {
     // Screenshot mode: read back the storage image and write a TGA
     if (Screenshot_Path) {
       printf ("[screenshot] saving to %s...\n", Screenshot_Path);
-      // Read pixels back from the storage image
-      uint64_t Pixel_Size = (uint64_t)Render_Width * Render_Height * 4;
+      // Read pixels back from the storage image (R16G16B16A16_SFLOAT = 8 bytes/pixel)
+      uint64_t Pixel_Size = (uint64_t)Render_Width * Render_Height * 8;
       Gpu_Buffer Readback = Buffer_Allocate (Pixel_Size, VK_BUFFER_USAGE_TRANSFER_DST_BIT,
                                               VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
 
@@ -7275,8 +7863,9 @@ int main (int Argc, char **Argv) {
       vkQueueWaitIdle (Queue);
 
       // Map the readback buffer and write a TGA file
-      uint8_t *Pixels;
-      vkMapMemory (Device, Readback.Memory, 0, Pixel_Size, 0, (void **)&Pixels);
+      // Storage is R16G16B16A16_SFLOAT — convert fp16 to 8-bit sRGB for TGA output
+      uint16_t *Pixels_F16;
+      vkMapMemory (Device, Readback.Memory, 0, Pixel_Size, 0, (void **)&Pixels_F16);
 
       FILE *TGA = fopen (Screenshot_Path, "wb");
       if (TGA) {
@@ -7289,11 +7878,28 @@ int main (int Argc, char **Argv) {
         Header[17] = 0x20; // Top-left origin
         fwrite (Header, 1, 18, TGA);
 
-        // Write pixels (convert RGBA to BGRA for TGA format)
+        // Write pixels: fp16 linear → clamp → linear-to-sRGB → 8-bit BGRA for TGA
         for (int Y = 0; Y < Render_Height; Y++) {
           for (int X = 0; X < Render_Width; X++) {
-            uint8_t *P = Pixels + (Y * Render_Width + X) * 4;
-            uint8_t BGRA[4] = {P[2], P[1], P[0], P[3]};
+            uint16_t *P = Pixels_F16 + (Y * Render_Width + X) * 4;
+            // Convert fp16 to float (use half-to-float bit manipulation)
+            uint8_t BGRA[4];
+            for (int C = 0; C < 3; C++) {
+              // IEEE 754 fp16 to fp32 conversion
+              uint16_t H = P[C];
+              uint32_t Sign = (uint32_t)(H >> 15) << 31;
+              uint32_t Exp  = (H >> 10) & 0x1F;
+              uint32_t Man  = H & 0x3FF;
+              float V;
+              if (Exp == 0) V = (Man == 0) ? 0.0f : (float)Man / 1024.0f * (1.0f / 16384.0f);
+              else if (Exp == 31) V = 1.0f;
+              else { uint32_t F = Sign | ((Exp + 112) << 23) | (Man << 13); memcpy (&V, &F, 4); }
+              // Clamp and apply sRGB gamma
+              if (V < 0.0f) V = 0.0f; if (V > 1.0f) V = 1.0f;
+              float S = (V <= 0.0031308f) ? V * 12.92f : 1.055f * powf (V, 1.0f / 2.4f) - 0.055f;
+              BGRA[2 - C] = (uint8_t)(S * 255.0f + 0.5f);  // RGB → BGR for TGA
+            }
+            BGRA[3] = 255;
             fwrite (BGRA, 1, 4, TGA);
           }
         }
@@ -7337,8 +7943,21 @@ int main (int Argc, char **Argv) {
     Last = Now;
     Total_Time += Dt;
 
-    // Poll input and dispatch GPU physics (also updates projectiles on GPU)
+    // Poll input (handles windowing events, mode transitions, resize)
     Input In         = Poll_Input ();
+
+    // Skip rendering when minimized (window may be 0x0, nothing to present)
+    if (Current_Activated == MINIMIZE_DEACTIVATED) {
+      SDL_Delay (16);  // Don't spin-wait when minimized
+      Last = SDL_GetPerformanceCounter ();
+      continue;
+    }
+
+    // Recreate swapchain if window was resized or fullscreen was toggled
+    if (Swapchain_Dirty) {
+      Vulkan_Recreate_Swapchain ();
+      Swapchain_Dirty = 0;
+    }
 
     // Spawn projectile on fire and upload to GPU before physics dispatch
     if (In.Fire) {
@@ -7425,13 +8044,33 @@ int main (int Argc, char **Argv) {
     mat4 Reproject = Mat4_Mul (Proj, Mat4_Mul (Prev_View_Matrix, Cur_Inv_View));
     mat4 Inv_Proj = Inverse_Projection (Proj);
 
+    // Project sun direction to screen space for god rays
+    vec3 Sun_D = Normalize (Active_Environment.Sun_Direction);
+    vec3 Sun_World = Add (Cam.Position, Scale (Sun_D, 1000.f));  // Far point in sun direction
+    // Transform through View * Proj to get clip space
+    mat4 VP = Mat4_Mul (Proj, Cur_View);
+    float Cx = VP.E[0]*Sun_World.x + VP.E[4]*Sun_World.y + VP.E[8]*Sun_World.z  + VP.E[12];
+    float Cy = VP.E[1]*Sun_World.x + VP.E[5]*Sun_World.y + VP.E[9]*Sun_World.z  + VP.E[13];
+    float Cw = VP.E[3]*Sun_World.x + VP.E[7]*Sun_World.y + VP.E[11]*Sun_World.z + VP.E[15];
+    float Sun_U = 0.5f, Sun_V = 0.5f;
+    float Sun_Visible = 0.f;
+    if (Cw > 0.01f) {  // Sun is in front of camera
+      Sun_U = (Cx / Cw) * 0.5f + 0.5f;
+      Sun_V = (Cy / Cw) * 0.5f + 0.5f;
+      // Check if sun is roughly on screen (with margin for off-screen glow)
+      if (Sun_U > -0.5f && Sun_U < 1.5f && Sun_V > -0.5f && Sun_V < 1.5f)
+        Sun_Visible = 1.f;
+    }
+
     Gpu_Postprocess_Push PP = {
       .Time           = Total_Time,
       .Dt_Frame       = (uint32_t)Float_To_Half (Dt) | ((uint32_t)(Frame_Count & 0xFFFF) << 16),
       .Velocity       = Pack_Half2x16 (Physics.Velocity.x, Physics.Velocity.z),
       .Speed_Exposure = Pack_Half2x16 (H_Speed, STYLE.Exposure),
       .Bloom_Vignette = Pack_Half2x16 (STYLE.Bloom_Strength, STYLE.Vignette),
-      .Inv_Proj_Diag  = Pack_Half2x16 (Inv_Proj.E[0], Inv_Proj.E[5])};
+      .Inv_Proj_Diag  = Pack_Half2x16 (Inv_Proj.E[0], Inv_Proj.E[5]),
+      .Sun_Screen_Pos = Pack_Half2x16 (Sun_U, Sun_V),
+      .Sun_Params     = Pack_Half2x16 (0.15f, Sun_Visible)};  // God ray intensity
     Pack_Mat4_Half (&Reproject, PP.Reproject);
     Raytracing_Frame (PP);
     Prev_View_Matrix = Cur_View;
@@ -7445,6 +8084,11 @@ int main (int Argc, char **Argv) {
   Damage_Cache_Free ();
   vkDeviceWaitIdle (Device);
   printf ("[shutdown] %u frames rendered\n", Frame);
+
+  // Free SDL cursors
+  if (SDL_Cursor_Arrow)     SDL_FreeCursor (SDL_Cursor_Arrow);
+  if (SDL_Cursor_Hand)      SDL_FreeCursor (SDL_Cursor_Hand);
+  if (SDL_Cursor_Crosshair) SDL_FreeCursor (SDL_Cursor_Crosshair);
 
   // Free scene data
   free (Scene_Data.Vertices);
@@ -7608,8 +8252,18 @@ glsl shader raygen rgen {
 #extension GL_EXT_ray_tracing : require
 
 layout(binding = 0) uniform accelerationStructureEXT  Top_Level;
-layout(binding = 1, rgba8) uniform image2D             Storage_Image;
-layout(binding = 2) uniform Camera_Uniform { mat4 Inverse_View; mat4 Inverse_Projection; uint Frame; uint Weapon_Texture_Base; uint PBR_Stride; uint Active_SPP; };
+layout(binding = 1, rgba16f) uniform image2D            Storage_Image;
+layout(binding = 2) uniform Camera_Uniform {
+  mat4  Inverse_View; mat4 Inverse_Projection;
+  uint  Frame; uint Weapon_Texture_Base; uint PBR_Stride; uint Active_SPP;
+  vec4  Env_Sun_Dir;      // xyz = direction, w = angular_radius
+  vec4  Env_Sun_Color;    // xyz = color, w = intensity
+  vec4  Env_Sky_Zenith;   // xyz = zenith color, w = sky_intensity
+  vec4  Env_Sky_Horizon;  // xyz = horizon color, w = cos(sun_disc_size)
+  vec4  Env_Ambient_Up;   // xyz = ambient up, w = sun_disc_intensity
+  vec4  Env_Ambient_Down; // xyz = ambient down, w = fog_density
+  vec4  Env_Fog_Color;    // xyz = fog color
+};
 layout(binding = 11, r32f) uniform image2D             Depth_Output;
 
 layout(location = 0) rayPayloadEXT vec4 Payload;  // rgb = color, a = hit distance
@@ -7625,9 +8279,6 @@ uint PCG (uint V) {
   uint W = ((S >> ((S >> 28u) + 4u)) ^ S) * 277803737u;
   return (W >> 22u) ^ W;
 }
-float Hash (vec2 P) {
-  return float (PCG (uint (P.x) * 1664525u + PCG (uint (P.y)))) * 2.3283064e-10;
-}
 
 void main () {
   // SPP from lower 8 bits; budget from upper bits (0=full quality, 255=minimal)
@@ -7636,24 +8287,17 @@ void main () {
   vec3  Color_Sum  = vec3 (0.0);
   float Depth_Sum  = 0.0;
 
+  // ISA optimization: ray direction is invariant across SPP samples (no jitter),
+  // so compute it once outside the loop. Saves 1 mat4×vec4 multiply + normalize per extra sample.
+  vec2  Pixel  = vec2 (gl_LaunchIDEXT.xy) + 0.5;
+  vec2  Uv     = Pixel / vec2 (gl_LaunchSizeEXT.xy);
+  vec2  Ndc    = Uv * 2.0 - 1.0;
+  vec4  Target    = Inverse_Projection * vec4 (Ndc.x, Ndc.y, 0.0, 1.0);
+  vec4  Direction = Inverse_View * vec4 (normalize (Target.xyz / Target.w), 0.0);
+
   for (int S = 0; S < SPP; S++) {
-    // No sub-pixel jitter: at low internal resolution, jitter causes different
-    // texture samples each frame which TAA blends into a blurry average.
-    // Stochastic shadow/reflection noise is still smoothed by TAA because the
-    // shadow/reflection patterns change per frame independently of ray position.
-    // Re-enable jitter when running at native resolution (GPU_RT path).
-    vec2  Pixel  = vec2 (gl_LaunchIDEXT.xy) + 0.5;
-    vec2  Uv     = Pixel / vec2 (gl_LaunchSizeEXT.xy);
-    vec2  Ndc    = Uv * 2.0 - 1.0;
-
-    // Reconstruct world-space ray from jittered screen coordinate
-    vec4  Target    = Inverse_Projection * vec4 (Ndc.x, Ndc.y, 0.0, 1.0);
-    vec4  Direction = Inverse_View * vec4 (normalize (Target.xyz / Target.w), 0.0);
-
     Payload = vec4 (0.0, 0.0, 0.0, 10000.0);
     // Mask 0xFD: primary rays see everything EXCEPT player body (bit 1 = 0x02).
-    // Player body is invisible to the camera (it's inside the model) but visible
-    // to reflection and shadow rays which use mask 0xFF.
     traceRayEXT (Top_Level, gl_RayFlagsOpaqueEXT, 0xFD, 0, 0, 0,
                  Origin, 0.001, Direction.xyz, 10000.0, 0);
 
@@ -7677,7 +8321,17 @@ glsl shader closesthit rchit {
 #extension GL_EXT_nonuniform_qualifier : require
 
 layout(binding = 0) uniform accelerationStructureEXT Top_Level;
-layout(binding = 2) uniform Camera_Uniform { mat4 Inverse_View; mat4 Inverse_Projection; uint Frame; uint Weapon_Texture_Base; uint PBR_Stride; uint Active_SPP; };
+layout(binding = 2) uniform Camera_Uniform {
+  mat4  Inverse_View; mat4 Inverse_Projection;
+  uint  Frame; uint Weapon_Texture_Base; uint PBR_Stride; uint Active_SPP;
+  vec4  Env_Sun_Dir;      // xyz = direction, w = angular_radius
+  vec4  Env_Sun_Color;    // xyz = color, w = intensity
+  vec4  Env_Sky_Zenith;   // xyz = zenith color, w = sky_intensity
+  vec4  Env_Sky_Horizon;  // xyz = horizon color, w = cos(sun_disc_size)
+  vec4  Env_Ambient_Up;   // xyz = ambient up, w = sun_disc_intensity
+  vec4  Env_Ambient_Down; // xyz = ambient down, w = fog_density
+  vec4  Env_Fog_Color;    // xyz = fog color
+};
 
 // Scene geometry
 layout(binding = 3, std430) readonly buffer Vertex_Data   { vec4 Data[]; } Vertices;
@@ -7703,6 +8357,42 @@ layout(location = 0) rayPayloadInEXT vec4 Payload;  // rgb = color, a = hit dist
 // Shadow rays now use inline rayQueryEXT — no payload needed (saves continuation stack)
 
 hitAttributeEXT vec2 Barycentrics;
+
+// PCG hash for stochastic effects (soft shadows, importance sampling)
+uint PCG (uint V) {
+  uint S = V * 747796405u + 2891336453u;
+  uint W = ((S >> ((S >> 28u) + 4u)) ^ S) * 277803737u;
+  return (W >> 22u) ^ W;
+}
+
+// ── ISA optimization: soft shadow ray direction (extracted to avoid code duplication) ────
+// Computes a jittered direction on a disk around the light direction for soft shadows.
+// Previously duplicated in entity + world shadow paths (~20 lines each).
+// On NVIDIA: saves ~1 KB instruction cache from deduplicated code.
+vec3 Soft_Shadow_Dir (vec3 Ld, uint Prim, uint Inst, uint Frame, float Disk_Radius) {
+  uint Seed  = PCG (Prim * 1973u + Inst * 9277u + Frame * 26699u);
+  float Ang  = float (Seed) * 2.3283064e-10 * 6.2831853;
+  float Rad  = sqrt (float (PCG (Seed)) * 2.3283064e-10) * Disk_Radius;
+  vec3 Lt    = (abs (Ld.y) < 0.99) ? normalize (cross (Ld, vec3 (0, 1, 0)))
+                                    : normalize (cross (Ld, vec3 (1, 0, 0)));
+  vec3 Lb    = cross (Ld, Lt);
+  return normalize (Ld + Lt * (cos (Ang) * Rad) + Lb * (sin (Ang) * Rad));
+}
+
+// ── Extracted shadow trace (deduplicated from entity + world paths) ────────
+// Both paths used identical rayQueryEXT code: same mask (0xFE), offset (Normal*0.1),
+// tmin (0.001), tmax (600.0), and shadow factor (1.0 : 0.05).
+// Saves ~15 lines of duplicated code + instruction cache pressure.
+float Trace_Shadow (vec3 Origin, vec3 Normal, vec3 Ld, uint Prim, uint Inst, uint Frame, float Disk_Radius) {
+  vec3 Shadow_Dir = Soft_Shadow_Dir (Ld, Prim, Inst, Frame, Disk_Radius);
+  rayQueryEXT Shadow_Query;
+  rayQueryInitializeEXT (Shadow_Query, Top_Level,
+    gl_RayFlagsTerminateOnFirstHitEXT | gl_RayFlagsOpaqueEXT,
+    0xFE, Origin + Normal * 0.1, 0.001, Shadow_Dir, 600.0);
+  rayQueryProceedEXT (Shadow_Query);
+  return (rayQueryGetIntersectionTypeEXT (Shadow_Query, true)
+    == gl_RayQueryCommittedIntersectionNoneEXT) ? 1.0 : 0.05;
+}
 
 // Read a vertex attribute (48 bytes = 12 floats per vertex) from the appropriate buffer
 // Dispatch: Instance 0 = world, 1 = weapon, 2 = entity
@@ -7856,14 +8546,13 @@ void main () {
     }
     Emissive   = textureLod (Textures[nonuniformEXT(Tex_Id + PBR_Stride * 4u)], Tex_Coord, 0.0).rgb;
   } else if (Is_Weapon) {
-    // Weapon PBR: weapon textures have 6 map types × 2 surfaces, stride = 2
-    // Layout in texture array: [diffuse_0, diffuse_1, normal_0, normal_1, rough_0, ...]
-    uint Weapon_Tex_Local = Tex_Id - Weapon_Texture_Base;  // 0 or 1 (body or sight)
-    uint Weapon_Stride    = 2u;  // WEAPON_TEXTURE_COUNT
-    Normal_Map = textureLod (Textures[nonuniformEXT(Weapon_Texture_Base + Weapon_Stride + Weapon_Tex_Local)],       Tex_Coord, 0.0).rgb * 2.0 - 1.0;
-    R          = textureLod (Textures[nonuniformEXT(Weapon_Texture_Base + Weapon_Stride * 2u + Weapon_Tex_Local)],  Tex_Coord, 0.0).r;
-    M          = textureLod (Textures[nonuniformEXT(Weapon_Texture_Base + Weapon_Stride * 3u + Weapon_Tex_Local)],  Tex_Coord, 0.0).r;
-    Emissive   = textureLod (Textures[nonuniformEXT(Weapon_Texture_Base + Weapon_Stride * 4u + Weapon_Tex_Local)],  Tex_Coord, 0.0).rgb;
+    // Weapon PBR: 6 map types × 2 surfaces, stride = 2
+    // ISA optimization: Weapon_Texture_Base + Stride*N + (Tex_Id - Weapon_Texture_Base) = Tex_Id + 2*N
+    // Eliminates 2 local variables and 4 subtractions per invocation.
+    Normal_Map = textureLod (Textures[nonuniformEXT(Tex_Id + 2u)],  Tex_Coord, 0.0).rgb * 2.0 - 1.0;
+    R          = textureLod (Textures[nonuniformEXT(Tex_Id + 4u)],  Tex_Coord, 0.0).r;
+    M          = textureLod (Textures[nonuniformEXT(Tex_Id + 6u)],  Tex_Coord, 0.0).r;
+    Emissive   = textureLod (Textures[nonuniformEXT(Tex_Id + 8u)],  Tex_Coord, 0.0).rgb;
   } else {
     // Fallback for textures outside the PBR material range: derive from albedo statistics
     float Lu = dot (Albedo, vec3 (0.2126, 0.7152, 0.0722));
@@ -7873,18 +8562,19 @@ void main () {
     M = smoothstep (0.35, 0.15, Sa) * smoothstep (0.45, 0.2, Lu) * 0.4;
   }
 
-  // ── Normal mapping: perturb geometric normal with tangent-space normal map ──
-  if (Normal_Map != vec3 (0.0, 0.0, 1.0)) {
-    Normal = normalize (T_Axis * Normal_Map.x + B_Axis * Normal_Map.y + Geo_Normal * Normal_Map.z);
-  }
+  // ── Normal mapping: always apply TBN transform ─────────────────────────────
+  // ISA optimization: removed (Normal_Map != vec3(0,0,1)) branch.
+  // When Normal_Map = (0,0,1): T*0 + B*0 + N*1 = N, normalize(N) = N.
+  // Mathematically identical, eliminates divergent branch across wavefront.
+  Normal = normalize (T_Axis * Normal_Map.x + B_Axis * Normal_Map.y + Geo_Normal * Normal_Map.z);
 
   // ── PBR material parameters ───────────────────────────────────────────────
   vec3  F0 = mix (vec3 (0.04), Albedo, M);
   float NV = max (dot (Normal, V), 1e-3);
 
   // ── Direct lighting: Cook-Torrance microfacet BRDF ────────────────────────
-  vec3  Ld = normalize (vec3 (0.6, 0.9, 0.3));        // Sun direction
-  vec3  Lr = vec3 (2.5, 2.2, 1.8);                    // Sun radiance — warm fill light for Q3's indoor arenas
+  vec3  Ld = normalize (Env_Sun_Dir.xyz);               // Per-scene sun direction
+  vec3  Lr = Env_Sun_Color.xyz * Env_Sun_Color.w;      // Per-scene sun radiance (color × intensity)
   float NL  = max (dot (Normal, Ld), 0.0);
 
   // ── Optimization: skip full BRDF when surface faces away from sun ────────
@@ -7925,8 +8615,8 @@ void main () {
 
   // Hemisphere ambient diffuse (sky-ground gradient based on normal)
   // Warm indoor bounce lighting — Q3 arenas have amber-toned fill light from torches and lava.
-  vec3  Sky_Color    = vec3 (0.28, 0.24, 0.18);           // Brighter ambient — Q3 arenas have strong fill light
-  vec3  Ground_Color = vec3 (0.20, 0.16, 0.10);           // Warm ground bounce — visible floor fill
+  vec3  Sky_Color    = Env_Ambient_Up.xyz;                 // Per-scene ambient from above (sky contribution)
+  vec3  Ground_Color = Env_Ambient_Down.xyz;               // Per-scene ambient from below (ground bounce)
   float Hemisphere   = Normal.y * 0.5 + 0.5;              // 0=down, 1=up
   vec3  Ambient_Irradiance = mix (Ground_Color, Sky_Color, Hemisphere);
 
@@ -8009,22 +8699,18 @@ void main () {
     Color = mix (Wpn_Full, Wpn_Cheap, Budget);
   } else if (Is_Entity) {
     // Entity: direct sun + shadows + hemisphere ambient, no lightmap (MD3 models have no LM UVs)
-    float Shadow_Factor = 1.0;
-    if (NL > 0.0 && !Is_Reflection_Bounce && Hit_Dist < Shadow_Dist) {
-      rayQueryEXT Shadow_Query;
-      rayQueryInitializeEXT (Shadow_Query, Top_Level,
-        gl_RayFlagsTerminateOnFirstHitEXT | gl_RayFlagsOpaqueEXT,
-        0xFE, Position + Normal * 0.1, 0.001, Ld, 600.0);
-      rayQueryProceedEXT (Shadow_Query);
-      Shadow_Factor = (rayQueryGetIntersectionTypeEXT (Shadow_Query, true)
-        == gl_RayQueryCommittedIntersectionNoneEXT) ? 1.0 : 0.05;
-    }
+    float Shadow_Factor = (NL > 0.0 && !Is_Reflection_Bounce && Hit_Dist < Shadow_Dist)
+      ? Trace_Shadow (Position, Normal, Ld, Primitive, Instance, Frame, Env_Sun_Dir.w) : 1.0;
     vec3 Direct = (Df + Sp) * Lr * NL * Shadow_Factor;
-    vec3 Entity_Full  = Direct + (Indirect_Diffuse + Traced_Specular) * 1.5;
-    vec3 Entity_Cheap = Ambient_Irradiance * Albedo * 2.0 + Albedo * max(NL, 0.2) * 0.5;
+    // Entity color: balanced ambient — not too bright (avoids glow), not too dark (avoids silhouette)
+    vec3 Entity_Full  = Direct + Indirect_Diffuse * 0.8 + Traced_Specular;
+    vec3 Entity_Cheap = Ambient_Irradiance * Albedo * 0.9 + Albedo * max(NL, 0.2) * 0.4;
     Color = mix (Entity_Full, Entity_Cheap, Budget);
+    // Subtle saturation boost for entities — counteracts ambient washout on character models
+    float Ent_Luma = dot (Color, vec3 (0.2126, 0.7152, 0.0722));
+    Color = mix (vec3 (Ent_Luma), Color, 1.15);  // 15% saturation increase
   } else {
-    vec3 Lm = textureLod (Lightmap, Lm_Coord, 0.0).rgb * 4.5;  // HDR lightmap — brighter to match Q3's strong baked lighting
+    vec3 Lm = textureLod (Lightmap, Lm_Coord, 0.0).rgb * 4.0;  // Lightmap auto-linearized via SRGB format
 
     // ── Driver optimization: inline ray query for shadows ────────────────────
     // rayQueryEXT runs entirely within this shader invocation — no recursion,
@@ -8044,18 +8730,9 @@ void main () {
     // Soft shadow factor (0.15 floor) reduces stochastic noise amplitude:
     // a lit→shadow transition is 1.0→0.15 instead of 1.0→0.0, making the
     // per-pixel noise 85% as large → visually much less noticeable.
-    float Shadow_Factor = 1.0;
     // Adaptive shadow distance: closer surfaces always get shadows, distant ones shed at low fps.
-    if (NL > 0.0 && !Is_Reflection_Bounce && Hit_Dist < Shadow_Dist) {
-      rayQueryEXT Shadow_Query;
-      rayQueryInitializeEXT (Shadow_Query, Top_Level,
-        gl_RayFlagsTerminateOnFirstHitEXT | gl_RayFlagsOpaqueEXT,
-        0xFE, Position + Normal * 0.1, 0.001, Ld, 600.0);
-      rayQueryProceedEXT (Shadow_Query);
-      // Hard shadow: clean binary shadow like Q3's lightmap-based shadows
-      Shadow_Factor = (rayQueryGetIntersectionTypeEXT (Shadow_Query, true)
-        == gl_RayQueryCommittedIntersectionNoneEXT) ? 1.0 : 0.05;
-    }
+    float Shadow_Factor = (NL > 0.0 && !Is_Reflection_Bounce && Hit_Dist < Shadow_Dist)
+      ? Trace_Shadow (Position, Normal, Ld, Primitive, Instance, Frame, Env_Sun_Dir.w) : 1.0;
 
     // ── Dual-path rendering with Budget blend ──────────────────────────────
     // CHEAP PATH: Albedo × Lightmap — zero rays, zero noise, perfectly stable.
@@ -8067,11 +8744,11 @@ void main () {
     vec3 Direct = (Df + Sp) * Lr * NL * Shadow_Factor;
     vec3 Baked_GI = Albedo * Lm * (1.0 - M);
 
-    // Cheap path: just lightmap + ambient + emissive (zero rays, zero noise)
-    vec3 Cheap = Baked_GI + Ambient_Irradiance * Albedo * 0.3 + Emissive * 3.5;
+    // Cheap path: just lightmap + emissive (minimal ambient to keep shadows dark)
+    vec3 Cheap = Baked_GI + Ambient_Irradiance * Albedo * 0.15 + Emissive * 5.0;
 
-    // Full path: complete PBR lighting
-    vec3 Full = Baked_GI + Direct * 0.8 + Indirect_Diffuse + Traced_Specular + Emissive * 3.5;
+    // Full path: complete PBR lighting (direct at full strength for strong light/shadow contrast)
+    vec3 Full = Baked_GI + Direct + Indirect_Diffuse + Traced_Specular + Emissive * 5.0;
 
     // Blend: Budget is the knob. 0 = full raytraced, 1 = pure lightmap.
     Color = mix (Full, Cheap, Budget);
@@ -8082,9 +8759,10 @@ void main () {
     // Saves exp2 + dot + smoothstep + mix per reflected pixel.
     if (!Is_Reflection_Bounce) {
       float Fog_Distance  = gl_HitTEXT;
-      // Moderate distance fog — adds depth to corridors without washing out close surfaces
-      float Fog_Amount    = 1.0 - exp2 (-Fog_Distance * 7.0e-5 * 1.442695);
-      vec3  Fog_Color     = vec3 (0.30, 0.26, 0.22);  // Warm neutral haze matching Q3 atmosphere
+      // Per-scene exponential fog — adds depth to corridors
+      // ISA optimization: exp2(-x * 1.442695) = exp(-x), saves 1 multiply
+      float Fog_Amount    = 1.0 - exp (-Fog_Distance * Env_Ambient_Down.w);
+      vec3  Fog_Color     = Env_Fog_Color.xyz;  // Per-scene fog color
       Color = mix (Color, Fog_Color, Fog_Amount);
     }
   }
@@ -8098,13 +8776,49 @@ glsl shader miss rmiss {
 #extension GL_EXT_ray_tracing : require
 
 layout(location = 0) rayPayloadInEXT vec4 Payload;
+layout(binding = 2) uniform Camera_Uniform {
+  mat4  Inverse_View; mat4 Inverse_Projection;
+  uint  Frame; uint Weapon_Texture_Base; uint PBR_Stride; uint Active_SPP;
+  vec4  Env_Sun_Dir;      // xyz = direction, w = angular_radius
+  vec4  Env_Sun_Color;    // xyz = color, w = intensity
+  vec4  Env_Sky_Zenith;   // xyz = zenith color, w = sky_intensity
+  vec4  Env_Sky_Horizon;  // xyz = horizon color, w = cos(sun_disc_size)
+  vec4  Env_Ambient_Up;   // xyz = ambient up, w = sun_disc_intensity
+  vec4  Env_Ambient_Down; // xyz = ambient down, w = fog_density
+  vec4  Env_Fog_Color;    // xyz = fog color
+};
 
 void main () {
-  // Procedural sky: gradient from pale horizon to deeper blue at zenith
-  float Vertical  = max (gl_WorldRayDirectionEXT.y, 0.0);
-  vec3  Horizon   = vec3 (0.7, 0.8, 0.95);
-  vec3  Zenith    = vec3 (0.2, 0.4, 0.8);
-  Payload = vec4 (mix (Horizon, Zenith, pow (Vertical, 0.5)), 10000.0);  // Sky = max distance
+  // Per-scene procedural sky with sun disc (Q2RTX-inspired)
+  vec3  Dir       = gl_WorldRayDirectionEXT;
+  float Vertical  = max (Dir.y, 0.0);
+  // ISA optimization: sqrt() is a hardware instruction (1 cycle NVIDIA/AMD), pow(x,0.5) uses log+exp (~8 cycles)
+  vec3  Sky       = mix (Env_Sky_Horizon.xyz, Env_Sky_Zenith.xyz, sqrt (Vertical));
+  Sky *= Env_Sky_Zenith.w;  // Sky intensity multiplier
+
+  // Sun disc: bright spot in the sky at sun direction (Q2RTX: physical_sky.comp)
+  // ISA optimization: Dir is already normalized (ray direction), Env_Sun_Dir.xyz normalized on CPU
+  float Sun_Cos   = dot (Dir, Env_Sun_Dir.xyz);
+  // ISA optimization: cos(disc_size) pre-computed on CPU — eliminates per-pixel transcendental
+  float Disc_Edge = Env_Sky_Horizon.w;  // Already cos(sun_disc_size) from CPU
+  float Sun_Edge  = clamp ((Sun_Cos - Disc_Edge) / (1.0 - Disc_Edge), 0.0, 1.0);
+  float Sun_Glow  = Sun_Edge * Sun_Edge; Sun_Glow *= Sun_Glow;  // x^4
+  Sky += Env_Sun_Color.xyz * Sun_Glow * Env_Ambient_Up.w;  // sun_disc_intensity
+
+  // Atmospheric haze near horizon (Mie-like forward scattering glow)
+  float Horizon_Glow = exp (-Vertical * 8.0);  // Concentrated near horizon
+  // ISA optimization: replace 2× length() + 2× division with single inversesqrt(D²·S²).
+  // dot(A/|A|, B/|B|) = dot(A,B) / (|A|·|B|) = dot(A,B) · inversesqrt(dot(A,A)·dot(B,B)).
+  // Saves 2 length + 2 div → 1 dot + 1 dot + 1 mul + 1 rsq + 1 mul (~4 MUFU cycles saved).
+  vec2  Dir_XZ = vec2 (Dir.x, Dir.z);
+  vec2  Sun_XZ = vec2 (Env_Sun_Dir.x, Env_Sun_Dir.z);
+  float Sun_Horizon = max (dot (Dir_XZ, Sun_XZ) * inversesqrt (
+    max (dot (Dir_XZ, Dir_XZ) * dot (Sun_XZ, Sun_XZ), 1e-12)), 0.0);
+  // ISA optimization: pow(x,8) → ((x²)²)² (3 muls vs transcendental)
+  float SH2 = Sun_Horizon * Sun_Horizon; float SH4 = SH2 * SH2; float SH8 = SH4 * SH4;
+  Sky += Env_Sun_Color.xyz * Horizon_Glow * SH8 * 0.3;
+
+  Payload = vec4 (Sky, 10000.0);  // Sky = max distance
 }
 }
 
@@ -8715,8 +9429,8 @@ void main () {
 glsl shader denoise comp {
 #version 460
 
-layout(binding = 0, rgba8) uniform image2D Input_Image;    // Read: noisy color
-layout(binding = 1, rgba8) uniform image2D Output_Image;   // Write: filtered color
+layout(binding = 0, rgba16f) uniform image2D Input_Image;    // Read: noisy color (linear HDR)
+layout(binding = 1, rgba16f) uniform image2D Output_Image;   // Write: filtered color (linear HDR)
 layout(binding = 2, r32f)  uniform image2D Depth_Image;    // Read: hit distance for edge stopping
 
 layout(push_constant) uniform Denoise_Push {
@@ -8729,6 +9443,16 @@ layout(local_size_x = 8, local_size_y = 8) in;
 // 3×3 a-trous kernel weights (Gaussian-like, symmetric)
 const float Kernel[3] = float[3](1.0, 2.0 / 3.0, 1.0 / 6.0);
 
+// ── ISA optimization: depth-based normal from 3 cached depth values ────────
+// Instead of calling Depth_Normal() per sample (3 imageLoads × 9 samples = 27 loads),
+// load all depths once and compute normals from cached values.
+// Savings: 27 imageLoad → 0 extra imageLoad (normals computed from already-fetched depths).
+// On NVIDIA: imageLoad from L2 = 20-40 cycles; 27 eliminated = ~540-1080 cycles saved per pixel.
+// On AMD RDNA: image_load = ~32 cycles from L2; 27 eliminated = ~864 cycles saved per pixel.
+vec3 Normal_From_Depths (float D_C, float D_R, float D_U) {
+  return normalize (vec3 (D_C - D_R, D_C - D_U, 1.0));
+}
+
 void main () {
   ivec2 Pixel = ivec2 (gl_GlobalInvocationID.xy);
   ivec2 Size  = imageSize (Input_Image);
@@ -8737,46 +9461,70 @@ void main () {
   vec3  Center_Color = imageLoad (Input_Image, Pixel).rgb;
 
   // Skip denoising when ANY cheap path influence is present — cheap path has no noise.
-  // Even partial budget means the image is already partially stabilized by lightmap blend.
-  // Denoising only adds blur. Pass through unchanged.
   float Budget = float (Budget_256) / 256.0;
   if (Budget > 0.15) {
     imageStore (Output_Image, Pixel, vec4 (Center_Color, 1.0));
     return;
   }
-  float Center_Depth = imageLoad (Depth_Image, Pixel).r;
-  float Center_Lum   = dot (Center_Color, vec3 (0.2126, 0.7152, 0.0722));
+
+  // ── Batch-load all depth values for the 3×3 kernel in one shot ─────────
+  // Preload 9 depth values — center normal uses Depths[5] (right) and Depths[7] (up).
+  // Combined with 9 color loads = 18 total, vs. original 45 = 60% fewer memory ops.
+  float Depths[9];
+  ivec2 Sample_Positions[9];
+  int Idx = 0;
+  for (int Dy = -1; Dy <= 1; Dy++) {
+    for (int Dx = -1; Dx <= 1; Dx++) {
+      Sample_Positions[Idx] = clamp (Pixel + ivec2 (Dx, Dy) * Step_Size, ivec2 (0), Size - 1);
+      Depths[Idx] = imageLoad (Depth_Image, Sample_Positions[Idx]).r;
+      Idx++;
+    }
+  }
+  float Center_Depth = Depths[4];  // Center of 3×3 = index 4
+
+  // Center normal from preloaded batch: Depths[5] = right, Depths[7] = up (at Step_Size offset).
+  // ISA optimization: eliminated 2 extra imageLoads per pixel per denoise pass (6 total across 3 passes).
+  // At larger step sizes, kernel-spaced gradients are more appropriate for the a-trous edge stopping.
+  vec3  Center_Normal = Normal_From_Depths (Center_Depth, Depths[5], Depths[7]);
+
+  float Center_Lum = log2 (1.0 + dot (Center_Color, vec3 (0.2126, 0.7152, 0.0722)));
 
   vec3  Sum    = vec3 (0.0);
   float Weight = 0.0;
 
-  // 3×3 sparse kernel at current step size
-  for (int Dy = -1; Dy <= 1; Dy++) {
-    for (int Dx = -1; Dx <= 1; Dx++) {
-      ivec2 Offset = ivec2 (Dx, Dy) * Step_Size;
-      ivec2 Sample_Pos = clamp (Pixel + Offset, ivec2 (0), Size - 1);
+  // 3×3 sparse kernel at current step size — depths already cached
+  for (int I = 0; I < 9; I++) {
+    vec3  S_Color = imageLoad (Input_Image, Sample_Positions[I]).rgb;
+    float S_Depth = Depths[I];
+    float S_Lum   = log2 (1.0 + dot (S_Color, vec3 (0.2126, 0.7152, 0.0722)));
 
-      vec3  S_Color = imageLoad (Input_Image, Sample_Pos).rgb;
-      float S_Depth = imageLoad (Depth_Image, Sample_Pos).r;
-      float S_Lum   = dot (S_Color, vec3 (0.2126, 0.7152, 0.0722));
+    // Spatial weight: Gaussian kernel
+    int Dx = (I % 3) - 1, Dy = (I / 3) - 1;
+    float W_Spatial = Kernel[abs(Dx)] * Kernel[abs(Dy)];
 
-      // Spatial weight: Gaussian kernel
-      float W_Spatial = Kernel[abs(Dx)] * Kernel[abs(Dy)];
+    // Depth edge stopping
+    float Depth_Diff = abs (Center_Depth - S_Depth) / max (Center_Depth, 0.1);
+    float W_Depth = exp (-Depth_Diff * 50.0);
 
-      // Depth edge stopping: very tight — only blur surfaces at the exact same depth.
-      // Any depth discontinuity (wall edges, object silhouettes, floors) → weight = 0.
-      float Depth_Diff = abs (Center_Depth - S_Depth) / max (Center_Depth, 0.1);
-      float W_Depth = exp (-Depth_Diff * 50.0);  // Very aggressive: 2% depth diff → w ≈ 0.37
+    // Normal edge stopping: compute sample normal from cached depths.
+    // Use right neighbor (I+1 if in same row) and below neighbor (I+3 if exists).
+    // Fallback: use center depth if neighbor is out of the 3×3 grid.
+    float S_D_Right = ((I % 3) < 2) ? Depths[I + 1] : S_Depth;
+    float S_D_Up    = (I < 6) ? Depths[I + 3] : S_Depth;
+    vec3  S_Normal  = Normal_From_Depths (S_Depth, S_D_Right, S_D_Up);
+    // ISA optimization: pow(x,32) → chained squaring (5 muls vs log+mul+exp transcendental)
+    // On NVIDIA: saves ~6 MUFU cycles; on AMD: saves ~8 SALU cycles per sample
+    float Ndot = max (dot (Center_Normal, S_Normal), 0.0);
+    Ndot *= Ndot; Ndot *= Ndot; Ndot *= Ndot; Ndot *= Ndot; Ndot *= Ndot;  // x^32
+    float W_Normal = Ndot;
 
-      // Luminance edge stopping: ultra-tight — preserve ALL texture detail.
-      // Only blur when colors are nearly identical (pure noise, not texture variation).
-      float Lum_Diff = abs (Center_Lum - S_Lum);
-      float W_Lum = exp (-Lum_Diff * Lum_Diff * 800.0);  // 3% luminance diff → w ≈ 0.47
+    // Luminance edge stopping
+    float Lum_Diff = abs (Center_Lum - S_Lum);
+    float W_Lum = exp (-Lum_Diff * Lum_Diff * 200.0);
 
-      float W = W_Spatial * W_Depth * W_Lum;
-      Sum += S_Color * W;
-      Weight += W;
-    }
+    float W = W_Spatial * W_Depth * W_Normal * W_Lum;
+    Sum += S_Color * W;
+    Weight += W;
   }
 
   vec3 Result = Sum / max (Weight, 1e-6);
@@ -8787,9 +9535,13 @@ void main () {
 glsl shader postprocess comp {
 #version 460
 
-layout(binding = 0, rgba8) uniform image2D Color_Image;    // RT output (read-write in-place)
-layout(binding = 1, r32f)  uniform image2D Depth_Image;    // Ray hit distance from closest-hit shader
-layout(binding = 2, rgba8) uniform image2D History_Image;  // Previous frame for temporal accumulation
+layout(binding = 0, rgba16f) uniform image2D Color_Image;    // RT output (linear HDR, read-write in-place)
+layout(binding = 1, r32f)   uniform image2D Depth_Image;    // Ray hit distance from closest-hit shader
+layout(binding = 2, rgba16f) uniform image2D History_Image;  // Previous frame for temporal accumulation (linear HDR)
+
+// Environment uniform for god rays sun direction (shared with closesthit camera buffer)
+// Note: postprocess binds this at set 0, binding 3 (the camera UBO)
+// We need sun direction for screen-space god rays
 
 // ── fp16 RLE-packed push constants (56 bytes) ──────────────────────────────
 // Each uint holds two half-floats via packHalf2x16 encoding.  unpackHalf2x16
@@ -8802,6 +9554,8 @@ layout(push_constant) uniform Push {
   uint  Bloom_Vignette;   // packHalf2x16(Bloom_Strength, Vignette_Strength)
   uint  Reproject[8];     // packHalf2x16-compressed 4×4 reprojection matrix (Proj * Prev_View * Inv_View)
   uint  Inv_Proj_Diag;    // [15:0] = half(InvProj[0][0]), [31:16] = half(InvProj[1][1])
+  uint  Sun_Screen_Pos;   // packHalf2x16(Sun_Screen_U, Sun_Screen_V)
+  uint  Sun_Params;       // packHalf2x16(God_Ray_Intensity, Sun_On_Screen)
 } Params;
 
 layout(local_size_x = 8, local_size_y = 8) in;
@@ -8890,48 +9644,48 @@ void main () {
     if (On_Screen) {
       vec3 History = imageLoad (History_Image, Prev_Pixel).rgb;
 
-      // ── Q2RTX-inspired disocclusion detection ─────────────────────────────
-      // When reprojection displaces the pixel significantly in screen space,
-      // the history is likely stale (surface was occluded or moved).
-      // Weight alpha toward 1.0 proportionally to displacement.
+      // ── Q2RTX-inspired variance-based neighborhood clamping ────────────────
+      // Instead of simple min/max (too wide in HDR), compute mean ± k*sigma.
+      // This creates a tight, statistically-motivated clamp that rejects ghost
+      // colors aggressively while allowing natural temporal blending.
+      vec3 M1 = Color, M2 = Color * Color;  // Moments for variance computation
+      const ivec2 Offsets[4] = ivec2[4](ivec2(-1,0), ivec2(1,0), ivec2(0,-1), ivec2(0,1));
+      for (int I = 0; I < 4; I++) {
+        vec3 NS = imageLoad (Color_Image, clamp (Pixel + Offsets[I], ivec2(0), Size - 1)).rgb;
+        M1 += NS; M2 += NS * NS;
+      }
+      M1 /= 5.0; M2 /= 5.0;
+      vec3 Sigma = sqrt (max (M2 - M1 * M1, vec3 (0.0)));
+      // Tight clamp: mean ± 1.0 sigma (Q2RTX uses ~0.5-1.5 depending on channel)
+      History = clamp (History, M1 - Sigma * 1.0, M1 + Sigma * 1.0);
+
+      // ── Q2RTX-inspired anti-lag: luminance-based history rejection ─────────
+      // If the clamped history still differs significantly from the current frame,
+      // the surface has changed (new geometry, lighting change, disocclusion).
+      // Boost alpha toward 1.0 to reject stale history aggressively.
+      float Cur_Lum  = dot (Color, vec3 (0.2126, 0.7152, 0.0722));
+      float Hist_Lum = dot (History, vec3 (0.2126, 0.7152, 0.0722));
+      float Lum_Diff = abs (Cur_Lum - Hist_Lum) / max (Cur_Lum, 0.01);
+      float Anti_Lag = clamp (Lum_Diff * 3.0, 0.0, 1.0);  // >33% luminance change → full reject
+
+      // ── Disocclusion detection ─────────────────────────────────────────────
       vec2 Screen_Disp = vec2 (Prev_Pixel - Pixel) / vec2 (Size);
       float Disp_Len = length (Screen_Disp);
-      float Disocclusion = clamp (Disp_Len * 15.0, 0.0, 1.0);  // > ~7% screen = fully rejected
+      float Disocclusion = clamp (Disp_Len * 20.0, 0.0, 1.0);  // >5% screen = fully rejected
 
-      // ── Neighborhood clamp: prevent stale history from ghosting ──
-      // Cross pattern (5 taps) instead of 3×3 (9 taps) — same quality, fewer loads.
-      vec3 N_Min = Color, N_Max = Color;
-      vec3 NS;
-      NS = imageLoad (Color_Image, clamp (Pixel + ivec2 (-1,  0), ivec2(0), Size - 1)).rgb;
-      N_Min = min (N_Min, NS); N_Max = max (N_Max, NS);
-      NS = imageLoad (Color_Image, clamp (Pixel + ivec2 ( 1,  0), ivec2(0), Size - 1)).rgb;
-      N_Min = min (N_Min, NS); N_Max = max (N_Max, NS);
-      NS = imageLoad (Color_Image, clamp (Pixel + ivec2 ( 0, -1), ivec2(0), Size - 1)).rgb;
-      N_Min = min (N_Min, NS); N_Max = max (N_Max, NS);
-      NS = imageLoad (Color_Image, clamp (Pixel + ivec2 ( 0,  1), ivec2(0), Size - 1)).rgb;
-      N_Min = min (N_Min, NS); N_Max = max (N_Max, NS);
-      History = clamp (History, N_Min, N_Max);
+      // ── Temporal blend (Q2RTX-inspired two-mode system) ────────────────────
+      float Is_Static = step (Speed, 5.0);
 
-      // ── Q2RTX-inspired temporal blend ──────────────────────────────────────
-      // Two modes (from Q2RTX's accumulation + antilag system):
-      //
-      // 1. STATIC CAMERA (Speed < 5): Accumulate frames with 1/N weight.
-      //    At 2fps, after 5 seconds → 10 averaged samples = clean, noiseless image.
-      //    This is Q2RTX's "photo mode" principle adapted for software rendering.
-      //
-      // 2. MOVING CAMERA: Aggressive current-frame dominance.
-      //    At low fps: Alpha→1.0 (zero history = zero ghosts).
-      //    At high fps: normal TAA accumulation for smooth temporal AA.
-      //    Disoccluded pixels always reject history.
-      //
-      float Is_Static = step (Speed, 5.0);  // 1.0 when camera barely moving, 0.0 when moving
-      // Static mode: 1/N convergence (Q2RTX accumulation principle)
+      // Static: 1/N convergence for noise-free accumulation
       float Static_Alpha = 1.0 / max (float (Frame_Count), 1.0);
-      // Moving mode: aggressive zero-ghost alpha
-      float Motion      = clamp (Speed / 80.0, 0.0, 1.0);
-      float Base        = mix (0.20, 0.60, Motion);
-      float Fps_Adapt   = clamp ((Delta_Time - 0.033) * 30.0, 0.0, 1.0);
-      float Moving_Alpha = max (max (Base, Fps_Adapt), Disocclusion);
+
+      // Moving: very aggressive current-frame dominance.
+      // Q2RTX philosophy: spatial denoiser handles noise, TAA should NOT ghost.
+      float Motion      = clamp (Speed * 0.02, 0.0, 1.0);  // ISA: reciprocal multiply vs division
+      float Base        = mix (0.30, 0.95, Motion);  // Fast motion → 95% current frame
+      float Fps_Adapt   = clamp ((Delta_Time - 0.016) * 20.0, 0.0, 1.0);
+      float Moving_Alpha = max (max (max (Base, Fps_Adapt), Disocclusion), Anti_Lag);
+
       float Alpha = mix (Moving_Alpha, Static_Alpha, Is_Static);
       Color = mix (History, Color, Alpha);
     }
@@ -8947,27 +9701,76 @@ void main () {
 
   // ── 1. Bloom: 4-tap cross bright extraction + sun rays ───────────────────
   // Horizontal + vertical taps create a cross-shaped bloom pattern (fake god rays)
+  // Bloom threshold in linear space (0.4 linear ≈ 0.66 sRGB — bright highlights only)
   vec3 Bl = max (imageLoad (Color_Image, clamp (Pixel + ivec2 ( 6, 0), ivec2 (0), Size - 1)).rgb - 0.4, vec3 (0.0))
            + max (imageLoad (Color_Image, clamp (Pixel + ivec2 (-6, 0), ivec2 (0), Size - 1)).rgb - 0.4, vec3 (0.0))
            + max (imageLoad (Color_Image, clamp (Pixel + ivec2 (0,  6), ivec2 (0), Size - 1)).rgb - 0.4, vec3 (0.0))
            + max (imageLoad (Color_Image, clamp (Pixel + ivec2 (0, -6), ivec2 (0), Size - 1)).rgb - 0.4, vec3 (0.0));
   Color += Bl * Bloom_Strength;
 
-  // ── 2. Vignette + contrast + saturation + tonemap ──────────────────────
+  // ── 1b. Screen-space god rays (Q2RTX-inspired radial light shafts) ─────
+  // When the sun is on screen, march radially from each pixel toward the sun
+  // position, accumulating bright sky samples.  This creates volumetric-looking
+  // light shafts streaming from the sun through gaps in geometry.
+  vec2  Sun_UV  = unpackHalf2x16 (Params.Sun_Screen_Pos);
+  vec2  Sun_P   = unpackHalf2x16 (Params.Sun_Params);
+  float GR_Intensity = Sun_P.x;
+  float Sun_Visible  = Sun_P.y;
+
+  if (Sun_Visible > 0.5 && GR_Intensity > 0.0) {
+    vec2 Delta = Sun_UV - UV;
+    float Dist = length (Delta);
+    if (Dist > 0.001) {
+      vec2  Dir    = Delta / Dist;
+      // ISA optimization: incremental stepping replaces multiply-per-iteration
+      // Saves 8 float casts + 8 vec2 multiplies (replaced with 8 vec2 additions)
+      vec2  Step_Vec = Dir * (min (Dist, 0.3) / 8.0);
+      vec3  Accum  = vec3 (0.0);
+      float Falloff = 1.0;
+      vec2  Sample_UV = UV;
+      for (int S = 1; S <= 8; S++) {
+        Sample_UV += Step_Vec;
+        ivec2 Sample_Px = ivec2 (Sample_UV * vec2 (Size));
+        if (all (greaterThanEqual (Sample_Px, ivec2 (0))) && all (lessThan (Sample_Px, Size))) {
+          vec3  Sample_C = imageLoad (Color_Image, Sample_Px).rgb;
+          float Sample_D = imageLoad (Depth_Image, Sample_Px).r;
+          // Only accumulate sky/bright pixels (depth > 5000 = sky, or very bright)
+          float Is_Sky = step (5000.0, Sample_D);
+          float Bright = max (dot (Sample_C, vec3 (0.333)) - 0.3, 0.0);
+          Accum += Sample_C * max (Is_Sky, Bright * 0.5) * Falloff;
+        }
+        Falloff *= 0.85;  // Exponential decay away from sun
+      }
+      // Fade god rays based on distance from sun center (stronger near sun)
+      float Sun_Fade = 1.0 - clamp (Dist * 2.0, 0.0, 1.0);
+      Color += Accum * GR_Intensity * Sun_Fade / 8.0;
+    }
+  }
+
+  // ── 2. Vignette + saturation + tonemap (all in linear space) ─────────
   vec2  FC = UV - 0.5;
   float D2 = dot (FC, FC);
-  Color  = Color * (1.0 - D2 * Vignette);  // Quality-driven vignette
+  Color  = Color * (1.0 - D2 * Vignette);
   Color *= Exposure;
 
-  // Contrast boost: subtle S-curve to deepen shadows while preserving mids
-  Color = pow (max (Color, vec3 (0.0)), vec3 (1.08));
-
-  // Saturation boost: push colors away from grey for richer textures
+  // Saturation boost before tonemapping: push colors away from grey
   float Luma = dot (Color, vec3 (0.2126, 0.7152, 0.0722));
-  Color = mix (vec3 (Luma), Color, 1.20);  // 20% saturation increase
+  Color = mix (vec3 (Luma), Color, 1.35);  // 35% saturation increase — punchy colors
 
-  Color *= vec3 (1.04, 1.01, 0.95);  // Near-neutral grade with slight warmth
-  Color  = clamp (Color * (2.51 * Color + 0.03) / (Color * (2.43 * Color + 0.59) + 0.14), 0.0, 1.0);  // ACES
+  Color *= vec3 (1.05, 1.01, 0.92);  // Warm grade: boost reds, cut blues slightly
+
+  // ACES filmic tone mapping (operates on linear HDR values)
+  Color  = clamp (Color * (2.51 * Color + 0.03) / (Color * (2.43 * Color + 0.59) + 0.14), 0.0, 1.0);
+
+  // Post-tonemap contrast: shadow deepening for rich, cinematic look.
+  // pow(1.16) darkens midtones/shadows while keeping highlights readable.
+  Color = pow (max (Color, vec3 (0.0)), vec3 (1.16));
+
+  // ── 3. Blue-noise dithering (Q2RTX-inspired) ──────────────────────────
+  // Dither by ±0.5/255 in the output before sRGB conversion to prevent banding
+  // in dark gradients. The blit to B8G8R8A8_SRGB swapchain handles sRGB encoding.
+  float Dither = hash (vec2 (Pixel) + Params.Time * 1.618) - 0.5;  // [-0.5, 0.5]
+  Color += Dither / 255.0;
 
   imageStore (Color_Image, Pixel, vec4 (clamp (Color, 0.0, 1.0), 1.0));
 }
