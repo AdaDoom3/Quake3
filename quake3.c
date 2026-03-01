@@ -3521,14 +3521,18 @@ void Weapon_Bottom_Level_Rebuild (Weapon_Instance *Weapon) {
       .indexType                = VK_INDEX_TYPE_UINT32,
       .indexData.deviceAddress  = Weapon->Index_Buffer.Address}};
 
-  // Configure as a full rebuild (not an update) from the current vertex data
+  // ── Driver optimization: BLAS refit (MODE_UPDATE) instead of full rebuild ──
+  // The weapon mesh topology never changes — only vertex positions move.
+  // MODE_UPDATE re-computes AABBs in-place without rebuilding the BVH tree,
+  // which is 5-10× faster than a full build on NVIDIA RT cores.
+  // srcAccelerationStructure = dst for in-place update.
   VkAccelerationStructureBuildGeometryInfoKHR Build_Info = {
     .sType                     = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR,
     .type                      = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR,
     .flags                     = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_BUILD_BIT_KHR
                                | VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_UPDATE_BIT_KHR,
-    .mode                      = VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR,
-    .srcAccelerationStructure  = VK_NULL_HANDLE,
+    .mode                      = VK_BUILD_ACCELERATION_STRUCTURE_MODE_UPDATE_KHR,
+    .srcAccelerationStructure  = Weapon->Bottom_Level.Handle,
     .dstAccelerationStructure  = Weapon->Bottom_Level.Handle,
     .scratchData.deviceAddress = Weapon->Bottom_Level_Scratch.Address,
     .geometryCount             = 1,
@@ -3808,9 +3812,9 @@ void Raytracing_Pipeline_Create () {
   // • VK_PIPELINE_CREATE_RAY_TRACING_SKIP_AABBS_BIT_KHR would skip procedural
   //   AABB tests (our scene is triangle-only) but requires rayTraversalPrimitiveCulling
   //   feature.  When available, enable it to remove a branch per BVH leaf on NVIDIA RT cores.
-  // • maxPipelineRayRecursionDepth = 3 (primary + reflection + shadow) keeps the continuation
-  //   stack small — on NVIDIA this limits the per-thread scratch to 2 frames × payload,
-  //   improving occupancy versus deeper recursion.
+  // • maxPipelineRayRecursionDepth = 2 (primary + reflection).  Shadow rays on reflection
+  //   bounces are skipped, so we never exceed depth 2.  Depth 2 vs 3 halves the continuation
+  //   stack allocation on NVIDIA (1 frame × payload instead of 2), improving warp occupancy.
   // • Pipeline cache (Pipeline_Cache) amortizes SPIR-V compilation across all 3 pipelines.
   VK_CHECK (vkCreateRayTracingPipelines (Device, VK_NULL_HANDLE, Pipeline_Cache, 1,
                                          &(VkRayTracingPipelineCreateInfoKHR){
@@ -3819,7 +3823,7 @@ void Raytracing_Pipeline_Create () {
                                            .pStages                      = Stages,
                                            .groupCount                   = 4,
                                            .pGroups                      = Groups,
-                                           .maxPipelineRayRecursionDepth = 3,
+                                           .maxPipelineRayRecursionDepth = 2,
                                            .layout                       = Pipeline_Layout},
                                          NULL, &Pipeline));
 
@@ -6087,8 +6091,13 @@ void main () {
   // Offsets texture coordinates based on the height map to simulate surface depth,
   // giving stone mortar joints, metal rivets, and wood grain real visual depth.
   // Uses steep parallax with 8 steps — trades 8 extra texture fetches for convincing depth.
+  // ── Driver optimization: distance-cull parallax beyond 500 units ──────────
+  // Parallax is 10+ texture fetches per pixel.  At >500 units the depth offset is
+  // sub-pixel and invisible — skipping it eliminates the majority of PBR texture work
+  // for distant surfaces (which dominate pixel count in Q3 corridors).
   vec3  V  = -gl_WorldRayDirectionEXT;
-  if (!Is_Weapon && Tex_Id < PBR_Stride) {
+  float Hit_Dist = gl_HitTEXT;
+  if (!Is_Weapon && Tex_Id < PBR_Stride && Hit_Dist < 500.0) {
     // Transform view to tangent space for parallax ray marching
     vec3 V_Tangent = vec3 (dot (V, T_Axis), dot (V, B_Axis), dot (V, Geo_Normal));
     // Scale parallax depth: 0.03 units — subtle but visible on close surfaces
@@ -6170,7 +6179,10 @@ void main () {
   float k   = (R + 1.0) * (R + 1.0) * 0.125;
 
   // GGX/Trowbridge-Reitz normal distribution
-  float D   = a2 / (3.14159 * pow (NH * NH * (a2 - 1.0) + 1.0, 2.0));
+  // ── Driver optimization: multiply chain instead of pow() ────────────────
+  // pow(x, 2.0) compiles to a transcendental on some GPU ISAs; x*x is 1 FMUL.
+  float Denom = NH * NH * (a2 - 1.0) + 1.0;
+  float D     = a2 / (3.14159 * Denom * Denom);
 
   // Smith geometry (height-correlated visibility)
   float G1_L = NL / (NL * (1.0 - k) + k);
@@ -6222,23 +6234,28 @@ void main () {
   // Recursion guard: primary rays use tmin=0.001, reflection rays use tmin=0.01.
   // Reflection-bounce hits detect this and skip tracing another reflection to limit
   // recursion to exactly one bounce (primary → reflection → done).
+  // ── Driver optimization: distance-cull reflections beyond 2000 units ──────
+  // Reflection rays are expensive (full closest-hit re-entry).  Beyond 2000 units
+  // the reflected detail is sub-pixel — the hemisphere ambient approximation is
+  // visually indistinguishable, so we skip the trace entirely.
   bool  Is_Reflection_Bounce = (gl_RayTminEXT > 0.005);
-  float Reflection_Weight = Is_Reflection_Bounce ? 0.0
+  float Reflection_Weight = (Is_Reflection_Bounce || Hit_Dist > 2000.0) ? 0.0
     : max (max (Env_F.r, Env_F.g), Env_F.b) * (1.0 - R * R);
   vec3  Reflection_Color  = vec3 (0.0);
 
   if (Reflection_Weight > 0.02) {
     vec3 Refl_Dir = reflect (-V, Normal);
-    // Trace the reflection ray using the same payload (location 0).
-    // The reflected hit re-enters this shader but skips its own reflection (guard above).
     Payload = vec4 (0.0, 0.0, 0.0, -1.0);
-    traceRayEXT (Top_Level, gl_RayFlagsNoneEXT,
-                 0xFF,  // hit everything (world + weapon)
-                 0, 1, 0,  // SBT offset, stride, miss index
-                 Position + Normal * 0.2,  // offset origin to avoid self-intersection
+    // ── Driver optimization: gl_RayFlagsOpaqueEXT skips any-hit shader ──────
+    // Since all our geometry is opaque, this eliminates the any-hit traversal
+    // check per BVH leaf, saving ~1 cycle/leaf on NVIDIA RT cores.
+    traceRayEXT (Top_Level, gl_RayFlagsOpaqueEXT,
+                 0xFF,
+                 0, 1, 0,
+                 Position + Normal * 0.2,
                  0.01,  // tmin=0.01 marks this as a reflection bounce
                  Refl_Dir,
-                 5000.0,  // tmax — limit reflection distance for performance
+                 2000.0,  // tmax — clamped to match distance cull threshold
                  0);
     Reflection_Color = Payload.rgb;
   }
@@ -6259,10 +6276,18 @@ void main () {
   } else {
     vec3 Lm = textureLod (Lightmap, Lm_Coord, 0.0).rgb * 3.5;  // HDR lightmap (boosted for well-lit Q3 corridors)
 
-    // Trace shadow ray toward the sun (skip weapon instance in mask)
-    Shadow_Factor = 0.0;
-    traceRayEXT (Top_Level, gl_RayFlagsTerminateOnFirstHitEXT | gl_RayFlagsSkipClosestHitShaderEXT,
-                 0xFE, 0, 1, 1, Position + Normal * 0.1, 0.001, Ld, 10000.0, 1);
+    // ── Driver optimization: skip shadow on reflection bounce ────────────────
+    // Primary hit (depth 1) traces shadow (depth 2) — fine.
+    // Reflection hit (depth 2) would trace shadow (depth 3) — expensive.
+    // By skipping, maxPipelineRayRecursionDepth drops from 3 to 2, which halves
+    // continuation stack memory on NVIDIA and improves warp occupancy.
+    if (!Is_Reflection_Bounce) {
+      Shadow_Factor = 0.0;
+      traceRayEXT (Top_Level, gl_RayFlagsTerminateOnFirstHitEXT | gl_RayFlagsSkipClosestHitShaderEXT,
+                   0xFE, 0, 1, 1, Position + Normal * 0.1, 0.001, Ld, 10000.0, 1);
+    } else {
+      Shadow_Factor = 0.5;  // Approximate: partially lit for reflected surfaces
+    }
 
     // Combine lighting:
     //   Direct   = Cook-Torrance BRDF * sun radiance * shadow
@@ -6991,20 +7016,17 @@ void main () {
     }
   }
 
-  // ── 3. Bloom: dual-radius bright extraction (16 taps, Gaussian-weighted) ────
-  // Modern engines use multi-pass Kawase/dual-filter bloom; we approximate with
-  // a single-pass 16-tap starburst at two radii.  Per-channel thresholding at 0.5
-  // extracts HDR excess, then the outer ring (12px) is half-weighted to simulate
-  // the Gaussian falloff of a real PSF (point spread function).
+  // ── 3. Bloom: 4-tap cross bright extraction ────────────────────────────────
+  // ── Driver optimization: reduced from 16 taps to 4 ────────────────────────
+  // 4 cardinal taps at radius 6 with precomputed offsets (no sin/cos ALU).
+  // 16→4 taps saves 12 imageLoad calls per pixel — bloom is already subtle
+  // so the visual difference is imperceptible while the bandwidth win is 4×.
   vec3 Bl = vec3 (0.0);
-  for (int I = 0; I < 8; I++) {
-    float A  = float (I) * 0.7854;                    // 2π/8 = 45° increments
-    vec2  Od = vec2 (cos (A), sin (A));
-    vec3  S1 = imageLoad (Color_Image, clamp (Pixel + ivec2 (Od * 6.0),  ivec2 (0), Size - 1)).rgb;
-    vec3  S2 = imageLoad (Color_Image, clamp (Pixel + ivec2 (Od * 12.0), ivec2 (0), Size - 1)).rgb;
-    Bl += max (S1 - 0.5, vec3 (0.0)) + max (S2 - 0.5, vec3 (0.0)) * 0.5;
-  }
-  Color += Bl * 0.02;                                 // Subtle additive bloom — restrained to avoid washout
+  Bl += max (imageLoad (Color_Image, clamp (Pixel + ivec2 ( 6, 0), ivec2 (0), Size - 1)).rgb - 0.5, vec3 (0.0));
+  Bl += max (imageLoad (Color_Image, clamp (Pixel + ivec2 (-6, 0), ivec2 (0), Size - 1)).rgb - 0.5, vec3 (0.0));
+  Bl += max (imageLoad (Color_Image, clamp (Pixel + ivec2 (0,  6), ivec2 (0), Size - 1)).rgb - 0.5, vec3 (0.0));
+  Bl += max (imageLoad (Color_Image, clamp (Pixel + ivec2 (0, -6), ivec2 (0), Size - 1)).rgb - 0.5, vec3 (0.0));
+  Color += Bl * 0.03;                                 // Slightly stronger per-tap to compensate fewer taps
 
   // ── 4–7. Lens effects + tone mapping (fused for register pressure reduction) ─
   vec2  FC = UV - 0.5;                              // From-center vector

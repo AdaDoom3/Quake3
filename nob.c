@@ -213,9 +213,11 @@ int main(int argc, char **argv) {
         if (!nob_cmd_run(&cmd)) return 1;
     }
 
-    /* Compile the C portion */
+    /* Compile the C portion — max optimization for ray tracing perf */
     nob_cmd_append(&cmd,
-        "cc", "-O2", "-g", "-Wall", "-Wextra",
+        "cc", "-O3", "-march=native", "-mtune=native",
+        "-ffast-math", "-flto",
+        "-g", "-Wall", "-Wextra",
         "-o", BUILD "quake3",
         BUILD "quake3.c",
         "-I/usr/include/SDL2", "-D_REENTRANT",
