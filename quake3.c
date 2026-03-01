@@ -81,10 +81,10 @@ const char *DEVICE_EXTENSIONS[] = {VK_KHR_SWAPCHAIN_EXTENSION_NAME,
 #define SOFTWARE_RT
 
 // Windowing and viewport settings
-#define DEFAULT_WIDTH  1280    // Window width in pixels — 720p (16:9) output
-#define DEFAULT_HEIGHT 720     // Window height in pixels
+#define DEFAULT_WIDTH  1920    // Window width in pixels — 1080p (16:9) output
+#define DEFAULT_HEIGHT 1080    // Window height in pixels
 #ifdef SOFTWARE_RT
-#define RENDER_SCALE   0.35f   // Software RT: low internal res, TAA recovers quality
+#define RENDER_SCALE   0.38f   // Software RT: TAA temporal super-sampling recovers quality
 #else
 #define RENDER_SCALE   1.00f   // GPU: full native resolution
 #endif
