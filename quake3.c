@@ -755,6 +755,7 @@ Gpu_Image             Depth_Image;               // R32F depth output from ray t
 Gpu_Image             History_Image;             // Previous frame for temporal accumulation (TAA)
 Gpu_Image             Postprocess_Output_Image;  // Final post-processed output
 int                   Frame_Count = 0;           // Frame counter for TAA convergence
+mat4                  Prev_View_Matrix;          // Previous frame's view matrix for TAA reprojection
 
 // Audio
 Audio_System Audio;
@@ -1051,16 +1052,24 @@ static inline uint16_t Float_To_Half (float Value) {
 static inline uint32_t Pack_Half2x16 (float A, float B) {
   return (uint32_t)Float_To_Half (A) | ((uint32_t)Float_To_Half (B) << 16);
 }
+static inline void Pack_Mat4_Half (const mat4 *M, uint32_t Out[8]) {
+  for (int I = 0; I < 8; I++)
+    Out[I] = Pack_Half2x16 (M->E[I * 2], M->E[I * 2 + 1]);
+}
 
-// Push constants for the post-processing compute shader (20 bytes, was 32)
+// Push constants for the post-processing compute shader (56 bytes)
 // fp16 pair-packing: each uint holds two half-floats via packHalf2x16 encoding.
 // Frame_Count rides in upper 16 bits of Dt_Frame as a uint16 (good for 65535 frames).
+// Reprojection matrix (Proj * Prev_View * Inverse_View) is compressed to 8 × uint via
+// packHalf2x16 — sufficient precision at low render resolution for motion-vector TAA.
 typedef struct {
   float    Time;            // Full-precision seconds since start
   uint32_t Dt_Frame;        // [15:0] = half(Delta_Time), [31:16] = uint16(Frame_Count)
   uint32_t Velocity;        // [15:0] = half(Velocity_X), [31:16] = half(Velocity_Z)
   uint32_t Speed_Exposure;  // [15:0] = half(Speed),       [31:16] = half(Exposure)
   uint32_t Bloom_Grain;     // [15:0] = half(Bloom_Strength), [31:16] = half(Grain_Strength)
+  uint32_t Reproject[8];    // packHalf2x16-compressed 4×4 reprojection matrix (Proj * Prev_View * Inv_View)
+  uint32_t Inv_Proj_Diag;   // [15:0] = half(InvProj[0][0]), [31:16] = half(InvProj[1][1])
 } Gpu_Postprocess_Push;
 
 // CPU-side convex hull produced by the Quickhull algorithm.  Stores vertex positions and per-vertex
@@ -1289,6 +1298,19 @@ mat4 Inverse_Projection (mat4 Projection) {
   Result.E[11] = 1.f / Projection.E[14];
   Result.E[14] = 1.f / Projection.E[11];
   Result.E[15] = -Projection.E[10] / (Projection.E[11] * Projection.E[14]);
+  return Result;
+}
+
+// ═════════════
+//   Mat4_Mul
+// ═════════════
+
+mat4 Mat4_Mul (mat4 A, mat4 B) {
+  mat4 Result = {0};
+  for (int Row = 0; Row < 4; Row++)
+    for (int Col = 0; Col < 4; Col++)
+      for (int K = 0; K < 4; K++)
+        Result.E[Col * 4 + Row] += A.E[K * 4 + Row] * B.E[Col * 4 + K];
   return Result;
 }
 
@@ -5860,12 +5882,19 @@ int main (int Argc, char **Argv) {
       Weapon_Bottom_Level_Rebuild (&Weapon);
       Top_Level_Rebuild (&World_Bottom_Level, &Weapon.Bottom_Level);
       Camera_Upload (&Bench_Cam, FIELD_OF_VIEW, Weapon.Texture_Base_Index, PBR_Stride, Active_SPP);
+      mat4 Bench_View = View (Bench_Cam.Position, Bench_Cam.Yaw, Bench_Cam.Pitch);
+      mat4 Bench_Proj = Perspective (FIELD_OF_VIEW, (float)Width / Height, 0.1f, 10000.f);
+      mat4 Bench_Inv_Proj = Inverse_Projection (Bench_Proj);
+      mat4 Bench_Reproj = Mat4_Mul (Bench_Proj, Mat4_Mul (Bench_View, Inverse_Orthogonal (Bench_View)));
+      Prev_View_Matrix = Bench_View;
       for (int I = 0; I < 5; I++) {
         Gpu_Postprocess_Push Warmup_PP = {.Time = 0,
           .Dt_Frame       = (uint32_t)Float_To_Half (Fixed_Dt) | ((uint32_t)(Frame_Count & 0xFFFF) << 16),
           .Velocity       = 0,
           .Speed_Exposure = Pack_Half2x16 (0.f, 1.6f),
-          .Bloom_Grain    = Pack_Half2x16 (0.05f, 0.001f)};
+          .Bloom_Grain    = Pack_Half2x16 (0.05f, 0.001f),
+          .Inv_Proj_Diag  = Pack_Half2x16 (Bench_Inv_Proj.E[0], Bench_Inv_Proj.E[5])};
+        Pack_Mat4_Half (&Bench_Reproj, Warmup_PP.Reproject);
         Raytracing_Frame (Warmup_PP);
         VK_CHECK (vkWaitForFences (Device, 1, &Fence, VK_TRUE, UINT64_MAX));
         Frame_Count++;
@@ -5904,12 +5933,19 @@ int main (int Argc, char **Argv) {
       Top_Level_Rebuild (&World_Bottom_Level, &Weapon.Bottom_Level);
       Camera_Upload (&Bench_Cam, FIELD_OF_VIEW, Weapon.Texture_Base_Index, PBR_Stride, Active_SPP);
 
+      mat4 BV = View (Bench_Cam.Position, Bench_Cam.Yaw, Bench_Cam.Pitch);
+      mat4 BP = Perspective (FIELD_OF_VIEW, (float)Width / Height, 0.1f, 10000.f);
+      mat4 BIP = Inverse_Projection (BP);
+      mat4 BR = Mat4_Mul (BP, Mat4_Mul (Prev_View_Matrix, Inverse_Orthogonal (BV)));
       Gpu_Postprocess_Push PP = {.Time = F * Fixed_Dt,
         .Dt_Frame       = (uint32_t)Float_To_Half (Fixed_Dt) | ((uint32_t)(Frame_Count & 0xFFFF) << 16),
         .Velocity       = 0,
         .Speed_Exposure = Pack_Half2x16 (0.f, 1.6f),
-        .Bloom_Grain    = Pack_Half2x16 (0.05f, 0.001f)};
+        .Bloom_Grain    = Pack_Half2x16 (0.05f, 0.001f),
+        .Inv_Proj_Diag  = Pack_Half2x16 (BIP.E[0], BIP.E[5])};
+      Pack_Mat4_Half (&BR, PP.Reproject);
       Raytracing_Frame (PP);
+      Prev_View_Matrix = BV;
       Frame_Count++;
 
       uint64_t Frame_End = SDL_GetPerformanceCounter ();
@@ -6082,6 +6118,7 @@ int main (int Argc, char **Argv) {
 
   Camera   Cam   = {.Position = {Spawn_Point.Origin.x, Spawn_Point.Origin.y + 8.f + DEFAULT_VIEW_HEIGHT, Spawn_Point.Origin.z},
                      .Yaw = 1.5707963f - Spawn_Point.Angle * 3.14159f / 180.f};
+  Prev_View_Matrix = View (Cam.Position, Cam.Yaw, Cam.Pitch);
   uint64_t Last  = SDL_GetPerformanceCounter ();
   uint64_t Freq  = SDL_GetPerformanceFrequency ();
   uint     Frame = 0;
@@ -6141,13 +6178,24 @@ int main (int Argc, char **Argv) {
     Camera_Upload (&Cam, FIELD_OF_VIEW, Weapon.Texture_Base_Index, PBR_Stride, Active_SPP);
     float H_Speed = sqrtf (Physics.Velocity.x * Physics.Velocity.x +
                            Physics.Velocity.z * Physics.Velocity.z);
+
+    // Build reprojection matrix: Proj * Prev_View * Inverse_View (maps current view-space → previous clip-space)
+    mat4 Cur_View = View (Cam.Position, Cam.Yaw, Cam.Pitch);
+    mat4 Cur_Inv_View = Inverse_Orthogonal (Cur_View);
+    mat4 Proj = Perspective (FIELD_OF_VIEW, (float)Width / Height, 0.1f, 10000.f);
+    mat4 Reproject = Mat4_Mul (Proj, Mat4_Mul (Prev_View_Matrix, Cur_Inv_View));
+    mat4 Inv_Proj = Inverse_Projection (Proj);
+
     Gpu_Postprocess_Push PP = {
       .Time           = Total_Time,
       .Dt_Frame       = (uint32_t)Float_To_Half (Dt) | ((uint32_t)(Frame_Count & 0xFFFF) << 16),
       .Velocity       = Pack_Half2x16 (Physics.Velocity.x, Physics.Velocity.z),
       .Speed_Exposure = Pack_Half2x16 (H_Speed, 1.6f),
-      .Bloom_Grain    = Pack_Half2x16 (0.05f, 0.001f)};
+      .Bloom_Grain    = Pack_Half2x16 (0.05f, 0.001f),
+      .Inv_Proj_Diag  = Pack_Half2x16 (Inv_Proj.E[0], Inv_Proj.E[5])};
+    Pack_Mat4_Half (&Reproject, PP.Reproject);
     Raytracing_Frame (PP);
+    Prev_View_Matrix = Cur_View;
     Frame++;
     Frame_Count++;
   }
@@ -7343,7 +7391,7 @@ layout(binding = 0, rgba8) uniform image2D Color_Image;    // RT output (read-wr
 layout(binding = 1, r32f)  uniform image2D Depth_Image;    // Ray hit distance from closest-hit shader
 layout(binding = 2, rgba8) uniform image2D History_Image;  // Previous frame for temporal accumulation
 
-// ── fp16 RLE-packed push constants (20 bytes, was 32) ──────────────────────
+// ── fp16 RLE-packed push constants (56 bytes) ──────────────────────────────
 // Each uint holds two half-floats via packHalf2x16 encoding.  unpackHalf2x16
 // is 1 ALU op on all modern GPUs — same cycle cost as reading a float.
 layout(push_constant) uniform Push {
@@ -7352,6 +7400,8 @@ layout(push_constant) uniform Push {
   uint  Velocity;         // packHalf2x16(Velocity_X, Velocity_Z)
   uint  Speed_Exposure;   // packHalf2x16(Speed, Exposure)
   uint  Bloom_Grain;      // packHalf2x16(Bloom_Strength, Grain_Strength)
+  uint  Reproject[8];     // packHalf2x16-compressed 4×4 reprojection matrix (Proj * Prev_View * Inv_View)
+  uint  Inv_Proj_Diag;    // [15:0] = half(InvProj[0][0]), [31:16] = half(InvProj[1][1])
 } Params;
 
 layout(local_size_x = 8, local_size_y = 8) in;
@@ -7369,6 +7419,17 @@ float hash (vec2 p) {
   vec3 p3 = fract (vec3 (p.xyx) * 0.1031);
   p3 += dot (p3, p3.yzx + 33.33);
   return fract ((p3.x + p3.y) * p3.z);
+}
+
+// ── Decode compressed reprojection matrix from push constants ─────────────
+mat4 Decode_Reproject () {
+  mat4 M;
+  for (int I = 0; I < 8; I++) {
+    vec2 Pair = unpackHalf2x16 (Params.Reproject[I]);
+    M[I / 2][I % 2 * 2]     = Pair.x;
+    M[I / 2][I % 2 * 2 + 1] = Pair.y;
+  }
+  return M;
 }
 
 void main () {
@@ -7397,27 +7458,59 @@ void main () {
   vec3 Color = imageLoad (Color_Image, Pixel).rgb;
   float Depth = imageLoad (Depth_Image, Pixel).r;
 
-  // ── 0. Temporal accumulation (TAA) ────────────────────────────────────────
-  // Blend current frame with history using exponential moving average.
-  // Combined with PCG sub-pixel jitter in raygen, this creates free temporal
-  // super-sampling — effectively 4-8× more samples for zero extra ray cost.
+  // ── 0. Temporal accumulation (TAA) with motion-vector reprojection ─────
+  // Previous TAA blended History[Pixel] with Color[Pixel] — same screen
+  // coordinate.  When the camera translates, world geometry shifts on screen
+  // (parallax), causing the old frame's content to ghost into the new frame.
+  // Surfaces at glancing angles (like a wall beside the player) have the
+  // worst parallax and the most visible ghosting.
   //
-  // Hybrid temporal blend: Speed-based for translation + luminance for rotation.
-  //   Base alpha 0.15 → converges in ~18 frames without over-smoothing (blurring).
-  //   Speed ramp → responsive during walking/running.
-  //   Luminance fallback → when player rotates (Speed=0 but view changes),
-  //   large per-pixel luminance diffs (>1.0 ratio) snap to fresh frame.
-  //   Stochastic shadow diffs (~0.3–0.7) stay under the 1.0 threshold → smoothed.
+  // Fix: reconstruct each pixel's view-space position from depth + inverse
+  // projection, then reproject through Prev_View * Inverse_View to find where
+  // that world point appeared last frame.  Sample history from *that* location
+  // instead of the current pixel.  Neighborhood clamping prevents stale data
+  // from bleeding in when the reprojected sample is disoccluded.
   if (Frame_Count > 0u) {
-    vec3  History = imageLoad (History_Image, Pixel).rgb;
-    float Motion  = clamp (Speed / 200.0, 0.0, 1.0);
-    float Alpha   = mix (0.20, 0.40, Motion);
-    // Luminance-based rotation detector: fires when view changes to completely new surface
-    float Lum_Cur = dot (Color,   vec3 (0.299, 0.587, 0.114));
-    float Lum_His = dot (History, vec3 (0.299, 0.587, 0.114));
-    float Diff    = abs (Lum_Cur - Lum_His) / max (max (Lum_Cur, Lum_His), 0.05);
-    Alpha = max (Alpha, step (1.0, Diff) * 0.6);  // Snap on major view change
-    Color = mix (History, Color, Alpha);
+    // Reconstruct view-space position from NDC + linear hit distance
+    vec2  Inv_P       = unpackHalf2x16 (Params.Inv_Proj_Diag);
+    vec2  NDC         = UV * 2.0 - 1.0;
+    vec3  View_Dir    = normalize (vec3 (NDC.x * Inv_P.x, NDC.y * Inv_P.y, -1.0));
+    vec3  View_Pos    = View_Dir * Depth;
+
+    // Reproject: Proj * Prev_View * Inverse_View * View_Pos → previous clip-space
+    mat4  R           = Decode_Reproject ();
+    vec4  Prev_Clip   = R * vec4 (View_Pos, 1.0);
+    vec2  Prev_UV     = Prev_Clip.xy / Prev_Clip.w * 0.5 + 0.5;
+
+    // Fetch history from reprojected location (nearest-neighbor — imageLoad requires integer coords)
+    ivec2 Prev_Pixel  = ivec2 (Prev_UV * vec2 (Size));
+    bool  On_Screen   = all (greaterThanEqual (Prev_Pixel, ivec2 (0))) &&
+                        all (lessThan (Prev_Pixel, Size));
+
+    if (On_Screen) {
+      vec3 History = imageLoad (History_Image, Prev_Pixel).rgb;
+
+      // ── Neighborhood clamp: prevent disoccluded / stale history from ghosting ──
+      // Build a 3×3 color bounding box from the current frame.  If the reprojected
+      // history sample falls outside this box, clamp it — the surface was likely
+      // hidden last frame (disocclusion), so the old color is invalid.
+      vec3 N_Min = Color, N_Max = Color;
+      for (int Dy = -1; Dy <= 1; Dy++) {
+        for (int Dx = -1; Dx <= 1; Dx++) {
+          ivec2 NP = clamp (Pixel + ivec2 (Dx, Dy), ivec2 (0), Size - 1);
+          vec3  NS = imageLoad (Color_Image, NP).rgb;
+          N_Min = min (N_Min, NS);
+          N_Max = max (N_Max, NS);
+        }
+      }
+      History = clamp (History, N_Min, N_Max);
+
+      // Blend: responsive base alpha, speed ramp for translation
+      float Motion = clamp (Speed / 200.0, 0.0, 1.0);
+      float Alpha  = mix (0.15, 0.30, Motion);
+      Color = mix (History, Color, Alpha);
+    }
+    // Off-screen → keep current frame as-is (no history to blend)
   }
   // Write blended result to history for next frame (pre-tonemap, linear HDR)
   imageStore (History_Image, Pixel, vec4 (Color, 1.0));
