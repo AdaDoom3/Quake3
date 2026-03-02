@@ -1,3 +1,4 @@
+
 // ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 //
 //                                                                 Q 3 . C
@@ -60,7 +61,7 @@ const char *ENGINE_VERSION = "0.1.0";
 const uint  VALIDATION_LAYER_COUNT = 1;
 const char *VALIDATION_LAYERS[]    = {"VK_LAYER_KHRONOS_validation"};
 
-// Required device extensions: swapchain, accel struct, RT pipeline, deferred ops, ray query, push descriptor
+// Required device extensions
 const uint DEVICE_EXTENSION_COUNT = 6;
 const char *DEVICE_EXTENSIONS[] = {VK_KHR_SWAPCHAIN_EXTENSION_NAME,
                                    VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME,
@@ -70,10 +71,10 @@ const char *DEVICE_EXTENSIONS[] = {VK_KHR_SWAPCHAIN_EXTENSION_NAME,
                                    VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME};
 
 // Vulkan limits and versioning
-#define VULKAN_API_VERSION       VK_API_VERSION_1_3 // Minimum Vulkan API level (synchronization2, dynamic rendering)
-#define SWAPCHAIN_MAX_IMAGES     8                  // Upper bound for swapchain image handle array
-#define DESCRIPTOR_TEXTURE_SLOTS 1536               // Maximum entries in the bindless texture array (binding 12) - 256 materials × 6 maps (diffuse, normal, roughness, metalness, emissive, height)
-#define RAY_RECURSION_DEPTH      2                  // Primary ray + shadow ray
+#define VULKAN_API_VERSION       VK_API_VERSION_1_3
+#define SWAPCHAIN_MAX_IMAGES     8                  
+#define DESCRIPTOR_TEXTURE_SLOTS 1536               
+#define RAY_RECURSION_DEPTH      2                  
 
 // Windowing and viewport settings
 #define FIELD_OF_VIEW  90.f    // Vertical field-of-view in degrees
@@ -81,11 +82,7 @@ const char *DEVICE_EXTENSIONS[] = {VK_KHR_SWAPCHAIN_EXTENSION_NAME,
 #define FAR_CLIP       10000.f // Far clip plane distance
 #define MAX_DELTA_TIME 0.05f   // Clamp to 20 fps minimum (prevents physics tunneling)
 
-// Visual style knobs define the artistic look of the game and are independent of
-// quality/performance tier. Changing quality should NOT change the look.
-// Shader-side style knobs (fog, ambient, sun, shadows, reflections) are
-// hardcoded in GLSL closesthit/postprocess shaders - these C-side values
-// feed the postprocess push constants (bloom, vignette, exposure).
+// Visual style knobs define the artistic look of the game and are independent of quality/performance tier
 typedef struct {
   float Vignette;       // Vignette darkening intensity
   float Bloom_Strength; // Bloom glow intensity
@@ -107,39 +104,36 @@ const Visual_Style STYLE = {
   .Bloom_Strength = 0.08f,  // Subtle bloom
   .Exposure       = 1.75f}; // Slightly lower exposure - just enough to deepen without losing detail
 
-// Quality knobs control performance-affecting parameters only. The visual
-// style (bloom, vignette, exposure, fog, color grading) is defined in STYLE
-// above and stays constant across all tiers.
+// Quality knobs
 typedef enum {
-  QUALITY_ULTRA,    // 4K   native - maximum fidelity, 4 SPP
-  QUALITY_HIGH,     // 1440p native - high fidelity
-  QUALITY_MEDIUM,   // 1080p native - balanced (default)
-  QUALITY_LOW,      // 1080p at 75% - performance-friendly
-  QUALITY_POTATO,   // 720p native - minimum playable
+  QUALITY_ULTRA, 
+  QUALITY_HIGH,  
+  QUALITY_MEDIUM,   
+  QUALITY_LOW,     
+  QUALITY_POTATO, 
+
   QUALITY_COUNT
 } Quality_Level;
-
 typedef struct {
   const char *Name;
-  int         Width, Height;    // Window resolution
-  float       Render_Scale;     // Internal RT render resolution multiplier
-  int         SPP;              // Samples per pixel (ray count)
-  int         Parallax;         // Enable parallax occlusion mapping
-  int         Denoise_Passes;   // A-trous wavelet denoise iterations (0 = skip)
-  int         Checkerboard;     // 1 = half-width dispatch (Q2RTX-style temporal checkerboard)
+  int         Width, Height;  // Window resolution
+  float       Render_Scale;   // Internal RT render resolution multiplier
+  int         SPP;            // Ray count samples per pixel
+  int         Parallax;       // Enable parallax occlusion mapping
+  bool        Denoise_Passes; // A-trous wavelet denoise iterations
+  bool        Checkerboard;   // Temporal checkerboard optimization for ray reduction
 } Quality_Preset;
-
 const Quality_Preset QUALITY_PRESETS [QUALITY_COUNT] = {
-  //                              Res        Scale  SPP  POM  DN   CB
-  [QUALITY_ULTRA]  = {"Ultra",  3840,2160, 1.00f,  4,  1,   2,   0},  // 3840×2160 native
-  [QUALITY_HIGH]   = {"High",   2560,1440, 1.00f,  2,  1,   2,   0},  // 2560×1440 native
-  [QUALITY_MEDIUM] = {"Medium", 1920,1080, 1.00f,  1,  1,   2,   0},  // 1920×1080 native
-  [QUALITY_LOW]    = {"Low",    1600, 900, 1.00f,  1,  1,   1,   0},  // 1600×900  native
-  [QUALITY_POTATO] = {"Potato", 1280, 720, 0.667f, 1,  0,   0,   1},  //  856×480 internal, checkerboard
+  //                            Res        Scale  SPP  POM  DN   CB
+  [QUALITY_ULTRA]  = {"Ultra",  3840,2160, 1.00f,  4,  1,   2,   1}, 
+  [QUALITY_HIGH]   = {"High",   2560,1440, 1.00f,  2,  1,   2,   1}, 
+  [QUALITY_MEDIUM] = {"Medium", 1920,1080, 1.00f,  1,  1,   2,   1},
+  [QUALITY_LOW]    = {"Low",    1600, 900, 1.00f,  1,  1,   1,   1},
+  [QUALITY_POTATO] = {"Potato", 1280, 720, 0.667f, 1,  0,   1,   1}, 
 };
 
 // Asset paths
-#define ASSET_ROOT  "assets/"  // Root directory for all game assets
+#define ASSET_ROOT "assets/" // Root directory for all game assets
 
 // Default BSP map to load when no command-line argument is given
 const char *DEFAULT_MAP = "oa_dm1.bsp";
@@ -173,9 +167,8 @@ const char *WEAPON_TEXTURE_PATHS[] = {ASSET_ROOT "models/weapons2/machinegun/mgu
 // Player bounding box half-extents (x, y, z) used by the capsule collider
 const float PLAYER_HALF_EXTENTS[3] = {15.f, 32.f, 15.f};
 
-// Capsule spine half-length: half_height minus radius. For a 32-unit tall, 15-unit radius capsule
-// the spine is 32 - 15 = 17 units.
-#define PLAYER_CAPSULE_SPINE 17.f
+// Capsule spine half-length: half height minus radius
+#define PLAYER_CAPSULE_SPINE 17.f // For a 32-unit tall, 15-unit radius capsule: 32 - 15 = 17 units.
 
 // Projectile constants
 #define MAX_PROJECTILES 64    // Maximum simultaneous projectiles in flight
@@ -194,17 +187,14 @@ const float PLAYER_HALF_EXTENTS[3] = {15.f, 32.f, 15.f};
 #define MATERIAL_WATER   5
 #define MATERIAL_COUNT   6
 
-// Body-part damage multiplier maps: grayscale TGA textures UV-mapped to player models.
-// Brightness = damage multiplier: 255 = critical (exposed head/eyes), 0 = heavy armor.
-// Each player model has per-texture damage maps (head, upper, lower) that follow its UV layout.
-// The maps encode anatomical vulnerability: face/eyes = critical, exposed flesh = high,
-// fabric/scales = medium, metal armor = low, robot chassis = minimal.
+// Body-part damage multiplier maps: grayscale TGA textures UV-mapped to player models
 typedef struct {
   const char *Model_Name;       // Player model directory name
   const char *Damage_Maps[6];   // Up to 6 damage map TGA paths per model (NULL-terminated)
   int         Damage_Map_Count; // Number of damage maps for this model
 } Model_Damage_Entry;
 
+#define DAMAGE_CACHE_MAX 64
 #define DAMAGE_MODEL_COUNT 14
 const Model_Damage_Entry DAMAGE_MAP_REGISTRY[DAMAGE_MODEL_COUNT] = {
   {"grism",    {ASSET_ROOT "models/players/grism/enkiskin_dmg.tga"}, 1},
@@ -320,10 +310,7 @@ const Scene_Environment DEFAULT_ENVIRONMENT = {
 };
 Scene_Environment Active_Environment;
 
-// Builds per-scene environment settings by examining BSP shader names.
-// If a skybox texture is found, loads it and extracts dominant colors for
-// sky zenith/horizon and ambient hemisphere. Otherwise uses defaults.
-// Inspired by Q2RTX's per-map environment configuration.
+// Builds per-scene environment settings by examining BSP shader names
 Scene_Environment Environment_Infer_From_Scene (const Scene *S)
 
 // Sampled keyboard and mouse state for a single frame
@@ -343,9 +330,7 @@ typedef enum {
   MINIMIZE_DEACTIVATED // Window was minimized
 } Activated_Kind;
 
-// Aspect ratio constraints (ported from Neo Engine's Resize)
-// "Narrow" = widest aspect (21:9, height is narrow relative to width)
-// "Wide"   = narrowest aspect (4:3, height is wide relative to width)
+// Aspect ratio constraints
 #define ASPECT_NARROW_X     21
 #define ASPECT_NARROW_Y     9
 #define ASPECT_WIDE_X       4
@@ -457,9 +442,7 @@ typedef struct {
   float Normal     [3], Padding_B;       // Surface normal; padding aligns to 16 bytes
 } Vertex;
 
-// BSP Entity System (Master FPS Schema)
-//
-// One entity schema, one runtime union, no per-game structs.
+// BSP Entity System
 //
 // The entity lump in BSP files is text key/value records. We tokenize and map known keys into
 // typed fields, then discard the raw pairs. The discriminant union is the authoritative runtime
@@ -837,7 +820,7 @@ typedef struct {
 // Single spawn point parsed from the BSP entity lump
 typedef struct {vec3 Origin; float Angle;} Spawn; // World-space origin and facing angle in degrees
 
-// Parsed weapon model assembled from multiple MD3 surfaces (body, barrel, hand)
+// Parsed weapon model assembled from multiple MD3 surfaces
 typedef struct {
   Vertex *Vertices;     uint Vertex_Count;     // Merged vertex array from all surfaces
   uint    *Indices;     uint Index_Count;      // Merged index array from all surfaces
@@ -861,7 +844,7 @@ typedef struct {
   uint                   Texture_Base_Index;   // Starting index into the global texture array for weapon textures
 } Weapon_Instance;
 
-// Animated entity (player, NPC, etc.) with pre-computed per-frame vertex data for BLAS refit
+// Animated entity with pre-computed per-frame vertex data for BLAS refit
 #define ENTITY_MAX_FRAMES 16
 typedef struct {
   Vertex *Frame_Vertices[ENTITY_MAX_FRAMES]; // Pre-computed world-space vertices for each animation frame
@@ -881,9 +864,7 @@ typedef struct {
   float                  GL_Yaw;             // Entity yaw angle in GL space (radians)
 } Entity;
 
-// Player movement state: position, velocity, orientation, and ground contact information.
-// This is the CPU-side mirror of Gpu_Player; Physics_Dispatch reads back into this after
-// the compute shader finishes.
+// Player movement state
 typedef struct {
   vec3  Position;      // World-space position of the player's bounding box origin
   vec3  Velocity;      // Current velocity in units per second
@@ -1048,8 +1029,8 @@ Projectile_Pool Projectiles;
 int   Quit;       // Non-zero when the application should exit
 float Delta_Time; // Time elapsed since the previous frame in seconds
 
-// Runtime mode flags (set by command-line arguments)
-int   Skip_Postprocess; // Non-zero to bypass the post-processing compute pass
+// Runtime mode flags
+int Skip_Postprocess; // Non-zero to bypass the post-processing compute pass
 
 // Windowing state and settings
 Quality_Level    Active_Quality      = QUALITY_POTATO;
@@ -1164,10 +1145,7 @@ VkSampler Sampler_Create_Repeating ();
 // Create a sampler with linear filtering and clamp-to-edge on all axes
 VkSampler Sampler_Create_Clamping ();
 
-// Load a damage map TGA and sample it at normalized UV coordinates (0-1 range).
-// Returns a damage multiplier in [0.0, 1.0] where 0.0 = fully armored, 1.0 = critical.
-// The damage map is loaded on demand and cached in a table.
-#define DAMAGE_CACHE_MAX 64
+// Load a damage map TGA and sample it at normalized UV coordinates 
 
 // Loaded damage mapping
 typedef struct {
@@ -1185,6 +1163,9 @@ void Damage_Cache_Free ()
 
 // Look up the damage map path for a given model name and body part index (0=head, 1=upper, 2=lower)
 const char *Damage_Map_For_Model (const char *Model_Name, int Part_Index);
+
+// Returns a damage multiplier in [0.0, 1.0] where 0.0 = fully armored, 1.0 = critical.
+// The damage map is loaded on demand and cached in a table.
 float Damage_Map_Sample (const char *Path, float U, float V);
 
 // ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
@@ -1342,15 +1323,12 @@ Spawn BSP_Find_Spawn (const uint8_t *File_Data, const BSP_Header *Header);
 uint BSP_Parse_Entities (const uint8_t *File_Data, const BSP_Header *Header,
                          BSP_Entity *Out_Entities, uint Max_Entities);
 
-// Load a complete scene from a Quake 3 BSP file. This parses vertices, indices, faces (planar,
-// mesh, and patch types), shader references, and lightmap pages (packed into a single atlas).
-// Collision detection is handled entirely on the GPU via ray tracing against the TLAS, so no
-// CPU-side collision map is built - the BSP tree structure is only used for geometry extraction.
+// Load a complete scene from a Quake 3 BSP file
 Scene Scene_Load_From_BSP (const char *Path, Spawn *Out_Spawn);
 
 // Load textures for every material in the scene. Attempts to load TGA files from the assets
 // directory; materials without a texture file fall back to a 1×1 solid-color pixel derived
-// from the hashed shader name. Also uploads the lightmap atlas and per-triangle texture IDs.
+// from the hashed shader name.
 void Scene_Load_Textures (const Scene *Scene_Data);
 
 // Load the weapon model's TGA textures and append them to the global texture array.
@@ -1376,14 +1354,10 @@ void Weapon_Bottom_Level_Initialize (Weapon_Instance *Weapon);
 void Weapon_Bottom_Level_Rebuild (Weapon_Instance *Weapon);
 
 // Pre-allocate the top-level acceleration structure (TLAS) for up to Maximum_Instances
-// instance entries. The instance buffer, scratch buffer, and TLAS object are created once
-// and reused across frames. The TLAS is rebuilt (not updated) each frame.
+// instance entries.
 void Top_Level_Initialize (uint Maximum_Instances);
 
-// Rebuild the TLAS each frame with the world BLAS as instance 0 (mask 0xFF), optionally
-// the weapon BLAS as instance 1 (mask 0x01), an entity BLAS as instance 2 (mask 0xFF),
-// and optionally a player body as instance 3 (same BLAS as entity, mask 0x02 = reflection/shadow only).
-// Player_Body_Transform is a 3×4 affine matrix positioning the player body in world space (NULL = no player body).
+// Rebuild the TLAS each frame with the world BLAS 
 void Top_Level_Rebuild (Acceleration_Structure *World, Acceleration_Structure *Weapon, Acceleration_Structure *Enemy,
                         const float *Player_Body_Transform);
 
@@ -1395,12 +1369,12 @@ void Top_Level_Rebuild (Acceleration_Structure *World, Acceleration_Structure *W
 //   geometry, resolves contacts via a slide-move algorithm, and writes back the updated Gpu_Player state.
 //
 //   Six collider shapes, each defining a support function s(d̂) : S² → ℝ³:
-//     SPHERE      s(d̂) = d̂ · r                                  Projectiles, pickups
-//     CAPSULE     s(d̂) = d̂ · r + (0, sign(d̂.y) · spine, 0)     Player, NPCs
-//     AABB        s(d̂) = sign(d̂) ⊙ extents                      Crates, elevators
-//     CYLINDER    s(d̂) = (d̂.xz/‖d̂.xz‖ · r, sign(d̂.y) · h, 0)  Barrels, columns
-//     ELLIPSOID   s(d̂) = normalize(d̂ ⊘ axes) ⊙ axes · ‖...‖    Vehicles
-//     HULL        s(d̂) = argmax(v · d̂) over vertex set          Arbitrary convex models
+//     SPHERE      s(d̂) = d̂ · r                               Projectiles, pickups
+//     CAPSULE     s(d̂) = d̂ · r + (0, sign(d̂.y) · spine, 0)   Player, NPCs
+//     AABB        s(d̂) = sign(d̂) ⊙ extents                  Crates, elevators
+//     CYLINDER    s(d̂) = (d̂.xz/‖d̂.xz‖ · r, sign(d̂.y) · h, 0) Barrels, columns
+//     ELLIPSOID   s(d̂) = normalize(d̂ ⊘ axes) ⊙ axes · ‖...‖ Vehicles
+//     HULL        s(d̂) = argmax(v · d̂) over vertex set       Arbitrary convex models
 //
 //   Convex hull support uses hill-climbing with adjacency for O(√n) amortized queries on hulls with ≥64 vertices, falling back to O(n)
 //   brute-force for smaller hulls.
@@ -1419,9 +1393,7 @@ enum Collider_Shape {SHAPE_SPHERE,    // Projectiles:       s(d̂) = d̂ · r
                      SHAPE_ELLIPSOID, // Vehicles:          s(d̂) = normalize(d̂ ⊘ axes) ⊙ axes · ‖...‖     
                      SHAPE_HULL};     // Arbitrary models   s(d̂) = argmax(v · d̂) over vertex set      
 
-// GPU-resident player state uploaded to the physics compute shader (std430, 112 bytes).
-// The compute shader reads and writes this buffer each frame; the host reads it back
-// afterward to update the Camera and weapon transform.
+// GPU-resident player state uploaded to the physics compute shader
 typedef struct {
   float Position     [3]; float Pad_A;
   float Velocity     [3]; float Pad_B;
@@ -1520,9 +1492,7 @@ void Denoise_Pipeline_Create (void);
 void Physics_Resources_Create (const Player *Initial_State);
 
 // Dispatch the physics compute shader for one frame: push the current input, execute a single
-// workgroup, wait for completion, then read back the updated Gpu_Player state into a CPU-side
-// Player struct. The compute shader handles mouse look, acceleration, gravity, friction,
-// jump, crouch, and slide-move collision resolution against the TLAS.
+// workgroup, wait for completion, then read back the updated Gpu_Player state into a CPU-side.
 Player Physics_Dispatch (Input In, float Delta_Time);
 
 // ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
@@ -1531,17 +1501,13 @@ Player Physics_Dispatch (Input In, float Delta_Time);
 //
 // ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 
-// Create the ray tracing pipeline with four shader stages: ray generation, primary miss, shadow miss, and closest-hit. The descriptor set
-// layout defines 12 bindings covering the TLAS, storage image, camera uniform, vertex/index/material/texture-id buffers, lightmap sampler,
-//weapon buffers, and a variable-count texture array.
+// Create the ray tracing pipeline with four shader stages
 void Raytracing_Pipeline_Create ();
 
-// Build the shader binding table (SBT) by querying shader group handles from the pipeline and laying them out in an aligned buffer. Each
-// group gets one entry at the required stride.
+// Build the shader binding table (SBT) by querying shader group 
 void Shader_Binding_Table_Create ();
 
-// Allocate the descriptor pool and set, then write all 12 descriptor bindings for the ray tracing pipeline (TLAS, storage image, camera,
-// world geometry, weapon geometry, lightmap, and the variable-count texture array).
+// Allocate the descriptor pool and set, then write the descriptor bindings for the ray tracing pipeline 
 void Descriptor_Set_Create (Weapon_Instance *Weapon, Entity *Enemy);
 
 // ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
@@ -1552,9 +1518,8 @@ void Descriptor_Set_Create (Weapon_Instance *Weapon, Entity *Enemy);
 //
 // Each material is modeled as a bank of damped resonators (modes). An impact excitation
 // (short force pulse) drives all modes simultaneously. The resonator bank produces emergent
-// timbre from the object's physical resonances - not from hand-crafted oscillators.
+// timbre from the object's physical resonances - not from hand-crafted oscillators:
 //
-// Based on James/Zheng/Chadwick rigid-body sound synthesis:
 //   - Modal frequencies and T60 decay times per material
 //   - Contact impulse shapes the excitation
 //   - Acceleration noise restores high-frequency realism
@@ -1648,32 +1613,23 @@ void Audio_Init ();
 // Read a SPIR-V binary file from disk and wrap it in a Vulkan shader module.
 VkShaderModule Shader_Module_Load (const char *Path);
 
-// Closest-hit shader (rchit). Interpolates vertex attributes at the hit point using barycentric coordinates, samples the albedo from the
-// bindless texture array, applies lightmap-based illumination for BSP geometry or simple directional lighting for the weapon model, traces
-// a shadow ray toward the sun, and returns the final color.
+// Closest-hit shader (rchit). Interpolates vertex attributes at the hit point using barycentric coordinates, etc
 glsl rchit Closest_Hit;
 
-// Primary miss shader (rmiss). Called when a ray from the ray generation shader misses all geometry. Returns a procedural sky gradient
-// interpolated from a pale horizon color to a deeper blue at the zenith, based on the ray's vertical component.
+// Primary miss shader (rmiss). Called when a ray from the ray generation shader misses all geometry
 glsl rmiss Primary_Miss;
 
-// Shadow miss shader (rmiss, index 1). Called when a shadow ray reaches the sun without hitting any occluder. Sets the shadow factor to
-// 1.0 to indicate full illumination; if the ray had hit geometry, the closest-hit shader would not be invoked (due to
-// SkipClosestHitShader flag) and the factor remains at 0.0.
+// Shadow miss shader (rmiss, index 1). Called when a shadow ray reaches the sun without hitting any occluder
 glsl rmiss Shadow_Miss;
 
-// A-Trous Wavelet Spatial Denoiser (Q2RTX / SVGF-inspired)
-//
-// Core idea from Schied et al. "Spatiotemporal Variance-Guided Filtering" (HPG 2017):
-// Run a sparse 3×3 kernel at exponentially increasing step sizes (1, 2, 4).
-// 3 iterations × 9 taps = 27 taps total, but covers a 9×9 pixel area effectively.
-// Edge-stopping functions on depth and luminance prevent blurring across edges.
+// A-Trous Wavelet Spatial Denoiser 
 //
 // This filter cleans up:
 //   - Shadow noise from stochastic shadow sampling
 //   - Reflection noise from single-bounce traces
 //   - General 1-spp ray tracing noise
 // without the temporal lag/ghosting that TAA introduces.
+//
 glsl comp Denoise;
 
 // ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
@@ -1686,47 +1642,34 @@ glsl comp Denoise;
 // the current player position, yaw, pitch, field-of-view, and aspect ratio.
 void Camera_Upload (Camera *State, float Field_Of_View, uint Weapon_Texture_Base, uint PBR_Stride_Value, uint Active_SPP);
 
-// Update the weapon viewmodel's vertex positions each frame based on the camera orientation,
-// idle bob animation, and recoil animation from firing. The transformed vertices are written
-// to the CPU scratch buffer and subsequently uploaded to the GPU for BLAS rebuild.
+// Update the weapon viewmodel's vertex positions each frame based on the camera orientation
 void Weapon_Update (Weapon_Instance *Weapon, const Camera *Camera_Data, float Delta_Time, int Fire);
 
-// Sample the current keyboard and mouse state from SDL, returning the frame's input snapshot.
-// Also processes SDL_QUIT and ESCAPE key events to set the global Quit flag.
+// Sample the current keyboard and mouse state from SDL, returning the frame's input snapshot
 Input Poll_Input ();
 
-// Record and submit one frame of ray tracing: bind the pipeline and descriptors, dispatch
-// traceRaysKHR for every pixel, blit the storage image to the swapchain, and present.
+// Record and submit one frame of ray tracing: bind the pipeline and descriptors
 void Raytracing_Frame (Gpu_Postprocess_Push PP);
 
-// Ported from Neo Engine's Resize function.
-// Ensures window aspect ratio stays between 4:3 (wide) and 21:9 (narrow).
-// Width/height are clamped to minimum 256px.
+// Ensures window aspect ratio stays between our constraints
 void Constrain_Aspect_Ratio (int *W, int *H);
 
-// Change the visible cursor style in menu mode (rollover support).
-// Active = hovering interactive UI, Inactive = general menu, System = default arrow.
+// Change the visible cursor style in menu mode 
 void Set_Menu_Cursor (Cursor_Kind Kind);
 
-// Switch from game to menu: show cursor, unclip, stop centering.
-// Saves cursor position for restoration when returning to game.
+// Switch from game to menu: show cursor, unclip, stop centering
 void Enter_Menu_Mode ();
 
-// Switch from menu to game: hide cursor, clip to window, center each frame.
+// Switch from menu to game: hide cursor, clip to window, center each frame
 void Enter_Game_Mode ();
 
-// F11: toggle between windowed and fullscreen desktop mode.
-// Saves/restores window position and size across transitions.
+// Saves/restores window position and size across transitions
 void Toggle_Fullscreen ();
 
-// Ported from Neo Engine's activation state machine.
-// Handles focus gain/loss, minimize, and click-activate transitions.
-// Each case is explicit to avoid branching bugs (per Neo Engine convention).
+// Handles focus gain/loss, minimize, and click-activate transitions
 void Handle_Activation (Activated_Kind New_State);
 
-// Process SDL events and sample keyboard/mouse state.
-// Integrates with the Neo Engine-style windowing state machine for
-// focus changes, fullscreen toggle, menu/game transitions, and resize.
+// Process SDL events and sample keyboard/mouse state
 Input Poll_Input ();
 
 // ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
@@ -1743,8 +1686,6 @@ void Vulkan_Create_Swapchain ();
 void Vulkan_Recreate_Swapchain ();
 void Vulkan_Create_Synchronization ();
 void Vulkan_Transition_Storage_Image ();
-
-
 
 // ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 //
