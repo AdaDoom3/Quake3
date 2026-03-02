@@ -4350,8 +4350,15 @@ void Scene_Load_Textures (const Scene *Scene_Data) {
       Pixels = TGA_Load (Path, &W, &H);
     }
     if (Pixels and W and H) {
-      Texture_Upload_With_Format (Command_Buffer, Queue, Pixels, W, H, VK_FORMAT_R8G8B8A8_SRGB,
-                      &Texture_Images[Slot], &Texture_Memories[Slot], &Texture_Views[Slot]);
+      Texture_Upload_With_Format (/*Command_Buffer =>*/ Command_Buffer,
+                                  /*Queue          =>*/ Queue,
+                                  /*Pixels         =>*/ Pixels,
+                                  /*Width          =>*/ W,
+                                  /*Height         =>*/ H,
+                                  /*Format         =>*/ VK_FORMAT_R8G8B8A8_SRGB,
+                                  /*Out_Image      =>*/ &Texture_Images[Slot],
+                                  /*Out_Memory     =>*/ &Texture_Memories[Slot],
+                                  /*Out_View       =>*/ &Texture_Views[Slot]);
       Diffuse_Pixels[Index] = Pixels;  // retain for PBR derivation
       Diffuse_W[Index] = W;
       Diffuse_H[Index] = H;
@@ -4360,8 +4367,15 @@ void Scene_Load_Textures (const Scene *Scene_Data) {
       free (Pixels);
       vec4 Color = Scene_Data->Materials[Index];
       uint8_t Fallback[4] = {(uint8_t)(Color.x * 255), (uint8_t)(Color.y * 255), (uint8_t)(Color.z * 255), 255};
-      Texture_Upload_With_Format (Command_Buffer, Queue, Fallback, 1, 1, VK_FORMAT_R8G8B8A8_SRGB,
-                      &Texture_Images[Slot], &Texture_Memories[Slot], &Texture_Views[Slot]);
+      Texture_Upload_With_Format (/*Command_Buffer =>*/ Command_Buffer,
+                                  /*Queue          =>*/ Queue,
+                                  /*Pixels         =>*/ Fallback,
+                                  /*Width          =>*/ 1,
+                                  /*Height         =>*/ 1,
+                                  /*Format         =>*/ VK_FORMAT_R8G8B8A8_SRGB,
+                                  /*Out_Image      =>*/ &Texture_Images[Slot],
+                                  /*Out_Memory     =>*/ &Texture_Memories[Slot],
+                                  /*Out_View       =>*/ &Texture_Views[Slot]);
     }
   }
 
@@ -4381,8 +4395,15 @@ void Scene_Load_Textures (const Scene *Scene_Data) {
       VkFormat Fmt = VK_FORMAT_R8G8B8A8_UNORM;
 
       if (Pixels and W and H) {
-        Texture_Upload_With_Format (Command_Buffer, Queue, Pixels, W, H, Fmt,
-                        &Texture_Images[Slot], &Texture_Memories[Slot], &Texture_Views[Slot]);
+        Texture_Upload_With_Format (/*Command_Buffer =>*/ Command_Buffer,
+                                    /*Queue          =>*/ Queue,
+                                    /*Pixels         =>*/ Pixels,
+                                    /*Width          =>*/ W,
+                                    /*Height         =>*/ H,
+                                    /*Format         =>*/ Fmt,
+                                    /*Out_Image      =>*/ &Texture_Images[Slot],
+                                    /*Out_Memory     =>*/ &Texture_Memories[Slot],
+                                    /*Out_View       =>*/ &Texture_Views[Slot]);
         free (Pixels);
         PBR_Maps_Loaded++;
       } else {
@@ -4518,8 +4539,15 @@ void Scene_Load_Textures (const Scene *Scene_Data) {
           }
 
           // Upload texture to GPU
-          Texture_Upload_With_Format (Command_Buffer, Queue, Gen, DW, DH, Fmt,
-                          &Texture_Images[Slot], &Texture_Memories[Slot], &Texture_Views[Slot]);
+          Texture_Upload_With_Format (/*Command_Buffer =>*/ Command_Buffer,
+                                      /*Queue          =>*/ Queue,
+                                      /*Pixels         =>*/ Gen,
+                                      /*Width          =>*/ DW,
+                                      /*Height         =>*/ DH,
+                                      /*Format         =>*/ Fmt,
+                                      /*Out_Image      =>*/ &Texture_Images[Slot],
+                                      /*Out_Memory     =>*/ &Texture_Memories[Slot],
+                                      /*Out_View       =>*/ &Texture_Views[Slot]);
           free (Gen);
           PBR_Generated++;
 
@@ -4527,15 +4555,36 @@ void Scene_Load_Textures (const Scene *Scene_Data) {
         } else {
           if (Map_Type == 2) {
             uint8_t R_Pixel[4] = {Base_R, Base_R, Base_R, 255};
-            Texture_Upload_With_Format (Command_Buffer, Queue, R_Pixel, 1, 1, Fmt,
-                            &Texture_Images[Slot], &Texture_Memories[Slot], &Texture_Views[Slot]);
+            Texture_Upload_With_Format (/*Command_Buffer =>*/ Command_Buffer,
+                                        /*Queue          =>*/ Queue,
+                                        /*Pixels         =>*/ R_Pixel,
+                                        /*Width          =>*/ 1,
+                                        /*Height         =>*/ 1,
+                                        /*Format         =>*/ Fmt,
+                                        /*Out_Image      =>*/ &Texture_Images[Slot],
+                                        /*Out_Memory     =>*/ &Texture_Memories[Slot],
+                                        /*Out_View       =>*/ &Texture_Views[Slot]);
           } else if (Map_Type == 3) {
             uint8_t M_Pixel[4] = {Base_M, Base_M, Base_M, 255};
-            Texture_Upload_With_Format (Command_Buffer, Queue, M_Pixel, 1, 1, Fmt,
-                            &Texture_Images[Slot], &Texture_Memories[Slot], &Texture_Views[Slot]);
+            Texture_Upload_With_Format (/*Command_Buffer =>*/ Command_Buffer,
+                                        /*Queue          =>*/ Queue,
+                                        /*Pixels         =>*/ M_Pixel,
+                                        /*Width          =>*/ 1,
+                                        /*Height         =>*/ 1,
+                                        /*Format         =>*/ Fmt,
+                                        /*Out_Image      =>*/ &Texture_Images[Slot],
+                                        /*Out_Memory     =>*/ &Texture_Memories[Slot],
+                                        /*Out_View       =>*/ &Texture_Views[Slot]);
           } else {
-            Texture_Upload_With_Format (Command_Buffer, Queue, PBR_Fallbacks[Map_Type], 1, 1, Fmt,
-                            &Texture_Images[Slot], &Texture_Memories[Slot], &Texture_Views[Slot]);
+            Texture_Upload_With_Format (/*Command_Buffer =>*/ Command_Buffer,
+                                        /*Queue          =>*/ Queue,
+                                        /*Pixels         =>*/ PBR_Fallbacks[Map_Type],
+                                        /*Width          =>*/ 1,
+                                        /*Height         =>*/ 1,
+                                        /*Format         =>*/ Fmt,
+                                        /*Out_Image      =>*/ &Texture_Images[Slot],
+                                        /*Out_Memory     =>*/ &Texture_Memories[Slot],
+                                        /*Out_View       =>*/ &Texture_Views[Slot]);
           }
         }
       }
@@ -4564,17 +4613,27 @@ void Scene_Load_Textures (const Scene *Scene_Data) {
   // Upload the lightmap atlas (or a 1x1 white fallback if no lightmaps exist)
   Lightmap_Sampler = Sampler_Create_Clamping ();
   if (Scene_Data->Lightmap_Atlas and Scene_Data->Lightmap_Width and Scene_Data->Lightmap_Height) {
-    Texture_Upload_With_Format (Command_Buffer, Queue,
-                                Scene_Data->Lightmap_Atlas,
-                                Scene_Data->Lightmap_Width, Scene_Data->Lightmap_Height,
-                                VK_FORMAT_R8G8B8A8_SRGB,
-                                &Lightmap_Image, &Lightmap_Memory, &Lightmap_View);
+    Texture_Upload_With_Format (/*Command_Buffer =>*/ Command_Buffer,
+                                /*Queue          =>*/ Queue,
+                                /*Pixels         =>*/ Scene_Data->Lightmap_Atlas,
+                                /*Width          =>*/ Scene_Data->Lightmap_Width,
+                                /*Height         =>*/ Scene_Data->Lightmap_Height,
+                                /*Format         =>*/ VK_FORMAT_R8G8B8A8_SRGB,
+                                /*Out_Image      =>*/ &Lightmap_Image,
+                                /*Out_Memory     =>*/ &Lightmap_Memory,
+                                /*Out_View       =>*/ &Lightmap_View);
     printf ("[lightmap] uploaded %ux%u atlas (SRGB - auto-linearized on sample)\n", Scene_Data->Lightmap_Width, Scene_Data->Lightmap_Height);
   } else {
     uint8_t White[4] = {255, 255, 255, 255};
-    Texture_Upload_With_Format (Command_Buffer, Queue, White, 1, 1,
-                                VK_FORMAT_R8G8B8A8_SRGB,
-                                &Lightmap_Image, &Lightmap_Memory, &Lightmap_View);
+    Texture_Upload_With_Format (/*Command_Buffer =>*/ Command_Buffer,
+                                /*Queue          =>*/ Queue,
+                                /*Pixels         =>*/ White,
+                                /*Width          =>*/ 1,
+                                /*Height         =>*/ 1,
+                                /*Format         =>*/ VK_FORMAT_R8G8B8A8_SRGB,
+                                /*Out_Image      =>*/ &Lightmap_Image,
+                                /*Out_Memory     =>*/ &Lightmap_Memory,
+                                /*Out_View       =>*/ &Lightmap_View);
   }
 } // BSP_Parse_Entities
 
@@ -4626,16 +4685,30 @@ void Weapon_Load_Textures (Weapon_Instance *Weapon) {
       VkFormat Fmt = (Map_Type == 0) ? VK_FORMAT_R8G8B8A8_SRGB : VK_FORMAT_R8G8B8A8_UNORM;
 
       if (Pixels and Img_W and Img_H) {
-        Texture_Upload_With_Format (Command_Buffer, Queue, Pixels, Img_W, Img_H, Fmt,
-                        &Texture_Images[Slot], &Texture_Memories[Slot], &Texture_Views[Slot]);
+        Texture_Upload_With_Format (/*Command_Buffer =>*/ Command_Buffer,
+                                    /*Queue          =>*/ Queue,
+                                    /*Pixels         =>*/ Pixels,
+                                    /*Width          =>*/ Img_W,
+                                    /*Height         =>*/ Img_H,
+                                    /*Format         =>*/ Fmt,
+                                    /*Out_Image      =>*/ &Texture_Images[Slot],
+                                    /*Out_Memory     =>*/ &Texture_Memories[Slot],
+                                    /*Out_View       =>*/ &Texture_Views[Slot]);
         free (Pixels);
         if (Map_Type == 0)
           printf ("[weapon] loaded texture %s (%ux%u)\n", Path, Img_W, Img_H);
         else
           Weapon_PBR_Loaded++;
       } else {
-        Texture_Upload_With_Format (Command_Buffer, Queue, (uint8_t *)Weapon_PBR_Fallbacks[Map_Type], 1, 1, Fmt,
-                        &Texture_Images[Slot], &Texture_Memories[Slot], &Texture_Views[Slot]);
+        Texture_Upload_With_Format (/*Command_Buffer =>*/ Command_Buffer,
+                                    /*Queue          =>*/ Queue,
+                                    /*Pixels         =>*/ (uint8_t *)Weapon_PBR_Fallbacks[Map_Type],
+                                    /*Width          =>*/ 1,
+                                    /*Height         =>*/ 1,
+                                    /*Format         =>*/ Fmt,
+                                    /*Out_Image      =>*/ &Texture_Images[Slot],
+                                    /*Out_Memory     =>*/ &Texture_Memories[Slot],
+                                    /*Out_View       =>*/ &Texture_Views[Slot]);
         if (Map_Type == 0)
           printf ("[weapon] fallback texture for %s\n", WEAPON_TEXTURE_PATHS[Index]);
       }
