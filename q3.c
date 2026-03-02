@@ -5367,51 +5367,58 @@ void Postprocess_Pipeline_Create () {
     {3, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, NULL}, // Display output (tonemapped)
   };
 
-  VK_CHECK (vkCreateDescriptorSetLayout (Device,
-    &(VkDescriptorSetLayoutCreateInfo){
-      .sType        = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
-      .bindingCount = 4,
-      .pBindings    = Bindings},
-    NULL, &Postprocess_Descriptor_Layout));
+  VK_CHECK (vkCreateDescriptorSetLayout (/*device      =>*/ Device,
+                                         /*pCreateInfo =>*/ &(VkDescriptorSetLayoutCreateInfo){
+                                           .sType        = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+                                           .bindingCount = 4,
+                                           .pBindings    = Bindings},
+                                         /*pAllocator  =>*/ NULL,
+                                         /*pSetLayout  =>*/ &Postprocess_Descriptor_Layout));
 
   // Create the pipeline layout with push constants for postprocess parameters
   VkPushConstantRange Push_Range = {VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof (Gpu_Postprocess_Push)};
-  VK_CHECK (vkCreatePipelineLayout (Device,
-    &(VkPipelineLayoutCreateInfo){
-      .sType                  = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
-      .setLayoutCount         = 1,
-      .pSetLayouts            = &Postprocess_Descriptor_Layout,
-      .pushConstantRangeCount = 1,
-      .pPushConstantRanges    = &Push_Range},
-    NULL, &Postprocess_Pipeline_Layout));
+  VK_CHECK (vkCreatePipelineLayout (/*device          =>*/ Device,
+                                    /*pCreateInfo     =>*/ &(VkPipelineLayoutCreateInfo){
+                                      .sType                  = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+                                      .setLayoutCount         = 1,
+                                      .pSetLayouts            = &Postprocess_Descriptor_Layout,
+                                      .pushConstantRangeCount = 1,
+                                      .pPushConstantRanges    = &Push_Range},
+                                    /*pAllocator      =>*/ NULL,
+                                    /*pPipelineLayout =>*/ &Postprocess_Pipeline_Layout));
 
   // Load the postprocess shader and create the compute pipeline
   VkShaderModule Module = Shader_Module_Load (Shader_Path(Post_Process));
-  VK_CHECK (vkCreateComputePipelines (Device, Pipeline_Cache, 1,
-    &(VkComputePipelineCreateInfo){
-      .sType  = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
-      .stage  = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, NULL, 0, VK_SHADER_STAGE_COMPUTE_BIT, Module, "main", NULL},
-      .layout = Postprocess_Pipeline_Layout},
-    NULL, &Postprocess_Pipeline));
+  VK_CHECK (vkCreateComputePipelines (/*device          =>*/ Device,
+                                      /*pipelineCache   =>*/ Pipeline_Cache,
+                                      /*createInfoCount =>*/ 1,
+                                      /*pCreateInfos    =>*/ &(VkComputePipelineCreateInfo){
+                                        .sType  = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
+                                        .stage  = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, NULL, 0,
+                                                   VK_SHADER_STAGE_COMPUTE_BIT, Module, "main", NULL},
+                                        .layout = Postprocess_Pipeline_Layout},
+                                      /*pAllocator      =>*/ NULL,
+                                      /*pPipelines      =>*/ &Postprocess_Pipeline));
   vkDestroyShaderModule (Device, Module, NULL);
 
   // Descriptor pool and set
   VkDescriptorPoolSize Pool_Size = {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 4};
-  VK_CHECK (vkCreateDescriptorPool (Device,
-    &(VkDescriptorPoolCreateInfo){
-      .sType         = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
-      .maxSets       = 1,
-      .poolSizeCount = 1,
-      .pPoolSizes    = &Pool_Size},
-    NULL, &Postprocess_Descriptor_Pool));
+  VK_CHECK (vkCreateDescriptorPool (/*device          =>*/ Device,
+                                    /*pCreateInfo     =>*/ &(VkDescriptorPoolCreateInfo){
+                                      .sType         = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
+                                      .maxSets       = 1,
+                                      .poolSizeCount = 1,
+                                      .pPoolSizes    = &Pool_Size},
+                                    /*pAllocator      =>*/ NULL,
+                                    /*pDescriptorPool =>*/ &Postprocess_Descriptor_Pool));
 
-  VK_CHECK (vkAllocateDescriptorSets (Device,
-    &(VkDescriptorSetAllocateInfo){
-      .sType              = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
-      .descriptorPool     = Postprocess_Descriptor_Pool,
-      .descriptorSetCount = 1,
-      .pSetLayouts        = &Postprocess_Descriptor_Layout},
-    &Postprocess_Descriptor_Set));
+  VK_CHECK (vkAllocateDescriptorSets (/*device          =>*/ Device,
+                                      /*pAllocateInfo   =>*/ &(VkDescriptorSetAllocateInfo){
+                                        .sType              = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+                                        .descriptorPool     = Postprocess_Descriptor_Pool,
+                                        .descriptorSetCount = 1,
+                                        .pSetLayouts        = &Postprocess_Descriptor_Layout},
+                                      /*pDescriptorSets =>*/ &Postprocess_Descriptor_Set));
 
   // Prepare image descriptor infos for color, depth, history, and display output
   VkDescriptorImageInfo Color_Info   = {.imageView = Raytracing_Storage_Image.View,  .imageLayout = VK_IMAGE_LAYOUT_GENERAL};
@@ -5442,54 +5449,60 @@ void Denoise_Pipeline_Create () {
     {2, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, NULL},  // Depth
   };
 
-  // Submit Vulkan command
-  VK_CHECK (vkCreateDescriptorSetLayout (Device,
-    &(VkDescriptorSetLayoutCreateInfo){
-      .sType        = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
-      .bindingCount = 3,
-      .pBindings    = Bindings},
-    NULL, &Denoise_Descriptor_Layout));
+  VK_CHECK (vkCreateDescriptorSetLayout (/*device      =>*/ Device,
+                                         /*pCreateInfo =>*/ &(VkDescriptorSetLayoutCreateInfo){
+                                           .sType        = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+                                           .bindingCount = 3,
+                                           .pBindings    = Bindings},
+                                         /*pAllocator  =>*/ NULL,
+                                         /*pSetLayout  =>*/ &Denoise_Descriptor_Layout));
 
   // Create the pipeline layout with push constants for step size and budget
   VkPushConstantRange Push_Range = {VK_SHADER_STAGE_COMPUTE_BIT, 0, 2 * sizeof (int)};
-  VK_CHECK (vkCreatePipelineLayout (Device,
-    &(VkPipelineLayoutCreateInfo){
-      .sType                  = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
-      .setLayoutCount         = 1,
-      .pSetLayouts            = &Denoise_Descriptor_Layout,
-      .pushConstantRangeCount = 1,
-      .pPushConstantRanges    = &Push_Range},
-    NULL, &Denoise_Pipeline_Layout));
+  VK_CHECK (vkCreatePipelineLayout (/*device          =>*/ Device,
+                                    /*pCreateInfo     =>*/ &(VkPipelineLayoutCreateInfo){
+                                      .sType                  = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+                                      .setLayoutCount         = 1,
+                                      .pSetLayouts            = &Denoise_Descriptor_Layout,
+                                      .pushConstantRangeCount = 1,
+                                      .pPushConstantRanges    = &Push_Range},
+                                    /*pAllocator      =>*/ NULL,
+                                    /*pPipelineLayout =>*/ &Denoise_Pipeline_Layout));
 
   // Load the denoise shader and create the compute pipeline
   VkShaderModule Module = Shader_Module_Load (Shader_Path(Denoise));
-  VK_CHECK (vkCreateComputePipelines (Device, Pipeline_Cache, 1,
-    &(VkComputePipelineCreateInfo){
-      .sType  = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
-      .stage  = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, NULL, 0, VK_SHADER_STAGE_COMPUTE_BIT, Module, "main", NULL},
-      .layout = Denoise_Pipeline_Layout},
-    NULL, &Denoise_Pipeline));
+  VK_CHECK (vkCreateComputePipelines (/*device          =>*/ Device,
+                                      /*pipelineCache   =>*/ Pipeline_Cache,
+                                      /*createInfoCount =>*/ 1,
+                                      /*pCreateInfos    =>*/ &(VkComputePipelineCreateInfo){
+                                        .sType  = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
+                                        .stage  = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, NULL, 0,
+                                                   VK_SHADER_STAGE_COMPUTE_BIT, Module, "main", NULL},
+                                        .layout = Denoise_Pipeline_Layout},
+                                      /*pAllocator      =>*/ NULL,
+                                      /*pPipelines      =>*/ &Denoise_Pipeline));
   vkDestroyShaderModule (Device, Module, NULL);
 
   // Descriptor pool: 2 sets × 3 images each = 6 image descriptors
   VkDescriptorPoolSize Pool_Size = {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 6};
-  VK_CHECK (vkCreateDescriptorPool (Device,
-    &(VkDescriptorPoolCreateInfo){
-      .sType         = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
-      .maxSets       = 2,
-      .poolSizeCount = 1,
-      .pPoolSizes    = &Pool_Size},
-    NULL, &Denoise_Descriptor_Pool));
+  VK_CHECK (vkCreateDescriptorPool (/*device          =>*/ Device,
+                                    /*pCreateInfo     =>*/ &(VkDescriptorPoolCreateInfo){
+                                      .sType         = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
+                                      .maxSets       = 2,
+                                      .poolSizeCount = 1,
+                                      .pPoolSizes    = &Pool_Size},
+                                    /*pAllocator      =>*/ NULL,
+                                    /*pDescriptorPool =>*/ &Denoise_Descriptor_Pool));
 
   // Allocate both ping-pong descriptor sets
   VkDescriptorSetLayout Layouts[2] = {Denoise_Descriptor_Layout, Denoise_Descriptor_Layout};
-  VK_CHECK (vkAllocateDescriptorSets (Device,
-    &(VkDescriptorSetAllocateInfo){
-      .sType              = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
-      .descriptorPool     = Denoise_Descriptor_Pool,
-      .descriptorSetCount = 2,
-      .pSetLayouts        = Layouts},
-    Denoise_Descriptor_Sets));
+  VK_CHECK (vkAllocateDescriptorSets (/*device          =>*/ Device,
+                                      /*pAllocateInfo   =>*/ &(VkDescriptorSetAllocateInfo){
+                                        .sType              = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+                                        .descriptorPool     = Denoise_Descriptor_Pool,
+                                        .descriptorSetCount = 2,
+                                        .pSetLayouts        = Layouts},
+                                      /*pDescriptorSets =>*/ Denoise_Descriptor_Sets));
 
   // Set[0]: reads Storage_Image > writes Denoise_Ping_Image
   VkDescriptorImageInfo Storage_Info = {.imageView = Raytracing_Storage_Image.View, .imageLayout = VK_IMAGE_LAYOUT_GENERAL};
@@ -5559,21 +5572,23 @@ void Raytracing_Pipeline_Create () {
     .pBindingFlags = Binding_Flags};
 
   // Create the descriptor set layout with all 16 bindings
-  VK_CHECK (vkCreateDescriptorSetLayout (Device,
-                                         &(VkDescriptorSetLayoutCreateInfo){
+  VK_CHECK (vkCreateDescriptorSetLayout (/*device      =>*/ Device,
+                                         /*pCreateInfo =>*/ &(VkDescriptorSetLayoutCreateInfo){
                                            .sType        = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
                                            .pNext        = &Binding_Flags_Info,
                                            .bindingCount = 16,
                                            .pBindings    = Bindings},
-                                         NULL, &Descriptor_Set_Layout));
+                                         /*pAllocator  =>*/ NULL,
+                                         /*pSetLayout  =>*/ &Descriptor_Set_Layout));
 
   // Create the pipeline layout referencing the single descriptor set
-  VK_CHECK (vkCreatePipelineLayout (Device,
-                                    &(VkPipelineLayoutCreateInfo){
+  VK_CHECK (vkCreatePipelineLayout (/*device          =>*/ Device,
+                                    /*pCreateInfo     =>*/ &(VkPipelineLayoutCreateInfo){
                                       .sType          = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
                                       .setLayoutCount = 1,
                                       .pSetLayouts    = &Descriptor_Set_Layout},
-                                    NULL, &Pipeline_Layout));
+                                    /*pAllocator      =>*/ NULL,
+                                    /*pPipelineLayout =>*/ &Pipeline_Layout));
 
   // Load the four SPIR-V shader modules from pre-compiled files
   VkShaderModule Ray_Generation_Module = Shader_Module_Load (Shader_Path (Ray_Generation));
@@ -5596,13 +5611,18 @@ void Raytracing_Pipeline_Create () {
     {VK_STRUCTURE_TYPE_RAY_TRACING_SHADER_GROUP_CREATE_INFO_KHR, NULL, VK_RAY_TRACING_SHADER_GROUP_TYPE_TRIANGLES_HIT_GROUP_KHR, VK_SHADER_UNUSED_KHR, 3, VK_SHADER_UNUSED_KHR, VK_SHADER_UNUSED_KHR, NULL}};
 
   // A shared pipeline cache lets the driver reuse compiled shader ISA across pipeline objects and across runs
-  VK_CHECK (vkCreatePipelineCache (Device,
-    &(VkPipelineCacheCreateInfo){.sType = VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO},
-    NULL, &Pipeline_Cache));
+  VK_CHECK (vkCreatePipelineCache (/*device      =>*/ Device,
+                                   /*pCreateInfo =>*/ &(VkPipelineCacheCreateInfo){
+                                     .sType = VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO},
+                                   /*pAllocator  =>*/ NULL,
+                                   /*pPipelineCache =>*/ &Pipeline_Cache));
 
   // Create the ray tracing pipeline with recursion depth
-  VK_CHECK (vkCreateRayTracingPipelines (Device, VK_NULL_HANDLE, Pipeline_Cache, 1,
-                                         &(VkRayTracingPipelineCreateInfoKHR){
+  VK_CHECK (vkCreateRayTracingPipelines (/*device            =>*/ Device,
+                                         /*deferredOperation =>*/ VK_NULL_HANDLE,
+                                         /*pipelineCache     =>*/ Pipeline_Cache,
+                                         /*createInfoCount   =>*/ 1,
+                                         /*pCreateInfos      =>*/ &(VkRayTracingPipelineCreateInfoKHR){
                                            .sType                        = VK_STRUCTURE_TYPE_RAY_TRACING_PIPELINE_CREATE_INFO_KHR,
                                            .stageCount                   = 4,
                                            .pStages                      = Stages,
@@ -5610,7 +5630,8 @@ void Raytracing_Pipeline_Create () {
                                            .pGroups                      = Groups,
                                            .maxPipelineRayRecursionDepth = 2,
                                            .layout                       = Pipeline_Layout},
-                                         NULL, &Pipeline));
+                                         /*pAllocator        =>*/ NULL,
+                                         /*pPipelines        =>*/ &Pipeline));
 
   // Destroy the shader modules now that the pipeline owns the compiled code
   vkDestroyShaderModule (Device, Ray_Generation_Module, NULL);
@@ -5639,11 +5660,11 @@ void Shader_Binding_Table_Create () {
 
   // Allocate the SBT buffer and copy each handle at the proper stride offset
   uint Table_Size = Stride * Group_Count;
-  Shader_Binding_Table_Buffer = Buffer_Allocate (Table_Size,
-                                                 VK_BUFFER_USAGE_SHADER_BINDING_TABLE_BIT_KHR
-                                               | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
-                                                 VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT
-                                               | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+  Shader_Binding_Table_Buffer = Buffer_Allocate (/*Size         =>*/ Table_Size,
+                                                 /*Usage        =>*/ VK_BUFFER_USAGE_SHADER_BINDING_TABLE_BIT_KHR
+                                                                   | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
+                                                 /*Memory_Flags =>*/ VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT
+                                                                   | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
 
   // Map the SBT buffer and copy each group's handle at the aligned stride offset
   uint8_t *Destination;
@@ -5674,13 +5695,14 @@ void Descriptor_Set_Create (Weapon_Instance *Weapon, Entity *Enemy) {
                                        {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,             1},
                                        {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,             10}, // 7 world/weapon + 3 entity
                                        {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,     DESCRIPTOR_TEXTURE_SLOTS + 1}}; // +1 for lightmap
-  VK_CHECK (vkCreateDescriptorPool (Device,
-                                    &(VkDescriptorPoolCreateInfo){
+  VK_CHECK (vkCreateDescriptorPool (/*device          =>*/ Device,
+                                    /*pCreateInfo     =>*/ &(VkDescriptorPoolCreateInfo){
                                       .sType         = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
                                       .maxSets       = 1,
                                       .poolSizeCount = 5,
                                       .pPoolSizes    = Pool_Sizes},
-                                    NULL, &Descriptor_Pool));
+                                    /*pAllocator      =>*/ NULL,
+                                    /*pDescriptorPool =>*/ &Descriptor_Pool));
 
   // Allocate the descriptor set with a variable descriptor count for the texture array
   uint Variable_Count = Texture_Count;
@@ -5688,14 +5710,14 @@ void Descriptor_Set_Create (Weapon_Instance *Weapon, Entity *Enemy) {
     .sType              = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_VARIABLE_DESCRIPTOR_COUNT_ALLOCATE_INFO,
     .descriptorSetCount = 1,
     .pDescriptorCounts  = &Variable_Count};
-  VK_CHECK (vkAllocateDescriptorSets (Device,
-                                      &(VkDescriptorSetAllocateInfo){
+  VK_CHECK (vkAllocateDescriptorSets (/*device          =>*/ Device,
+                                      /*pAllocateInfo   =>*/ &(VkDescriptorSetAllocateInfo){
                                         .sType              = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
                                         .pNext              = &Variable_Allocate,
                                         .descriptorPool     = Descriptor_Pool,
                                         .descriptorSetCount = 1,
                                         .pSetLayouts        = &Descriptor_Set_Layout},
-                                      &Descriptor_Set));
+                                      /*pDescriptorSets =>*/ &Descriptor_Set));
 
   // Prepare descriptor info structures for each binding
   VkWriteDescriptorSetAccelerationStructureKHR Acceleration_Write = {
