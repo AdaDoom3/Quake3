@@ -4658,28 +4658,30 @@ void Weapon_Load_Textures (Weapon_Instance *Weapon) {
 
 Acceleration_Structure Build_World_Bottom_Level (const Scene *Scene_Data) {
 
-  // Upload scene vertex, index, and material data to device-local GPU buffers
-  Vertex_Buffer = Buffer_Stage_Upload (Command_Buffer, Queue,
-                                       Scene_Data->Vertices,
-                                       sizeof (Vertex) * Scene_Data->Vertex_Count,
-                                       VK_BUFFER_USAGE_VERTEX_BUFFER_BIT
-                                     | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
-                                     | VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR);
+  // Upload scene vertex, index, and material data to device-local GPU buffers for BLAS construction and shader access
+  Vertex_Buffer = Buffer_Stage_Upload (/*Command_Buffer =>*/ Command_Buffer,
+                                       /*Queue          =>*/ Queue,
+                                       /*Data           =>*/ Scene_Data->Vertices,
+                                       /*Size           =>*/ sizeof (Vertex) * Scene_Data->Vertex_Count,
+                                       /*Usage          =>*/ VK_BUFFER_USAGE_VERTEX_BUFFER_BIT
+                                                           | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
+                                                           | VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR);
 
   // Upload the index buffer to device-local memory for BLAS construction and shader access
-  Index_Buffer = Buffer_Stage_Upload (Command_Buffer, Queue,
-                                      Scene_Data->Indices,
-                                      sizeof (uint) * Scene_Data->Index_Count,
-                                      VK_BUFFER_USAGE_INDEX_BUFFER_BIT
-                                    | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
-                                    | VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR);
+  Index_Buffer = Buffer_Stage_Upload (/*Command_Buffer =>*/ Command_Buffer,
+                                      /*Queue          =>*/ Queue,
+                                      /*Data           =>*/ Scene_Data->Indices,
+                                      /*Size           =>*/ sizeof (uint) * Scene_Data->Index_Count,
+                                      /*Usage          =>*/ VK_BUFFER_USAGE_INDEX_BUFFER_BIT
+                                                          | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
+                                                          | VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR);
 
-  // Allocate a host-visible material buffer for per-surface RGBA tints
-  Material_Buffer = Buffer_Allocate (sizeof (vec4) * Scene_Data->Material_Count,
-                                     VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
-                                   | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
-                                     VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT
-                                   | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+  // Allocate a host-visible material buffer for per-surface RGBA tints that shaders can reference via buffer device address
+  Material_Buffer = Buffer_Allocate (/*Size         =>*/ sizeof (vec4) * Scene_Data->Material_Count,
+                                     /*Usage        =>*/ VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
+                                                       | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
+                                     /*Memory_Flags =>*/ VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT
+                                                       | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
 
   // Upload the material color array
   Buffer_Upload (Material_Buffer, Scene_Data->Materials, sizeof (vec4) * Scene_Data->Material_Count);
@@ -4706,32 +4708,37 @@ Acceleration_Structure Build_World_Bottom_Level (const Scene *Scene_Data) {
     .geometryCount = 1,
     .pGeometries   = &Geometry};
 
-  // Query required acceleration structure and scratch sizes from the driver
+  // Query required acceleration structure and scratch buffer sizes from the driver for the given triangle geometry
   uint Primitive_Count = Scene_Data->Triangle_Count;
   VkAccelerationStructureBuildSizesInfoKHR Build_Sizes = {.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR};
-  vkGetAccelerationStructureBuildSizes (Device, VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR, &Build_Info, &Primitive_Count, &Build_Sizes);
+  vkGetAccelerationStructureBuildSizes (/*device    =>*/ Device,
+                                        /*buildType =>*/ VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR,
+                                        /*pBuildInfo =>*/ &Build_Info,
+                                        /*pMaxPrimitiveCounts =>*/ &Primitive_Count,
+                                        /*pSizeInfo =>*/ &Build_Sizes);
 
   // Allocate the acceleration structure buffer and create the BLAS object
   Acceleration_Structure Result = {0};
-  Result.Buffer = Buffer_Allocate (Build_Sizes.accelerationStructureSize,
-                                   VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR
-                                 | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
-                                   VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+  Result.Buffer = Buffer_Allocate (/*Size         =>*/ Build_Sizes.accelerationStructureSize,
+                                   /*Usage        =>*/ VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR
+                                                     | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
+                                   /*Memory_Flags =>*/ VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
 
-  // Create the bottom-level acceleration structure object
-  VK_CHECK (vkCreateAccelerationStructure (Device,
-                                           &(VkAccelerationStructureCreateInfoKHR){
+  // Create the bottom-level acceleration structure object backed by the allocated buffer
+  VK_CHECK (vkCreateAccelerationStructure (/*device      =>*/ Device,
+                                           /*pCreateInfo =>*/ &(VkAccelerationStructureCreateInfoKHR){
                                              .sType  = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_CREATE_INFO_KHR,
                                              .buffer = Result.Buffer.Buffer,
                                              .size   = Build_Sizes.accelerationStructureSize,
                                              .type   = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR},
-                                           NULL, &Result.Handle));
+                                           /*pAllocator  =>*/ NULL,
+                                           /*pStructure  =>*/ &Result.Handle));
 
-  // Allocate temporary scratch memory for the build operation
-  Gpu_Buffer Scratch = Buffer_Allocate (Build_Sizes.buildScratchSize,
-                                        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
-                                      | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
-                                        VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+  // Allocate temporary scratch memory for the build operation (freed after the build completes)
+  Gpu_Buffer Scratch = Buffer_Allocate (/*Size         =>*/ Build_Sizes.buildScratchSize,
+                                        /*Usage        =>*/ VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
+                                                          | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
+                                        /*Memory_Flags =>*/ VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
 
   // Finalize the build info with the destination structure and scratch address
   Build_Info.dstAccelerationStructure  = Result.Handle;
@@ -4741,29 +4748,33 @@ Acceleration_Structure Build_World_Bottom_Level (const Scene *Scene_Data) {
   VkAccelerationStructureBuildRangeInfoKHR Range = {.primitiveCount = Primitive_Count};
   const VkAccelerationStructureBuildRangeInfoKHR *Range_Pointer = &Range;
 
-  // Record and submit a one-shot command buffer to build the BLAS
+  // Record and submit a one-shot command buffer to build the BLAS on the GPU
   VK_CHECK (vkResetCommandBuffer (Command_Buffer, 0));
-  VK_CHECK (vkBeginCommandBuffer (Command_Buffer,
-                                  &(VkCommandBufferBeginInfo){
+  VK_CHECK (vkBeginCommandBuffer (/*commandBuffer =>*/ Command_Buffer,
+                                  /*pBeginInfo    =>*/ &(VkCommandBufferBeginInfo){
                                     .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
                                     .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT}));
 
-  // Record the BLAS build command
-  vkCmdBuildAccelerationStructures (Command_Buffer, 1, &Build_Info, &Range_Pointer);
+  // Record the BLAS build command into the command buffer
+  vkCmdBuildAccelerationStructures (/*commandBuffer =>*/ Command_Buffer,
+                                    /*infoCount     =>*/ 1,
+                                    /*pInfos        =>*/ &Build_Info,
+                                    /*ppBuildRangeInfos =>*/ &Range_Pointer);
   VK_CHECK (vkEndCommandBuffer (Command_Buffer));
-  VK_CHECK (vkQueueSubmit (Queue, 1,
-                           &(VkSubmitInfo){
+  VK_CHECK (vkQueueSubmit (/*queue       =>*/ Queue,
+                           /*submitCount =>*/ 1,
+                           /*pSubmits    =>*/ &(VkSubmitInfo){
                              .sType              = VK_STRUCTURE_TYPE_SUBMIT_INFO,
                              .commandBufferCount = 1,
                              .pCommandBuffers    = &Command_Buffer},
-                           VK_NULL_HANDLE));
+                           /*fence       =>*/ VK_NULL_HANDLE));
 
   // Wait for the build to complete before querying the device address
   VK_CHECK (vkQueueWaitIdle (Queue));
 
-  // Query the device address of the built BLAS for referencing from the TLAS
-  Result.Address = vkGetAccelerationStructureDeviceAddress (Device,
-                     &(VkAccelerationStructureDeviceAddressInfoKHR){
+  // Query the device address of the built BLAS for referencing from the TLAS instance data
+  Result.Address = vkGetAccelerationStructureDeviceAddress (/*device =>*/ Device,
+                     /*pInfo  =>*/ &(VkAccelerationStructureDeviceAddressInfoKHR){
                        .sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_DEVICE_ADDRESS_INFO_KHR,
                        .accelerationStructure = Result.Handle});
 
@@ -4785,29 +4796,31 @@ void Weapon_Bottom_Level_Initialize (Weapon_Instance *Weapon) {
   Weapon->Transformed_Vertices = malloc (sizeof (Vertex) * Weapon->Model.Vertex_Count);
   memcpy (Weapon->Transformed_Vertices, Weapon->Model.Vertices, sizeof (Vertex) * Weapon->Model.Vertex_Count);
 
-  // Create host-visible vertex buffer for direct CPU writes each frame
-  Weapon->Vertex_Buffer = Buffer_Allocate (sizeof (Vertex) * Weapon->Model.Vertex_Count,
-                                           VK_BUFFER_USAGE_VERTEX_BUFFER_BIT
-                                         | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
-                                         | VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR
-                                         | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
-                                           VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT
-                                         | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+  // Create host-visible vertex buffer for direct CPU writes each frame (host-visible so we can update without staging)
+  Weapon->Vertex_Buffer = Buffer_Allocate (/*Size         =>*/ sizeof (Vertex) * Weapon->Model.Vertex_Count,
+                                           /*Usage        =>*/ VK_BUFFER_USAGE_VERTEX_BUFFER_BIT
+                                                             | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
+                                                             | VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR
+                                                             | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
+                                           /*Memory_Flags =>*/ VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT
+                                                             | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
 
   // Upload the initial vertex positions
   Buffer_Upload (Weapon->Vertex_Buffer, Weapon->Transformed_Vertices, sizeof (Vertex) * Weapon->Model.Vertex_Count);
 
-  // Upload index and texture-id data (static, device-local)
-  Weapon->Index_Buffer      = Buffer_Stage_Upload (Command_Buffer, Queue,
-                                                   Weapon->Model.Indices,
-                                                   sizeof (uint) * Weapon->Model.Index_Count,
-                                                   VK_BUFFER_USAGE_INDEX_BUFFER_BIT
-                                                 | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
-                                                 | VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR);
-  Weapon->Texture_Id_Buffer = Buffer_Stage_Upload (Command_Buffer, Queue,
-                                                   Weapon->Model.Texture_Ids,
-                                                   sizeof (uint) * Weapon->Model.Triangle_Count,
-                                                   VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+  // Upload index and texture-id data (static, device-local — these never change after the initial upload)
+  Weapon->Index_Buffer      = Buffer_Stage_Upload (/*Command_Buffer =>*/ Command_Buffer,
+                                                   /*Queue          =>*/ Queue,
+                                                   /*Data           =>*/ Weapon->Model.Indices,
+                                                   /*Size           =>*/ sizeof (uint) * Weapon->Model.Index_Count,
+                                                   /*Usage          =>*/ VK_BUFFER_USAGE_INDEX_BUFFER_BIT
+                                                                       | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
+                                                                       | VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR);
+  Weapon->Texture_Id_Buffer = Buffer_Stage_Upload (/*Command_Buffer =>*/ Command_Buffer,
+                                                   /*Queue          =>*/ Queue,
+                                                   /*Data           =>*/ Weapon->Model.Texture_Ids,
+                                                   /*Size           =>*/ sizeof (uint) * Weapon->Model.Triangle_Count,
+                                                   /*Usage          =>*/ VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
 
   // Configure the BLAS for fast builds with update capability
   VkAccelerationStructureGeometryKHR Geometry = {
@@ -4832,27 +4845,32 @@ void Weapon_Bottom_Level_Initialize (Weapon_Instance *Weapon) {
     .geometryCount = 1,
     .pGeometries   = &Geometry};
 
-  // Query required sizes for the weapon BLAS and its scratch buffer
+  // Query required sizes for the weapon BLAS and its scratch buffer from the driver
   uint Primitive_Count = Weapon->Model.Triangle_Count;
   VkAccelerationStructureBuildSizesInfoKHR Build_Sizes = {.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR};
-  vkGetAccelerationStructureBuildSizes (Device, VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR, &Build_Info, &Primitive_Count, &Build_Sizes);
+  vkGetAccelerationStructureBuildSizes (/*device             =>*/ Device,
+                                        /*buildType          =>*/ VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR,
+                                        /*pBuildInfo         =>*/ &Build_Info,
+                                        /*pMaxPrimitiveCounts =>*/ &Primitive_Count,
+                                        /*pSizeInfo          =>*/ &Build_Sizes);
 
-  // Allocate the BLAS buffer and persistent scratch buffer (reused across frames)
-  Weapon->Bottom_Level.Buffer  = Buffer_Allocate (Build_Sizes.accelerationStructureSize,
-                                                  VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR
-                                                | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
-                                                  VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-  VK_CHECK (vkCreateAccelerationStructure (Device,
-                                           &(VkAccelerationStructureCreateInfoKHR){
+  // Allocate the BLAS buffer and persistent scratch buffer (scratch is reused across frames for BLAS refits)
+  Weapon->Bottom_Level.Buffer  = Buffer_Allocate (/*Size         =>*/ Build_Sizes.accelerationStructureSize,
+                                                  /*Usage        =>*/ VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR
+                                                                    | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
+                                                  /*Memory_Flags =>*/ VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+  VK_CHECK (vkCreateAccelerationStructure (/*device      =>*/ Device,
+                                           /*pCreateInfo =>*/ &(VkAccelerationStructureCreateInfoKHR){
                                              .sType  = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_CREATE_INFO_KHR,
                                              .buffer = Weapon->Bottom_Level.Buffer.Buffer,
                                              .size   = Build_Sizes.accelerationStructureSize,
                                              .type   = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR},
-                                           NULL, &Weapon->Bottom_Level.Handle));
-  Weapon->Bottom_Level_Scratch = Buffer_Allocate (Build_Sizes.buildScratchSize,
-                                                  VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
-                                                | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
-                                                  VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+                                           /*pAllocator  =>*/ NULL,
+                                           /*pStructure  =>*/ &Weapon->Bottom_Level.Handle));
+  Weapon->Bottom_Level_Scratch = Buffer_Allocate (/*Size         =>*/ Build_Sizes.buildScratchSize,
+                                                  /*Usage        =>*/ VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
+                                                                    | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
+                                                  /*Memory_Flags =>*/ VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
 
   // Perform the initial BLAS build
   Build_Info.dstAccelerationStructure  = Weapon->Bottom_Level.Handle;
@@ -4864,25 +4882,31 @@ void Weapon_Bottom_Level_Initialize (Weapon_Instance *Weapon) {
 
   // Record and submit the initial weapon BLAS build
   VK_CHECK (vkResetCommandBuffer (Command_Buffer, 0));
-  VK_CHECK (vkBeginCommandBuffer (Command_Buffer,
-                                  &(VkCommandBufferBeginInfo){
+  VK_CHECK (vkBeginCommandBuffer (/*commandBuffer =>*/ Command_Buffer,
+                                  /*pBeginInfo    =>*/ &(VkCommandBufferBeginInfo){
                                     .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
                                     .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT}));
-  vkCmdBuildAccelerationStructures (Command_Buffer, 1, &Build_Info, &Range_Pointer);
+  vkCmdBuildAccelerationStructures (/*commandBuffer     =>*/ Command_Buffer,
+                                    /*infoCount         =>*/ 1,
+                                    /*pInfos            =>*/ &Build_Info,
+                                    /*ppBuildRangeInfos =>*/ &Range_Pointer);
   VK_CHECK (vkEndCommandBuffer (Command_Buffer));
 
-  // Submit and wait for the build to complete
-  VK_CHECK (vkQueueSubmit (Queue, 1,
-                           &(VkSubmitInfo){.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
-                             .commandBufferCount = 1, .pCommandBuffers = &Command_Buffer},
-                           VK_NULL_HANDLE));
+  // Submit and wait for the build to complete before querying the device address
+  VK_CHECK (vkQueueSubmit (/*queue       =>*/ Queue,
+                           /*submitCount =>*/ 1,
+                           /*pSubmits    =>*/ &(VkSubmitInfo){
+                             .sType              = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+                             .commandBufferCount = 1,
+                             .pCommandBuffers    = &Command_Buffer},
+                           /*fence       =>*/ VK_NULL_HANDLE));
   VK_CHECK (vkQueueWaitIdle (Queue));
 
   // Query the BLAS device address for TLAS instance referencing
-  Weapon->Bottom_Level.Address = vkGetAccelerationStructureDeviceAddress (Device,
-    &(VkAccelerationStructureDeviceAddressInfoKHR){
-      .sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_DEVICE_ADDRESS_INFO_KHR,
-      .accelerationStructure = Weapon->Bottom_Level.Handle});
+  Weapon->Bottom_Level.Address = vkGetAccelerationStructureDeviceAddress (/*device =>*/ Device,
+                                   /*pInfo  =>*/ &(VkAccelerationStructureDeviceAddressInfoKHR){
+                                     .sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_DEVICE_ADDRESS_INFO_KHR,
+                                     .accelerationStructure = Weapon->Bottom_Level.Handle});
   printf ("[weapon] BLAS built: %u triangles\n", Primitive_Count);
 
 } // Weapon_Bottom_Level_Initialize
@@ -4934,21 +4958,27 @@ void Weapon_Bottom_Level_Rebuild (Weapon_Instance *Weapon) {
   VkAccelerationStructureBuildRangeInfoKHR Range = {.primitiveCount = Weapon->Model.Triangle_Count};
   const VkAccelerationStructureBuildRangeInfoKHR *Range_Pointer = &Range;
 
-  // Record the rebuild command
+  // Record the BLAS refit command into a one-shot command buffer
   VK_CHECK (vkResetCommandBuffer (Command_Buffer, 0));
-  VK_CHECK (vkBeginCommandBuffer (Command_Buffer,
-                                  &(VkCommandBufferBeginInfo){
+  VK_CHECK (vkBeginCommandBuffer (/*commandBuffer =>*/ Command_Buffer,
+                                  /*pBeginInfo    =>*/ &(VkCommandBufferBeginInfo){
                                     .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
                                     .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT}));
 
-  // Issue the BLAS rebuild command
-  vkCmdBuildAccelerationStructures (Command_Buffer, 1, &Build_Info, &Range_Pointer);
+  // Issue the BLAS refit command (MODE_UPDATE: re-compute AABBs in-place without rebuilding the BVH tree)
+  vkCmdBuildAccelerationStructures (/*commandBuffer     =>*/ Command_Buffer,
+                                    /*infoCount         =>*/ 1,
+                                    /*pInfos            =>*/ &Build_Info,
+                                    /*ppBuildRangeInfos =>*/ &Range_Pointer);
 
-  // Submit and synchronize
+  // Submit and synchronize before the frame uses the updated BLAS
   VK_CHECK (vkEndCommandBuffer (Command_Buffer));
-  VK_CHECK (vkQueueSubmit (Queue, 1,
-                           &(VkSubmitInfo){.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
-                             .commandBufferCount = 1, .pCommandBuffers = &Command_Buffer},
+  VK_CHECK (vkQueueSubmit (/*queue       =>*/ Queue,
+                           /*submitCount =>*/ 1,
+                           /*pSubmits    =>*/ &(VkSubmitInfo){
+                             .sType              = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+                             .commandBufferCount = 1,
+                             .pCommandBuffers    = &Command_Buffer},
                            VK_NULL_HANDLE));
   VK_CHECK (vkQueueWaitIdle (Queue));
 }
@@ -4960,27 +4990,29 @@ void Weapon_Bottom_Level_Rebuild (Weapon_Instance *Weapon) {
 void Entity_Bottom_Level_Initialize (Entity *Enemy) {
   if (not Enemy->Vertex_Count) return;
 
-  // Host-visible vertex buffer for per-frame uploads
-  Enemy->Vertex_Buffer = Buffer_Allocate (sizeof (Vertex) * Enemy->Vertex_Count,
-                                          VK_BUFFER_USAGE_VERTEX_BUFFER_BIT
-                                        | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
-                                        | VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR
-                                        | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
-                                          VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT
-                                        | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+  // Host-visible vertex buffer for per-frame CPU uploads (host-visible so we can update each frame without staging)
+  Enemy->Vertex_Buffer = Buffer_Allocate (/*Size         =>*/ sizeof (Vertex) * Enemy->Vertex_Count,
+                                          /*Usage        =>*/ VK_BUFFER_USAGE_VERTEX_BUFFER_BIT
+                                                            | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
+                                                            | VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR
+                                                            | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
+                                          /*Memory_Flags =>*/ VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT
+                                                            | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
   Buffer_Upload (Enemy->Vertex_Buffer, Enemy->Current_Vertices, sizeof (Vertex) * Enemy->Vertex_Count);
 
-  // Static index and texture-id buffers (device-local)
-  Enemy->Index_Buffer      = Buffer_Stage_Upload (Command_Buffer, Queue,
-                                                  Enemy->Indices,
-                                                  sizeof (uint) * Enemy->Index_Count,
-                                                  VK_BUFFER_USAGE_INDEX_BUFFER_BIT
-                                                | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
-                                                | VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR);
-  Enemy->Texture_Id_Buffer = Buffer_Stage_Upload (Command_Buffer, Queue,
-                                                  Enemy->Texture_Ids,
-                                                  sizeof (uint) * Enemy->Triangle_Count,
-                                                  VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+  // Static index and texture-id buffers (device-local — these never change after the initial upload)
+  Enemy->Index_Buffer      = Buffer_Stage_Upload (/*Command_Buffer =>*/ Command_Buffer,
+                                                  /*Queue          =>*/ Queue,
+                                                  /*Data           =>*/ Enemy->Indices,
+                                                  /*Size           =>*/ sizeof (uint) * Enemy->Index_Count,
+                                                  /*Usage          =>*/ VK_BUFFER_USAGE_INDEX_BUFFER_BIT
+                                                                      | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
+                                                                      | VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR);
+  Enemy->Texture_Id_Buffer = Buffer_Stage_Upload (/*Command_Buffer =>*/ Command_Buffer,
+                                                  /*Queue          =>*/ Queue,
+                                                  /*Data           =>*/ Enemy->Texture_Ids,
+                                                  /*Size           =>*/ sizeof (uint) * Enemy->Triangle_Count,
+                                                  /*Usage          =>*/ VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
 
   // Build the initial BLAS with FAST_BUILD + ALLOW_UPDATE for per-frame refit
   VkAccelerationStructureGeometryKHR Geometry = {
@@ -5005,27 +5037,32 @@ void Entity_Bottom_Level_Initialize (Entity *Enemy) {
     .geometryCount = 1,
     .pGeometries   = &Geometry};
 
-  // Query required BLAS and scratch buffer sizes
+  // Query required BLAS and scratch buffer sizes from the driver for the given triangle geometry
   uint Primitive_Count = Enemy->Triangle_Count;
   VkAccelerationStructureBuildSizesInfoKHR Build_Sizes = {.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR};
-  vkGetAccelerationStructureBuildSizes (Device, VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR, &Build_Info, &Primitive_Count, &Build_Sizes);
+  vkGetAccelerationStructureBuildSizes (/*device             =>*/ Device,
+                                        /*buildType          =>*/ VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR,
+                                        /*pBuildInfo         =>*/ &Build_Info,
+                                        /*pMaxPrimitiveCounts =>*/ &Primitive_Count,
+                                        /*pSizeInfo          =>*/ &Build_Sizes);
 
-  // Allocate BLAS storage, create the structure, and allocate scratch memory
-  Enemy->Bottom_Level.Buffer  = Buffer_Allocate (Build_Sizes.accelerationStructureSize,
-                                                 VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR
-                                               | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
-                                                 VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-  VK_CHECK (vkCreateAccelerationStructure (Device,
-    &(VkAccelerationStructureCreateInfoKHR){
-      .sType  = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_CREATE_INFO_KHR,
-      .buffer = Enemy->Bottom_Level.Buffer.Buffer,
-      .size   = Build_Sizes.accelerationStructureSize,
-      .type   = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR},
-    NULL, &Enemy->Bottom_Level.Handle));
-  Enemy->Bottom_Level_Scratch = Buffer_Allocate (Build_Sizes.buildScratchSize,
-                                                 VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
-                                               | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
-                                                 VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+  // Allocate BLAS storage, create the acceleration structure, and allocate persistent scratch memory for per-frame refits
+  Enemy->Bottom_Level.Buffer  = Buffer_Allocate (/*Size         =>*/ Build_Sizes.accelerationStructureSize,
+                                                 /*Usage        =>*/ VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR
+                                                                   | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
+                                                 /*Memory_Flags =>*/ VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+  VK_CHECK (vkCreateAccelerationStructure (/*device      =>*/ Device,
+                                           /*pCreateInfo =>*/ &(VkAccelerationStructureCreateInfoKHR){
+                                             .sType  = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_CREATE_INFO_KHR,
+                                             .buffer = Enemy->Bottom_Level.Buffer.Buffer,
+                                             .size   = Build_Sizes.accelerationStructureSize,
+                                             .type   = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR},
+                                           /*pAllocator  =>*/ NULL,
+                                           /*pStructure  =>*/ &Enemy->Bottom_Level.Handle));
+  Enemy->Bottom_Level_Scratch = Buffer_Allocate (/*Size         =>*/ Build_Sizes.buildScratchSize,
+                                                 /*Usage        =>*/ VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
+                                                                   | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
+                                                 /*Memory_Flags =>*/ VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
 
   // Finalize the build info with destination and scratch addresses
   Build_Info.dstAccelerationStructure  = Enemy->Bottom_Level.Handle;
@@ -5035,21 +5072,28 @@ void Entity_Bottom_Level_Initialize (Entity *Enemy) {
   VkAccelerationStructureBuildRangeInfoKHR Range = {.primitiveCount = Primitive_Count};
   const VkAccelerationStructureBuildRangeInfoKHR *Range_Pointer = &Range;
   VK_CHECK (vkResetCommandBuffer (Command_Buffer, 0));
-  VK_CHECK (vkBeginCommandBuffer (Command_Buffer,
-    &(VkCommandBufferBeginInfo){.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
-      .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT}));
-  vkCmdBuildAccelerationStructures (Command_Buffer, 1, &Build_Info, &Range_Pointer);
+  VK_CHECK (vkBeginCommandBuffer (/*commandBuffer =>*/ Command_Buffer,
+                                  /*pBeginInfo    =>*/ &(VkCommandBufferBeginInfo){
+                                    .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+                                    .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT}));
+  vkCmdBuildAccelerationStructures (/*commandBuffer     =>*/ Command_Buffer,
+                                    /*infoCount         =>*/ 1,
+                                    /*pInfos            =>*/ &Build_Info,
+                                    /*ppBuildRangeInfos =>*/ &Range_Pointer);
   VK_CHECK (vkEndCommandBuffer (Command_Buffer));
-  VK_CHECK (vkQueueSubmit (Queue, 1,
-    &(VkSubmitInfo){.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
-      .commandBufferCount = 1, .pCommandBuffers = &Command_Buffer},
-    VK_NULL_HANDLE));
+  VK_CHECK (vkQueueSubmit (/*queue       =>*/ Queue,
+                           /*submitCount =>*/ 1,
+                           /*pSubmits    =>*/ &(VkSubmitInfo){
+                             .sType              = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+                             .commandBufferCount = 1,
+                             .pCommandBuffers    = &Command_Buffer},
+                           /*fence       =>*/ VK_NULL_HANDLE));
   VK_CHECK (vkQueueWaitIdle (Queue));
 
   // Query the BLAS device address for TLAS instance referencing
-  Enemy->Bottom_Level.Address = vkGetAccelerationStructureDeviceAddress (Device,
-    &(VkAccelerationStructureDeviceAddressInfoKHR){
-      .sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_DEVICE_ADDRESS_INFO_KHR,
+  Enemy->Bottom_Level.Address = vkGetAccelerationStructureDeviceAddress (/*device =>*/ Device,
+                                  /*pInfo  =>*/ &(VkAccelerationStructureDeviceAddressInfoKHR){
+                                    .sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_DEVICE_ADDRESS_INFO_KHR,
       .accelerationStructure = Enemy->Bottom_Level.Handle});
   printf ("[enemy] BLAS built: %u triangles\n", Primitive_Count);
 }
@@ -5091,19 +5135,26 @@ void Entity_Bottom_Level_Rebuild (Entity *Enemy) {
     .geometryCount             = 1,
     .pGeometries               = &Geometry};
 
-  // Record and submit the BLAS refit command
+  // Record and submit the BLAS refit command into a one-shot command buffer
   VkAccelerationStructureBuildRangeInfoKHR Range = {.primitiveCount = Enemy->Triangle_Count};
   const VkAccelerationStructureBuildRangeInfoKHR *Range_Pointer = &Range;
   VK_CHECK (vkResetCommandBuffer (Command_Buffer, 0));
-  VK_CHECK (vkBeginCommandBuffer (Command_Buffer,
-    &(VkCommandBufferBeginInfo){.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
-      .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT}));
-  vkCmdBuildAccelerationStructures (Command_Buffer, 1, &Build_Info, &Range_Pointer);
+  VK_CHECK (vkBeginCommandBuffer (/*commandBuffer =>*/ Command_Buffer,
+                                  /*pBeginInfo    =>*/ &(VkCommandBufferBeginInfo){
+                                    .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+                                    .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT}));
+  vkCmdBuildAccelerationStructures (/*commandBuffer     =>*/ Command_Buffer,
+                                    /*infoCount         =>*/ 1,
+                                    /*pInfos            =>*/ &Build_Info,
+                                    /*ppBuildRangeInfos =>*/ &Range_Pointer);
   VK_CHECK (vkEndCommandBuffer (Command_Buffer));
-  VK_CHECK (vkQueueSubmit (Queue, 1,
-    &(VkSubmitInfo){.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
-      .commandBufferCount = 1, .pCommandBuffers = &Command_Buffer},
-    VK_NULL_HANDLE));
+  VK_CHECK (vkQueueSubmit (/*queue       =>*/ Queue,
+                           /*submitCount =>*/ 1,
+                           /*pSubmits    =>*/ &(VkSubmitInfo){
+                             .sType              = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+                             .commandBufferCount = 1,
+                             .pCommandBuffers    = &Command_Buffer},
+                           /*fence       =>*/ VK_NULL_HANDLE));
   VK_CHECK (vkQueueWaitIdle (Queue));
 }
 
@@ -5113,12 +5164,12 @@ void Entity_Bottom_Level_Rebuild (Entity *Enemy) {
 
 void Top_Level_Initialize (uint Maximum_Instances) {
 
-  // Allocate a host-visible instance buffer for writing TLAS instance descriptors each frame
-  Top_Level_Instance_Buffer = Buffer_Allocate (sizeof (VkAccelerationStructureInstanceKHR) * Maximum_Instances,
-                                               VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR
-                                             | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
-                                               VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT
-                                             | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+  // Allocate a host-visible instance buffer for writing TLAS instance descriptors each frame (host-visible for direct CPU writes)
+  Top_Level_Instance_Buffer = Buffer_Allocate (/*Size         =>*/ sizeof (VkAccelerationStructureInstanceKHR) * Maximum_Instances,
+                                               /*Usage        =>*/ VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR
+                                                                 | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
+                                               /*Memory_Flags =>*/ VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT
+                                                                 | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
 
   // Query the required sizes for the TLAS and its scratch buffer
   VkAccelerationStructureGeometryKHR Geometry = {
@@ -5146,34 +5197,39 @@ void Top_Level_Initialize (uint Maximum_Instances) {
     .geometryCount = 1,
     .pGeometries   = &Geometry};
   VkAccelerationStructureBuildSizesInfoKHR Build_Sizes = {.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR};
-  vkGetAccelerationStructureBuildSizes (Device, VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR, &Build_Info, &Maximum_Instances, &Build_Sizes);
+  vkGetAccelerationStructureBuildSizes (/*device             =>*/ Device,
+                                        /*buildType          =>*/ VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR,
+                                        /*pBuildInfo         =>*/ &Build_Info,
+                                        /*pMaxPrimitiveCounts =>*/ &Maximum_Instances,
+                                        /*pSizeInfo          =>*/ &Build_Sizes);
 
-  // Allocate the TLAS storage buffer and create the acceleration structure object
-  Top_Level.Buffer = Buffer_Allocate (Build_Sizes.accelerationStructureSize,
-                                      VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR
-                                    | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
-                                      VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+  // Allocate the TLAS storage buffer and create the top-level acceleration structure object
+  Top_Level.Buffer = Buffer_Allocate (/*Size         =>*/ Build_Sizes.accelerationStructureSize,
+                                      /*Usage        =>*/ VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR
+                                                        | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
+                                      /*Memory_Flags =>*/ VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
 
-  // Create the top-level acceleration structure object
-  VK_CHECK (vkCreateAccelerationStructure (Device,
-                                           &(VkAccelerationStructureCreateInfoKHR){
+  // Create the top-level acceleration structure object backed by the allocated buffer
+  VK_CHECK (vkCreateAccelerationStructure (/*device      =>*/ Device,
+                                           /*pCreateInfo =>*/ &(VkAccelerationStructureCreateInfoKHR){
                                              .sType  = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_CREATE_INFO_KHR,
                                              .buffer = Top_Level.Buffer.Buffer,
                                              .size   = Build_Sizes.accelerationStructureSize,
                                              .type   = VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR},
-                                           NULL, &Top_Level.Handle));
+                                           /*pAllocator  =>*/ NULL,
+                                           /*pStructure  =>*/ &Top_Level.Handle));
 
-  // Allocate persistent scratch memory for per-frame TLAS rebuilds
-  Top_Level_Scratch_Buffer = Buffer_Allocate (Build_Sizes.buildScratchSize,
-                                              VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
-                                            | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
-                                              VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+  // Allocate persistent scratch memory for per-frame TLAS rebuilds (reused every frame)
+  Top_Level_Scratch_Buffer = Buffer_Allocate (/*Size         =>*/ Build_Sizes.buildScratchSize,
+                                              /*Usage        =>*/ VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
+                                                                | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
+                                              /*Memory_Flags =>*/ VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
 
-  // Query the TLAS device address for descriptor binding
-  Top_Level.Address = vkGetAccelerationStructureDeviceAddress (Device,
-    &(VkAccelerationStructureDeviceAddressInfoKHR){
-      .sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_DEVICE_ADDRESS_INFO_KHR,
-      .accelerationStructure = Top_Level.Handle});
+  // Query the TLAS device address for descriptor binding in the ray tracing pipeline
+  Top_Level.Address = vkGetAccelerationStructureDeviceAddress (/*device =>*/ Device,
+                        /*pInfo  =>*/ &(VkAccelerationStructureDeviceAddressInfoKHR){
+                          .sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_DEVICE_ADDRESS_INFO_KHR,
+                          .accelerationStructure = Top_Level.Handle});
 
 } // Top_Level_Initialize
 
@@ -5267,20 +5323,26 @@ void Top_Level_Rebuild (Acceleration_Structure *World, Acceleration_Structure *W
     .pGeometries               = &Geometry};
   First_Build = 0;
 
-  // Record and submit the TLAS rebuild
+  // Record and submit the TLAS rebuild command into a one-shot command buffer
   VK_CHECK (vkResetCommandBuffer (Command_Buffer, 0));
-  VK_CHECK (vkBeginCommandBuffer (Command_Buffer,
-                                  &(VkCommandBufferBeginInfo){
+  VK_CHECK (vkBeginCommandBuffer (/*commandBuffer =>*/ Command_Buffer,
+                                  /*pBeginInfo    =>*/ &(VkCommandBufferBeginInfo){
                                     .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
                                     .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT}));
-  vkCmdBuildAccelerationStructures (Command_Buffer, 1, &Build_Info, &Range_Pointer);
+  vkCmdBuildAccelerationStructures (/*commandBuffer     =>*/ Command_Buffer,
+                                    /*infoCount         =>*/ 1,
+                                    /*pInfos            =>*/ &Build_Info,
+                                    /*ppBuildRangeInfos =>*/ &Range_Pointer);
   VK_CHECK (vkEndCommandBuffer (Command_Buffer));
 
-  // Submit and wait for the TLAS rebuild to complete
-  VK_CHECK (vkQueueSubmit (Queue, 1,
-                           &(VkSubmitInfo){.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
-                             .commandBufferCount = 1, .pCommandBuffers = &Command_Buffer},
-                           VK_NULL_HANDLE));
+  // Submit and wait for the TLAS rebuild to complete before the frame uses it
+  VK_CHECK (vkQueueSubmit (/*queue       =>*/ Queue,
+                           /*submitCount =>*/ 1,
+                           /*pSubmits    =>*/ &(VkSubmitInfo){
+                             .sType              = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+                             .commandBufferCount = 1,
+                             .pCommandBuffers    = &Command_Buffer},
+                           /*fence       =>*/ VK_NULL_HANDLE));
   VK_CHECK (vkQueueWaitIdle (Queue));
 
 } // Top_Level_Rebuild
