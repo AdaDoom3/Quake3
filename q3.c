@@ -8699,7 +8699,7 @@ glsl comp Post_Process {
         }
         M1 /= 5.0; M2 /= 5.0;
         vec3 Sigma = sqrt (max (M2 - M1 * M1, vec3 (0.0)));
-        History = clamp (History, M1 - Sigma * 0.5, M1 + Sigma * 0.5);
+        History = clamp (History, M1 - Sigma * 0.3, M1 + Sigma * 0.3);
   
         // Luminance-based history rejection
         //
@@ -8710,22 +8710,22 @@ glsl comp Post_Process {
         float Cur_Lum  = dot (Color,   vec3 (0.2126, 0.7152, 0.0722));
         float Hist_Lum = dot (History, vec3 (0.2126, 0.7152, 0.0722));
         float Lum_Diff = abs (Cur_Lum - Hist_Lum) / max (Cur_Lum, 0.01);
-        float Anti_Lag = clamp (Lum_Diff * 3.0, 0.0, 1.0); // Reject
+        float Anti_Lag = clamp (Lum_Diff * 5.0, 0.0, 1.0); // Reject
   
         // Disocclusion detection
         vec2 Screen_Disp = vec2 (Prev_Pixel - Pixel) / vec2 (Size);
         float Disp_Len = length (Screen_Disp);
-        float Disocclusion = clamp (Disp_Len * 20.0, 0.0, 1.0); // Rejected
+        float Disocclusion = clamp (Disp_Len * 30.0, 0.0, 1.0); // Rejected
   
         // Temporal blend
-        float Is_Static = step (Speed, 5.0);
+        float Is_Static = step (Speed, 2.0);
   
         // Static: 1/N convergence floored high
-        float Static_Alpha = max (1.0 / max (float (Frame_Count), 1.0), 0.30);
+        float Static_Alpha = max (1.0 / max (float (Frame_Count), 1.0), 0.25);
   
         // Moving: very aggressive current-frame dominance
-        float Motion      = clamp (Speed * 0.02, 0.0, 1.0);  // ISA: reciprocal multiply vs division
-        float Base        = mix (0.50, 0.95, Motion);  // Even slow motion > 50% current frame
+        float Motion      = clamp (Speed * 0.04, 0.0, 1.0);  // ISA: reciprocal multiply vs division
+        float Base        = mix (0.65, 0.98, Motion);  // Even slow motion > 65% current frame
         float Fps_Adapt   = clamp ((Delta_Time - 0.016) * 20.0, 0.0, 1.0);
         float Moving_Alpha = max (max (max (Base, Fps_Adapt), Disocclusion), Anti_Lag);
 
