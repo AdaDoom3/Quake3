@@ -1,5 +1,5 @@
 #define NOB_IMPLEMENTATION
-#include "nob.h"
+#include "nobuild.h"
 #include <iso646.h>
 
 // ── system dependencies ──────────────────────────────────────────
@@ -21,10 +21,9 @@
 
 // ── settings ─────────────────────────────────────────────────────
 
-#define SRC   "./"
 #define BUILD "build/"
 #define SPVD  BUILD "shaders/"
-#define MAIN  SRC "quake3.c"
+#define MAIN  "q3.c"
 
 // Validation layers: enabled for debug builds, stripped for production.
 // Production builds patch the generated C source to zero out the layer
@@ -34,33 +33,47 @@
 
 // ── shader extraction ──────────────────────────────────────────
 //
-// Embedded shaders can appear anywhere in quake3.c at the top level
+// Embedded shaders can appear anywhere in q3.c at the top level
 // (outside of any C brace-delimited block) as:
 //
-//     glsl shader <Name> <stage> {
+//     glsl <stage> <Name> {        ← shader definition (body extracted)
 //     ...GLSL source...
 //     }
 //
-// nob walks the file tracking C brace depth.  A `glsl shader` line
+//     glsl <stage> <Name>;         ← forward declaration (skipped)
+//
+// nob walks the file tracking C brace depth.  A `glsl` line
 // at depth 0 is recognised as a shader block; anything nested inside
 // a C function, struct, etc. is ignored.  The C-only output written
-// to build/quake3.c has every shader block excised; each block's
+// to build/q3.c has every shader block excised; each block's
 // GLSL body is extracted to its own .glsl file for SPIR-V compilation.
+// Forward declarations (ending in `;`) are also excised from the
+// generated C source.
 
 typedef struct {
     char        name[64];
     char        stage[16];
     const char *code;
     size_t      code_len;
-    const char *block_start; // first char of `glsl shader ...` line
+    const char *block_start; // first char of `glsl ...` line
     const char *block_end;   // first char after the closing `}\n`
 } Shader_Block;
 
+// Region to excise from C output (forward declarations or shader blocks)
+typedef struct {
+    const char *start;
+    const char *end;
+} Excise_Region;
+
 #define MAX_SHADERS 16
+#define MAX_EXCISE  64
 
 // Walk the source tracking C brace depth and extract top-level
-// `glsl shader` blocks.  Returns the number of blocks found.
-static int extract_shaders(const char *src, Shader_Block *out, int max) {
+// `glsl <stage> <Name>` blocks.  Forward declarations (`glsl <stage> <Name>;`)
+// are recorded as excise regions but not as shader blocks.
+// Returns the number of shader blocks found.
+static int extract_shaders(const char *src, Shader_Block *out, int max,
+                           Excise_Region *excise, int *excise_count, int excise_max) {
     int count = 0;
     int depth = 0;           // C brace nesting depth
     const char *p = src;
@@ -101,8 +114,8 @@ static int extract_shaders(const char *src, Shader_Block *out, int max) {
         if (*p == '{' and depth >= 0) { depth++; p++; continue; }
         if (*p == '}' and depth >  0) { depth--; p++; continue; }
 
-        // Look for `glsl shader ` at depth 0, possibly with leading whitespace
-        if (depth == 0 and strncmp(p, "glsl shader ", 12) == 0) {
+        // Look for `glsl ` at depth 0
+        if (depth == 0 and strncmp(p, "glsl ", 5) == 0) {
             // Verify it's at the start of a line (only whitespace before it)
             const char *scan = p;
             while (scan > src and scan[-1] != '\n') scan--;
@@ -111,27 +124,55 @@ static int extract_shaders(const char *src, Shader_Block *out, int max) {
                 if (*c != ' ' and *c != '\t') { line_ok = false; break; }
             if (not line_ok) { p++; continue; }
 
-            const char *blk = scan;  // block starts at beginning of line
-            p += 12;
+            // Scan backwards further to capture any preceding comment block
+            // (lines starting with // immediately above the glsl line)
+            const char *blk = scan;
+            while (blk > src) {
+                // Move to the start of the previous line
+                const char *prev_end = blk - 1; // points to '\n' before blk
+                if (prev_end < src) break;
+                const char *prev_start = prev_end;
+                while (prev_start > src and prev_start[-1] != '\n') prev_start--;
+                // Check if that line is a comment (skip whitespace then //)
+                const char *c = prev_start;
+                while (c < prev_end and (*c == ' ' or *c == '\t')) c++;
+                if (c + 1 < prev_end and c[0] == '/' and c[1] == '/') {
+                    blk = prev_start;  // include this comment line
+                } else {
+                    break;             // not a comment, stop
+                }
+            }
 
-            // Name
-            const char *ns = p;
-            while (*p and *p != ' ' and *p != '\n') p++;
-            size_t nl = (size_t)(p - ns);
-            if (nl >= sizeof out[0].name) nl = sizeof out[0].name - 1;
-            memcpy(out[count].name, ns, nl);
-            out[count].name[nl] = '\0';
+            p += 5;
+
+            // Stage (comes first in new syntax)
+            const char *ss = p;
+            while (*p and *p != ' ' and *p != '\n' and *p != ';') p++;
+            size_t sl = (size_t)(p - ss);
+            if (sl >= sizeof out[0].stage) sl = sizeof out[0].stage - 1;
 
             while (*p == ' ') p++;
 
-            // Stage
-            const char *ss = p;
-            while (*p and *p != ' ' and *p != '{' and *p != '\n') p++;
-            size_t sl = (size_t)(p - ss);
-            while (sl > 0 and ss[sl - 1] == ' ') sl--;
-            if (sl >= sizeof out[0].stage) sl = sizeof out[0].stage - 1;
-            memcpy(out[count].stage, ss, sl);
-            out[count].stage[sl] = '\0';
+            // Name
+            const char *ns = p;
+            while (*p and *p != ' ' and *p != '{' and *p != ';' and *p != '\n') p++;
+            size_t nl = (size_t)(p - ns);
+            if (nl >= sizeof out[0].name) nl = sizeof out[0].name - 1;
+
+            while (*p == ' ') p++;
+
+            // Check for forward declaration (semicolon)
+            if (*p == ';') {
+                p++;
+                if (*p == '\n') p++;
+                // Record as an excise region (remove from C output)
+                if (*excise_count < excise_max) {
+                    excise[*excise_count].start = blk;
+                    excise[*excise_count].end   = p;
+                    (*excise_count)++;
+                }
+                continue;
+            }
 
             // Opening brace
             while (*p and *p != '{') p++;
@@ -150,10 +191,19 @@ static int extract_shaders(const char *src, Shader_Block *out, int max) {
             }
             if (not code_end) break;
 
-            // Skip past the closing brace and trailing newline
+            // Skip past the closing brace, optional comment, and trailing newline
             p = code_end + 1;
+            // Skip optional trailing comment like `} // Denoise`
+            while (*p == ' ') p++;
+            if (p[0] == '/' and p[1] == '/') {
+                while (*p and *p != '\n') p++;
+            }
             if (*p == '\n') p++;
 
+            memcpy(out[count].stage, ss, sl);
+            out[count].stage[sl] = '\0';
+            memcpy(out[count].name, ns, nl);
+            out[count].name[nl] = '\0';
             out[count].code        = code_start;
             out[count].code_len    = (size_t)(code_end - code_start);
             out[count].block_start = blk;
@@ -167,19 +217,32 @@ static int extract_shaders(const char *src, Shader_Block *out, int max) {
     return count;
 }
 
-// Write the C-only source: copy `src` but skip every shader block region.
-// Injects the generated Shader_Path() macro so quake3.c can reference
-// shader .spv files by their glsl block name.
+// Write the C-only source: copy `src` but skip every shader block and
+// forward-declaration region.  Injects the generated Shader_Path() macro
+// so q3.c can reference shader .spv files by their glsl block name.
 // When `production` is true, also patch out validation layers and the
 // debug utils extension so the binary runs clean without them.
 static bool write_c_source(const char *path, const char *src, size_t src_len,
-                            const Shader_Block *sh, int n, bool production) {
+                            const Shader_Block *sh, int nsh,
+                            const Excise_Region *ex, int nex,
+                            bool production) {
 
     // Shader_Path macro header injected at the top of the generated source
     const char *hdr =
-        "// Generated by nob.c — Shader_Path resolves glsl shader names to .spv paths\n"
+        "// Generated by sdk.c — Shader_Path resolves glsl shader names to .spv paths\n"
         "#define Shader_Path(name) \"" SPVD "\" #name \".spv\"\n\n";
     size_t hdr_len = strlen(hdr);
+
+    // Merge shader blocks and excise regions into a sorted skip list
+    int total_skip = nsh + nex;
+    typedef struct { const char *start; const char *end; } Skip;
+    Skip *skips = malloc((size_t)total_skip * sizeof(Skip));
+    for (int i = 0; i < nsh; i++) { skips[i].start = sh[i].block_start; skips[i].end = sh[i].block_end; }
+    for (int i = 0; i < nex; i++) { skips[nsh + i].start = ex[i].start; skips[nsh + i].end = ex[i].end; }
+    // Sort by start position
+    for (int i = 0; i < total_skip - 1; i++)
+        for (int j = i + 1; j < total_skip; j++)
+            if (skips[j].start < skips[i].start) { Skip t = skips[i]; skips[i] = skips[j]; skips[j] = t; }
 
     // Build the full C source into a buffer so we can patch it
     size_t buf_cap = hdr_len + src_len + 256;
@@ -190,16 +253,16 @@ static bool write_c_source(const char *path, const char *src, size_t src_len,
     memcpy(buf, hdr, hdr_len);
     buf_len = hdr_len;
 
-    // Copy the source, skipping shader block regions
+    // Copy the source, skipping all excise regions
     const char *cursor = src;
     const char *end    = src + src_len;
-    for (int i = 0; i < n; i++) {
-        if (sh[i].block_start > cursor) {
-            size_t chunk = (size_t)(sh[i].block_start - cursor);
+    for (int i = 0; i < total_skip; i++) {
+        if (skips[i].start > cursor) {
+            size_t chunk = (size_t)(skips[i].start - cursor);
             memcpy(buf + buf_len, cursor, chunk);
             buf_len += chunk;
         }
-        cursor = sh[i].block_end;
+        cursor = skips[i].end;
     }
     if (cursor < end) {
         size_t chunk = (size_t)(end - cursor);
@@ -207,6 +270,7 @@ static bool write_c_source(const char *path, const char *src, size_t src_len,
         buf_len += chunk;
     }
     buf[buf_len] = '\0';
+    free(skips);
 
     // Production: force VALIDATION_LAYER_COUNT to 0 so validation is never requested
     if (production) {
@@ -300,29 +364,46 @@ static bool write_shader_glsl(const char *path, const char *code, size_t len) {
 
 // ── shader forward declaration validation ────────────────────────
 //
-// The `glsl shader <Name> <stage> { ... }` blocks in quake3.c serve as
-// forward declarations.  nob.c generates a `Shader_Path(name)` macro
-// into build/quake3.c that resolves shader names to .spv paths.
+// The `glsl <stage> <Name> { ... }` blocks in q3.c define embedded shaders.
+// sdk.c generates a `Shader_Path(name)` macro into build/q3.c that resolves
+// shader names to .spv paths.
 //
 // This function validates that every Shader_Path(xxx) call in the source
 // maps to an extracted glsl shader block, and vice versa.  Mismatches
 // produce compiler-style errors with line numbers.
+
+// Find next Shader_Path reference, handling optional whitespace: Shader_Path(x) or Shader_Path (x)
+static const char *find_shader_path(const char *p, const char **name_out, size_t *name_len_out) {
+    while (*p) {
+        const char *sp = strstr(p, "Shader_Path");
+        if (not sp) return NULL;
+        const char *q = sp + 11;  // skip "Shader_Path"
+        while (*q == ' ') q++;    // skip optional whitespace
+        if (*q != '(') { p = q; continue; }
+        q++;  // skip '('
+        while (*q == ' ') q++;
+        *name_out = q;
+        while (*q and *q != ')' and *q != ' ' and *q != '\n') q++;
+        *name_len_out = (size_t)(q - *name_out);
+        return sp;
+    }
+    return NULL;
+}
 
 static bool validate_shader_declarations(const char *src, const Shader_Block *sh, int n) {
     bool ok = true;
 
     // Forward check: every Shader_Path(xxx) call must match an extracted block
     const char *p = src;
-    while ((p = strstr(p, "Shader_Path(")) != NULL) {
+    const char *name;
+    size_t name_len;
+    while ((p = find_shader_path(p, &name, &name_len)) != NULL) {
         const char *call_pos = p;
-        p += 12;  // skip past "Shader_Path("
-        const char *name_start = p;
-        while (*p and *p != ')' and *p != '\n') p++;
-        size_t name_len = (size_t)(p - name_start);
+        p = name + name_len;
         if (name_len == 0 or name_len > 63) continue;
 
         char expected[64];
-        memcpy(expected, name_start, name_len);
+        memcpy(expected, name, name_len);
         expected[name_len] = '\0';
 
         // Find a matching extracted shader block
@@ -339,19 +420,29 @@ static bool validate_shader_declarations(const char *src, const Shader_Block *sh
             for (const char *c = src; c < call_pos; c++)
                 if (*c == '\n') line++;
             nob_log(NOB_ERROR,
-                "quake3.c:%d: Shader_Path(%s) has no matching "
-                "'glsl shader %s ...' block", line, expected, expected);
+                "q3.c:%d: Shader_Path(%s) has no matching "
+                "'glsl %s ...' block", line, expected, expected);
             ok = false;
         }
     }
 
     // Reverse check: every extracted shader must have a Shader_Path() reference
     for (int i = 0; i < n; i++) {
-        char pattern[128];
-        snprintf(pattern, sizeof pattern, "Shader_Path(%s)", sh[i].name);
-        if (not strstr(src, pattern)) {
+        // Search for Shader_Path(name) or Shader_Path (name) with the shader's name
+        const char *s = src;
+        const char *sname;
+        size_t sname_len;
+        bool found = false;
+        while ((s = find_shader_path(s, &sname, &sname_len)) != NULL) {
+            s = sname + sname_len;
+            if (sname_len == strlen(sh[i].name) and memcmp(sname, sh[i].name, sname_len) == 0) {
+                found = true;
+                break;
+            }
+        }
+        if (not found) {
             nob_log(NOB_ERROR,
-                "quake3.c: glsl shader '%s' extracted but never loaded — "
+                "q3.c: glsl '%s' extracted but never loaded — "
                 "add Shader_Path(%s) to use it", sh[i].name, sh[i].name);
             ok = false;
         }
@@ -491,7 +582,7 @@ static const char *platform_names[] = {
 
 // Append platform-specific C compiler flags and libraries to `cmd`.
 static void platform_compile(Nob_Cmd *cmd, Platform plat, bool production) {
-    const char *src_file = BUILD "quake3.c";
+    const char *src_file = BUILD "q3.c";
 
     switch (plat) {
 
@@ -501,7 +592,7 @@ static void platform_compile(Nob_Cmd *cmd, Platform plat, bool production) {
             "x86_64-w64-mingw32-gcc",
             "-O3", "-ffast-math", "-flto",
             "-Wall", "-Wextra",
-            "-o", BUILD "release/quake3.exe",
+            "-o", BUILD "release/q3.exe",
             src_file,
             "-I/usr/x86_64-w64-mingw32/include/SDL2",
             "-lmingw32", "-lSDL2main", "-lSDL2",
@@ -516,7 +607,7 @@ static void platform_compile(Nob_Cmd *cmd, Platform plat, bool production) {
             "-O3", "-ffast-math", "-flto",
             "-Wall", "-Wextra",
             production ? "-DNDEBUG" : "-g",
-            "-o", production ? BUILD "release/quake3_macos" : BUILD "quake3",
+            "-o", production ? BUILD "release/q3_macos" : BUILD "q3",
             src_file,
             "-I/opt/homebrew/include/SDL2", "-I/opt/homebrew/include",
             "-D_REENTRANT",
@@ -532,7 +623,7 @@ static void platform_compile(Nob_Cmd *cmd, Platform plat, bool production) {
             "-O3", "-march=x86-64-v2", "-ffast-math", "-flto",
             "-Wall", "-Wextra",
             production ? "-DNDEBUG" : "-g",
-            "-o", production ? BUILD "release/quake3_debian" : BUILD "quake3",
+            "-o", production ? BUILD "release/q3_debian" : BUILD "q3",
             src_file,
             "-I/usr/include/SDL2", "-D_REENTRANT",
             "-lSDL2", "-lvulkan", "-lm",
@@ -546,7 +637,7 @@ static void platform_compile(Nob_Cmd *cmd, Platform plat, bool production) {
             "-O3", "-march=x86-64-v2", "-ffast-math", "-flto",
             "-Wall", "-Wextra",
             production ? "-DNDEBUG" : "-g",
-            "-o", production ? BUILD "release/quake3_arch" : BUILD "quake3",
+            "-o", production ? BUILD "release/q3_arch" : BUILD "q3",
             src_file,
             "-I/usr/include/SDL2", "-D_REENTRANT",
             "-lSDL2", "-lvulkan", "-lm",
@@ -562,7 +653,7 @@ static void platform_compile(Nob_Cmd *cmd, Platform plat, bool production) {
             "-ffast-math", "-flto",
             production ? "-DNDEBUG" : "-g",
             "-Wall", "-Wextra",
-            "-o", production ? BUILD "release/quake3" : BUILD "quake3",
+            "-o", production ? BUILD "release/q3" : BUILD "q3",
             src_file,
             "-I/usr/include/SDL2", "-D_REENTRANT",
             "-lSDL2", "-lvulkan", "-lm",
@@ -598,16 +689,19 @@ int main(int argc, char **argv) {
     if (not nob_read_entire_file(MAIN, &sb)) return 1;
     nob_sb_append_null(&sb);
 
-    // Extract top-level shader blocks
+    // Extract top-level shader blocks and forward declarations
     Shader_Block shaders[MAX_SHADERS];
-    int n = extract_shaders(sb.items, shaders, MAX_SHADERS);
-    nob_log(NOB_INFO, "extracted %d shader(s) from %s", n, MAIN);
+    Excise_Region excise[MAX_EXCISE];
+    int excise_count = 0;
+    int n = extract_shaders(sb.items, shaders, MAX_SHADERS, excise, &excise_count, MAX_EXCISE);
+    nob_log(NOB_INFO, "extracted %d shader(s), %d forward decl(s) from %s", n, excise_count, MAIN);
 
     // Validate that every Shader_Path() call matches an extracted glsl shader block
     if (not validate_shader_declarations(sb.items, shaders, n)) return 1;
 
-    // Write the C-only source (shader blocks excised, Shader_Path macro injected)
-    if (not write_c_source(BUILD "quake3.c", sb.items, sb.count - 1, shaders, n, production)) return 1;
+    // Write the C-only source (shader blocks + forward decls excised, Shader_Path macro injected)
+    if (not write_c_source(BUILD "q3.c", sb.items, sb.count - 1,
+                           shaders, n, excise, excise_count, production)) return 1;
 
     // Write extracted shaders to build/shaders/ (preprocessing and/or/not to GLSL operators)
     char glsl_paths[MAX_SHADERS][256], spv_paths[MAX_SHADERS][256];

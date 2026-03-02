@@ -4,34 +4,33 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Build System
 
-This project uses [nob.h](https://github.com/tsoding/nob.h) — a single-header C build tool. The build script is `nob.c`.
+This project uses [nob.h](https://github.com/tsoding/nob.h) (vendored as `nobuild.h`) — a single-header C build tool. The build script is `sdk.c`.
 
 **Bootstrap (only needed once):**
 ```sh
-cc -o nob nob.c
+cc -o sdk sdk.c
 ```
 
 **Build:**
 ```sh
-./nob
+./sdk
 ```
-`nob` auto-rebuilds itself when `nob.c` is modified (via `NOB_GO_REBUILD_URSELF`).
+`sdk` auto-rebuilds itself when `sdk.c` is modified (via `NOB_GO_REBUILD_URSELF`).
 
 **Run:**
 ```sh
-./build/quake3
+./build/q3
 ```
 
 ## Architecture
 
-- `nob.c` — Build script. Compiles `src/quake3.c` with `-Wall -Wextra` into `build/quake3`.
-- `nob.h` — The nob build library (v3.2.2). Treat as a vendored dependency; do not modify.
-- `src/quake3.c` — Main entry point. Currently a stub; this is where the game implementation lives.
+- `sdk.c` — Build script. Extracts inline GLSL shaders from `q3.c`, compiles them to SPIR-V, then compiles the C source.
+- `nobuild.h` — The nob build library (v3.2.2). Treat as a vendored dependency; do not modify.
+- `q3.c` — Main entry point. Monolithic game engine with inline GLSL shader blocks.
 - `assets/` — Game assets: textures, models, maps, sounds, menus, sprites, etc.
 - `reference/` — Reference materials.
-- `Raytracing-shaders.glsl` — Raytracing shader reference/goal file.
 
-## nob.h Conventions
+## nobuild.h Conventions
 
 - `Nob_Cmd` is a dynamic array of strings representing a shell command.
 - `nob_cmd_append(&cmd, ...)` appends arguments; `nob_cmd_run(&cmd)` runs and resets the array.

@@ -405,13 +405,15 @@ typedef struct {int V0, V1, Face;}      Quickhull_Edge;
   _(vkCreateRayTracingPipelinesKHR,             vkCreateRayTracingPipelines)             /* Creates a ray tracing pipeline */ \
   _(vkGetRayTracingShaderGroupHandlesKHR,       vkGetRayTracingShaderGroupHandles)       /* Retrieves shader group handles (SBT) */ \
   _(vkCmdTraceRaysKHR,                          vkCmdTraceRays)                          /* Records a ray dispatch command */
-VULKAN_FUNCTIONS (DECLARE_VK)
 
 // Convenience macro for declaring Vulkan function pointer variables from their spec names
 #define DECLARE_VK(vk, alias) PFN_##vk alias;
 
 // Convenience macro for loading Vulkan function pointers from the logical device at runtime
 #define LOAD_VK(vk, alias) alias = (PFN_##vk) vkGetDeviceProcAddr (Device, #vk);
+
+// Declare all ray tracing function pointers as globals
+VULKAN_FUNCTIONS (DECLARE_VK)
 
 // Assertion to validate Vulkan return values; prints the error code, file, and line number then exits
 #define VK_CHECK(Call) do { \
@@ -673,7 +675,7 @@ int                    Damage_Cache_Count = 0;
 Damage_Map_Cache_Entry Damage_Cache[DAMAGE_CACHE_MAX];
 
 // Free all cached damage map pixel data
-void Damage_Cache_Free ()
+void Damage_Cache_Free ();
 
 // Look up the damage map path for a given model name and body part index (0=head, 1=upper, 2=lower)
 const char *Damage_Map_For_Model (const char *Model_Name, int Part_Index);
@@ -712,49 +714,37 @@ typedef struct {
   float Axis[9];   // A 3×3 rotation matrix (row-major) defining the tag's local coordinate frame
 } MD3_Tag;
 
-// Parse a single MD3 surface's geometry (vertices, indices, texture coordinates) into the growing output arrays. An optional 12-float
-// transform (origin + 3×3 axis matrix) can pre-transform vertices and normals. Quake 3 coordinate swizzle (x,y,z)->(x,z,-y) is
-// applied.
-void MD3_Parse_Surface (const uint8_t *Surface_Data,
-                        Vertex **Inout_Vertices,    uint *Inout_Vertex_Count,
-                        uint   **Inout_Indices,     uint *Inout_Index_Count,
-                        uint   **Inout_Texture_Ids, uint *Inout_Triangle_Count,
-                        uint Assigned_Texture_Index, const float *Transform);
-
-// Frame-aware variant of MD3_Parse_Surface: reads vertex data from a specific animation frame.
-// Used for player model assembly where each body part has per-frame animation data.
-void MD3_Parse_Surface_At_Frame (const uint8_t *Surface_Data, int Frame,
-                                  Vertex **Inout_Vertices,    uint *Inout_Vertex_Count,
-                                  uint   **Inout_Indices,     uint *Inout_Index_Count,
-                                  uint   **Inout_Texture_Ids, uint *Inout_Triangle_Count,
-                                  uint Assigned_Texture_Index, const float *Transform);
-
-// Load the three-part machinegun weapon model (body, barrel, hand) from MD3 files
-Weapon_Model Weapon_Model_Load ();
-
-// Load an entity model and pre-compute all animation frames
-Entity Entity_Load (Scene *S, Spawn Spawn_Point);
-
-// Initialize entity BLAS with host-visible vertex buffer and ALLOW_UPDATE for per-frame refit
-void Entity_Bottom_Level_Initialize (Entity *Enemy);
-
-// Refit entity BLAS after uploading the current animation frame's vertices
-void Entity_Bottom_Level_Rebuild (Entity *Enemy);
+// Forward declarations — these reference types defined later (Vertex, Weapon_Model, Entity, Scene, Spawn)
+// so they are placed here as documentation. The implementations appear after the type definitions.
+//
+//   void MD3_Parse_Surface (const uint8_t *Surface_Data,
+//                           Vertex **Inout_Vertices, uint *Inout_Vertex_Count,
+//                           uint **Inout_Indices, uint *Inout_Index_Count,
+//                           uint **Inout_Texture_Ids, uint *Inout_Triangle_Count,
+//                           uint Assigned_Texture_Index, const float *Transform);
+//
+//   void MD3_Parse_Surface_At_Frame (const uint8_t *Surface_Data, int Frame,
+//                                    Vertex **Inout_Vertices, uint *Inout_Vertex_Count,
+//                                    uint **Inout_Indices, uint *Inout_Index_Count,
+//                                    uint **Inout_Texture_Ids, uint *Inout_Triangle_Count,
+//                                    uint Assigned_Texture_Index, const float *Transform);
+//
+//   Weapon_Model Weapon_Model_Load ();
+//   Entity Entity_Load (Scene *S, Spawn Spawn_Point);
+//   void Entity_Bottom_Level_Initialize (Entity *Enemy);
+//   void Entity_Bottom_Level_Rebuild (Entity *Enemy);
+//   void Entity_Assemble_Frame (int Legs_Frame, int Torso_Frame,
+//                               uint Body_Mat, uint Gun_Mat, const float World[12],
+//                               Vertex **Out_Verts, uint *Out_Vert_Count,
+//                               uint **Out_Indices, uint *Out_Index_Count,
+//                               uint **Out_Tex_Ids, uint *Out_Tri_Count);
 
 // Compose two tag transforms (each float[12]: origin[3] + axis[9])
 void Tag_Compose (const float *A, const float *B, float *C);
 
 // Returns 1 if found, 0 if not. Writes the 12-float transform (origin[3] + axis[9]) to Out
 int MD3_Find_Tag_At_Frame (const uint8_t *Data, int Tag_Count, int Tags_Offset,
-                                   int Frame, const char *Name, float Out[12])
-
-// Assemble the full entity model (legs + torso + head + gun + barrel) for a single
-// animation frame into temporary arrays. Caller owns the returned vertex/index/texture data.
-void Entity_Assemble_Frame (int Legs_Frame, int Torso_Frame,
-                            uint Body_Mat, uint Gun_Mat, const float World[12],
-                            Vertex **Out_Verts, uint *Out_Vert_Count,
-                            uint **Out_Indices, uint *Out_Index_Count,
-                            uint **Out_Tex_Ids, uint *Out_Tri_Count);
+                                   int Frame, const char *Name, float Out[12]);
 
 // ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 //
@@ -1551,7 +1541,7 @@ typedef struct {
   float y1, y2; // Filter state
 } Mode_Resonator;
 
-void Mode_Init (Mode_Resonator *M, float Freq_Hz, float T60, float Gain)
+void Mode_Init (Mode_Resonator *M, float Freq_Hz, float T60, float Gain);
 float Mode_Tick (Mode_Resonator *M, float X);
 
 // Material mode tables: {frequency_Hz, T60_seconds, gain}
@@ -2423,13 +2413,6 @@ const char *Damage_Map_For_Model (const char *Model_Name, int Part_Index) {
       if (Part_Index < DAMAGE_MAP_REGISTRY[I].Damage_Map_Count)
         return DAMAGE_MAP_REGISTRY[I].Damage_Maps[Part_Index];
       return DAMAGE_MAP_REGISTRY[I].Damage_Maps[0]; // Fallback to first map
-    }
-  }
-  for (int I = 0; I < DAMAGE_EXTRA_COUNT; I++) {
-    if (strcmp (DAMAGE_MAP_EXTRA[I].Model_Name, Model_Name) == 0) {
-      if (Part_Index < DAMAGE_MAP_EXTRA[I].Damage_Map_Count)
-        return DAMAGE_MAP_EXTRA[I].Damage_Maps[Part_Index];
-      return DAMAGE_MAP_EXTRA[I].Damage_Maps[0];
     }
   }
   return NULL; // Unknown model
@@ -4175,7 +4158,7 @@ uint BSP_Parse_Entities (const uint8_t *File_Data, const BSP_Header *Header,
     Classify_Entity (Classname, Classname_Len, &Entity);
 
     // Skip unrecognized entity classnames
-    if (Entity.Kind == ENTITY_NONE) continue; // skip unknown entities
+    if (Entity.Kind == NO_ENTITY) continue; // skip unknown entities
 
     // Populate kind-specific fields from parsed temporaries
     switch (Entity.Kind) {
@@ -5341,7 +5324,7 @@ void Postprocess_Pipeline_Create () {
     NULL, &Postprocess_Pipeline_Layout));
 
   // Load the postprocess shader and create the compute pipeline
-  VkShaderModule Module = Shader_Module_Load (Shader_Path(postprocess));
+  VkShaderModule Module = Shader_Module_Load (Shader_Path(Post_Process));
   VK_CHECK (vkCreateComputePipelines (Device, Pipeline_Cache, 1,
     &(VkComputePipelineCreateInfo){
       .sType  = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
@@ -5417,7 +5400,7 @@ void Denoise_Pipeline_Create () {
     NULL, &Denoise_Pipeline_Layout));
 
   // Load the denoise shader and create the compute pipeline
-  VkShaderModule Module = Shader_Module_Load (Shader_Path(denoise));
+  VkShaderModule Module = Shader_Module_Load (Shader_Path(Denoise));
   VK_CHECK (vkCreateComputePipelines (Device, Pipeline_Cache, 1,
     &(VkComputePipelineCreateInfo){
       .sType  = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
@@ -5533,8 +5516,8 @@ void Raytracing_Pipeline_Create () {
   // Load the four SPIR-V shader modules from pre-compiled files
   VkShaderModule Ray_Generation_Module = Shader_Module_Load (Shader_Path (Ray_Generation));
   VkShaderModule Closest_Hit_Module    = Shader_Module_Load (Shader_Path (Closest_Hit));
-  VkShaderModule Primary_Miss_Module   = Shader_Module_Load (Shader_Path (miss));
-  VkShaderModule Shadow_Miss_Module    = Shader_Module_Load (Shader_Path (shadow_miss));
+  VkShaderModule Primary_Miss_Module   = Shader_Module_Load (Shader_Path (Ray_Miss));
+  VkShaderModule Shadow_Miss_Module    = Shader_Module_Load (Shader_Path (Shadow_Miss));
 
   // Define the pipeline shader stages
   VkPipelineShaderStageCreateInfo Stages[] = {
@@ -6390,7 +6373,7 @@ void Physics_Pipeline_Create () {
     NULL, &Physics_Pipeline_Layout));
 
   // Load the pre-compiled physics compute shader and create the compute pipeline
-  VkShaderModule Physics_Module = Shader_Module_Load (Shader_Path(physics));
+  VkShaderModule Physics_Module = Shader_Module_Load (Shader_Path(Physics));
   VK_CHECK (vkCreateComputePipelines (Device, Pipeline_Cache, 1,
     &(VkComputePipelineCreateInfo){
       .sType  = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
