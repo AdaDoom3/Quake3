@@ -18,6 +18,7 @@
 // §12. Shaders               
 // §13. Render                
 // §14. Main                  
+// §15. Assets                 
 //
 // ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 //
@@ -37,14 +38,17 @@
 // Media Layer
 #include <SDL2/SDL.h>
 #include <SDL2/SDL_vulkan.h>
+
+// Graphics
 #include <vulkan/vulkan.h>
+
+// Audio
 #include <AL/al.h>
 #include <AL/alc.h>
 #include <AL/efx.h>
   
 // Language Extensions
 #include <iso646.h>
-typedef unsigned int uint;
 
 // ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 //
@@ -52,9 +56,68 @@ typedef unsigned int uint;
 //
 // ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 
-// Engine identifer and information strings
+// For sanity...
+typedef unsigned int uint;
+
+// Engine id and info strings
 const char *ENGINE_NAME    = "q3";
 const char *ENGINE_VERSION = "0.1.0";
+
+// Default BSP map to load when no command-line argument is given
+const char *DEFAULT_MAP = "oa_dm1.bsp";
+
+// Vulkan limits and versioning
+#define VULKAN_API_VERSION       VK_API_VERSION_1_3
+#define SWAPCHAIN_MAX_IMAGES     8                  
+#define DESCRIPTOR_TEXTURE_SLOTS 1536               
+#define RAY_RECURSION_DEPTH      2                  
+
+// Windowing and viewport settings
+#define FIELD_OF_VIEW  90.f    // Vertical field-of-view in degrees
+#define NEAR_CLIP      0.1f    // Near clip plane distance
+#define FAR_CLIP       10000.f // Far clip plane distance
+#define MAX_DELTA_TIME 0.05f   // Clamp to 20 fps minimum (prevents physics tunneling)
+
+// Asset paths
+#define ASSET_ROOT "assets/" // Root directory for all game assets
+
+// Player physics constants designed to mirror the Quake 3 movement parameters. The GPU physics compute shader (§10) references these same
+// values as specialization constants compiled into the SPIR-V module.
+#define GRAVITY             800.f  // Downward acceleration in units per second squared
+#define GROUND_FRICTION     6.f    // Friction coefficient applied while on walkable ground
+#define STOP_SPEED          100.f  // Speed below which friction uses this as the control speed
+#define GROUND_ACCELERATE   10.f   // Acceleration rate while grounded (units/s per frame)
+#define AIR_ACCELERATE      1.f    // Acceleration rate while airborne (enables strafe-jumping)
+#define MAXIMUM_SPEED       320.f  // Maximum wish speed from input (units/s)
+#define JUMP_VELOCITY       270.f  // Instantaneous upward velocity applied on jump
+#define STEP_SIZE           18.f   // Maximum stair step height the player can walk up
+#define MINIMUM_WALK_NORMAL 0.7f   // Minimum Y-component of a surface normal to count as walkable floor
+#define OVERBOUNCE          1.001f // Slight overshoot factor when clipping velocity off surfaces
+#define MAXIMUM_CLIP_PLANES 5      // Maximum simultaneous contact planes during slide-move resolution
+#define DEFAULT_VIEW_HEIGHT 26.f   // Camera height offset from player origin when standing
+#define CROUCH_VIEW_HEIGHT  12.f   // Camera height offset from player origin when crouching
+
+// Weapon Animation Parameters
+#define WEAPON_MODEL_SCALE  0.7f // Viewmodel scale factor for first-person perspective
+#define WEAPON_FIRE_SPEED   10.f // Fire animation playback rate (frames per second)
+#define WEAPON_FIRE_FRAMES  6.f  // Total fire animation duration in frames
+#define WEAPON_BOB_RATE_V   3.5f // Vertical idle bob frequency (radians/second)
+#define WEAPON_BOB_RATE_H   1.7f // Horizontal idle bob frequency (radians/second)
+#define WEAPON_BOB_AMP_V    0.4f // Vertical idle bob amplitude (units)
+#define WEAPON_BOB_AMP_H    0.2f // Horizontal idle bob amplitude (units)
+#define WEAPON_RECOIL_AMP  -1.2f // Recoil kick magnitude (negative = pull back)
+#define WEAPON_RECOIL_DECAY 5.f  // Recoil exponential decay rate  
+
+// Capsule spine half-length: half height minus radius
+#define PLAYER_CAPSULE_SPINE 17.f // For a 32-unit tall, 15-unit radius capsule: 32 - 15 = 17 units.
+
+// Projectile constants
+#define MAX_PROJECTILES 64    // Maximum simultaneous projectiles in flight
+#define ROCKET_SPEED    900.f // Rocket projectile speed (units/second)
+#define ROCKET_DAMAGE   100   // Direct hit damage
+#define ROCKET_SPLASH   120.f // Splash damage radius
+#define ROCKET_LIFETIME 10.f  // Seconds before projectile expires
+#define FIRE_COOLDOWN   0.8f  // Minimum seconds between shots
 
 // Enable the Khronos validation layer for debug builds
 const uint  VALIDATION_LAYER_COUNT = 1;
@@ -68,18 +131,6 @@ const char *DEVICE_EXTENSIONS[] = {VK_KHR_SWAPCHAIN_EXTENSION_NAME,
                                    VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME,
                                    VK_KHR_RAY_QUERY_EXTENSION_NAME,
                                    VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME};
-
-// Vulkan limits and versioning
-#define VULKAN_API_VERSION       VK_API_VERSION_1_3
-#define SWAPCHAIN_MAX_IMAGES     8                  
-#define DESCRIPTOR_TEXTURE_SLOTS 1536               
-#define RAY_RECURSION_DEPTH      2                  
-
-// Windowing and viewport settings
-#define FIELD_OF_VIEW  90.f    // Vertical field-of-view in degrees
-#define NEAR_CLIP      0.1f    // Near clip plane distance
-#define FAR_CLIP       10000.f // Far clip plane distance
-#define MAX_DELTA_TIME 0.05f   // Clamp to 20 fps minimum (prevents physics tunneling)
 
 // Visual style knobs define the artistic look of the game and are independent of quality/performance tier
 typedef struct {
@@ -131,109 +182,13 @@ const Quality_Preset QUALITY_PRESETS [QUALITY_COUNT] = {
   [QUALITY_POTATO] = {"Potato", 1280, 720, 0.667f, 1,  0,   1,   1}, 
 };
 
-// Asset paths
-#define ASSET_ROOT "assets/" // Root directory for all game assets
-
-// Default BSP map to load when no command-line argument is given
-const char *DEFAULT_MAP = "oa_dm1.bsp";
-
-// Paths to the weapon model's diffuse textures (body and sight)
-#define WEAPON_TEXTURE_COUNT 2
-const char *WEAPON_TEXTURE_PATHS[] = {ASSET_ROOT "models/weapons2/machinegun/mgun.tga",
-                                      ASSET_ROOT "models/weapons2/machinegun/sight.tga"};
-
-// Paths to the three-part machinegun weapon model (body, barrel, hand)
-#define WEAPON_BODY_PATH   ASSET_ROOT "models/weapons2/machinegun/machinegun.md3"
-#define WEAPON_BARREL_PATH ASSET_ROOT "models/weapons2/machinegun/machinegun_barrel.md3"
-#define WEAPON_HAND_PATH   ASSET_ROOT "models/weapons2/machinegun/machinegun_hand.md3"
-
-// Player physics constants designed to mirror the Quake 3 movement parameters. The GPU physics compute shader (§10) references these same
-// values as specialization constants compiled into the SPIR-V module.
-#define GRAVITY             800.f  // Downward acceleration in units per second squared
-#define GROUND_FRICTION     6.f    // Friction coefficient applied while on walkable ground
-#define STOP_SPEED          100.f  // Speed below which friction uses this as the control speed
-#define GROUND_ACCELERATE   10.f   // Acceleration rate while grounded (units/s per frame)
-#define AIR_ACCELERATE      1.f    // Acceleration rate while airborne (enables strafe-jumping)
-#define MAXIMUM_SPEED       320.f  // Maximum wish speed from input (units/s)
-#define JUMP_VELOCITY       270.f  // Instantaneous upward velocity applied on jump
-#define STEP_SIZE           18.f   // Maximum stair step height the player can walk up
-#define MINIMUM_WALK_NORMAL 0.7f   // Minimum Y-component of a surface normal to count as walkable floor
-#define OVERBOUNCE          1.001f // Slight overshoot factor when clipping velocity off surfaces
-#define MAXIMUM_CLIP_PLANES 5      // Maximum simultaneous contact planes during slide-move resolution
-#define DEFAULT_VIEW_HEIGHT 26.f   // Camera height offset from player origin when standing
-#define CROUCH_VIEW_HEIGHT  12.f   // Camera height offset from player origin when crouching
-
-// Player bounding box half-extents (x, y, z) used by the capsule collider
-const float PLAYER_HALF_EXTENTS[3] = {15.f, 32.f, 15.f};
-
-// Capsule spine half-length: half height minus radius
-#define PLAYER_CAPSULE_SPINE 17.f // For a 32-unit tall, 15-unit radius capsule: 32 - 15 = 17 units.
-
-// Projectile constants
-#define MAX_PROJECTILES 64    // Maximum simultaneous projectiles in flight
-#define ROCKET_SPEED    900.f // Rocket projectile speed (units/second)
-#define ROCKET_DAMAGE   100   // Direct hit damage
-#define ROCKET_SPLASH   120.f // Splash damage radius
-#define ROCKET_LIFETIME 10.f  // Seconds before projectile expires
-#define FIRE_COOLDOWN   0.8f  // Minimum seconds between shots
-
-// Material surface types for footstep and impact sounds
-#define MATERIAL_DEFAULT 0
-#define MATERIAL_METAL   1
-#define MATERIAL_STONE   2
-#define MATERIAL_WOOD    3
-#define MATERIAL_FLESH   4
-#define MATERIAL_WATER   5
-#define MATERIAL_COUNT   6
-
 // Body-part damage multiplier maps: grayscale TGA textures UV-mapped to player models
+#define DAMAGE_CACHE_MAX 64
 typedef struct {
   const char *Model_Name;       // Player model directory name
   const char *Damage_Maps[6];   // Up to 6 damage map TGA paths per model (NULL-terminated)
   int         Damage_Map_Count; // Number of damage maps for this model
 } Model_Damage_Entry;
-
-#define DAMAGE_CACHE_MAX 64
-#define DAMAGE_MODEL_COUNT 14
-const Model_Damage_Entry DAMAGE_MAP_REGISTRY[DAMAGE_MODEL_COUNT] = {
-  {"grism",    {ASSET_ROOT "models/players/grism/enkiskin_dmg.tga"}, 1},
-  {"sarge",    {ASSET_ROOT "models/players/grism/enkiskin_dmg.tga"}, 1},
-  {"liz",      {ASSET_ROOT "models/players/liz/h_head_dmg.tga",
-                ASSET_ROOT "models/players/liz/u_torso_dmg.tga",
-                ASSET_ROOT "models/players/liz/l_legs_dmg.tga"}, 3},
-  {"major",    {ASSET_ROOT "models/players/major/head_dmg.tga",
-                ASSET_ROOT "models/players/major/torso_dmg.tga",
-                ASSET_ROOT "models/players/major/lower_dmg.tga"}, 3},
-  {"tony",     {ASSET_ROOT "models/players/tony/head_dmg.tga",
-                ASSET_ROOT "models/players/tony/suit_dmg.tga"}, 2},
-  {"assassin", {ASSET_ROOT "models/players/assassin/upper_dmg.tga",
-                ASSET_ROOT "models/players/assassin/lower_dmg.tga"}, 2},
-  {"smarine",  {ASSET_ROOT "models/players/smarine/2h_head_dmg.tga",
-                ASSET_ROOT "models/players/smarine/2u_torso_dmg.tga",
-                ASSET_ROOT "models/players/smarine/2l_legs_dmg.tga"}, 3},
-  {"beret",    {ASSET_ROOT "models/players/beret/skin1_dmg.tga",
-                ASSET_ROOT "models/players/beret/skin2_dmg.tga"}, 2},
-  {"gargoyle", {ASSET_ROOT "models/players/gargoyle/bared_dmg.tga"}, 1},
-  {"penguin",  {ASSET_ROOT "models/players/penguin/skin_dmg.tga"}, 1},
-  {"sergei",   {ASSET_ROOT "models/players/sergei/face_dmg.tga",
-                ASSET_ROOT "models/players/sergei/hairs_dmg.tga",
-                ASSET_ROOT "models/players/sergei/skin_dmg.tga"}, 3},
-  {"skelebot", {ASSET_ROOT "models/players/skelebot/skin1_dmg.tga",
-                ASSET_ROOT "models/players/skelebot/skin2_dmg.tga"}, 2},
-  {"merman",   {ASSET_ROOT "models/players/merman/skin_dmg.tga",
-                ASSET_ROOT "models/players/merman/fins_dmg.tga",
-                ASSET_ROOT "models/players/merman/brac_dmg.tga"}, 3},
-  {"kyonshi",  {ASSET_ROOT "models/players/kyonshi/skin_dmg.tga",
-                ASSET_ROOT "models/players/kyonshi/torso_dmg.tga",
-                ASSET_ROOT "models/players/kyonshi/hair_dmg.tga",
-                ASSET_ROOT "models/players/kyonshi/eyes_dmg.tga",
-                ASSET_ROOT "models/players/kyonshi/lower_dmg.tga"}, 5}};
-
-// Sorceress and additional entries use a separate constant to keep the registry clean
-const Model_Damage_Entry DAMAGE_MAP_EXTRA[] = {
-  {"sorceress", {ASSET_ROOT "models/players/sorceress/drowhead_dmg.tga", ASSET_ROOT "models/players/sorceress/drowbody_dmg.tga", ASSET_ROOT "models/players/sorceress/rings_dmg.tga"}, 3},
-};
-#define DAMAGE_EXTRA_COUNT 1
 
 // Convex Hull Limits
 #define HULL_MAX_VERTS     256 // Per-hull vertex cap (matches GPU array size in Gpu_Hull)
@@ -241,21 +196,8 @@ const Model_Damage_Entry DAMAGE_MAP_EXTRA[] = {
 #define HULL_MAX_FACES     512 // Quickhull internal face cap during construction
 #define HULL_MAX_ENTITIES  32  // Maximum simultaneous hull collider instances
 
-// Weapon Animation Parameters
-#define WEAPON_MODEL_SCALE  0.7f // Viewmodel scale factor for first-person perspective
-#define WEAPON_FIRE_SPEED   10.f // Fire animation playback rate (frames per second)
-#define WEAPON_FIRE_FRAMES  6.f  // Total fire animation duration in frames
-#define WEAPON_BOB_RATE_V   3.5f // Vertical idle bob frequency (radians/second)
-#define WEAPON_BOB_RATE_H   1.7f // Horizontal idle bob frequency (radians/second)
-#define WEAPON_BOB_AMP_V    0.4f // Vertical idle bob amplitude (units)
-#define WEAPON_BOB_AMP_H    0.2f // Horizontal idle bob amplitude (units)
-#define WEAPON_RECOIL_AMP  -1.2f // Recoil kick magnitude (negative = pull back)
-#define WEAPON_RECOIL_DECAY 5.f  // Recoil exponential decay rate  
-
-// Forward-declared constants used in type definitions below
-#define BSP_LUMP_COUNT       17  // Total number of lumps in the BSP directory
-#define MD3_MAX_SURFACES     3   // Maximum surfaces per weapon part (body, barrel, hand)
-#define MD3_MAX_ANIM_FRAMES  30  // Maximum animation frames extracted from tag_weapon
+// Player bounding box half-extents (x, y, z) used by the capsule collider
+const float PLAYER_HALF_EXTENTS[3] = {15.f, 32.f, 15.f};
 
 // ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 //
@@ -494,7 +436,7 @@ typedef enum {
   ENTITY_TARGET_RELAY,       // Relay event
   ENTITY_TARGET_DELAY,       // Delay proxy
   ENTITY_TARGET_RANDOM,      // Random choice proxy
-  ENTITY_TARGET_CHANGELEVEL, // Exit / level transition node
+  ENTITY_TARGET_CHANGELEVEL, // Exit transition node
 
   // Movers
   ENTITY_DOOR_SLIDING,  // Linear door
@@ -504,18 +446,18 @@ typedef enum {
   ENTITY_ELEVATOR,      // Multi-stop lift
   ENTITY_TRAIN,         // Path-based mover
   ENTITY_ROTATING,      // Rotating mover
-  ENTITY_CONVEYOR,      // Conveyor volume/mover
+  ENTITY_CONVEYOR,      // Conveyor mover
   ENTITY_BREAKABLE,     // Breakable brush/prop
   ENTITY_EXPLOSIVE,     // Explosive object
 
   // Items
-  ENTITY_ITEM_GENERIC, // General pickup (holdables, etc.)
+  ENTITY_ITEM_GENERIC, // General pickup
   ENTITY_ITEM_WEAPON,  // Weapon pickup
   ENTITY_ITEM_AMMO,    // Ammo pickup
   ENTITY_ITEM_HEALTH,  // Health pickup
   ENTITY_ITEM_ARMOR,   // Armor pickup
   ENTITY_ITEM_POWERUP, // Timed powerup pickup
-  ENTITY_ITEM_KEY,     // Key / access pickup
+  ENTITY_ITEM_KEY,     // Access pickup
 
   // Combat and spawners
   ENTITY_PROJECTILE_SPAWNER, // Spawns projectiles periodically or on trigger
@@ -605,20 +547,20 @@ typedef struct {
 
   // Identity / linkage
   char Name    [64]; // Graph node name (e.g. "targetname")
-  char Target  [64]; // primary target id
-  char Target2 [64]; // secondary target id
-  char Parent  [64]; // parent attachment id
+  char Target  [64]; // Primary target id
+  char Target2 [64]; // Secondary target id
+  char Parent  [64]; // Parent attachment id
 
   // Transform
   vec3  Origin; // World-space position
   vec3  Angles; // Pitch/Yaw/Roll degrees
-  float Scale;  // Uniform scale (1.0 default)
+  float Scale;  // Uniform scale
 
   // Bounds for volumes and brush entities
   vec3  Mins;   // Local or world mins
   vec3  Maxs;   // Local or world maxs
-  float Radius; // Radius for spherical volumes (0 if unused)
-  float Height; // Height for cylindrical volumes (0 if unused)
+  float Radius; // Radius for spherical volumes
+  float Height; // Height for cylindrical volumes
 
   // Rendering assets
   char Model    [96];  // Model path (mesh, brush model token, etc)
@@ -636,12 +578,12 @@ typedef struct {
   int   Health;     // Hit points (0 if not damageable)
   int   Armor;      // Armor points (0 if unused)
   int   Damage;     // Damage (for hurt/explosive/etc)
-  int   Count;      // Generic count (ammo amount, quantity, etc)
+  int   Count;      // Generic count (quantity, etc)
   float Speed;      // Generic speed (doors/movers/projectiles)
-  float Accel;      // Acceleration (movers)
-  float Decel;      // Deceleration (movers)
-  float Wait;       // Wait time (seconds)
-  float Delay;      // Delay before fire (seconds)
+  float Accel;    
+  float Decel;  
+  float Wait;       // Seconds
+  float Delay;      // Seconds
   float Random;     // Random variance (seconds or scalar)
 } Entity_Common;
 
@@ -987,21 +929,20 @@ Acceleration_Structure Bottom_Level, Top_Level;
 // GPU physics pipeline state
 VkPipeline            Physics_Pipeline;          // Compute pipeline for physics simulation
 VkPipelineLayout      Physics_Pipeline_Layout;   // Pipeline layout with push constants for Gpu_Input
-VkDescriptorSetLayout Physics_Descriptor_Layout; // Layout: TLAS + vertex + index + player + hull (5 bindings)
+VkDescriptorSetLayout Physics_Descriptor_Layout; // Layout
 VkDescriptorPool      Physics_Descriptor_Pool;   // Pool for the physics descriptor set
 VkDescriptorSet       Physics_Descriptor_Set;    // Descriptor set binding physics resources
 Gpu_Buffer            Player_State_Buffer;       // SSBO holding the Gpu_Player state (read-write each frame)
-Gpu_Buffer            Hull_Storage_Buffer;       // SSBO holding Gpu_Hull vertex + adjacency data (binding 4)
-Gpu_Buffer            Projectile_Buffer;         // SSBO holding Gpu_Projectile_Pool (binding 5)
+Gpu_Buffer            Hull_Storage_Buffer;       // SSBO holding Gpu_Hull vertex + adjacency data
+Gpu_Buffer            Projectile_Buffer;         // SSBO holding Gpu_Projectile_Pool
 
 // Central rendering context holding all Vulkan state, GPU resources, and synchronization objects
-SDL_Window      *Window;                // SDL window for presentation and input
 int              Width;                 // Window width in pixels (output/display resolution)
 int              Height;                // Window height in pixels
-float            Active_Render_Scale;   // Internal RT render scale (from quality preset)
-int              Active_Denoise_Passes; // A-trous denoise iterations (from quality preset)
+float            Active_Render_Scale;   // Internal RT render scale
+int              Active_Denoise_Passes; // A-trous denoise iterations
 int              Active_Checkerboard;   // Half-width dispatch (e.g. checkerboard)
-int              Render_Width;          // Internal RT render resolution (Width * Render_Scale)
+int              Render_Width;          // Internal RT render resolution (Width *  Render_Scale)
 int              Render_Height;         // Internal RT render resolution (Height * Render_Scale)
 VkInstance       Instance;              // Vulkan instance with validation layers
 VkSurfaceKHR     Surface;               // Window surface for presentation
@@ -1033,17 +974,18 @@ int Skip_Postprocess; // Non-zero to bypass the post-processing compute pass
 
 // Windowing state and settings
 Quality_Level    Active_Quality      = QUALITY_POTATO;
-Window_Mode_Kind Current_Window_Mode = WINDOWED_MODE;
-Game_Mode_Kind   Current_Game_Mode   = GAME_PLAYING;
 Cursor_Kind      Current_Cursor_Kind = CURSOR_SYSTEM;
 Activated_Kind   Current_Activated   = OTHER_ACTIVATED;
+Game_Mode_Kind   Current_Game_Mode   = GAME_PLAYING;
+Window_Mode_Kind Current_Window_Mode = WINDOWED_MODE;
 int              Input_Active        = 1;        // Process input when active (disabled on deactivation)
 int              Cursor_Centering    = 0;        // Center cursor each frame (game mode)
 int              In_Menu             = 0;        // 1 = menu mode, 0 = game mode
+int              Swapchain_Dirty     = 0;        // Non-zero when swapchain needs recreation
 int              Saved_Cursor_X, Saved_Cursor_Y; // Cursor position saved across mode transitions
 int              Windowed_X, Windowed_Y;         // Saved window position before fullscreen
 int              Windowed_W, Windowed_H;         // Saved window size before fullscreen
-int              Swapchain_Dirty     = 0;        // Non-zero when swapchain needs recreation
+SDL_Window      *Window;                         // SDL window for presentation and input
 SDL_Cursor      *SDL_Cursor_Arrow;               // System arrow cursor (menu default)
 SDL_Cursor      *SDL_Cursor_Hand;                // Active cursor (hovering interactive UI)
 SDL_Cursor      *SDL_Cursor_Crosshair;           // Inactive cursor (menu, not hovering)
@@ -1111,13 +1053,19 @@ Gpu_Buffer Buffer_Stage_Upload (VkCommandBuffer Command_Buffer, VkQueue Queue,
 //
 // ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 
-// Load a TGA image file and decode it into RGBA8 pixel data. Supports uncompressed 8/24/32-bit images (type 2/3) and RLE-compressed
-// true-color images (type 10). The output is always bottom-to-top, RGBA, 8 bits per channel.
+// Material surface types for footstep and impact sounds
+#define MATERIAL_DEFAULT 0
+#define MATERIAL_METAL   1
+#define MATERIAL_STONE   2
+#define MATERIAL_WOOD    3
+#define MATERIAL_FLESH   4
+#define MATERIAL_WATER   5
+#define MATERIAL_COUNT   6
+
+// Load a TGA image file and decode it into RGBA8 pixel data
 uint8_t *TGA_Load (const char *Path, uint *Out_Width, uint *Out_Height);
 
-// Upload raw RGBA pixel data to a device-local texture image via staging buffer,
-// transitioning the image layout from undefined through transfer-destination to shader-read-only.
-// The caller specifies the Vulkan format (SRGB vs UNORM).
+// Upload raw RGBA pixel data to a device-local texture image via staging buffer
 void Texture_Upload_With_Format (VkCommandBuffer Command_Buffer, VkQueue Queue,
                                  const uint8_t *Pixels, uint Width, uint Height, VkFormat Format,
                                  VkImage *Out_Image, VkDeviceMemory *Out_Memory, VkImageView *Out_View);
@@ -1173,8 +1121,10 @@ float Damage_Map_Sample (const char *Path, float U, float V);
 //
 // ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 
-// Quake 3 animated model (MD3) format
-#define MD3_MAGIC 0x33504449u // "IDP3" as a 32-bit little-endian integer
+// Quake 3 model format
+#define MD3_MAGIC            0x33504449u // "IDP3" as a 32-bit little-endian integer
+#define MD3_MAX_SURFACES     3           // Maximum surfaces per weapon part (body, barrel, hand)
+#define MD3_MAX_ANIM_FRAMES  30          // Maximum animation frames extracted from tag_weapon
 
 // MD3 surface header: describes one mesh within an MD3 model file
 typedef struct {
@@ -1246,26 +1196,27 @@ void Entity_Assemble_Frame (int Legs_Frame, int Torso_Frame,
 // ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 
 // Quake 3 BSP format
-#define BSP_MAGIC            0x50534249u // "IBSP" as a 32-bit little-endian integer
-#define BSP_VERSION          46          // Quake 3 BSP format version number
-#define BSP_ENTITIES         0           // Lump index: entity definitions (key-value text)
-#define BSP_SHADERS          1           // Lump index: shader/material name table
-#define BSP_PLANES           2           // Lump index: splitting planes for BSP tree and brushes
-#define BSP_NODES            3           // Lump index: interior BSP tree nodes
-#define BSP_LEAFS            4           // Lump index: BSP tree leaf nodes
-#define BSP_LEAF_SURFACES    5           // Lump index: per-leaf surface index lists
-#define BSP_LEAF_BRUSHES     6           // Lump index: per-leaf brush index lists
-#define BSP_BRUSHES          8           // Lump index: convex brush volumes for collision
-#define BSP_BRUSH_SIDES      9           // Lump index: bounding planes for each brush
-#define BSP_VERTICES         10          // Lump index: vertex positions, UVs, normals, colors
-#define BSP_INDICES          11          // Lump index: triangle mesh element indices
-#define BSP_FACES            13          // Lump index: face/surface descriptors
-#define BSP_LIGHTMAPS        14          // Lump index: 128×128 RGB lightmap pages
-#define SURFACE_TYPE_PLANAR  1           // Face type: flat polygon rendered from indices
-#define SURFACE_TYPE_PATCH   2           // Face type: Bézier patch (tessellated at load time)
-#define SURFACE_TYPE_MESH    3           // Face type: triangle mesh (e.g. models in BSP)
-#define TESSELLATION_LEVEL   5           // Number of subdivisions per Bézier patch edge
-#define LIGHTMAP_PAGE_SIZE   128         // Width and height in texels of each lightmap page
+#define BSP_MAGIC           0x50534249u // "IBSP" as a 32-bit little-endian integer
+#define BSP_VERSION         46          // Quake 3 BSP format version number
+#define BSP_LUMP_COUNT      17          // Total number of lumps in the BSP directory
+#define BSP_ENTITIES        0           // Lump index: entity definitions (key-value text)
+#define BSP_SHADERS         1           // Lump index: shader/material name table
+#define BSP_PLANES          2           // Lump index: splitting planes for BSP tree and brushes
+#define BSP_NODES           3           // Lump index: interior BSP tree nodes
+#define BSP_LEAFS           4           // Lump index: BSP tree leaf nodes
+#define BSP_LEAF_SURFACES   5           // Lump index: per-leaf surface index lists
+#define BSP_LEAF_BRUSHES    6           // Lump index: per-leaf brush index lists
+#define BSP_BRUSHES         8           // Lump index: convex brush volumes for collision
+#define BSP_BRUSH_SIDES     9           // Lump index: bounding planes for each brush
+#define BSP_VERTICES        10          // Lump index: vertex positions, UVs, normals, colors
+#define BSP_INDICES         11          // Lump index: triangle mesh element indices
+#define BSP_FACES           13          // Lump index: face/surface descriptors
+#define BSP_LIGHTMAPS       14          // Lump index: 128×128 RGB lightmap pages
+#define SURFACE_TYPE_PLANAR 1           // Face type: flat polygon rendered from indices
+#define SURFACE_TYPE_PATCH  2           // Face type: Bézier patch (tessellated at load time)
+#define SURFACE_TYPE_MESH   3           // Face type: triangle mesh (e.g. models in BSP)
+#define TESSELLATION_LEVEL  5           // Number of subdivisions per Bézier patch edge
+#define LIGHTMAP_PAGE_SIZE  128         // Width and height in texels of each lightmap page
 
 // BSP lump directory entry: byte offset and length of a data lump within the file
 typedef struct {int Offset, Length;} BSP_Lump;
@@ -1697,6 +1648,61 @@ void Vulkan_Create_Swapchain ();
 void Vulkan_Recreate_Swapchain ();
 void Vulkan_Create_Synchronization ();
 void Vulkan_Transition_Storage_Image ();
+
+// ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+//
+// §15. Assets
+//
+// ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+
+// Paths to the weapon model's diffuse textures (body and sight)
+#define WEAPON_TEXTURE_COUNT 2
+const char *WEAPON_TEXTURE_PATHS[] = {ASSET_ROOT "models/weapons2/machinegun/mgun.tga",
+                                      ASSET_ROOT "models/weapons2/machinegun/sight.tga"};
+
+// Paths to the three-part machinegun weapon model (body, barrel, hand)
+#define WEAPON_BODY_PATH   ASSET_ROOT "models/weapons2/machinegun/machinegun.md3"
+#define WEAPON_BARREL_PATH ASSET_ROOT "models/weapons2/machinegun/machinegun_barrel.md3"
+#define WEAPON_HAND_PATH   ASSET_ROOT "models/weapons2/machinegun/machinegun_hand.md3"
+
+// Damage or "hit" texture manifest
+#define DAMAGE_MODEL_COUNT 15
+const Model_Damage_Entry DAMAGE_MAP_REGISTRY[DAMAGE_MODEL_COUNT] = {
+  {"grism",    {ASSET_ROOT "models/players/grism/enkiskin_dmg.tga"}, 1},
+  {"sarge",    {ASSET_ROOT "models/players/grism/enkiskin_dmg.tga"}, 1},
+  {"liz",      {ASSET_ROOT "models/players/liz/h_head_dmg.tga",
+                ASSET_ROOT "models/players/liz/u_torso_dmg.tga",
+                ASSET_ROOT "models/players/liz/l_legs_dmg.tga"}, 3},
+  {"major",    {ASSET_ROOT "models/players/major/head_dmg.tga",
+                ASSET_ROOT "models/players/major/torso_dmg.tga",
+                ASSET_ROOT "models/players/major/lower_dmg.tga"}, 3},
+  {"tony",     {ASSET_ROOT "models/players/tony/head_dmg.tga",
+                ASSET_ROOT "models/players/tony/suit_dmg.tga"}, 2},
+  {"assassin", {ASSET_ROOT "models/players/assassin/upper_dmg.tga",
+                ASSET_ROOT "models/players/assassin/lower_dmg.tga"}, 2},
+  {"smarine",  {ASSET_ROOT "models/players/smarine/2h_head_dmg.tga",
+                ASSET_ROOT "models/players/smarine/2u_torso_dmg.tga",
+                ASSET_ROOT "models/players/smarine/2l_legs_dmg.tga"}, 3},
+  {"beret",    {ASSET_ROOT "models/players/beret/skin1_dmg.tga",
+                ASSET_ROOT "models/players/beret/skin2_dmg.tga"}, 2},
+  {"gargoyle", {ASSET_ROOT "models/players/gargoyle/bared_dmg.tga"}, 1},
+  {"penguin",  {ASSET_ROOT "models/players/penguin/skin_dmg.tga"}, 1},
+  {"sergei",   {ASSET_ROOT "models/players/sergei/face_dmg.tga",
+                ASSET_ROOT "models/players/sergei/hairs_dmg.tga",
+                ASSET_ROOT "models/players/sergei/skin_dmg.tga"}, 3},
+  {"skelebot", {ASSET_ROOT "models/players/skelebot/skin1_dmg.tga",
+                ASSET_ROOT "models/players/skelebot/skin2_dmg.tga"}, 2},
+  {"merman",   {ASSET_ROOT "models/players/merman/skin_dmg.tga",
+                ASSET_ROOT "models/players/merman/fins_dmg.tga",
+                ASSET_ROOT "models/players/merman/brac_dmg.tga"}, 3},
+  {"sorceress", {ASSET_ROOT "models/players/sorceress/drowhead_dmg.tga",
+                 ASSET_ROOT "models/players/sorceress/drowbody_dmg.tga",
+                 ASSET_ROOT "models/players/sorceress/rings_dmg.tga"}, 3},
+  {"kyonshi",  {ASSET_ROOT "models/players/kyonshi/skin_dmg.tga",
+                ASSET_ROOT "models/players/kyonshi/torso_dmg.tga",
+                ASSET_ROOT "models/players/kyonshi/hair_dmg.tga",
+                ASSET_ROOT "models/players/kyonshi/eyes_dmg.tga",
+                ASSET_ROOT "models/players/kyonshi/lower_dmg.tga"}, 5}};
 
 // ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 //
@@ -8426,6 +8432,7 @@ glsl comp Post_Process {
       vec3 E = imageLoad (Color_Image, ivec2 (min (Pixel.x + 1, Size.x - 1), Pixel.y)).rgb;
       vec3 Mn = min (min (N, S), min (W, E));
       vec3 Mx = max (max (N, S), max (W, E));
+
       // Reinhard-compress to [0,1] for adaptive weight (handles HDR > 1.0 gracefully)
       vec3 Mn_T = Mn / (1.0 + Mn);
       vec3 Mx_T = Mx / (1.0 + Mx);
@@ -8551,7 +8558,7 @@ glsl comp Post_Process {
             float Bright = max (dot (Sample_C, vec3 (0.333)) - 0.3, 0.0);
             Accum += Sample_C * max (Is_Sky, Bright * 0.5) * Falloff;
           }
-          Falloff *= 0.85;  // Exponential decay away from sun
+          Falloff *= 0.85; // Exponential decay away from sun
         }
 
         // Fade god rays based on distance from sun center (stronger near sun)
@@ -8609,13 +8616,13 @@ void Constrain_Aspect_Ratio (int *W, int *H) {
   if (*H < Min_H) *H = Min_H;
 
   // Width bounds for the current height
-  int Max_Width = *H * ASPECT_NARROW_X / ASPECT_NARROW_Y;   // Widest allowed (21:9)
-  int Min_Width = *H * ASPECT_WIDE_X   / ASPECT_WIDE_Y;     // Narrowest allowed (4:3)
+  int Max_Width = *H * ASPECT_NARROW_X / ASPECT_NARROW_Y;  // Widest allowed (21:9)
+  int Min_Width = *H * ASPECT_WIDE_X   / ASPECT_WIDE_Y;    // Narrowest allowed (4:3)
   int Fit_W = (*W > Max_Width) ? Max_Width : (*W < Min_Width) ? Min_Width : *W;
 
   // Height bounds for the current width
-  int Max_Height = *W * ASPECT_WIDE_Y   / ASPECT_WIDE_X;    // Tallest allowed (4:3)
-  int Min_Height = *W * ASPECT_NARROW_Y / ASPECT_NARROW_X;  // Shortest allowed (21:9)
+  int Max_Height = *W * ASPECT_WIDE_Y   / ASPECT_WIDE_X;   // Tallest allowed (4:3)
+  int Min_Height = *W * ASPECT_NARROW_Y / ASPECT_NARROW_X; // Shortest allowed (21:9)
   int Fit_H = (*H > Max_Height) ? Max_Height : (*H < Min_Height) ? Min_Height : *H;
 
   // Apply the clamped dimensions
@@ -8677,8 +8684,9 @@ void Enter_Game_Mode () {
 // ═════════════════════
 
 void Toggle_Fullscreen () {
+
+  // Save windowed geometry for restoration
   if (Current_Window_Mode == WINDOWED_MODE) {
-    // Save windowed geometry for restoration
     SDL_GetWindowPosition (Window, &Windowed_X, &Windowed_Y);
     SDL_GetWindowSize (Window, &Windowed_W, &Windowed_H);
     SDL_SetWindowFullscreen (Window, SDL_WINDOW_FULLSCREEN_DESKTOP);
@@ -8710,8 +8718,9 @@ void Handle_Activation (Activated_Kind New_State) {
       Input_Active = 1;
       switch (Current_Window_Mode) {
         case WINDOWED_MODE:
+
+          // Alt-tab back in windowed game mode: pause game input until click
           if (not In_Menu) {
-            // Alt-tab back in windowed game mode: pause game input until click
             Cursor_Centering = 0;
             SDL_SetRelativeMouseMode (SDL_FALSE);
             SDL_SetWindowGrab (Window, SDL_FALSE);
@@ -8800,10 +8809,10 @@ Input Poll_Input () {
 
       // Handle key presses (ESC, F11)
       case SDL_KEYDOWN:
-        if (Event.key.repeat) break;  // Ignore key repeat for mode toggles
+        if (Event.key.repeat) break; // Ignore key repeat for mode toggles
         if (Event.key.keysym.sym == SDLK_ESCAPE) {
-          if (In_Menu) Quit = 1;       // ESC in menu = quit
-          else Enter_Menu_Mode ();      // ESC in game = open menu
+          if (In_Menu) Quit = 1;   // ESC in menu = quit
+          else Enter_Menu_Mode (); // ESC in game = open menu
         }
         if (Event.key.keysym.sym == SDLK_F11)
           Toggle_Fullscreen ();
@@ -8812,7 +8821,7 @@ Input Poll_Input () {
       // Handle mouse button clicks
       case SDL_MOUSEBUTTONDOWN:
         if (Event.button.button == SDL_BUTTON_LEFT) {
-          if (In_Menu) Enter_Game_Mode ();   // Click in menu = enter game
+          if (In_Menu) Enter_Game_Mode (); // Click in menu = enter game
           else Input_Data.Fire = 1;
         }
         break;
@@ -8908,16 +8917,16 @@ int main (int Argc, char **Argv) {
 
   // Parse command-line arguments
   for (int I = 1; I < Argc; I++) {
-    if (strcmp (Argv[I], "--physics-test") == 0) Physics_Test = 1;
-    else if (strcmp (Argv[I], "--benchmark") == 0 and I + 1 < Argc) Benchmark_Frames = atoi (Argv[++I]);
-    else if (strcmp (Argv[I], "--screenshot") == 0 and I + 1 < Argc) Screenshot_Path = Argv[++I];
-    else if (strcmp (Argv[I], "--dump-frames") == 0 and I + 1 < Argc) Dump_Frames_Dir = Argv[++I];
+    if      (strcmp (Argv[I], "--physics-test")   == 0) Physics_Test = 1;
+    else if (strcmp (Argv[I], "--benchmark")      == 0 and I + 1 < Argc) Benchmark_Frames = atoi (Argv[++I]);
+    else if (strcmp (Argv[I], "--screenshot")     == 0 and I + 1 < Argc) Screenshot_Path = Argv[++I];
+    else if (strcmp (Argv[I], "--dump-frames")    == 0 and I + 1 < Argc) Dump_Frames_Dir = Argv[++I];
     else if (strcmp (Argv[I], "--no-postprocess") == 0) No_Postprocess = 1;
-    else if (strcmp (Argv[I], "--no-pbr") == 0) No_PBR = 1;
-    else if (strcmp (Argv[I], "--no-parallax") == 0) No_Parallax = 1;
-    else if (strcmp (Argv[I], "--cheap") == 0) Force_Cheap = 1;
-    else if (strcmp (Argv[I], "--spp") == 0 and I + 1 < Argc) Override_SPP = atoi (Argv[++I]);
-    else if (strcmp (Argv[I], "--res") == 0 and I + 1 < Argc) {
+    else if (strcmp (Argv[I], "--no-pbr")         == 0) No_PBR = 1;
+    else if (strcmp (Argv[I], "--no-parallax")    == 0) No_Parallax = 1;
+    else if (strcmp (Argv[I], "--cheap")          == 0) Force_Cheap = 1;
+    else if (strcmp (Argv[I], "--spp")            == 0 and I + 1 < Argc) Override_SPP = atoi (Argv[++I]);
+    else if (strcmp (Argv[I], "--res")            == 0 and I + 1 < Argc) {
       sscanf (Argv[++I], "%dx%d", &Width, &Height);
       Override_Res = 1;
     }
@@ -8933,7 +8942,7 @@ int main (int Argc, char **Argv) {
     else Map_Name = Argv[I];
   }
 
-  // Apply quality preset - CLI --res and --spp override preset values
+  // Apply quality presets
   const Quality_Preset *QP = &QUALITY_PRESETS[Active_Quality];
   if (not Override_Res) { Width = QP->Width; Height = QP->Height; }
   Active_Render_Scale  = QP->Render_Scale;
@@ -8954,7 +8963,7 @@ int main (int Argc, char **Argv) {
   Window = SDL_CreateWindow (ENGINE_NAME, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
                              Width, Height, SDL_WINDOW_VULKAN | SDL_WINDOW_SHOWN | SDL_WINDOW_RESIZABLE);
 
-  // Create system cursors for menu mode rollover (ported from Neo Engine cursor management)
+  // Create system cursors for menu mode rollover
   SDL_Cursor_Arrow     = SDL_CreateSystemCursor (SDL_SYSTEM_CURSOR_ARROW);
   SDL_Cursor_Hand      = SDL_CreateSystemCursor (SDL_SYSTEM_CURSOR_HAND);
   SDL_Cursor_Crosshair = SDL_CreateSystemCursor (SDL_SYSTEM_CURSOR_CROSSHAIR);
@@ -8968,16 +8977,14 @@ int main (int Argc, char **Argv) {
   Windowed_H = Height;
   SDL_GetWindowPosition (Window, &Windowed_X, &Windowed_Y);
 
-  // Create the Vulkan instance, surface, pick a physical device, and create the logical device
+  // Create the Vulkan environment
   Vulkan_Create_Instance ();
   Vulkan_Pick_Physical_Device ();
   Vulkan_Create_Logical_Device ();
-
-  // Create the swapchain and synchronization primitives
   Vulkan_Create_Swapchain ();
   Vulkan_Create_Synchronization ();
 
-  // Compute internal render resolution (scale < 1.0 = upscaled rendering for perf)
+  // Compute internal render resolution
   Render_Width  = (int)(Width  * Active_Render_Scale);
   Render_Height = (int)(Height * Active_Render_Scale);
   Render_Width  = (Render_Width  + 7) & ~7;  // Round up to multiple of 8 (postprocess workgroup size)
@@ -9071,8 +9078,7 @@ int main (int Argc, char **Argv) {
     vkFreeCommandBuffers (Device, Command_Pool, 1, &Cmd);
   }
 
-  // Allocate the camera uniform buffer
-  // sizeof(mat4)*2 + 16 (base) + 7*16 (environment vec4s) = 256 bytes
+  // Allocate the camera uniform buffer sizeof(mat4)*2 + 16 (base) + 7*16 (environment vec4s) = 256 bytes
   Camera_Uniform_Buffer = Buffer_Allocate (256,
     VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
     VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
@@ -9846,4 +9852,5 @@ int main (int Argc, char **Argv) {
   SDL_DestroyWindow (Window);
   SDL_Quit ();
   return 0;
+  
 } // main
