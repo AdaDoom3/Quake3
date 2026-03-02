@@ -1,4 +1,6 @@
 build/
 nob
 nob.old
+sdk
+sdk.old
 reference/SDL2/

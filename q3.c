@@ -405,13 +405,15 @@ typedef struct {int V0, V1, Face;}      Quickhull_Edge;
   _(vkCreateRayTracingPipelinesKHR,             vkCreateRayTracingPipelines)             /* Creates a ray tracing pipeline */ \
   _(vkGetRayTracingShaderGroupHandlesKHR,       vkGetRayTracingShaderGroupHandles)       /* Retrieves shader group handles (SBT) */ \
   _(vkCmdTraceRaysKHR,                          vkCmdTraceRays)                          /* Records a ray dispatch command */
-VULKAN_FUNCTIONS (DECLARE_VK)
 
 // Convenience macro for declaring Vulkan function pointer variables from their spec names
 #define DECLARE_VK(vk, alias) PFN_##vk alias;
 
 // Convenience macro for loading Vulkan function pointers from the logical device at runtime
 #define LOAD_VK(vk, alias) alias = (PFN_##vk) vkGetDeviceProcAddr (Device, #vk);
+
+// Declare all ray tracing function pointers as globals
+VULKAN_FUNCTIONS (DECLARE_VK)
 
 // Assertion to validate Vulkan return values; prints the error code, file, and line number then exits
 #define VK_CHECK(Call) do { \
@@ -673,7 +675,7 @@ int                    Damage_Cache_Count = 0;
 Damage_Map_Cache_Entry Damage_Cache[DAMAGE_CACHE_MAX];
 
 // Free all cached damage map pixel data
-void Damage_Cache_Free ()
+void Damage_Cache_Free ();
 
 // Look up the damage map path for a given model name and body part index (0=head, 1=upper, 2=lower)
 const char *Damage_Map_For_Model (const char *Model_Name, int Part_Index);
@@ -712,49 +714,37 @@ typedef struct {
   float Axis[9];   // A 3×3 rotation matrix (row-major) defining the tag's local coordinate frame
 } MD3_Tag;
 
-// Parse a single MD3 surface's geometry (vertices, indices, texture coordinates) into the growing output arrays. An optional 12-float
-// transform (origin + 3×3 axis matrix) can pre-transform vertices and normals. Quake 3 coordinate swizzle (x,y,z)->(x,z,-y) is
-// applied.
-void MD3_Parse_Surface (const uint8_t *Surface_Data,
-                        Vertex **Inout_Vertices,    uint *Inout_Vertex_Count,
-                        uint   **Inout_Indices,     uint *Inout_Index_Count,
-                        uint   **Inout_Texture_Ids, uint *Inout_Triangle_Count,
-                        uint Assigned_Texture_Index, const float *Transform);
-
-// Frame-aware variant of MD3_Parse_Surface: reads vertex data from a specific animation frame.
-// Used for player model assembly where each body part has per-frame animation data.
-void MD3_Parse_Surface_At_Frame (const uint8_t *Surface_Data, int Frame,
-                                  Vertex **Inout_Vertices,    uint *Inout_Vertex_Count,
-                                  uint   **Inout_Indices,     uint *Inout_Index_Count,
-                                  uint   **Inout_Texture_Ids, uint *Inout_Triangle_Count,
-                                  uint Assigned_Texture_Index, const float *Transform);
-
-// Load the three-part machinegun weapon model (body, barrel, hand) from MD3 files
-Weapon_Model Weapon_Model_Load ();
-
-// Load an entity model and pre-compute all animation frames
-Entity Entity_Load (Scene *S, Spawn Spawn_Point);
-
-// Initialize entity BLAS with host-visible vertex buffer and ALLOW_UPDATE for per-frame refit
-void Entity_Bottom_Level_Initialize (Entity *Enemy);
-
-// Refit entity BLAS after uploading the current animation frame's vertices
-void Entity_Bottom_Level_Rebuild (Entity *Enemy);
+// Forward declarations — these reference types defined later (Vertex, Weapon_Model, Entity, Scene, Spawn)
+// so they are placed here as documentation. The implementations appear after the type definitions.
+//
+//   void MD3_Parse_Surface (const uint8_t *Surface_Data,
+//                           Vertex **Inout_Vertices, uint *Inout_Vertex_Count,
+//                           uint **Inout_Indices, uint *Inout_Index_Count,
+//                           uint **Inout_Texture_Ids, uint *Inout_Triangle_Count,
+//                           uint Assigned_Texture_Index, const float *Transform);
+//
+//   void MD3_Parse_Surface_At_Frame (const uint8_t *Surface_Data, int Frame,
+//                                    Vertex **Inout_Vertices, uint *Inout_Vertex_Count,
+//                                    uint **Inout_Indices, uint *Inout_Index_Count,
+//                                    uint **Inout_Texture_Ids, uint *Inout_Triangle_Count,
+//                                    uint Assigned_Texture_Index, const float *Transform);
+//
+//   Weapon_Model Weapon_Model_Load ();
+//   Entity Entity_Load (Scene *S, Spawn Spawn_Point);
+//   void Entity_Bottom_Level_Initialize (Entity *Enemy);
+//   void Entity_Bottom_Level_Rebuild (Entity *Enemy);
+//   void Entity_Assemble_Frame (int Legs_Frame, int Torso_Frame,
+//                               uint Body_Mat, uint Gun_Mat, const float World[12],
+//                               Vertex **Out_Verts, uint *Out_Vert_Count,
+//                               uint **Out_Indices, uint *Out_Index_Count,
+//                               uint **Out_Tex_Ids, uint *Out_Tri_Count);
 
 // Compose two tag transforms (each float[12]: origin[3] + axis[9])
 void Tag_Compose (const float *A, const float *B, float *C);
 
 // Returns 1 if found, 0 if not. Writes the 12-float transform (origin[3] + axis[9]) to Out
 int MD3_Find_Tag_At_Frame (const uint8_t *Data, int Tag_Count, int Tags_Offset,
-                                   int Frame, const char *Name, float Out[12])
-
-// Assemble the full entity model (legs + torso + head + gun + barrel) for a single
-// animation frame into temporary arrays. Caller owns the returned vertex/index/texture data.
-void Entity_Assemble_Frame (int Legs_Frame, int Torso_Frame,
-                            uint Body_Mat, uint Gun_Mat, const float World[12],
-                            Vertex **Out_Verts, uint *Out_Vert_Count,
-                            uint **Out_Indices, uint *Out_Index_Count,
-                            uint **Out_Tex_Ids, uint *Out_Tri_Count);
+                                   int Frame, const char *Name, float Out[12]);
 
 // ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 //
@@ -1551,7 +1541,7 @@ typedef struct {
   float y1, y2; // Filter state
 } Mode_Resonator;
 
-void Mode_Init (Mode_Resonator *M, float Freq_Hz, float T60, float Gain)
+void Mode_Init (Mode_Resonator *M, float Freq_Hz, float T60, float Gain);
 float Mode_Tick (Mode_Resonator *M, float X);
 
 // Material mode tables: {frequency_Hz, T60_seconds, gain}
@@ -2425,13 +2415,6 @@ const char *Damage_Map_For_Model (const char *Model_Name, int Part_Index) {
       return DAMAGE_MAP_REGISTRY[I].Damage_Maps[0]; // Fallback to first map
     }
   }
-  for (int I = 0; I < DAMAGE_EXTRA_COUNT; I++) {
-    if (strcmp (DAMAGE_MAP_EXTRA[I].Model_Name, Model_Name) == 0) {
-      if (Part_Index < DAMAGE_MAP_EXTRA[I].Damage_Map_Count)
-        return DAMAGE_MAP_EXTRA[I].Damage_Maps[Part_Index];
-      return DAMAGE_MAP_EXTRA[I].Damage_Maps[0];
-    }
-  }
   return NULL; // Unknown model
 }
 
@@ -3297,23 +3280,24 @@ void Vulkan_Recreate_Swapchain () {
     Image_Count = Capabilities.maxImageCount;
 
   // Create the new swapchain, chaining from the old one
-  VK_CHECK (vkCreateSwapchainKHR (Device,
-    &(VkSwapchainCreateInfoKHR){
-      .sType            = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR,
-      .surface          = Surface,
-      .minImageCount    = Image_Count,
-      .imageFormat      = Swapchain_Format,
-      .imageColorSpace  = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR,
-      .imageExtent      = Swapchain_Extent,
-      .imageArrayLayers = 1,
-      .imageUsage       = VK_IMAGE_USAGE_TRANSFER_DST_BIT,
-      .imageSharingMode = VK_SHARING_MODE_EXCLUSIVE,
-      .preTransform     = Capabilities.currentTransform,
-      .compositeAlpha   = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR,
-      .presentMode      = VK_PRESENT_MODE_FIFO_KHR,
-      .clipped          = VK_TRUE,
-      .oldSwapchain     = Old},
-    NULL, &Swapchain));
+  VK_CHECK (vkCreateSwapchainKHR (/*device      =>*/ Device,
+                                  /*pCreateInfo =>*/ &(VkSwapchainCreateInfoKHR){
+                                    .sType            = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR,
+                                    .surface          = Surface,
+                                    .minImageCount    = Image_Count,
+                                    .imageFormat      = Swapchain_Format,
+                                    .imageColorSpace  = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR,
+                                    .imageExtent      = Swapchain_Extent,
+                                    .imageArrayLayers = 1,
+                                    .imageUsage       = VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+                                    .imageSharingMode = VK_SHARING_MODE_EXCLUSIVE,
+                                    .preTransform     = Capabilities.currentTransform,
+                                    .compositeAlpha   = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR,
+                                    .presentMode      = VK_PRESENT_MODE_FIFO_KHR,
+                                    .clipped          = VK_TRUE,
+                                    .oldSwapchain     = Old},
+                                  /*pAllocator  =>*/ NULL,
+                                  /*pSwapchain  =>*/ &Swapchain));
 
   // Destroy the old swapchain and retrieve new image handles
   vkDestroySwapchainKHR (Device, Old, NULL);
@@ -4175,7 +4159,7 @@ uint BSP_Parse_Entities (const uint8_t *File_Data, const BSP_Header *Header,
     Classify_Entity (Classname, Classname_Len, &Entity);
 
     // Skip unrecognized entity classnames
-    if (Entity.Kind == ENTITY_NONE) continue; // skip unknown entities
+    if (Entity.Kind == NO_ENTITY) continue; // skip unknown entities
 
     // Populate kind-specific fields from parsed temporaries
     switch (Entity.Kind) {
@@ -4367,8 +4351,15 @@ void Scene_Load_Textures (const Scene *Scene_Data) {
       Pixels = TGA_Load (Path, &W, &H);
     }
     if (Pixels and W and H) {
-      Texture_Upload_With_Format (Command_Buffer, Queue, Pixels, W, H, VK_FORMAT_R8G8B8A8_SRGB,
-                      &Texture_Images[Slot], &Texture_Memories[Slot], &Texture_Views[Slot]);
+      Texture_Upload_With_Format (/*Command_Buffer =>*/ Command_Buffer,
+                                  /*Queue          =>*/ Queue,
+                                  /*Pixels         =>*/ Pixels,
+                                  /*Width          =>*/ W,
+                                  /*Height         =>*/ H,
+                                  /*Format         =>*/ VK_FORMAT_R8G8B8A8_SRGB,
+                                  /*Out_Image      =>*/ &Texture_Images[Slot],
+                                  /*Out_Memory     =>*/ &Texture_Memories[Slot],
+                                  /*Out_View       =>*/ &Texture_Views[Slot]);
       Diffuse_Pixels[Index] = Pixels;  // retain for PBR derivation
       Diffuse_W[Index] = W;
       Diffuse_H[Index] = H;
@@ -4377,8 +4368,15 @@ void Scene_Load_Textures (const Scene *Scene_Data) {
       free (Pixels);
       vec4 Color = Scene_Data->Materials[Index];
       uint8_t Fallback[4] = {(uint8_t)(Color.x * 255), (uint8_t)(Color.y * 255), (uint8_t)(Color.z * 255), 255};
-      Texture_Upload_With_Format (Command_Buffer, Queue, Fallback, 1, 1, VK_FORMAT_R8G8B8A8_SRGB,
-                      &Texture_Images[Slot], &Texture_Memories[Slot], &Texture_Views[Slot]);
+      Texture_Upload_With_Format (/*Command_Buffer =>*/ Command_Buffer,
+                                  /*Queue          =>*/ Queue,
+                                  /*Pixels         =>*/ Fallback,
+                                  /*Width          =>*/ 1,
+                                  /*Height         =>*/ 1,
+                                  /*Format         =>*/ VK_FORMAT_R8G8B8A8_SRGB,
+                                  /*Out_Image      =>*/ &Texture_Images[Slot],
+                                  /*Out_Memory     =>*/ &Texture_Memories[Slot],
+                                  /*Out_View       =>*/ &Texture_Views[Slot]);
     }
   }
 
@@ -4398,8 +4396,15 @@ void Scene_Load_Textures (const Scene *Scene_Data) {
       VkFormat Fmt = VK_FORMAT_R8G8B8A8_UNORM;
 
       if (Pixels and W and H) {
-        Texture_Upload_With_Format (Command_Buffer, Queue, Pixels, W, H, Fmt,
-                        &Texture_Images[Slot], &Texture_Memories[Slot], &Texture_Views[Slot]);
+        Texture_Upload_With_Format (/*Command_Buffer =>*/ Command_Buffer,
+                                    /*Queue          =>*/ Queue,
+                                    /*Pixels         =>*/ Pixels,
+                                    /*Width          =>*/ W,
+                                    /*Height         =>*/ H,
+                                    /*Format         =>*/ Fmt,
+                                    /*Out_Image      =>*/ &Texture_Images[Slot],
+                                    /*Out_Memory     =>*/ &Texture_Memories[Slot],
+                                    /*Out_View       =>*/ &Texture_Views[Slot]);
         free (Pixels);
         PBR_Maps_Loaded++;
       } else {
@@ -4535,8 +4540,15 @@ void Scene_Load_Textures (const Scene *Scene_Data) {
           }
 
           // Upload texture to GPU
-          Texture_Upload_With_Format (Command_Buffer, Queue, Gen, DW, DH, Fmt,
-                          &Texture_Images[Slot], &Texture_Memories[Slot], &Texture_Views[Slot]);
+          Texture_Upload_With_Format (/*Command_Buffer =>*/ Command_Buffer,
+                                      /*Queue          =>*/ Queue,
+                                      /*Pixels         =>*/ Gen,
+                                      /*Width          =>*/ DW,
+                                      /*Height         =>*/ DH,
+                                      /*Format         =>*/ Fmt,
+                                      /*Out_Image      =>*/ &Texture_Images[Slot],
+                                      /*Out_Memory     =>*/ &Texture_Memories[Slot],
+                                      /*Out_View       =>*/ &Texture_Views[Slot]);
           free (Gen);
           PBR_Generated++;
 
@@ -4544,15 +4556,36 @@ void Scene_Load_Textures (const Scene *Scene_Data) {
         } else {
           if (Map_Type == 2) {
             uint8_t R_Pixel[4] = {Base_R, Base_R, Base_R, 255};
-            Texture_Upload_With_Format (Command_Buffer, Queue, R_Pixel, 1, 1, Fmt,
-                            &Texture_Images[Slot], &Texture_Memories[Slot], &Texture_Views[Slot]);
+            Texture_Upload_With_Format (/*Command_Buffer =>*/ Command_Buffer,
+                                        /*Queue          =>*/ Queue,
+                                        /*Pixels         =>*/ R_Pixel,
+                                        /*Width          =>*/ 1,
+                                        /*Height         =>*/ 1,
+                                        /*Format         =>*/ Fmt,
+                                        /*Out_Image      =>*/ &Texture_Images[Slot],
+                                        /*Out_Memory     =>*/ &Texture_Memories[Slot],
+                                        /*Out_View       =>*/ &Texture_Views[Slot]);
           } else if (Map_Type == 3) {
             uint8_t M_Pixel[4] = {Base_M, Base_M, Base_M, 255};
-            Texture_Upload_With_Format (Command_Buffer, Queue, M_Pixel, 1, 1, Fmt,
-                            &Texture_Images[Slot], &Texture_Memories[Slot], &Texture_Views[Slot]);
+            Texture_Upload_With_Format (/*Command_Buffer =>*/ Command_Buffer,
+                                        /*Queue          =>*/ Queue,
+                                        /*Pixels         =>*/ M_Pixel,
+                                        /*Width          =>*/ 1,
+                                        /*Height         =>*/ 1,
+                                        /*Format         =>*/ Fmt,
+                                        /*Out_Image      =>*/ &Texture_Images[Slot],
+                                        /*Out_Memory     =>*/ &Texture_Memories[Slot],
+                                        /*Out_View       =>*/ &Texture_Views[Slot]);
           } else {
-            Texture_Upload_With_Format (Command_Buffer, Queue, PBR_Fallbacks[Map_Type], 1, 1, Fmt,
-                            &Texture_Images[Slot], &Texture_Memories[Slot], &Texture_Views[Slot]);
+            Texture_Upload_With_Format (/*Command_Buffer =>*/ Command_Buffer,
+                                        /*Queue          =>*/ Queue,
+                                        /*Pixels         =>*/ PBR_Fallbacks[Map_Type],
+                                        /*Width          =>*/ 1,
+                                        /*Height         =>*/ 1,
+                                        /*Format         =>*/ Fmt,
+                                        /*Out_Image      =>*/ &Texture_Images[Slot],
+                                        /*Out_Memory     =>*/ &Texture_Memories[Slot],
+                                        /*Out_View       =>*/ &Texture_Views[Slot]);
           }
         }
       }
@@ -4567,10 +4600,11 @@ void Scene_Load_Textures (const Scene *Scene_Data) {
   free (Material_PBR);
 
   // Upload per-triangle texture IDs as a storage buffer
-  Texture_Id_Buffer = Buffer_Stage_Upload (Command_Buffer, Queue,
-                                           Scene_Data->Texture_Ids,
-                                           sizeof (uint) * Scene_Data->Triangle_Count,
-                                           VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+  Texture_Id_Buffer = Buffer_Stage_Upload (/*Command_Buffer =>*/ Command_Buffer,
+                                           /*Queue          =>*/ Queue,
+                                           /*Data           =>*/ Scene_Data->Texture_Ids,
+                                           /*Size           =>*/ sizeof (uint) * Scene_Data->Triangle_Count,
+                                           /*Usage          =>*/ VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
 
   // Log texture loading statistics and material names
   printf ("[textures] loaded %u/%u diffuse, %u PBR from disk, %u PBR generated, total %u slots\n",
@@ -4581,17 +4615,27 @@ void Scene_Load_Textures (const Scene *Scene_Data) {
   // Upload the lightmap atlas (or a 1x1 white fallback if no lightmaps exist)
   Lightmap_Sampler = Sampler_Create_Clamping ();
   if (Scene_Data->Lightmap_Atlas and Scene_Data->Lightmap_Width and Scene_Data->Lightmap_Height) {
-    Texture_Upload_With_Format (Command_Buffer, Queue,
-                                Scene_Data->Lightmap_Atlas,
-                                Scene_Data->Lightmap_Width, Scene_Data->Lightmap_Height,
-                                VK_FORMAT_R8G8B8A8_SRGB,
-                                &Lightmap_Image, &Lightmap_Memory, &Lightmap_View);
+    Texture_Upload_With_Format (/*Command_Buffer =>*/ Command_Buffer,
+                                /*Queue          =>*/ Queue,
+                                /*Pixels         =>*/ Scene_Data->Lightmap_Atlas,
+                                /*Width          =>*/ Scene_Data->Lightmap_Width,
+                                /*Height         =>*/ Scene_Data->Lightmap_Height,
+                                /*Format         =>*/ VK_FORMAT_R8G8B8A8_SRGB,
+                                /*Out_Image      =>*/ &Lightmap_Image,
+                                /*Out_Memory     =>*/ &Lightmap_Memory,
+                                /*Out_View       =>*/ &Lightmap_View);
     printf ("[lightmap] uploaded %ux%u atlas (SRGB - auto-linearized on sample)\n", Scene_Data->Lightmap_Width, Scene_Data->Lightmap_Height);
   } else {
     uint8_t White[4] = {255, 255, 255, 255};
-    Texture_Upload_With_Format (Command_Buffer, Queue, White, 1, 1,
-                                VK_FORMAT_R8G8B8A8_SRGB,
-                                &Lightmap_Image, &Lightmap_Memory, &Lightmap_View);
+    Texture_Upload_With_Format (/*Command_Buffer =>*/ Command_Buffer,
+                                /*Queue          =>*/ Queue,
+                                /*Pixels         =>*/ White,
+                                /*Width          =>*/ 1,
+                                /*Height         =>*/ 1,
+                                /*Format         =>*/ VK_FORMAT_R8G8B8A8_SRGB,
+                                /*Out_Image      =>*/ &Lightmap_Image,
+                                /*Out_Memory     =>*/ &Lightmap_Memory,
+                                /*Out_View       =>*/ &Lightmap_View);
   }
 } // BSP_Parse_Entities
 
@@ -4643,16 +4687,30 @@ void Weapon_Load_Textures (Weapon_Instance *Weapon) {
       VkFormat Fmt = (Map_Type == 0) ? VK_FORMAT_R8G8B8A8_SRGB : VK_FORMAT_R8G8B8A8_UNORM;
 
       if (Pixels and Img_W and Img_H) {
-        Texture_Upload_With_Format (Command_Buffer, Queue, Pixels, Img_W, Img_H, Fmt,
-                        &Texture_Images[Slot], &Texture_Memories[Slot], &Texture_Views[Slot]);
+        Texture_Upload_With_Format (/*Command_Buffer =>*/ Command_Buffer,
+                                    /*Queue          =>*/ Queue,
+                                    /*Pixels         =>*/ Pixels,
+                                    /*Width          =>*/ Img_W,
+                                    /*Height         =>*/ Img_H,
+                                    /*Format         =>*/ Fmt,
+                                    /*Out_Image      =>*/ &Texture_Images[Slot],
+                                    /*Out_Memory     =>*/ &Texture_Memories[Slot],
+                                    /*Out_View       =>*/ &Texture_Views[Slot]);
         free (Pixels);
         if (Map_Type == 0)
           printf ("[weapon] loaded texture %s (%ux%u)\n", Path, Img_W, Img_H);
         else
           Weapon_PBR_Loaded++;
       } else {
-        Texture_Upload_With_Format (Command_Buffer, Queue, (uint8_t *)Weapon_PBR_Fallbacks[Map_Type], 1, 1, Fmt,
-                        &Texture_Images[Slot], &Texture_Memories[Slot], &Texture_Views[Slot]);
+        Texture_Upload_With_Format (/*Command_Buffer =>*/ Command_Buffer,
+                                    /*Queue          =>*/ Queue,
+                                    /*Pixels         =>*/ (uint8_t *)Weapon_PBR_Fallbacks[Map_Type],
+                                    /*Width          =>*/ 1,
+                                    /*Height         =>*/ 1,
+                                    /*Format         =>*/ Fmt,
+                                    /*Out_Image      =>*/ &Texture_Images[Slot],
+                                    /*Out_Memory     =>*/ &Texture_Memories[Slot],
+                                    /*Out_View       =>*/ &Texture_Views[Slot]);
         if (Map_Type == 0)
           printf ("[weapon] fallback texture for %s\n", WEAPON_TEXTURE_PATHS[Index]);
       }
@@ -4675,28 +4733,30 @@ void Weapon_Load_Textures (Weapon_Instance *Weapon) {
 
 Acceleration_Structure Build_World_Bottom_Level (const Scene *Scene_Data) {
 
-  // Upload scene vertex, index, and material data to device-local GPU buffers
-  Vertex_Buffer = Buffer_Stage_Upload (Command_Buffer, Queue,
-                                       Scene_Data->Vertices,
-                                       sizeof (Vertex) * Scene_Data->Vertex_Count,
-                                       VK_BUFFER_USAGE_VERTEX_BUFFER_BIT
-                                     | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
-                                     | VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR);
+  // Upload scene vertex, index, and material data to device-local GPU buffers for BLAS construction and shader access
+  Vertex_Buffer = Buffer_Stage_Upload (/*Command_Buffer =>*/ Command_Buffer,
+                                       /*Queue          =>*/ Queue,
+                                       /*Data           =>*/ Scene_Data->Vertices,
+                                       /*Size           =>*/ sizeof (Vertex) * Scene_Data->Vertex_Count,
+                                       /*Usage          =>*/ VK_BUFFER_USAGE_VERTEX_BUFFER_BIT
+                                                           | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
+                                                           | VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR);
 
   // Upload the index buffer to device-local memory for BLAS construction and shader access
-  Index_Buffer = Buffer_Stage_Upload (Command_Buffer, Queue,
-                                      Scene_Data->Indices,
-                                      sizeof (uint) * Scene_Data->Index_Count,
-                                      VK_BUFFER_USAGE_INDEX_BUFFER_BIT
-                                    | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
-                                    | VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR);
+  Index_Buffer = Buffer_Stage_Upload (/*Command_Buffer =>*/ Command_Buffer,
+                                      /*Queue          =>*/ Queue,
+                                      /*Data           =>*/ Scene_Data->Indices,
+                                      /*Size           =>*/ sizeof (uint) * Scene_Data->Index_Count,
+                                      /*Usage          =>*/ VK_BUFFER_USAGE_INDEX_BUFFER_BIT
+                                                          | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
+                                                          | VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR);
 
-  // Allocate a host-visible material buffer for per-surface RGBA tints
-  Material_Buffer = Buffer_Allocate (sizeof (vec4) * Scene_Data->Material_Count,
-                                     VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
-                                   | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
-                                     VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT
-                                   | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+  // Allocate a host-visible material buffer for per-surface RGBA tints that shaders can reference via buffer device address
+  Material_Buffer = Buffer_Allocate (/*Size         =>*/ sizeof (vec4) * Scene_Data->Material_Count,
+                                     /*Usage        =>*/ VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
+                                                       | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
+                                     /*Memory_Flags =>*/ VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT
+                                                       | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
 
   // Upload the material color array
   Buffer_Upload (Material_Buffer, Scene_Data->Materials, sizeof (vec4) * Scene_Data->Material_Count);
@@ -4723,32 +4783,37 @@ Acceleration_Structure Build_World_Bottom_Level (const Scene *Scene_Data) {
     .geometryCount = 1,
     .pGeometries   = &Geometry};
 
-  // Query required acceleration structure and scratch sizes from the driver
+  // Query required acceleration structure and scratch buffer sizes from the driver for the given triangle geometry
   uint Primitive_Count = Scene_Data->Triangle_Count;
   VkAccelerationStructureBuildSizesInfoKHR Build_Sizes = {.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR};
-  vkGetAccelerationStructureBuildSizes (Device, VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR, &Build_Info, &Primitive_Count, &Build_Sizes);
+  vkGetAccelerationStructureBuildSizes (/*device    =>*/ Device,
+                                        /*buildType =>*/ VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR,
+                                        /*pBuildInfo =>*/ &Build_Info,
+                                        /*pMaxPrimitiveCounts =>*/ &Primitive_Count,
+                                        /*pSizeInfo =>*/ &Build_Sizes);
 
   // Allocate the acceleration structure buffer and create the BLAS object
   Acceleration_Structure Result = {0};
-  Result.Buffer = Buffer_Allocate (Build_Sizes.accelerationStructureSize,
-                                   VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR
-                                 | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
-                                   VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+  Result.Buffer = Buffer_Allocate (/*Size         =>*/ Build_Sizes.accelerationStructureSize,
+                                   /*Usage        =>*/ VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR
+                                                     | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
+                                   /*Memory_Flags =>*/ VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
 
-  // Create the bottom-level acceleration structure object
-  VK_CHECK (vkCreateAccelerationStructure (Device,
-                                           &(VkAccelerationStructureCreateInfoKHR){
+  // Create the bottom-level acceleration structure object backed by the allocated buffer
+  VK_CHECK (vkCreateAccelerationStructure (/*device      =>*/ Device,
+                                           /*pCreateInfo =>*/ &(VkAccelerationStructureCreateInfoKHR){
                                              .sType  = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_CREATE_INFO_KHR,
                                              .buffer = Result.Buffer.Buffer,
                                              .size   = Build_Sizes.accelerationStructureSize,
                                              .type   = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR},
-                                           NULL, &Result.Handle));
+                                           /*pAllocator  =>*/ NULL,
+                                           /*pStructure  =>*/ &Result.Handle));
 
-  // Allocate temporary scratch memory for the build operation
-  Gpu_Buffer Scratch = Buffer_Allocate (Build_Sizes.buildScratchSize,
-                                        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
-                                      | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
-                                        VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+  // Allocate temporary scratch memory for the build operation (freed after the build completes)
+  Gpu_Buffer Scratch = Buffer_Allocate (/*Size         =>*/ Build_Sizes.buildScratchSize,
+                                        /*Usage        =>*/ VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
+                                                          | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
+                                        /*Memory_Flags =>*/ VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
 
   // Finalize the build info with the destination structure and scratch address
   Build_Info.dstAccelerationStructure  = Result.Handle;
@@ -4758,29 +4823,33 @@ Acceleration_Structure Build_World_Bottom_Level (const Scene *Scene_Data) {
   VkAccelerationStructureBuildRangeInfoKHR Range = {.primitiveCount = Primitive_Count};
   const VkAccelerationStructureBuildRangeInfoKHR *Range_Pointer = &Range;
 
-  // Record and submit a one-shot command buffer to build the BLAS
+  // Record and submit a one-shot command buffer to build the BLAS on the GPU
   VK_CHECK (vkResetCommandBuffer (Command_Buffer, 0));
-  VK_CHECK (vkBeginCommandBuffer (Command_Buffer,
-                                  &(VkCommandBufferBeginInfo){
+  VK_CHECK (vkBeginCommandBuffer (/*commandBuffer =>*/ Command_Buffer,
+                                  /*pBeginInfo    =>*/ &(VkCommandBufferBeginInfo){
                                     .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
                                     .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT}));
 
-  // Record the BLAS build command
-  vkCmdBuildAccelerationStructures (Command_Buffer, 1, &Build_Info, &Range_Pointer);
+  // Record the BLAS build command into the command buffer
+  vkCmdBuildAccelerationStructures (/*commandBuffer =>*/ Command_Buffer,
+                                    /*infoCount     =>*/ 1,
+                                    /*pInfos        =>*/ &Build_Info,
+                                    /*ppBuildRangeInfos =>*/ &Range_Pointer);
   VK_CHECK (vkEndCommandBuffer (Command_Buffer));
-  VK_CHECK (vkQueueSubmit (Queue, 1,
-                           &(VkSubmitInfo){
+  VK_CHECK (vkQueueSubmit (/*queue       =>*/ Queue,
+                           /*submitCount =>*/ 1,
+                           /*pSubmits    =>*/ &(VkSubmitInfo){
                              .sType              = VK_STRUCTURE_TYPE_SUBMIT_INFO,
                              .commandBufferCount = 1,
                              .pCommandBuffers    = &Command_Buffer},
-                           VK_NULL_HANDLE));
+                           /*fence       =>*/ VK_NULL_HANDLE));
 
   // Wait for the build to complete before querying the device address
   VK_CHECK (vkQueueWaitIdle (Queue));
 
-  // Query the device address of the built BLAS for referencing from the TLAS
-  Result.Address = vkGetAccelerationStructureDeviceAddress (Device,
-                     &(VkAccelerationStructureDeviceAddressInfoKHR){
+  // Query the device address of the built BLAS for referencing from the TLAS instance data
+  Result.Address = vkGetAccelerationStructureDeviceAddress (/*device =>*/ Device,
+                     /*pInfo  =>*/ &(VkAccelerationStructureDeviceAddressInfoKHR){
                        .sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_DEVICE_ADDRESS_INFO_KHR,
                        .accelerationStructure = Result.Handle});
 
@@ -4802,29 +4871,31 @@ void Weapon_Bottom_Level_Initialize (Weapon_Instance *Weapon) {
   Weapon->Transformed_Vertices = malloc (sizeof (Vertex) * Weapon->Model.Vertex_Count);
   memcpy (Weapon->Transformed_Vertices, Weapon->Model.Vertices, sizeof (Vertex) * Weapon->Model.Vertex_Count);
 
-  // Create host-visible vertex buffer for direct CPU writes each frame
-  Weapon->Vertex_Buffer = Buffer_Allocate (sizeof (Vertex) * Weapon->Model.Vertex_Count,
-                                           VK_BUFFER_USAGE_VERTEX_BUFFER_BIT
-                                         | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
-                                         | VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR
-                                         | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
-                                           VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT
-                                         | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+  // Create host-visible vertex buffer for direct CPU writes each frame (host-visible so we can update without staging)
+  Weapon->Vertex_Buffer = Buffer_Allocate (/*Size         =>*/ sizeof (Vertex) * Weapon->Model.Vertex_Count,
+                                           /*Usage        =>*/ VK_BUFFER_USAGE_VERTEX_BUFFER_BIT
+                                                             | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
+                                                             | VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR
+                                                             | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
+                                           /*Memory_Flags =>*/ VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT
+                                                             | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
 
   // Upload the initial vertex positions
   Buffer_Upload (Weapon->Vertex_Buffer, Weapon->Transformed_Vertices, sizeof (Vertex) * Weapon->Model.Vertex_Count);
 
-  // Upload index and texture-id data (static, device-local)
-  Weapon->Index_Buffer      = Buffer_Stage_Upload (Command_Buffer, Queue,
-                                                   Weapon->Model.Indices,
-                                                   sizeof (uint) * Weapon->Model.Index_Count,
-                                                   VK_BUFFER_USAGE_INDEX_BUFFER_BIT
-                                                 | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
-                                                 | VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR);
-  Weapon->Texture_Id_Buffer = Buffer_Stage_Upload (Command_Buffer, Queue,
-                                                   Weapon->Model.Texture_Ids,
-                                                   sizeof (uint) * Weapon->Model.Triangle_Count,
-                                                   VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+  // Upload index and texture-id data (static, device-local — these never change after the initial upload)
+  Weapon->Index_Buffer      = Buffer_Stage_Upload (/*Command_Buffer =>*/ Command_Buffer,
+                                                   /*Queue          =>*/ Queue,
+                                                   /*Data           =>*/ Weapon->Model.Indices,
+                                                   /*Size           =>*/ sizeof (uint) * Weapon->Model.Index_Count,
+                                                   /*Usage          =>*/ VK_BUFFER_USAGE_INDEX_BUFFER_BIT
+                                                                       | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
+                                                                       | VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR);
+  Weapon->Texture_Id_Buffer = Buffer_Stage_Upload (/*Command_Buffer =>*/ Command_Buffer,
+                                                   /*Queue          =>*/ Queue,
+                                                   /*Data           =>*/ Weapon->Model.Texture_Ids,
+                                                   /*Size           =>*/ sizeof (uint) * Weapon->Model.Triangle_Count,
+                                                   /*Usage          =>*/ VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
 
   // Configure the BLAS for fast builds with update capability
   VkAccelerationStructureGeometryKHR Geometry = {
@@ -4849,27 +4920,32 @@ void Weapon_Bottom_Level_Initialize (Weapon_Instance *Weapon) {
     .geometryCount = 1,
     .pGeometries   = &Geometry};
 
-  // Query required sizes for the weapon BLAS and its scratch buffer
+  // Query required sizes for the weapon BLAS and its scratch buffer from the driver
   uint Primitive_Count = Weapon->Model.Triangle_Count;
   VkAccelerationStructureBuildSizesInfoKHR Build_Sizes = {.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR};
-  vkGetAccelerationStructureBuildSizes (Device, VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR, &Build_Info, &Primitive_Count, &Build_Sizes);
+  vkGetAccelerationStructureBuildSizes (/*device             =>*/ Device,
+                                        /*buildType          =>*/ VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR,
+                                        /*pBuildInfo         =>*/ &Build_Info,
+                                        /*pMaxPrimitiveCounts =>*/ &Primitive_Count,
+                                        /*pSizeInfo          =>*/ &Build_Sizes);
 
-  // Allocate the BLAS buffer and persistent scratch buffer (reused across frames)
-  Weapon->Bottom_Level.Buffer  = Buffer_Allocate (Build_Sizes.accelerationStructureSize,
-                                                  VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR
-                                                | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
-                                                  VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-  VK_CHECK (vkCreateAccelerationStructure (Device,
-                                           &(VkAccelerationStructureCreateInfoKHR){
+  // Allocate the BLAS buffer and persistent scratch buffer (scratch is reused across frames for BLAS refits)
+  Weapon->Bottom_Level.Buffer  = Buffer_Allocate (/*Size         =>*/ Build_Sizes.accelerationStructureSize,
+                                                  /*Usage        =>*/ VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR
+                                                                    | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
+                                                  /*Memory_Flags =>*/ VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+  VK_CHECK (vkCreateAccelerationStructure (/*device      =>*/ Device,
+                                           /*pCreateInfo =>*/ &(VkAccelerationStructureCreateInfoKHR){
                                              .sType  = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_CREATE_INFO_KHR,
                                              .buffer = Weapon->Bottom_Level.Buffer.Buffer,
                                              .size   = Build_Sizes.accelerationStructureSize,
                                              .type   = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR},
-                                           NULL, &Weapon->Bottom_Level.Handle));
-  Weapon->Bottom_Level_Scratch = Buffer_Allocate (Build_Sizes.buildScratchSize,
-                                                  VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
-                                                | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
-                                                  VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+                                           /*pAllocator  =>*/ NULL,
+                                           /*pStructure  =>*/ &Weapon->Bottom_Level.Handle));
+  Weapon->Bottom_Level_Scratch = Buffer_Allocate (/*Size         =>*/ Build_Sizes.buildScratchSize,
+                                                  /*Usage        =>*/ VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
+                                                                    | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
+                                                  /*Memory_Flags =>*/ VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
 
   // Perform the initial BLAS build
   Build_Info.dstAccelerationStructure  = Weapon->Bottom_Level.Handle;
@@ -4881,25 +4957,31 @@ void Weapon_Bottom_Level_Initialize (Weapon_Instance *Weapon) {
 
   // Record and submit the initial weapon BLAS build
   VK_CHECK (vkResetCommandBuffer (Command_Buffer, 0));
-  VK_CHECK (vkBeginCommandBuffer (Command_Buffer,
-                                  &(VkCommandBufferBeginInfo){
+  VK_CHECK (vkBeginCommandBuffer (/*commandBuffer =>*/ Command_Buffer,
+                                  /*pBeginInfo    =>*/ &(VkCommandBufferBeginInfo){
                                     .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
                                     .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT}));
-  vkCmdBuildAccelerationStructures (Command_Buffer, 1, &Build_Info, &Range_Pointer);
+  vkCmdBuildAccelerationStructures (/*commandBuffer     =>*/ Command_Buffer,
+                                    /*infoCount         =>*/ 1,
+                                    /*pInfos            =>*/ &Build_Info,
+                                    /*ppBuildRangeInfos =>*/ &Range_Pointer);
   VK_CHECK (vkEndCommandBuffer (Command_Buffer));
 
-  // Submit and wait for the build to complete
-  VK_CHECK (vkQueueSubmit (Queue, 1,
-                           &(VkSubmitInfo){.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
-                             .commandBufferCount = 1, .pCommandBuffers = &Command_Buffer},
-                           VK_NULL_HANDLE));
+  // Submit and wait for the build to complete before querying the device address
+  VK_CHECK (vkQueueSubmit (/*queue       =>*/ Queue,
+                           /*submitCount =>*/ 1,
+                           /*pSubmits    =>*/ &(VkSubmitInfo){
+                             .sType              = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+                             .commandBufferCount = 1,
+                             .pCommandBuffers    = &Command_Buffer},
+                           /*fence       =>*/ VK_NULL_HANDLE));
   VK_CHECK (vkQueueWaitIdle (Queue));
 
   // Query the BLAS device address for TLAS instance referencing
-  Weapon->Bottom_Level.Address = vkGetAccelerationStructureDeviceAddress (Device,
-    &(VkAccelerationStructureDeviceAddressInfoKHR){
-      .sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_DEVICE_ADDRESS_INFO_KHR,
-      .accelerationStructure = Weapon->Bottom_Level.Handle});
+  Weapon->Bottom_Level.Address = vkGetAccelerationStructureDeviceAddress (/*device =>*/ Device,
+                                   /*pInfo  =>*/ &(VkAccelerationStructureDeviceAddressInfoKHR){
+                                     .sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_DEVICE_ADDRESS_INFO_KHR,
+                                     .accelerationStructure = Weapon->Bottom_Level.Handle});
   printf ("[weapon] BLAS built: %u triangles\n", Primitive_Count);
 
 } // Weapon_Bottom_Level_Initialize
@@ -4951,21 +5033,27 @@ void Weapon_Bottom_Level_Rebuild (Weapon_Instance *Weapon) {
   VkAccelerationStructureBuildRangeInfoKHR Range = {.primitiveCount = Weapon->Model.Triangle_Count};
   const VkAccelerationStructureBuildRangeInfoKHR *Range_Pointer = &Range;
 
-  // Record the rebuild command
+  // Record the BLAS refit command into a one-shot command buffer
   VK_CHECK (vkResetCommandBuffer (Command_Buffer, 0));
-  VK_CHECK (vkBeginCommandBuffer (Command_Buffer,
-                                  &(VkCommandBufferBeginInfo){
+  VK_CHECK (vkBeginCommandBuffer (/*commandBuffer =>*/ Command_Buffer,
+                                  /*pBeginInfo    =>*/ &(VkCommandBufferBeginInfo){
                                     .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
                                     .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT}));
 
-  // Issue the BLAS rebuild command
-  vkCmdBuildAccelerationStructures (Command_Buffer, 1, &Build_Info, &Range_Pointer);
+  // Issue the BLAS refit command (MODE_UPDATE: re-compute AABBs in-place without rebuilding the BVH tree)
+  vkCmdBuildAccelerationStructures (/*commandBuffer     =>*/ Command_Buffer,
+                                    /*infoCount         =>*/ 1,
+                                    /*pInfos            =>*/ &Build_Info,
+                                    /*ppBuildRangeInfos =>*/ &Range_Pointer);
 
-  // Submit and synchronize
+  // Submit and synchronize before the frame uses the updated BLAS
   VK_CHECK (vkEndCommandBuffer (Command_Buffer));
-  VK_CHECK (vkQueueSubmit (Queue, 1,
-                           &(VkSubmitInfo){.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
-                             .commandBufferCount = 1, .pCommandBuffers = &Command_Buffer},
+  VK_CHECK (vkQueueSubmit (/*queue       =>*/ Queue,
+                           /*submitCount =>*/ 1,
+                           /*pSubmits    =>*/ &(VkSubmitInfo){
+                             .sType              = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+                             .commandBufferCount = 1,
+                             .pCommandBuffers    = &Command_Buffer},
                            VK_NULL_HANDLE));
   VK_CHECK (vkQueueWaitIdle (Queue));
 }
@@ -4977,27 +5065,29 @@ void Weapon_Bottom_Level_Rebuild (Weapon_Instance *Weapon) {
 void Entity_Bottom_Level_Initialize (Entity *Enemy) {
   if (not Enemy->Vertex_Count) return;
 
-  // Host-visible vertex buffer for per-frame uploads
-  Enemy->Vertex_Buffer = Buffer_Allocate (sizeof (Vertex) * Enemy->Vertex_Count,
-                                          VK_BUFFER_USAGE_VERTEX_BUFFER_BIT
-                                        | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
-                                        | VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR
-                                        | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
-                                          VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT
-                                        | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+  // Host-visible vertex buffer for per-frame CPU uploads (host-visible so we can update each frame without staging)
+  Enemy->Vertex_Buffer = Buffer_Allocate (/*Size         =>*/ sizeof (Vertex) * Enemy->Vertex_Count,
+                                          /*Usage        =>*/ VK_BUFFER_USAGE_VERTEX_BUFFER_BIT
+                                                            | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
+                                                            | VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR
+                                                            | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
+                                          /*Memory_Flags =>*/ VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT
+                                                            | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
   Buffer_Upload (Enemy->Vertex_Buffer, Enemy->Current_Vertices, sizeof (Vertex) * Enemy->Vertex_Count);
 
-  // Static index and texture-id buffers (device-local)
-  Enemy->Index_Buffer      = Buffer_Stage_Upload (Command_Buffer, Queue,
-                                                  Enemy->Indices,
-                                                  sizeof (uint) * Enemy->Index_Count,
-                                                  VK_BUFFER_USAGE_INDEX_BUFFER_BIT
-                                                | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
-                                                | VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR);
-  Enemy->Texture_Id_Buffer = Buffer_Stage_Upload (Command_Buffer, Queue,
-                                                  Enemy->Texture_Ids,
-                                                  sizeof (uint) * Enemy->Triangle_Count,
-                                                  VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+  // Static index and texture-id buffers (device-local — these never change after the initial upload)
+  Enemy->Index_Buffer      = Buffer_Stage_Upload (/*Command_Buffer =>*/ Command_Buffer,
+                                                  /*Queue          =>*/ Queue,
+                                                  /*Data           =>*/ Enemy->Indices,
+                                                  /*Size           =>*/ sizeof (uint) * Enemy->Index_Count,
+                                                  /*Usage          =>*/ VK_BUFFER_USAGE_INDEX_BUFFER_BIT
+                                                                      | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
+                                                                      | VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR);
+  Enemy->Texture_Id_Buffer = Buffer_Stage_Upload (/*Command_Buffer =>*/ Command_Buffer,
+                                                  /*Queue          =>*/ Queue,
+                                                  /*Data           =>*/ Enemy->Texture_Ids,
+                                                  /*Size           =>*/ sizeof (uint) * Enemy->Triangle_Count,
+                                                  /*Usage          =>*/ VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
 
   // Build the initial BLAS with FAST_BUILD + ALLOW_UPDATE for per-frame refit
   VkAccelerationStructureGeometryKHR Geometry = {
@@ -5022,27 +5112,32 @@ void Entity_Bottom_Level_Initialize (Entity *Enemy) {
     .geometryCount = 1,
     .pGeometries   = &Geometry};
 
-  // Query required BLAS and scratch buffer sizes
+  // Query required BLAS and scratch buffer sizes from the driver for the given triangle geometry
   uint Primitive_Count = Enemy->Triangle_Count;
   VkAccelerationStructureBuildSizesInfoKHR Build_Sizes = {.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR};
-  vkGetAccelerationStructureBuildSizes (Device, VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR, &Build_Info, &Primitive_Count, &Build_Sizes);
+  vkGetAccelerationStructureBuildSizes (/*device             =>*/ Device,
+                                        /*buildType          =>*/ VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR,
+                                        /*pBuildInfo         =>*/ &Build_Info,
+                                        /*pMaxPrimitiveCounts =>*/ &Primitive_Count,
+                                        /*pSizeInfo          =>*/ &Build_Sizes);
 
-  // Allocate BLAS storage, create the structure, and allocate scratch memory
-  Enemy->Bottom_Level.Buffer  = Buffer_Allocate (Build_Sizes.accelerationStructureSize,
-                                                 VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR
-                                               | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
-                                                 VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-  VK_CHECK (vkCreateAccelerationStructure (Device,
-    &(VkAccelerationStructureCreateInfoKHR){
-      .sType  = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_CREATE_INFO_KHR,
-      .buffer = Enemy->Bottom_Level.Buffer.Buffer,
-      .size   = Build_Sizes.accelerationStructureSize,
-      .type   = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR},
-    NULL, &Enemy->Bottom_Level.Handle));
-  Enemy->Bottom_Level_Scratch = Buffer_Allocate (Build_Sizes.buildScratchSize,
-                                                 VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
-                                               | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
-                                                 VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+  // Allocate BLAS storage, create the acceleration structure, and allocate persistent scratch memory for per-frame refits
+  Enemy->Bottom_Level.Buffer  = Buffer_Allocate (/*Size         =>*/ Build_Sizes.accelerationStructureSize,
+                                                 /*Usage        =>*/ VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR
+                                                                   | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
+                                                 /*Memory_Flags =>*/ VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+  VK_CHECK (vkCreateAccelerationStructure (/*device      =>*/ Device,
+                                           /*pCreateInfo =>*/ &(VkAccelerationStructureCreateInfoKHR){
+                                             .sType  = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_CREATE_INFO_KHR,
+                                             .buffer = Enemy->Bottom_Level.Buffer.Buffer,
+                                             .size   = Build_Sizes.accelerationStructureSize,
+                                             .type   = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR},
+                                           /*pAllocator  =>*/ NULL,
+                                           /*pStructure  =>*/ &Enemy->Bottom_Level.Handle));
+  Enemy->Bottom_Level_Scratch = Buffer_Allocate (/*Size         =>*/ Build_Sizes.buildScratchSize,
+                                                 /*Usage        =>*/ VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
+                                                                   | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
+                                                 /*Memory_Flags =>*/ VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
 
   // Finalize the build info with destination and scratch addresses
   Build_Info.dstAccelerationStructure  = Enemy->Bottom_Level.Handle;
@@ -5052,21 +5147,28 @@ void Entity_Bottom_Level_Initialize (Entity *Enemy) {
   VkAccelerationStructureBuildRangeInfoKHR Range = {.primitiveCount = Primitive_Count};
   const VkAccelerationStructureBuildRangeInfoKHR *Range_Pointer = &Range;
   VK_CHECK (vkResetCommandBuffer (Command_Buffer, 0));
-  VK_CHECK (vkBeginCommandBuffer (Command_Buffer,
-    &(VkCommandBufferBeginInfo){.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
-      .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT}));
-  vkCmdBuildAccelerationStructures (Command_Buffer, 1, &Build_Info, &Range_Pointer);
+  VK_CHECK (vkBeginCommandBuffer (/*commandBuffer =>*/ Command_Buffer,
+                                  /*pBeginInfo    =>*/ &(VkCommandBufferBeginInfo){
+                                    .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+                                    .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT}));
+  vkCmdBuildAccelerationStructures (/*commandBuffer     =>*/ Command_Buffer,
+                                    /*infoCount         =>*/ 1,
+                                    /*pInfos            =>*/ &Build_Info,
+                                    /*ppBuildRangeInfos =>*/ &Range_Pointer);
   VK_CHECK (vkEndCommandBuffer (Command_Buffer));
-  VK_CHECK (vkQueueSubmit (Queue, 1,
-    &(VkSubmitInfo){.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
-      .commandBufferCount = 1, .pCommandBuffers = &Command_Buffer},
-    VK_NULL_HANDLE));
+  VK_CHECK (vkQueueSubmit (/*queue       =>*/ Queue,
+                           /*submitCount =>*/ 1,
+                           /*pSubmits    =>*/ &(VkSubmitInfo){
+                             .sType              = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+                             .commandBufferCount = 1,
+                             .pCommandBuffers    = &Command_Buffer},
+                           /*fence       =>*/ VK_NULL_HANDLE));
   VK_CHECK (vkQueueWaitIdle (Queue));
 
   // Query the BLAS device address for TLAS instance referencing
-  Enemy->Bottom_Level.Address = vkGetAccelerationStructureDeviceAddress (Device,
-    &(VkAccelerationStructureDeviceAddressInfoKHR){
-      .sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_DEVICE_ADDRESS_INFO_KHR,
+  Enemy->Bottom_Level.Address = vkGetAccelerationStructureDeviceAddress (/*device =>*/ Device,
+                                  /*pInfo  =>*/ &(VkAccelerationStructureDeviceAddressInfoKHR){
+                                    .sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_DEVICE_ADDRESS_INFO_KHR,
       .accelerationStructure = Enemy->Bottom_Level.Handle});
   printf ("[enemy] BLAS built: %u triangles\n", Primitive_Count);
 }
@@ -5108,19 +5210,26 @@ void Entity_Bottom_Level_Rebuild (Entity *Enemy) {
     .geometryCount             = 1,
     .pGeometries               = &Geometry};
 
-  // Record and submit the BLAS refit command
+  // Record and submit the BLAS refit command into a one-shot command buffer
   VkAccelerationStructureBuildRangeInfoKHR Range = {.primitiveCount = Enemy->Triangle_Count};
   const VkAccelerationStructureBuildRangeInfoKHR *Range_Pointer = &Range;
   VK_CHECK (vkResetCommandBuffer (Command_Buffer, 0));
-  VK_CHECK (vkBeginCommandBuffer (Command_Buffer,
-    &(VkCommandBufferBeginInfo){.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
-      .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT}));
-  vkCmdBuildAccelerationStructures (Command_Buffer, 1, &Build_Info, &Range_Pointer);
+  VK_CHECK (vkBeginCommandBuffer (/*commandBuffer =>*/ Command_Buffer,
+                                  /*pBeginInfo    =>*/ &(VkCommandBufferBeginInfo){
+                                    .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+                                    .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT}));
+  vkCmdBuildAccelerationStructures (/*commandBuffer     =>*/ Command_Buffer,
+                                    /*infoCount         =>*/ 1,
+                                    /*pInfos            =>*/ &Build_Info,
+                                    /*ppBuildRangeInfos =>*/ &Range_Pointer);
   VK_CHECK (vkEndCommandBuffer (Command_Buffer));
-  VK_CHECK (vkQueueSubmit (Queue, 1,
-    &(VkSubmitInfo){.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
-      .commandBufferCount = 1, .pCommandBuffers = &Command_Buffer},
-    VK_NULL_HANDLE));
+  VK_CHECK (vkQueueSubmit (/*queue       =>*/ Queue,
+                           /*submitCount =>*/ 1,
+                           /*pSubmits    =>*/ &(VkSubmitInfo){
+                             .sType              = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+                             .commandBufferCount = 1,
+                             .pCommandBuffers    = &Command_Buffer},
+                           /*fence       =>*/ VK_NULL_HANDLE));
   VK_CHECK (vkQueueWaitIdle (Queue));
 }
 
@@ -5130,12 +5239,12 @@ void Entity_Bottom_Level_Rebuild (Entity *Enemy) {
 
 void Top_Level_Initialize (uint Maximum_Instances) {
 
-  // Allocate a host-visible instance buffer for writing TLAS instance descriptors each frame
-  Top_Level_Instance_Buffer = Buffer_Allocate (sizeof (VkAccelerationStructureInstanceKHR) * Maximum_Instances,
-                                               VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR
-                                             | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
-                                               VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT
-                                             | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+  // Allocate a host-visible instance buffer for writing TLAS instance descriptors each frame (host-visible for direct CPU writes)
+  Top_Level_Instance_Buffer = Buffer_Allocate (/*Size         =>*/ sizeof (VkAccelerationStructureInstanceKHR) * Maximum_Instances,
+                                               /*Usage        =>*/ VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR
+                                                                 | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
+                                               /*Memory_Flags =>*/ VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT
+                                                                 | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
 
   // Query the required sizes for the TLAS and its scratch buffer
   VkAccelerationStructureGeometryKHR Geometry = {
@@ -5163,34 +5272,39 @@ void Top_Level_Initialize (uint Maximum_Instances) {
     .geometryCount = 1,
     .pGeometries   = &Geometry};
   VkAccelerationStructureBuildSizesInfoKHR Build_Sizes = {.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR};
-  vkGetAccelerationStructureBuildSizes (Device, VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR, &Build_Info, &Maximum_Instances, &Build_Sizes);
+  vkGetAccelerationStructureBuildSizes (/*device             =>*/ Device,
+                                        /*buildType          =>*/ VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR,
+                                        /*pBuildInfo         =>*/ &Build_Info,
+                                        /*pMaxPrimitiveCounts =>*/ &Maximum_Instances,
+                                        /*pSizeInfo          =>*/ &Build_Sizes);
 
-  // Allocate the TLAS storage buffer and create the acceleration structure object
-  Top_Level.Buffer = Buffer_Allocate (Build_Sizes.accelerationStructureSize,
-                                      VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR
-                                    | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
-                                      VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+  // Allocate the TLAS storage buffer and create the top-level acceleration structure object
+  Top_Level.Buffer = Buffer_Allocate (/*Size         =>*/ Build_Sizes.accelerationStructureSize,
+                                      /*Usage        =>*/ VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR
+                                                        | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
+                                      /*Memory_Flags =>*/ VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
 
-  // Create the top-level acceleration structure object
-  VK_CHECK (vkCreateAccelerationStructure (Device,
-                                           &(VkAccelerationStructureCreateInfoKHR){
+  // Create the top-level acceleration structure object backed by the allocated buffer
+  VK_CHECK (vkCreateAccelerationStructure (/*device      =>*/ Device,
+                                           /*pCreateInfo =>*/ &(VkAccelerationStructureCreateInfoKHR){
                                              .sType  = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_CREATE_INFO_KHR,
                                              .buffer = Top_Level.Buffer.Buffer,
                                              .size   = Build_Sizes.accelerationStructureSize,
                                              .type   = VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR},
-                                           NULL, &Top_Level.Handle));
+                                           /*pAllocator  =>*/ NULL,
+                                           /*pStructure  =>*/ &Top_Level.Handle));
 
-  // Allocate persistent scratch memory for per-frame TLAS rebuilds
-  Top_Level_Scratch_Buffer = Buffer_Allocate (Build_Sizes.buildScratchSize,
-                                              VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
-                                            | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
-                                              VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+  // Allocate persistent scratch memory for per-frame TLAS rebuilds (reused every frame)
+  Top_Level_Scratch_Buffer = Buffer_Allocate (/*Size         =>*/ Build_Sizes.buildScratchSize,
+                                              /*Usage        =>*/ VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
+                                                                | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
+                                              /*Memory_Flags =>*/ VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
 
-  // Query the TLAS device address for descriptor binding
-  Top_Level.Address = vkGetAccelerationStructureDeviceAddress (Device,
-    &(VkAccelerationStructureDeviceAddressInfoKHR){
-      .sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_DEVICE_ADDRESS_INFO_KHR,
-      .accelerationStructure = Top_Level.Handle});
+  // Query the TLAS device address for descriptor binding in the ray tracing pipeline
+  Top_Level.Address = vkGetAccelerationStructureDeviceAddress (/*device =>*/ Device,
+                        /*pInfo  =>*/ &(VkAccelerationStructureDeviceAddressInfoKHR){
+                          .sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_DEVICE_ADDRESS_INFO_KHR,
+                          .accelerationStructure = Top_Level.Handle});
 
 } // Top_Level_Initialize
 
@@ -5284,20 +5398,26 @@ void Top_Level_Rebuild (Acceleration_Structure *World, Acceleration_Structure *W
     .pGeometries               = &Geometry};
   First_Build = 0;
 
-  // Record and submit the TLAS rebuild
+  // Record and submit the TLAS rebuild command into a one-shot command buffer
   VK_CHECK (vkResetCommandBuffer (Command_Buffer, 0));
-  VK_CHECK (vkBeginCommandBuffer (Command_Buffer,
-                                  &(VkCommandBufferBeginInfo){
+  VK_CHECK (vkBeginCommandBuffer (/*commandBuffer =>*/ Command_Buffer,
+                                  /*pBeginInfo    =>*/ &(VkCommandBufferBeginInfo){
                                     .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
                                     .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT}));
-  vkCmdBuildAccelerationStructures (Command_Buffer, 1, &Build_Info, &Range_Pointer);
+  vkCmdBuildAccelerationStructures (/*commandBuffer     =>*/ Command_Buffer,
+                                    /*infoCount         =>*/ 1,
+                                    /*pInfos            =>*/ &Build_Info,
+                                    /*ppBuildRangeInfos =>*/ &Range_Pointer);
   VK_CHECK (vkEndCommandBuffer (Command_Buffer));
 
-  // Submit and wait for the TLAS rebuild to complete
-  VK_CHECK (vkQueueSubmit (Queue, 1,
-                           &(VkSubmitInfo){.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
-                             .commandBufferCount = 1, .pCommandBuffers = &Command_Buffer},
-                           VK_NULL_HANDLE));
+  // Submit and wait for the TLAS rebuild to complete before the frame uses it
+  VK_CHECK (vkQueueSubmit (/*queue       =>*/ Queue,
+                           /*submitCount =>*/ 1,
+                           /*pSubmits    =>*/ &(VkSubmitInfo){
+                             .sType              = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+                             .commandBufferCount = 1,
+                             .pCommandBuffers    = &Command_Buffer},
+                           /*fence       =>*/ VK_NULL_HANDLE));
   VK_CHECK (vkQueueWaitIdle (Queue));
 
 } // Top_Level_Rebuild
@@ -5322,51 +5442,58 @@ void Postprocess_Pipeline_Create () {
     {3, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, NULL}, // Display output (tonemapped)
   };
 
-  VK_CHECK (vkCreateDescriptorSetLayout (Device,
-    &(VkDescriptorSetLayoutCreateInfo){
-      .sType        = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
-      .bindingCount = 4,
-      .pBindings    = Bindings},
-    NULL, &Postprocess_Descriptor_Layout));
+  VK_CHECK (vkCreateDescriptorSetLayout (/*device      =>*/ Device,
+                                         /*pCreateInfo =>*/ &(VkDescriptorSetLayoutCreateInfo){
+                                           .sType        = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+                                           .bindingCount = 4,
+                                           .pBindings    = Bindings},
+                                         /*pAllocator  =>*/ NULL,
+                                         /*pSetLayout  =>*/ &Postprocess_Descriptor_Layout));
 
   // Create the pipeline layout with push constants for postprocess parameters
   VkPushConstantRange Push_Range = {VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof (Gpu_Postprocess_Push)};
-  VK_CHECK (vkCreatePipelineLayout (Device,
-    &(VkPipelineLayoutCreateInfo){
-      .sType                  = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
-      .setLayoutCount         = 1,
-      .pSetLayouts            = &Postprocess_Descriptor_Layout,
-      .pushConstantRangeCount = 1,
-      .pPushConstantRanges    = &Push_Range},
-    NULL, &Postprocess_Pipeline_Layout));
+  VK_CHECK (vkCreatePipelineLayout (/*device          =>*/ Device,
+                                    /*pCreateInfo     =>*/ &(VkPipelineLayoutCreateInfo){
+                                      .sType                  = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+                                      .setLayoutCount         = 1,
+                                      .pSetLayouts            = &Postprocess_Descriptor_Layout,
+                                      .pushConstantRangeCount = 1,
+                                      .pPushConstantRanges    = &Push_Range},
+                                    /*pAllocator      =>*/ NULL,
+                                    /*pPipelineLayout =>*/ &Postprocess_Pipeline_Layout));
 
   // Load the postprocess shader and create the compute pipeline
-  VkShaderModule Module = Shader_Module_Load (Shader_Path(postprocess));
-  VK_CHECK (vkCreateComputePipelines (Device, Pipeline_Cache, 1,
-    &(VkComputePipelineCreateInfo){
-      .sType  = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
-      .stage  = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, NULL, 0, VK_SHADER_STAGE_COMPUTE_BIT, Module, "main", NULL},
-      .layout = Postprocess_Pipeline_Layout},
-    NULL, &Postprocess_Pipeline));
+  VkShaderModule Module = Shader_Module_Load (Shader_Path(Post_Process));
+  VK_CHECK (vkCreateComputePipelines (/*device          =>*/ Device,
+                                      /*pipelineCache   =>*/ Pipeline_Cache,
+                                      /*createInfoCount =>*/ 1,
+                                      /*pCreateInfos    =>*/ &(VkComputePipelineCreateInfo){
+                                        .sType  = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
+                                        .stage  = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, NULL, 0,
+                                                   VK_SHADER_STAGE_COMPUTE_BIT, Module, "main", NULL},
+                                        .layout = Postprocess_Pipeline_Layout},
+                                      /*pAllocator      =>*/ NULL,
+                                      /*pPipelines      =>*/ &Postprocess_Pipeline));
   vkDestroyShaderModule (Device, Module, NULL);
 
   // Descriptor pool and set
   VkDescriptorPoolSize Pool_Size = {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 4};
-  VK_CHECK (vkCreateDescriptorPool (Device,
-    &(VkDescriptorPoolCreateInfo){
-      .sType         = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
-      .maxSets       = 1,
-      .poolSizeCount = 1,
-      .pPoolSizes    = &Pool_Size},
-    NULL, &Postprocess_Descriptor_Pool));
+  VK_CHECK (vkCreateDescriptorPool (/*device          =>*/ Device,
+                                    /*pCreateInfo     =>*/ &(VkDescriptorPoolCreateInfo){
+                                      .sType         = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
+                                      .maxSets       = 1,
+                                      .poolSizeCount = 1,
+                                      .pPoolSizes    = &Pool_Size},
+                                    /*pAllocator      =>*/ NULL,
+                                    /*pDescriptorPool =>*/ &Postprocess_Descriptor_Pool));
 
-  VK_CHECK (vkAllocateDescriptorSets (Device,
-    &(VkDescriptorSetAllocateInfo){
-      .sType              = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
-      .descriptorPool     = Postprocess_Descriptor_Pool,
-      .descriptorSetCount = 1,
-      .pSetLayouts        = &Postprocess_Descriptor_Layout},
-    &Postprocess_Descriptor_Set));
+  VK_CHECK (vkAllocateDescriptorSets (/*device          =>*/ Device,
+                                      /*pAllocateInfo   =>*/ &(VkDescriptorSetAllocateInfo){
+                                        .sType              = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+                                        .descriptorPool     = Postprocess_Descriptor_Pool,
+                                        .descriptorSetCount = 1,
+                                        .pSetLayouts        = &Postprocess_Descriptor_Layout},
+                                      /*pDescriptorSets =>*/ &Postprocess_Descriptor_Set));
 
   // Prepare image descriptor infos for color, depth, history, and display output
   VkDescriptorImageInfo Color_Info   = {.imageView = Raytracing_Storage_Image.View,  .imageLayout = VK_IMAGE_LAYOUT_GENERAL};
@@ -5397,54 +5524,60 @@ void Denoise_Pipeline_Create () {
     {2, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, NULL},  // Depth
   };
 
-  // Submit Vulkan command
-  VK_CHECK (vkCreateDescriptorSetLayout (Device,
-    &(VkDescriptorSetLayoutCreateInfo){
-      .sType        = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
-      .bindingCount = 3,
-      .pBindings    = Bindings},
-    NULL, &Denoise_Descriptor_Layout));
+  VK_CHECK (vkCreateDescriptorSetLayout (/*device      =>*/ Device,
+                                         /*pCreateInfo =>*/ &(VkDescriptorSetLayoutCreateInfo){
+                                           .sType        = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+                                           .bindingCount = 3,
+                                           .pBindings    = Bindings},
+                                         /*pAllocator  =>*/ NULL,
+                                         /*pSetLayout  =>*/ &Denoise_Descriptor_Layout));
 
   // Create the pipeline layout with push constants for step size and budget
   VkPushConstantRange Push_Range = {VK_SHADER_STAGE_COMPUTE_BIT, 0, 2 * sizeof (int)};
-  VK_CHECK (vkCreatePipelineLayout (Device,
-    &(VkPipelineLayoutCreateInfo){
-      .sType                  = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
-      .setLayoutCount         = 1,
-      .pSetLayouts            = &Denoise_Descriptor_Layout,
-      .pushConstantRangeCount = 1,
-      .pPushConstantRanges    = &Push_Range},
-    NULL, &Denoise_Pipeline_Layout));
+  VK_CHECK (vkCreatePipelineLayout (/*device          =>*/ Device,
+                                    /*pCreateInfo     =>*/ &(VkPipelineLayoutCreateInfo){
+                                      .sType                  = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+                                      .setLayoutCount         = 1,
+                                      .pSetLayouts            = &Denoise_Descriptor_Layout,
+                                      .pushConstantRangeCount = 1,
+                                      .pPushConstantRanges    = &Push_Range},
+                                    /*pAllocator      =>*/ NULL,
+                                    /*pPipelineLayout =>*/ &Denoise_Pipeline_Layout));
 
   // Load the denoise shader and create the compute pipeline
-  VkShaderModule Module = Shader_Module_Load (Shader_Path(denoise));
-  VK_CHECK (vkCreateComputePipelines (Device, Pipeline_Cache, 1,
-    &(VkComputePipelineCreateInfo){
-      .sType  = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
-      .stage  = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, NULL, 0, VK_SHADER_STAGE_COMPUTE_BIT, Module, "main", NULL},
-      .layout = Denoise_Pipeline_Layout},
-    NULL, &Denoise_Pipeline));
+  VkShaderModule Module = Shader_Module_Load (Shader_Path(Denoise));
+  VK_CHECK (vkCreateComputePipelines (/*device          =>*/ Device,
+                                      /*pipelineCache   =>*/ Pipeline_Cache,
+                                      /*createInfoCount =>*/ 1,
+                                      /*pCreateInfos    =>*/ &(VkComputePipelineCreateInfo){
+                                        .sType  = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
+                                        .stage  = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, NULL, 0,
+                                                   VK_SHADER_STAGE_COMPUTE_BIT, Module, "main", NULL},
+                                        .layout = Denoise_Pipeline_Layout},
+                                      /*pAllocator      =>*/ NULL,
+                                      /*pPipelines      =>*/ &Denoise_Pipeline));
   vkDestroyShaderModule (Device, Module, NULL);
 
   // Descriptor pool: 2 sets × 3 images each = 6 image descriptors
   VkDescriptorPoolSize Pool_Size = {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 6};
-  VK_CHECK (vkCreateDescriptorPool (Device,
-    &(VkDescriptorPoolCreateInfo){
-      .sType         = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
-      .maxSets       = 2,
-      .poolSizeCount = 1,
-      .pPoolSizes    = &Pool_Size},
-    NULL, &Denoise_Descriptor_Pool));
+  VK_CHECK (vkCreateDescriptorPool (/*device          =>*/ Device,
+                                    /*pCreateInfo     =>*/ &(VkDescriptorPoolCreateInfo){
+                                      .sType         = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
+                                      .maxSets       = 2,
+                                      .poolSizeCount = 1,
+                                      .pPoolSizes    = &Pool_Size},
+                                    /*pAllocator      =>*/ NULL,
+                                    /*pDescriptorPool =>*/ &Denoise_Descriptor_Pool));
 
   // Allocate both ping-pong descriptor sets
   VkDescriptorSetLayout Layouts[2] = {Denoise_Descriptor_Layout, Denoise_Descriptor_Layout};
-  VK_CHECK (vkAllocateDescriptorSets (Device,
-    &(VkDescriptorSetAllocateInfo){
-      .sType              = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
-      .descriptorPool     = Denoise_Descriptor_Pool,
-      .descriptorSetCount = 2,
-      .pSetLayouts        = Layouts},
-    Denoise_Descriptor_Sets));
+  VK_CHECK (vkAllocateDescriptorSets (/*device          =>*/ Device,
+                                      /*pAllocateInfo   =>*/ &(VkDescriptorSetAllocateInfo){
+                                        .sType              = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+                                        .descriptorPool     = Denoise_Descriptor_Pool,
+                                        .descriptorSetCount = 2,
+                                        .pSetLayouts        = Layouts},
+                                      /*pDescriptorSets =>*/ Denoise_Descriptor_Sets));
 
   // Set[0]: reads Storage_Image > writes Denoise_Ping_Image
   VkDescriptorImageInfo Storage_Info = {.imageView = Raytracing_Storage_Image.View, .imageLayout = VK_IMAGE_LAYOUT_GENERAL};
@@ -5514,27 +5647,29 @@ void Raytracing_Pipeline_Create () {
     .pBindingFlags = Binding_Flags};
 
   // Create the descriptor set layout with all 16 bindings
-  VK_CHECK (vkCreateDescriptorSetLayout (Device,
-                                         &(VkDescriptorSetLayoutCreateInfo){
+  VK_CHECK (vkCreateDescriptorSetLayout (/*device      =>*/ Device,
+                                         /*pCreateInfo =>*/ &(VkDescriptorSetLayoutCreateInfo){
                                            .sType        = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
                                            .pNext        = &Binding_Flags_Info,
                                            .bindingCount = 16,
                                            .pBindings    = Bindings},
-                                         NULL, &Descriptor_Set_Layout));
+                                         /*pAllocator  =>*/ NULL,
+                                         /*pSetLayout  =>*/ &Descriptor_Set_Layout));
 
   // Create the pipeline layout referencing the single descriptor set
-  VK_CHECK (vkCreatePipelineLayout (Device,
-                                    &(VkPipelineLayoutCreateInfo){
+  VK_CHECK (vkCreatePipelineLayout (/*device          =>*/ Device,
+                                    /*pCreateInfo     =>*/ &(VkPipelineLayoutCreateInfo){
                                       .sType          = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
                                       .setLayoutCount = 1,
                                       .pSetLayouts    = &Descriptor_Set_Layout},
-                                    NULL, &Pipeline_Layout));
+                                    /*pAllocator      =>*/ NULL,
+                                    /*pPipelineLayout =>*/ &Pipeline_Layout));
 
   // Load the four SPIR-V shader modules from pre-compiled files
   VkShaderModule Ray_Generation_Module = Shader_Module_Load (Shader_Path (Ray_Generation));
   VkShaderModule Closest_Hit_Module    = Shader_Module_Load (Shader_Path (Closest_Hit));
-  VkShaderModule Primary_Miss_Module   = Shader_Module_Load (Shader_Path (miss));
-  VkShaderModule Shadow_Miss_Module    = Shader_Module_Load (Shader_Path (shadow_miss));
+  VkShaderModule Primary_Miss_Module   = Shader_Module_Load (Shader_Path (Ray_Miss));
+  VkShaderModule Shadow_Miss_Module    = Shader_Module_Load (Shader_Path (Shadow_Miss));
 
   // Define the pipeline shader stages
   VkPipelineShaderStageCreateInfo Stages[] = {
@@ -5551,13 +5686,18 @@ void Raytracing_Pipeline_Create () {
     {VK_STRUCTURE_TYPE_RAY_TRACING_SHADER_GROUP_CREATE_INFO_KHR, NULL, VK_RAY_TRACING_SHADER_GROUP_TYPE_TRIANGLES_HIT_GROUP_KHR, VK_SHADER_UNUSED_KHR, 3, VK_SHADER_UNUSED_KHR, VK_SHADER_UNUSED_KHR, NULL}};
 
   // A shared pipeline cache lets the driver reuse compiled shader ISA across pipeline objects and across runs
-  VK_CHECK (vkCreatePipelineCache (Device,
-    &(VkPipelineCacheCreateInfo){.sType = VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO},
-    NULL, &Pipeline_Cache));
+  VK_CHECK (vkCreatePipelineCache (/*device      =>*/ Device,
+                                   /*pCreateInfo =>*/ &(VkPipelineCacheCreateInfo){
+                                     .sType = VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO},
+                                   /*pAllocator  =>*/ NULL,
+                                   /*pPipelineCache =>*/ &Pipeline_Cache));
 
   // Create the ray tracing pipeline with recursion depth
-  VK_CHECK (vkCreateRayTracingPipelines (Device, VK_NULL_HANDLE, Pipeline_Cache, 1,
-                                         &(VkRayTracingPipelineCreateInfoKHR){
+  VK_CHECK (vkCreateRayTracingPipelines (/*device            =>*/ Device,
+                                         /*deferredOperation =>*/ VK_NULL_HANDLE,
+                                         /*pipelineCache     =>*/ Pipeline_Cache,
+                                         /*createInfoCount   =>*/ 1,
+                                         /*pCreateInfos      =>*/ &(VkRayTracingPipelineCreateInfoKHR){
                                            .sType                        = VK_STRUCTURE_TYPE_RAY_TRACING_PIPELINE_CREATE_INFO_KHR,
                                            .stageCount                   = 4,
                                            .pStages                      = Stages,
@@ -5565,7 +5705,8 @@ void Raytracing_Pipeline_Create () {
                                            .pGroups                      = Groups,
                                            .maxPipelineRayRecursionDepth = 2,
                                            .layout                       = Pipeline_Layout},
-                                         NULL, &Pipeline));
+                                         /*pAllocator        =>*/ NULL,
+                                         /*pPipelines        =>*/ &Pipeline));
 
   // Destroy the shader modules now that the pipeline owns the compiled code
   vkDestroyShaderModule (Device, Ray_Generation_Module, NULL);
@@ -5594,11 +5735,11 @@ void Shader_Binding_Table_Create () {
 
   // Allocate the SBT buffer and copy each handle at the proper stride offset
   uint Table_Size = Stride * Group_Count;
-  Shader_Binding_Table_Buffer = Buffer_Allocate (Table_Size,
-                                                 VK_BUFFER_USAGE_SHADER_BINDING_TABLE_BIT_KHR
-                                               | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
-                                                 VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT
-                                               | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+  Shader_Binding_Table_Buffer = Buffer_Allocate (/*Size         =>*/ Table_Size,
+                                                 /*Usage        =>*/ VK_BUFFER_USAGE_SHADER_BINDING_TABLE_BIT_KHR
+                                                                   | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
+                                                 /*Memory_Flags =>*/ VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT
+                                                                   | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
 
   // Map the SBT buffer and copy each group's handle at the aligned stride offset
   uint8_t *Destination;
@@ -5629,13 +5770,14 @@ void Descriptor_Set_Create (Weapon_Instance *Weapon, Entity *Enemy) {
                                        {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,             1},
                                        {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,             10}, // 7 world/weapon + 3 entity
                                        {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,     DESCRIPTOR_TEXTURE_SLOTS + 1}}; // +1 for lightmap
-  VK_CHECK (vkCreateDescriptorPool (Device,
-                                    &(VkDescriptorPoolCreateInfo){
+  VK_CHECK (vkCreateDescriptorPool (/*device          =>*/ Device,
+                                    /*pCreateInfo     =>*/ &(VkDescriptorPoolCreateInfo){
                                       .sType         = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
                                       .maxSets       = 1,
                                       .poolSizeCount = 5,
                                       .pPoolSizes    = Pool_Sizes},
-                                    NULL, &Descriptor_Pool));
+                                    /*pAllocator      =>*/ NULL,
+                                    /*pDescriptorPool =>*/ &Descriptor_Pool));
 
   // Allocate the descriptor set with a variable descriptor count for the texture array
   uint Variable_Count = Texture_Count;
@@ -5643,14 +5785,14 @@ void Descriptor_Set_Create (Weapon_Instance *Weapon, Entity *Enemy) {
     .sType              = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_VARIABLE_DESCRIPTOR_COUNT_ALLOCATE_INFO,
     .descriptorSetCount = 1,
     .pDescriptorCounts  = &Variable_Count};
-  VK_CHECK (vkAllocateDescriptorSets (Device,
-                                      &(VkDescriptorSetAllocateInfo){
+  VK_CHECK (vkAllocateDescriptorSets (/*device          =>*/ Device,
+                                      /*pAllocateInfo   =>*/ &(VkDescriptorSetAllocateInfo){
                                         .sType              = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
                                         .pNext              = &Variable_Allocate,
                                         .descriptorPool     = Descriptor_Pool,
                                         .descriptorSetCount = 1,
                                         .pSetLayouts        = &Descriptor_Set_Layout},
-                                      &Descriptor_Set));
+                                      /*pDescriptorSets =>*/ &Descriptor_Set));
 
   // Prepare descriptor info structures for each binding
   VkWriteDescriptorSetAccelerationStructureKHR Acceleration_Write = {
@@ -5904,8 +6046,12 @@ void Raytracing_Frame (Gpu_Postprocess_Push PP) {
 
   // Acquire the next swapchain image (handle OUT_OF_DATE from window resize)
   uint Image_Index;
-  { VkResult R = vkAcquireNextImageKHR (Device, Swapchain, UINT64_MAX,
-                                        Semaphore_Image_Available, VK_NULL_HANDLE, &Image_Index);
+  { VkResult R = vkAcquireNextImageKHR (/*device      =>*/ Device,
+                                        /*swapchain   =>*/ Swapchain,
+                                        /*timeout     =>*/ UINT64_MAX,
+                                        /*semaphore   =>*/ Semaphore_Image_Available,
+                                        /*fence       =>*/ VK_NULL_HANDLE,
+                                        /*pImageIndex =>*/ &Image_Index);
     if (R == VK_ERROR_OUT_OF_DATE_KHR) { Swapchain_Dirty = 1; return; }
     if (R != VK_SUCCESS and R != VK_SUBOPTIMAL_KHR) {
       fprintf (stderr, "[vulkan] acquire error %d at %s:%d\n", R, __FILE__, __LINE__); exit (1);
@@ -5915,23 +6061,34 @@ void Raytracing_Frame (Gpu_Postprocess_Push PP) {
   // Reset the fence and begin recording the frame's command buffer
   VK_CHECK (vkResetFences (Device, 1, &Fence));
   VK_CHECK (vkResetCommandBuffer (Command_Buffer, 0));
-  VK_CHECK (vkBeginCommandBuffer (Command_Buffer,
-                                  &(VkCommandBufferBeginInfo){.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO}));
+  VK_CHECK (vkBeginCommandBuffer (/*commandBuffer =>*/ Command_Buffer,
+                                  /*pBeginInfo    =>*/ &(VkCommandBufferBeginInfo){
+                                    .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO}));
 
   // Bind the ray tracing pipeline and descriptor set
   vkCmdBindPipeline       (Command_Buffer, VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR, Pipeline);
-  vkCmdBindDescriptorSets (Command_Buffer, VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR,
-                           Pipeline_Layout, 0, 1, &Descriptor_Set, 0, NULL);
+  vkCmdBindDescriptorSets (/*commandBuffer      =>*/ Command_Buffer,
+                           /*pipelineBindPoint   =>*/ VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR,
+                           /*layout              =>*/ Pipeline_Layout,
+                           /*firstSet            =>*/ 0,
+                           /*descriptorSetCount  =>*/ 1,
+                           /*pDescriptorSets     =>*/ &Descriptor_Set,
+                           /*dynamicOffsetCount  =>*/ 0,
+                           /*pDynamicOffsets     =>*/ NULL);
 
   // Checkerboard: dispatch at half width, each thread remaps to a
   // checkerboard pixel. Untouched pixels keep their previous value; the postprocess
   // reconstructs them from traced neighbors before TAA. On lavapipe (CPU) this
   // halves actual thread count, saving ~35% frame time.
   int RT_Dispatch_W = Active_Checkerboard ? (Render_Width + 1) / 2 : Render_Width;
-  vkCmdTraceRays (Command_Buffer,
-                  &Shader_Binding_Ray_Generation, &Shader_Binding_Miss,
-                  &Shader_Binding_Hit, &Shader_Binding_Callable,
-                  RT_Dispatch_W, Render_Height, 1);
+  vkCmdTraceRays (/*commandBuffer                  =>*/ Command_Buffer,
+                  /*pRaygenShaderBindingTable      =>*/ &Shader_Binding_Ray_Generation,
+                  /*pMissShaderBindingTable        =>*/ &Shader_Binding_Miss,
+                  /*pHitShaderBindingTable         =>*/ &Shader_Binding_Hit,
+                  /*pCallableShaderBindingTable    =>*/ &Shader_Binding_Callable,
+                  /*width                          =>*/ RT_Dispatch_W,
+                  /*height                         =>*/ Render_Height,
+                  /*depth                          =>*/ 1);
 
   // Dispatch postprocess compute shader (unless bypassed for raw PBR output)
   if (not Skip_Postprocess) {
@@ -5947,9 +6104,16 @@ void Raytracing_Frame (Gpu_Postprocess_Push PP) {
        .oldLayout = VK_IMAGE_LAYOUT_GENERAL, .newLayout = VK_IMAGE_LAYOUT_GENERAL,
        .image = Depth_Image.Image,
        .subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1}}};
-    vkCmdPipelineBarrier (Command_Buffer,
-      VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-      0, 0, NULL, 0, NULL, 2, RT_To_Compute_Barriers);
+    vkCmdPipelineBarrier (/*commandBuffer            =>*/ Command_Buffer,
+                          /*srcStageMask             =>*/ VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR,
+                          /*dstStageMask             =>*/ VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                          /*dependencyFlags          =>*/ 0,
+                          /*memoryBarrierCount       =>*/ 0,
+                          /*pMemoryBarriers          =>*/ NULL,
+                          /*bufferMemoryBarrierCount =>*/ 0,
+                          /*pBufferMemoryBarriers    =>*/ NULL,
+                          /*imageMemoryBarrierCount  =>*/ 2,
+                          /*pImageMemoryBarriers     =>*/ RT_To_Compute_Barriers);
 
     // Iteration count controlled by quality preset (Potato=0, Low=1, Medium+=2).
     // Passes Budget to the shader - at high budget (cheap path), denoiser is a passthrough.
@@ -5958,19 +6122,36 @@ void Raytracing_Frame (Gpu_Postprocess_Push PP) {
     if (Denoise_Passes > 0) {
       vkCmdBindPipeline (Command_Buffer, VK_PIPELINE_BIND_POINT_COMPUTE, Denoise_Pipeline);
       for (int I = 0; I < Denoise_Passes; I++) {
-        vkCmdBindDescriptorSets (Command_Buffer, VK_PIPELINE_BIND_POINT_COMPUTE,
-                                 Denoise_Pipeline_Layout, 0, 1, &Denoise_Descriptor_Sets[I], 0, NULL);
+        vkCmdBindDescriptorSets (/*commandBuffer      =>*/ Command_Buffer,
+                                 /*pipelineBindPoint   =>*/ VK_PIPELINE_BIND_POINT_COMPUTE,
+                                 /*layout              =>*/ Denoise_Pipeline_Layout,
+                                 /*firstSet            =>*/ 0,
+                                 /*descriptorSetCount  =>*/ 1,
+                                 /*pDescriptorSets     =>*/ &Denoise_Descriptor_Sets[I],
+                                 /*dynamicOffsetCount  =>*/ 0,
+                                 /*pDynamicOffsets     =>*/ NULL);
         int Push[2] = {Steps[I], Current_Budget_Byte};
-        vkCmdPushConstants (Command_Buffer, Denoise_Pipeline_Layout, VK_SHADER_STAGE_COMPUTE_BIT,
-                            0, sizeof (Push), Push);
+        vkCmdPushConstants (/*commandBuffer =>*/ Command_Buffer,
+                            /*layout        =>*/ Denoise_Pipeline_Layout,
+                            /*stageFlags    =>*/ VK_SHADER_STAGE_COMPUTE_BIT,
+                            /*offset        =>*/ 0,
+                            /*size          =>*/ sizeof (Push),
+                            /*pValues       =>*/ Push);
         vkCmdDispatch (Command_Buffer, (Render_Width + 7) / 8, (Render_Height + 7) / 8, 1);
 
         // Barrier between iterations
         VkMemoryBarrier Iter_Barrier = {VK_STRUCTURE_TYPE_MEMORY_BARRIER, NULL,
           VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT};
-        vkCmdPipelineBarrier (Command_Buffer,
-          VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-          0, 1, &Iter_Barrier, 0, NULL, 0, NULL);
+        vkCmdPipelineBarrier (/*commandBuffer            =>*/ Command_Buffer,
+                              /*srcStageMask             =>*/ VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                              /*dstStageMask             =>*/ VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                              /*dependencyFlags          =>*/ 0,
+                              /*memoryBarrierCount       =>*/ 1,
+                              /*pMemoryBarriers          =>*/ &Iter_Barrier,
+                              /*bufferMemoryBarrierCount =>*/ 0,
+                              /*pBufferMemoryBarriers    =>*/ NULL,
+                              /*imageMemoryBarrierCount  =>*/ 0,
+                              /*pImageMemoryBarriers     =>*/ NULL);
       }
     }
 
@@ -5978,10 +6159,20 @@ void Raytracing_Frame (Gpu_Postprocess_Push PP) {
 
     // Postprocess: TAA + bloom + tonemapping
     vkCmdBindPipeline       (Command_Buffer, VK_PIPELINE_BIND_POINT_COMPUTE, Postprocess_Pipeline);
-    vkCmdBindDescriptorSets (Command_Buffer, VK_PIPELINE_BIND_POINT_COMPUTE,
-                             Postprocess_Pipeline_Layout, 0, 1, &Postprocess_Descriptor_Set, 0, NULL);
-    vkCmdPushConstants      (Command_Buffer, Postprocess_Pipeline_Layout, VK_SHADER_STAGE_COMPUTE_BIT,
-                             0, sizeof PP, &PP);
+    vkCmdBindDescriptorSets (/*commandBuffer      =>*/ Command_Buffer,
+                             /*pipelineBindPoint   =>*/ VK_PIPELINE_BIND_POINT_COMPUTE,
+                             /*layout              =>*/ Postprocess_Pipeline_Layout,
+                             /*firstSet            =>*/ 0,
+                             /*descriptorSetCount  =>*/ 1,
+                             /*pDescriptorSets     =>*/ &Postprocess_Descriptor_Set,
+                             /*dynamicOffsetCount  =>*/ 0,
+                             /*pDynamicOffsets     =>*/ NULL);
+    vkCmdPushConstants      (/*commandBuffer =>*/ Command_Buffer,
+                             /*layout        =>*/ Postprocess_Pipeline_Layout,
+                             /*stageFlags    =>*/ VK_SHADER_STAGE_COMPUTE_BIT,
+                             /*offset        =>*/ 0,
+                             /*size          =>*/ sizeof PP,
+                             /*pValues       =>*/ &PP);
     vkCmdDispatch (Command_Buffer, (Render_Width + 7) / 8, (Render_Height + 7) / 8, 1);
   }
 
@@ -5991,54 +6182,82 @@ void Raytracing_Frame (Gpu_Postprocess_Push PP) {
     ? VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR : VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
 
   // Barrier: writes complete before blit reads
-  vkCmdPipelineBarrier (Command_Buffer,
-    Pre_Blit, VK_PIPELINE_STAGE_TRANSFER_BIT,
-    0, 1, &(VkMemoryBarrier){VK_STRUCTURE_TYPE_MEMORY_BARRIER, NULL,
-      VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT},
-    0, NULL, 0, NULL);
+  vkCmdPipelineBarrier (/*commandBuffer            =>*/ Command_Buffer,
+                        /*srcStageMask             =>*/ Pre_Blit,
+                        /*dstStageMask             =>*/ VK_PIPELINE_STAGE_TRANSFER_BIT,
+                        /*dependencyFlags          =>*/ 0,
+                        /*memoryBarrierCount       =>*/ 1,
+                        /*pMemoryBarriers          =>*/ &(VkMemoryBarrier){
+                          VK_STRUCTURE_TYPE_MEMORY_BARRIER, NULL,
+                          VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT},
+                        /*bufferMemoryBarrierCount =>*/ 0,
+                        /*pBufferMemoryBarriers    =>*/ NULL,
+                        /*imageMemoryBarrierCount  =>*/ 0,
+                        /*pImageMemoryBarriers     =>*/ NULL);
 
   // Transition blit source from general to transfer-source
-  Image_Layout_Barrier (Command_Buffer, Blit_Source,
-                        VK_IMAGE_LAYOUT_GENERAL,              VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                        VK_ACCESS_SHADER_WRITE_BIT,           VK_ACCESS_TRANSFER_READ_BIT,
-                        Pre_Blit,                             VK_PIPELINE_STAGE_TRANSFER_BIT);
+  Image_Layout_Barrier (/*Command_Buffer     =>*/ Command_Buffer,
+                        /*Image              =>*/ Blit_Source,
+                        /*Old_Layout         =>*/ VK_IMAGE_LAYOUT_GENERAL,
+                        /*New_Layout         =>*/ VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                        /*Source_Access      =>*/ VK_ACCESS_SHADER_WRITE_BIT,
+                        /*Destination_Access =>*/ VK_ACCESS_TRANSFER_READ_BIT,
+                        /*Source_Stage       =>*/ Pre_Blit,
+                        /*Destination_Stage  =>*/ VK_PIPELINE_STAGE_TRANSFER_BIT);
 
   // Transition the swapchain image from undefined to transfer-destination
-  Image_Layout_Barrier (Command_Buffer, Swapchain_Images[Image_Index],
-                        VK_IMAGE_LAYOUT_UNDEFINED,            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                        0,                                    VK_ACCESS_TRANSFER_WRITE_BIT,
-                        VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,    VK_PIPELINE_STAGE_TRANSFER_BIT);
+  Image_Layout_Barrier (/*Command_Buffer     =>*/ Command_Buffer,
+                        /*Image              =>*/ Swapchain_Images[Image_Index],
+                        /*Old_Layout         =>*/ VK_IMAGE_LAYOUT_UNDEFINED,
+                        /*New_Layout         =>*/ VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                        /*Source_Access      =>*/ 0,
+                        /*Destination_Access =>*/ VK_ACCESS_TRANSFER_WRITE_BIT,
+                        /*Source_Stage       =>*/ VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                        /*Destination_Stage  =>*/ VK_PIPELINE_STAGE_TRANSFER_BIT);
 
   // Blit result to swapchain (bilinear upscale from internal to window resolution)
-  vkCmdBlitImage (Command_Buffer,
-                  Blit_Source,                         VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                  Swapchain_Images[Image_Index],       VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                  1, &(VkImageBlit){
+  vkCmdBlitImage (/*commandBuffer  =>*/ Command_Buffer,
+                  /*srcImage       =>*/ Blit_Source,
+                  /*srcImageLayout =>*/ VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                  /*dstImage       =>*/ Swapchain_Images[Image_Index],
+                  /*dstImageLayout =>*/ VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                  /*regionCount    =>*/ 1,
+                  /*pRegions       =>*/ &(VkImageBlit){
                     .srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
                     .srcOffsets[1]  = {Render_Width, Render_Height, 1},
                     .dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
                     .dstOffsets[1]  = {(int)Swapchain_Extent.width, (int)Swapchain_Extent.height, 1}},
-                  VK_FILTER_LINEAR);
+                  /*filter         =>*/ VK_FILTER_LINEAR);
 
   // Transition blit source back to general for next frame
-  Image_Layout_Barrier (Command_Buffer, Blit_Source,
-                        VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL,
-                        VK_ACCESS_TRANSFER_READ_BIT,          VK_ACCESS_SHADER_WRITE_BIT,
-                        VK_PIPELINE_STAGE_TRANSFER_BIT,       VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+  Image_Layout_Barrier (/*Command_Buffer     =>*/ Command_Buffer,
+                        /*Image              =>*/ Blit_Source,
+                        /*Old_Layout         =>*/ VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                        /*New_Layout         =>*/ VK_IMAGE_LAYOUT_GENERAL,
+                        /*Source_Access      =>*/ VK_ACCESS_TRANSFER_READ_BIT,
+                        /*Destination_Access =>*/ VK_ACCESS_SHADER_WRITE_BIT,
+                        /*Source_Stage       =>*/ VK_PIPELINE_STAGE_TRANSFER_BIT,
+                        /*Destination_Stage  =>*/ VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR
+                                                | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
 
   // Transition the swapchain image to present-source for display
-  Image_Layout_Barrier (Command_Buffer, Swapchain_Images[Image_Index],
-                        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
-                        VK_ACCESS_TRANSFER_WRITE_BIT,         0,
-                        VK_PIPELINE_STAGE_TRANSFER_BIT,       VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
+  Image_Layout_Barrier (/*Command_Buffer     =>*/ Command_Buffer,
+                        /*Image              =>*/ Swapchain_Images[Image_Index],
+                        /*Old_Layout         =>*/ VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                        /*New_Layout         =>*/ VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+                        /*Source_Access      =>*/ VK_ACCESS_TRANSFER_WRITE_BIT,
+                        /*Destination_Access =>*/ 0,
+                        /*Source_Stage       =>*/ VK_PIPELINE_STAGE_TRANSFER_BIT,
+                        /*Destination_Stage  =>*/ VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
 
   // Finalize the command buffer recording
   VK_CHECK (vkEndCommandBuffer (Command_Buffer));
 
   // Submit the command buffer, waiting on image-available and signaling render-finished
   VkPipelineStageFlags Wait_Stage = VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR;
-  VK_CHECK (vkQueueSubmit (Queue, 1,
-                           &(VkSubmitInfo){
+  VK_CHECK (vkQueueSubmit (/*queue       =>*/ Queue,
+                           /*submitCount =>*/ 1,
+                           /*pSubmits    =>*/ &(VkSubmitInfo){
                              .sType                = VK_STRUCTURE_TYPE_SUBMIT_INFO,
                              .waitSemaphoreCount   = 1,
                              .pWaitSemaphores      = &Semaphore_Image_Available,
@@ -6047,11 +6266,11 @@ void Raytracing_Frame (Gpu_Postprocess_Push PP) {
                              .pCommandBuffers      = &Command_Buffer,
                              .signalSemaphoreCount = 1,
                              .pSignalSemaphores    = &Semaphore_Render_Finished},
-                           Fence));
+                           /*fence       =>*/ Fence));
 
   // Present the rendered image to the display (handle OUT_OF_DATE from resize)
-  { VkResult R = vkQueuePresentKHR (Queue,
-                                    &(VkPresentInfoKHR){
+  { VkResult R = vkQueuePresentKHR (/*queue        =>*/ Queue,
+                                    /*pPresentInfo =>*/ &(VkPresentInfoKHR){
                                       .sType              = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
                                       .waitSemaphoreCount = 1,
                                       .pWaitSemaphores    = &Semaphore_Render_Finished,
@@ -6348,9 +6567,11 @@ void Hull_Upload (const Convex_Hull *Hull) {
 
   // Allocate the hull storage buffer on first use, then upload the packed data
   if (not Hull_Storage_Buffer.Buffer)
-    Hull_Storage_Buffer = Buffer_Allocate (sizeof (Gpu_Hull),
-      VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
-      VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+    Hull_Storage_Buffer = Buffer_Allocate (/*Size         =>*/ sizeof (Gpu_Hull),
+                                           /*Usage        =>*/ VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
+                                                             | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
+                                           /*Memory_Flags =>*/ VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT
+                                                             | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
   Buffer_Upload (Hull_Storage_Buffer, &Packed, sizeof Packed);
 }
 
@@ -6371,32 +6592,38 @@ void Physics_Pipeline_Create () {
   };
 
   // Create the descriptor set layout with all 6 physics bindings
-  VK_CHECK (vkCreateDescriptorSetLayout (Device,
-    &(VkDescriptorSetLayoutCreateInfo){
-      .sType        = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
-      .bindingCount = 6,
-      .pBindings    = Bindings},
-    NULL, &Physics_Descriptor_Layout));
+  VK_CHECK (vkCreateDescriptorSetLayout (/*device      =>*/ Device,
+                                         /*pCreateInfo =>*/ &(VkDescriptorSetLayoutCreateInfo){
+                                           .sType        = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+                                           .bindingCount = 6,
+                                           .pBindings    = Bindings},
+                                         /*pAllocator  =>*/ NULL,
+                                         /*pSetLayout  =>*/ &Physics_Descriptor_Layout));
 
   // Create the pipeline layout with push constants for per-frame Gpu_Input delivery
   VkPushConstantRange Push_Range = {VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof (Gpu_Input)};
-  VK_CHECK (vkCreatePipelineLayout (Device,
-    &(VkPipelineLayoutCreateInfo){
-      .sType                  = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
-      .setLayoutCount         = 1,
-      .pSetLayouts            = &Physics_Descriptor_Layout,
-      .pushConstantRangeCount = 1,
-      .pPushConstantRanges    = &Push_Range},
-    NULL, &Physics_Pipeline_Layout));
+  VK_CHECK (vkCreatePipelineLayout (/*device          =>*/ Device,
+                                    /*pCreateInfo     =>*/ &(VkPipelineLayoutCreateInfo){
+                                      .sType                  = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+                                      .setLayoutCount         = 1,
+                                      .pSetLayouts            = &Physics_Descriptor_Layout,
+                                      .pushConstantRangeCount = 1,
+                                      .pPushConstantRanges    = &Push_Range},
+                                    /*pAllocator      =>*/ NULL,
+                                    /*pPipelineLayout =>*/ &Physics_Pipeline_Layout));
 
   // Load the pre-compiled physics compute shader and create the compute pipeline
-  VkShaderModule Physics_Module = Shader_Module_Load (Shader_Path(physics));
-  VK_CHECK (vkCreateComputePipelines (Device, Pipeline_Cache, 1,
-    &(VkComputePipelineCreateInfo){
-      .sType  = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
-      .stage  = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, NULL, 0, VK_SHADER_STAGE_COMPUTE_BIT, Physics_Module, "main", NULL},
-      .layout = Physics_Pipeline_Layout},
-    NULL, &Physics_Pipeline));
+  VkShaderModule Physics_Module = Shader_Module_Load (Shader_Path(Physics));
+  VK_CHECK (vkCreateComputePipelines (/*device          =>*/ Device,
+                                      /*pipelineCache   =>*/ Pipeline_Cache,
+                                      /*createInfoCount =>*/ 1,
+                                      /*pCreateInfos    =>*/ &(VkComputePipelineCreateInfo){
+                                        .sType  = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
+                                        .stage  = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, NULL, 0,
+                                                   VK_SHADER_STAGE_COMPUTE_BIT, Physics_Module, "main", NULL},
+                                        .layout = Physics_Pipeline_Layout},
+                                      /*pAllocator      =>*/ NULL,
+                                      /*pPipelines      =>*/ &Physics_Pipeline));
   vkDestroyShaderModule (Device, Physics_Module, NULL);
 }
 
@@ -6407,9 +6634,11 @@ void Physics_Pipeline_Create () {
 void Physics_Resources_Create (const Player *Initial_State) {
 
   // Allocate the host-visible player state buffer for GPU read-write access each frame
-  Player_State_Buffer = Buffer_Allocate (sizeof (Gpu_Player),
-    VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
-    VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+  Player_State_Buffer = Buffer_Allocate (/*Size         =>*/ sizeof (Gpu_Player),
+                                         /*Usage        =>*/ VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
+                                                           | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
+                                         /*Memory_Flags =>*/ VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT
+                                                           | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
 
   // Initialize the GPU player state from the spawn point with a capsule collider
   Gpu_Player Initial_GPU_State = {
@@ -6424,18 +6653,22 @@ void Physics_Resources_Create (const Player *Initial_State) {
 
   // Initialize the hull storage buffer with a 1-vertex dummy (replaced when a real hull is loaded)
   if (not Hull_Storage_Buffer.Buffer) {
-    Hull_Storage_Buffer = Buffer_Allocate (sizeof (Gpu_Hull),
-      VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
-      VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+    Hull_Storage_Buffer = Buffer_Allocate (/*Size         =>*/ sizeof (Gpu_Hull),
+                                           /*Usage        =>*/ VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
+                                                             | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
+                                           /*Memory_Flags =>*/ VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT
+                                                             | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
     Gpu_Hull Empty = {0};
     Empty.Count = 1;
     Buffer_Upload (Hull_Storage_Buffer, &Empty, sizeof Empty);
   }
 
   // Allocate the projectile pool buffer (binding 5)
-  Projectile_Buffer = Buffer_Allocate (sizeof (Gpu_Projectile_Pool),
-    VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
-    VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+  Projectile_Buffer = Buffer_Allocate (/*Size         =>*/ sizeof (Gpu_Projectile_Pool),
+                                       /*Usage        =>*/ VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
+                                                         | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
+                                       /*Memory_Flags =>*/ VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT
+                                                         | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
   Gpu_Projectile_Pool Empty_Pool = {0};
   Buffer_Upload (Projectile_Buffer, &Empty_Pool, sizeof Empty_Pool);
 
@@ -6443,22 +6676,22 @@ void Physics_Resources_Create (const Player *Initial_State) {
   VkDescriptorPoolSize Pool_Sizes[] = {
     {VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, 1},
     {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,             5}}; // 5 storage buffers: vertex, index, player, hull, projectiles
-  VK_CHECK (vkCreateDescriptorPool (Device,
-    &(VkDescriptorPoolCreateInfo){
-      .sType         = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
-      .maxSets       = 1,
-      .poolSizeCount = 2,
-      .pPoolSizes    = Pool_Sizes},
-    NULL, &Physics_Descriptor_Pool));
+  VK_CHECK (vkCreateDescriptorPool (/*device          =>*/ Device,
+                                    /*pCreateInfo     =>*/ &(VkDescriptorPoolCreateInfo){
+                                      .sType         = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
+                                      .maxSets       = 1,
+                                      .poolSizeCount = 2,
+                                      .pPoolSizes    = Pool_Sizes},
+                                    /*pAllocator      =>*/ NULL,
+                                    /*pDescriptorPool =>*/ &Physics_Descriptor_Pool));
 
-  // Submit Vulkan command
-  VK_CHECK (vkAllocateDescriptorSets (Device,
-    &(VkDescriptorSetAllocateInfo){
-      .sType              = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
-      .descriptorPool     = Physics_Descriptor_Pool,
-      .descriptorSetCount = 1,
-      .pSetLayouts        = &Physics_Descriptor_Layout},
-    &Physics_Descriptor_Set));
+  VK_CHECK (vkAllocateDescriptorSets (/*device          =>*/ Device,
+                                      /*pAllocateInfo   =>*/ &(VkDescriptorSetAllocateInfo){
+                                        .sType              = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+                                        .descriptorPool     = Physics_Descriptor_Pool,
+                                        .descriptorSetCount = 1,
+                                        .pSetLayouts        = &Physics_Descriptor_Layout},
+                                      /*pDescriptorSets =>*/ &Physics_Descriptor_Set));
 
   // Write all 5 descriptor bindings: TLAS, vertex buffer, index buffer, player state, hull data
   VkWriteDescriptorSetAccelerationStructureKHR Acceleration_Write = {
@@ -6498,36 +6731,53 @@ Player Physics_Dispatch (Input In, float Dt) {
 
   // Record a one-shot command buffer for the physics compute dispatch
   VK_CHECK (vkResetCommandBuffer (Command_Buffer, 0));
-  VK_CHECK (vkBeginCommandBuffer (Command_Buffer,
-    &(VkCommandBufferBeginInfo){
-      .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
-      .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT}));
+  VK_CHECK (vkBeginCommandBuffer (/*commandBuffer =>*/ Command_Buffer,
+                                  /*pBeginInfo    =>*/ &(VkCommandBufferBeginInfo){
+                                    .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+                                    .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT}));
 
   // Bind the physics pipeline and descriptors, push the input, dispatch a single workgroup
   vkCmdBindPipeline       (Command_Buffer, VK_PIPELINE_BIND_POINT_COMPUTE, Physics_Pipeline);
-  vkCmdBindDescriptorSets (Command_Buffer, VK_PIPELINE_BIND_POINT_COMPUTE, Physics_Pipeline_Layout,
-                           0, 1, &Physics_Descriptor_Set, 0, NULL);
-  vkCmdPushConstants      (Command_Buffer, Physics_Pipeline_Layout, VK_SHADER_STAGE_COMPUTE_BIT,
-                           0, sizeof GPU_Input, &GPU_Input);
+  vkCmdBindDescriptorSets (/*commandBuffer      =>*/ Command_Buffer,
+                           /*pipelineBindPoint   =>*/ VK_PIPELINE_BIND_POINT_COMPUTE,
+                           /*layout              =>*/ Physics_Pipeline_Layout,
+                           /*firstSet            =>*/ 0,
+                           /*descriptorSetCount  =>*/ 1,
+                           /*pDescriptorSets     =>*/ &Physics_Descriptor_Set,
+                           /*dynamicOffsetCount  =>*/ 0,
+                           /*pDynamicOffsets     =>*/ NULL);
+  vkCmdPushConstants      (/*commandBuffer =>*/ Command_Buffer,
+                           /*layout        =>*/ Physics_Pipeline_Layout,
+                           /*stageFlags    =>*/ VK_SHADER_STAGE_COMPUTE_BIT,
+                           /*offset        =>*/ 0,
+                           /*size          =>*/ sizeof GPU_Input,
+                           /*pValues       =>*/ &GPU_Input);
   vkCmdDispatch           (Command_Buffer, 1, 1, 1);
 
   // Memory barrier: ensure compute shader writes are visible to the host before readback
-  vkCmdPipelineBarrier (Command_Buffer,
-    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_HOST_BIT, 0,
-    1, &(VkMemoryBarrier){
-      .sType         = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
-      .srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT,
-      .dstAccessMask = VK_ACCESS_HOST_READ_BIT},
-    0, NULL, 0, NULL);
+  vkCmdPipelineBarrier (/*commandBuffer            =>*/ Command_Buffer,
+                        /*srcStageMask             =>*/ VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                        /*dstStageMask             =>*/ VK_PIPELINE_STAGE_HOST_BIT,
+                        /*dependencyFlags          =>*/ 0,
+                        /*memoryBarrierCount       =>*/ 1,
+                        /*pMemoryBarriers          =>*/ &(VkMemoryBarrier){
+                          .sType         = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
+                          .srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT,
+                          .dstAccessMask = VK_ACCESS_HOST_READ_BIT},
+                        /*bufferMemoryBarrierCount =>*/ 0,
+                        /*pBufferMemoryBarriers    =>*/ NULL,
+                        /*imageMemoryBarrierCount  =>*/ 0,
+                        /*pImageMemoryBarriers     =>*/ NULL);
 
   // Submit the command buffer and wait for the GPU to finish
   VK_CHECK (vkEndCommandBuffer (Command_Buffer));
-  VK_CHECK (vkQueueSubmit (Queue, 1,
-    &(VkSubmitInfo){
-      .sType              = VK_STRUCTURE_TYPE_SUBMIT_INFO,
-      .commandBufferCount = 1,
-      .pCommandBuffers    = &Command_Buffer},
-    VK_NULL_HANDLE));
+  VK_CHECK (vkQueueSubmit (/*queue       =>*/ Queue,
+                           /*submitCount =>*/ 1,
+                           /*pSubmits    =>*/ &(VkSubmitInfo){
+                             .sType              = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+                             .commandBufferCount = 1,
+                             .pCommandBuffers    = &Command_Buffer},
+                           /*fence       =>*/ VK_NULL_HANDLE));
   VK_CHECK (vkQueueWaitIdle (Queue));
 
   // Read back the updated player state from the GPU buffer
@@ -7084,12 +7334,13 @@ VkShaderModule Shader_Module_Load (const char *Path) {
 
   // Wrap the raw SPIR-V code in a Vulkan shader module
   VkShaderModule Module;
-  VK_CHECK (vkCreateShaderModule (Device,
-                                  &(VkShaderModuleCreateInfo){
+  VK_CHECK (vkCreateShaderModule (/*device      =>*/ Device,
+                                  /*pCreateInfo =>*/ &(VkShaderModuleCreateInfo){
                                     .sType    = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
                                     .codeSize = (size_t)Size,
                                     .pCode    = Code},
-                                  NULL, &Module));
+                                  /*pAllocator  =>*/ NULL,
+                                  /*pShaderModule =>*/ &Module));
 
   // Release allocated memory
   free (Code);
@@ -8448,7 +8699,7 @@ glsl comp Post_Process {
         }
         M1 /= 5.0; M2 /= 5.0;
         vec3 Sigma = sqrt (max (M2 - M1 * M1, vec3 (0.0)));
-        History = clamp (History, M1 - Sigma * 0.5, M1 + Sigma * 0.5);
+        History = clamp (History, M1 - Sigma * 0.3, M1 + Sigma * 0.3);
   
         // Luminance-based history rejection
         //
@@ -8459,22 +8710,22 @@ glsl comp Post_Process {
         float Cur_Lum  = dot (Color,   vec3 (0.2126, 0.7152, 0.0722));
         float Hist_Lum = dot (History, vec3 (0.2126, 0.7152, 0.0722));
         float Lum_Diff = abs (Cur_Lum - Hist_Lum) / max (Cur_Lum, 0.01);
-        float Anti_Lag = clamp (Lum_Diff * 3.0, 0.0, 1.0); // Reject
+        float Anti_Lag = clamp (Lum_Diff * 5.0, 0.0, 1.0); // Reject
   
         // Disocclusion detection
         vec2 Screen_Disp = vec2 (Prev_Pixel - Pixel) / vec2 (Size);
         float Disp_Len = length (Screen_Disp);
-        float Disocclusion = clamp (Disp_Len * 20.0, 0.0, 1.0); // Rejected
+        float Disocclusion = clamp (Disp_Len * 30.0, 0.0, 1.0); // Rejected
   
         // Temporal blend
-        float Is_Static = step (Speed, 5.0);
+        float Is_Static = step (Speed, 2.0);
   
         // Static: 1/N convergence floored high
-        float Static_Alpha = max (1.0 / max (float (Frame_Count), 1.0), 0.30);
+        float Static_Alpha = max (1.0 / max (float (Frame_Count), 1.0), 0.25);
   
         // Moving: very aggressive current-frame dominance
-        float Motion      = clamp (Speed * 0.02, 0.0, 1.0);  // ISA: reciprocal multiply vs division
-        float Base        = mix (0.50, 0.95, Motion);  // Even slow motion > 50% current frame
+        float Motion      = clamp (Speed * 0.04, 0.0, 1.0);  // ISA: reciprocal multiply vs division
+        float Base        = mix (0.65, 0.98, Motion);  // Even slow motion > 65% current frame
         float Fps_Adapt   = clamp ((Delta_Time - 0.016) * 20.0, 0.0, 1.0);
         float Moving_Alpha = max (max (max (Base, Fps_Adapt), Disocclusion), Anti_Lag);
 
@@ -8978,38 +9229,70 @@ int main (int Argc, char **Argv) {
   // Create R32F depth image for postprocessing
   {
     Depth_Image.Format = VK_FORMAT_R32_SFLOAT;
-    VK_CHECK (vkCreateImage (Device, &(VkImageCreateInfo){
-      .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .imageType = VK_IMAGE_TYPE_2D,
-      .format = VK_FORMAT_R32_SFLOAT, .extent = {Render_Width, Render_Height, 1},
-      .mipLevels = 1, .arrayLayers = 1, .samples = VK_SAMPLE_COUNT_1_BIT,
-      .tiling = VK_IMAGE_TILING_OPTIMAL, .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
-      .usage = VK_IMAGE_USAGE_STORAGE_BIT}, NULL, &Depth_Image.Image));
+    VK_CHECK (vkCreateImage (/*device      =>*/ Device,
+                             /*pCreateInfo =>*/ &(VkImageCreateInfo){
+                               .sType         = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+                               .imageType     = VK_IMAGE_TYPE_2D,
+                               .format        = VK_FORMAT_R32_SFLOAT,
+                               .extent        = {Render_Width, Render_Height, 1},
+                               .mipLevels     = 1,
+                               .arrayLayers   = 1,
+                               .samples       = VK_SAMPLE_COUNT_1_BIT,
+                               .tiling        = VK_IMAGE_TILING_OPTIMAL,
+                               .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+                               .usage         = VK_IMAGE_USAGE_STORAGE_BIT},
+                             /*pAllocator  =>*/ NULL,
+                             /*pImage      =>*/ &Depth_Image.Image));
     VkMemoryRequirements Mem_Req;
     vkGetImageMemoryRequirements (Device, Depth_Image.Image, &Mem_Req);
-    VK_CHECK (vkAllocateMemory (Device, &(VkMemoryAllocateInfo){
-      .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .allocationSize = Mem_Req.size,
-      .memoryTypeIndex = Find_Memory_Type (Mem_Req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)},
-      NULL, &Depth_Image.Memory));
+    VK_CHECK (vkAllocateMemory (/*device       =>*/ Device,
+                                /*pAllocateInfo =>*/ &(VkMemoryAllocateInfo){
+                                  .sType           = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+                                  .allocationSize  = Mem_Req.size,
+                                  .memoryTypeIndex = Find_Memory_Type (Mem_Req.memoryTypeBits,
+                                                                       VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)},
+                                /*pAllocator    =>*/ NULL,
+                                /*pMemory       =>*/ &Depth_Image.Memory));
     VK_CHECK (vkBindImageMemory (Device, Depth_Image.Image, Depth_Image.Memory, 0));
-    VK_CHECK (vkCreateImageView (Device, &(VkImageViewCreateInfo){
-      .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO, .image = Depth_Image.Image,
-      .viewType = VK_IMAGE_VIEW_TYPE_2D, .format = VK_FORMAT_R32_SFLOAT,
-      .subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1}}, NULL, &Depth_Image.View));
+    VK_CHECK (vkCreateImageView (/*device      =>*/ Device,
+                                 /*pCreateInfo =>*/ &(VkImageViewCreateInfo){
+                                   .sType            = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+                                   .image            = Depth_Image.Image,
+                                   .viewType         = VK_IMAGE_VIEW_TYPE_2D,
+                                   .format           = VK_FORMAT_R32_SFLOAT,
+                                   .subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1}},
+                                 /*pAllocator  =>*/ NULL,
+                                 /*pView       =>*/ &Depth_Image.View));
 
     // Transition depth image to general layout
     VkCommandBuffer Cmd;
-    VK_CHECK (vkAllocateCommandBuffers (Device, &(VkCommandBufferAllocateInfo){
-      .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
-      .commandPool = Command_Pool, .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY, .commandBufferCount = 1}, &Cmd));
-    VK_CHECK (vkBeginCommandBuffer (Cmd, &(VkCommandBufferBeginInfo){
-      .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO, .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT}));
-    Image_Layout_Barrier (Cmd, Depth_Image.Image,
-      VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL,
-      0, VK_ACCESS_SHADER_WRITE_BIT,
-      VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR);
+    VK_CHECK (vkAllocateCommandBuffers (/*device        =>*/ Device,
+                                        /*pAllocateInfo =>*/ &(VkCommandBufferAllocateInfo){
+                                          .sType              = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+                                          .commandPool        = Command_Pool,
+                                          .level              = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+                                          .commandBufferCount = 1},
+                                        /*pCommandBuffers =>*/ &Cmd));
+    VK_CHECK (vkBeginCommandBuffer (/*commandBuffer =>*/ Cmd,
+                                    /*pBeginInfo    =>*/ &(VkCommandBufferBeginInfo){
+                                      .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+                                      .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT}));
+    Image_Layout_Barrier (/*Command_Buffer     =>*/ Cmd,
+                          /*Image              =>*/ Depth_Image.Image,
+                          /*Old_Layout         =>*/ VK_IMAGE_LAYOUT_UNDEFINED,
+                          /*New_Layout         =>*/ VK_IMAGE_LAYOUT_GENERAL,
+                          /*Source_Access      =>*/ 0,
+                          /*Destination_Access =>*/ VK_ACCESS_SHADER_WRITE_BIT,
+                          /*Source_Stage       =>*/ VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                          /*Destination_Stage  =>*/ VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR);
     VK_CHECK (vkEndCommandBuffer (Cmd));
-    VK_CHECK (vkQueueSubmit (Queue, 1, &(VkSubmitInfo){
-      .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO, .commandBufferCount = 1, .pCommandBuffers = &Cmd}, VK_NULL_HANDLE));
+    VK_CHECK (vkQueueSubmit (/*queue       =>*/ Queue,
+                             /*submitCount =>*/ 1,
+                             /*pSubmits    =>*/ &(VkSubmitInfo){
+                               .sType              = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+                               .commandBufferCount = 1,
+                               .pCommandBuffers    = &Cmd},
+                             /*fence       =>*/ VK_NULL_HANDLE));
     vkQueueWaitIdle (Queue);
     vkFreeCommandBuffers (Device, Command_Pool, 1, &Cmd);
   }
@@ -9018,18 +9301,33 @@ int main (int Argc, char **Argv) {
   History_Image = Image_Storage_Create (Render_Width, Render_Height);
   {
     VkCommandBuffer Cmd;
-    VK_CHECK (vkAllocateCommandBuffers (Device, &(VkCommandBufferAllocateInfo){
-      .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
-      .commandPool = Command_Pool, .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY, .commandBufferCount = 1}, &Cmd));
-    VK_CHECK (vkBeginCommandBuffer (Cmd, &(VkCommandBufferBeginInfo){
-      .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO, .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT}));
-    Image_Layout_Barrier (Cmd, History_Image.Image,
-      VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL,
-      0, VK_ACCESS_SHADER_WRITE_BIT,
-      VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+    VK_CHECK (vkAllocateCommandBuffers (/*device        =>*/ Device,
+                                        /*pAllocateInfo =>*/ &(VkCommandBufferAllocateInfo){
+                                          .sType              = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+                                          .commandPool        = Command_Pool,
+                                          .level              = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+                                          .commandBufferCount = 1},
+                                        /*pCommandBuffers =>*/ &Cmd));
+    VK_CHECK (vkBeginCommandBuffer (/*commandBuffer =>*/ Cmd,
+                                    /*pBeginInfo    =>*/ &(VkCommandBufferBeginInfo){
+                                      .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+                                      .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT}));
+    Image_Layout_Barrier (/*Command_Buffer     =>*/ Cmd,
+                          /*Image              =>*/ History_Image.Image,
+                          /*Old_Layout         =>*/ VK_IMAGE_LAYOUT_UNDEFINED,
+                          /*New_Layout         =>*/ VK_IMAGE_LAYOUT_GENERAL,
+                          /*Source_Access      =>*/ 0,
+                          /*Destination_Access =>*/ VK_ACCESS_SHADER_WRITE_BIT,
+                          /*Source_Stage       =>*/ VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                          /*Destination_Stage  =>*/ VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
     VK_CHECK (vkEndCommandBuffer (Cmd));
-    VK_CHECK (vkQueueSubmit (Queue, 1, &(VkSubmitInfo){
-      .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO, .commandBufferCount = 1, .pCommandBuffers = &Cmd}, VK_NULL_HANDLE));
+    VK_CHECK (vkQueueSubmit (/*queue       =>*/ Queue,
+                             /*submitCount =>*/ 1,
+                             /*pSubmits    =>*/ &(VkSubmitInfo){
+                               .sType              = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+                               .commandBufferCount = 1,
+                               .pCommandBuffers    = &Cmd},
+                             /*fence       =>*/ VK_NULL_HANDLE));
     vkQueueWaitIdle (Queue);
     vkFreeCommandBuffers (Device, Command_Pool, 1, &Cmd);
   }
@@ -9040,26 +9338,42 @@ int main (int Argc, char **Argv) {
   Postprocess_Output_Image = Image_Storage_Create (Render_Width, Render_Height);
   {
     VkCommandBuffer Cmd;
-    VK_CHECK (vkAllocateCommandBuffers (Device, &(VkCommandBufferAllocateInfo){
-      .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
-      .commandPool = Command_Pool, .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY, .commandBufferCount = 1}, &Cmd));
-    VK_CHECK (vkBeginCommandBuffer (Cmd, &(VkCommandBufferBeginInfo){
-      .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO, .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT}));
-    Image_Layout_Barrier (Cmd, Postprocess_Output_Image.Image,
-      VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL,
-      0, VK_ACCESS_SHADER_WRITE_BIT,
-      VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+    VK_CHECK (vkAllocateCommandBuffers (/*device        =>*/ Device,
+                                        /*pAllocateInfo =>*/ &(VkCommandBufferAllocateInfo){
+                                          .sType              = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+                                          .commandPool        = Command_Pool,
+                                          .level              = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+                                          .commandBufferCount = 1},
+                                        /*pCommandBuffers =>*/ &Cmd));
+    VK_CHECK (vkBeginCommandBuffer (/*commandBuffer =>*/ Cmd,
+                                    /*pBeginInfo    =>*/ &(VkCommandBufferBeginInfo){
+                                      .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+                                      .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT}));
+    Image_Layout_Barrier (/*Command_Buffer     =>*/ Cmd,
+                          /*Image              =>*/ Postprocess_Output_Image.Image,
+                          /*Old_Layout         =>*/ VK_IMAGE_LAYOUT_UNDEFINED,
+                          /*New_Layout         =>*/ VK_IMAGE_LAYOUT_GENERAL,
+                          /*Source_Access      =>*/ 0,
+                          /*Destination_Access =>*/ VK_ACCESS_SHADER_WRITE_BIT,
+                          /*Source_Stage       =>*/ VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                          /*Destination_Stage  =>*/ VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
     VK_CHECK (vkEndCommandBuffer (Cmd));
-    VK_CHECK (vkQueueSubmit (Queue, 1, &(VkSubmitInfo){
-      .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO, .commandBufferCount = 1, .pCommandBuffers = &Cmd}, VK_NULL_HANDLE));
+    VK_CHECK (vkQueueSubmit (/*queue       =>*/ Queue,
+                             /*submitCount =>*/ 1,
+                             /*pSubmits    =>*/ &(VkSubmitInfo){
+                               .sType              = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+                               .commandBufferCount = 1,
+                               .pCommandBuffers    = &Cmd},
+                             /*fence       =>*/ VK_NULL_HANDLE));
     vkQueueWaitIdle (Queue);
     vkFreeCommandBuffers (Device, Command_Pool, 1, &Cmd);
   }
 
   // Allocate the camera uniform buffer sizeof(mat4)*2 + 16 (base) + 7*16 (environment vec4s) = 256 bytes
-  Camera_Uniform_Buffer = Buffer_Allocate (256,
-    VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
-    VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+  Camera_Uniform_Buffer = Buffer_Allocate (/*Size         =>*/ 256,
+                                           /*Usage        =>*/ VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
+                                           /*Memory_Flags =>*/ VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT
+                                                             | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
 
   // Load the BSP scene and spawn point (no CPU collision map - GPU handles physics via TLAS)
   Spawn Spawn_Point;
@@ -9107,18 +9421,33 @@ int main (int Argc, char **Argv) {
   Denoise_Ping_Image = Image_Storage_Create (Render_Width, Render_Height);
   {
     VkCommandBuffer Cmd;
-    VK_CHECK (vkAllocateCommandBuffers (Device, &(VkCommandBufferAllocateInfo){
-      .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
-      .commandPool = Command_Pool, .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY, .commandBufferCount = 1}, &Cmd));
-    VK_CHECK (vkBeginCommandBuffer (Cmd, &(VkCommandBufferBeginInfo){
-      .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO, .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT}));
-    Image_Layout_Barrier (Cmd, Denoise_Ping_Image.Image,
-      VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL,
-      0, VK_ACCESS_SHADER_WRITE_BIT,
-      VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+    VK_CHECK (vkAllocateCommandBuffers (/*device        =>*/ Device,
+                                        /*pAllocateInfo =>*/ &(VkCommandBufferAllocateInfo){
+                                          .sType              = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+                                          .commandPool        = Command_Pool,
+                                          .level              = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+                                          .commandBufferCount = 1},
+                                        /*pCommandBuffers =>*/ &Cmd));
+    VK_CHECK (vkBeginCommandBuffer (/*commandBuffer =>*/ Cmd,
+                                    /*pBeginInfo    =>*/ &(VkCommandBufferBeginInfo){
+                                      .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+                                      .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT}));
+    Image_Layout_Barrier (/*Command_Buffer     =>*/ Cmd,
+                          /*Image              =>*/ Denoise_Ping_Image.Image,
+                          /*Old_Layout         =>*/ VK_IMAGE_LAYOUT_UNDEFINED,
+                          /*New_Layout         =>*/ VK_IMAGE_LAYOUT_GENERAL,
+                          /*Source_Access      =>*/ 0,
+                          /*Destination_Access =>*/ VK_ACCESS_SHADER_WRITE_BIT,
+                          /*Source_Stage       =>*/ VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                          /*Destination_Stage  =>*/ VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
     VK_CHECK (vkEndCommandBuffer (Cmd));
-    VK_CHECK (vkQueueSubmit (Queue, 1, &(VkSubmitInfo){
-      .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO, .commandBufferCount = 1, .pCommandBuffers = &Cmd}, VK_NULL_HANDLE));
+    VK_CHECK (vkQueueSubmit (/*queue       =>*/ Queue,
+                             /*submitCount =>*/ 1,
+                             /*pSubmits    =>*/ &(VkSubmitInfo){
+                               .sType              = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+                               .commandBufferCount = 1,
+                               .pCommandBuffers    = &Cmd},
+                             /*fence       =>*/ VK_NULL_HANDLE));
     vkQueueWaitIdle (Queue);
     vkFreeCommandBuffers (Device, Command_Pool, 1, &Cmd);
   }
