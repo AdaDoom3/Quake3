@@ -56,30 +56,22 @@
 //
 // ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 
-// For sanity...
-typedef unsigned int uint;
-
 // Engine id and info strings
 const char *ENGINE_NAME    = "q3";
-const char *ENGINE_VERSION = "0.1.0";
+const char *ENGINE_VERSION = "0.1.0";              
 
-// Default BSP map to load when no command-line argument is given
-const char *DEFAULT_MAP = "oa_dm1.bsp";
-
-// Vulkan limits and versioning
-#define VULKAN_API_VERSION       VK_API_VERSION_1_3
-#define SWAPCHAIN_MAX_IMAGES     8                  
-#define DESCRIPTOR_TEXTURE_SLOTS 1536               
-#define RAY_RECURSION_DEPTH      2                  
+// Aspect ratio constraints
+#define ASPECT_NARROW_X     21
+#define ASPECT_NARROW_Y     9
+#define ASPECT_WIDE_X       4
+#define ASPECT_WIDE_Y       3
+#define MINIMUM_WINDOW_SIZE 256
 
 // Windowing and viewport settings
 #define FIELD_OF_VIEW  90.f    // Vertical field-of-view in degrees
 #define NEAR_CLIP      0.1f    // Near clip plane distance
 #define FAR_CLIP       10000.f // Far clip plane distance
 #define MAX_DELTA_TIME 0.05f   // Clamp to 20 fps minimum (prevents physics tunneling)
-
-// Asset paths
-#define ASSET_ROOT "assets/" // Root directory for all game assets
 
 // Player physics constants designed to mirror the Quake 3 movement parameters. The GPU physics compute shader (§10) references these same
 // values as specialization constants compiled into the SPIR-V module.
@@ -119,7 +111,14 @@ const char *DEFAULT_MAP = "oa_dm1.bsp";
 #define ROCKET_LIFETIME 10.f  // Seconds before projectile expires
 #define FIRE_COOLDOWN   0.8f  // Minimum seconds between shots
 
+// Vulkan limits and versioning
+#define VULKAN_API_VERSION       VK_API_VERSION_1_3
+#define SWAPCHAIN_MAX_IMAGES     8                  
+#define DESCRIPTOR_TEXTURE_SLOTS 1536               
+#define RAY_RECURSION_DEPTH      2    
+
 // Enable the Khronos validation layer for debug builds
+typedef unsigned int uint; // For sanity...
 const uint  VALIDATION_LAYER_COUNT = 1;
 const char *VALIDATION_LAYERS[]    = {"VK_LAYER_KHRONOS_validation"};
 
@@ -137,18 +136,19 @@ typedef struct {
   float Vignette;       // Vignette darkening intensity
   float Bloom_Strength; // Bloom glow intensity
   float Exposure;       // Tonemapping exposure multiplier
-  //   Fog_Density      = 7.0e-5     (closesthit.glsl)
-  //   Fog_Color        = (0.30, 0.26, 0.22)
-  //   Ambient_Sky      = (0.28, 0.24, 0.18)
-  //   Ambient_Ground   = (0.20, 0.16, 0.10)
-  //   Sun_Radiance     = (2.5, 2.2, 1.8)
-  //   Shadow_Floor     = 0.05
-  //   Lightmap_Mult    = 4.5
-  //   Contrast_Power   = 1.08        (postprocess.glsl)
-  //   Saturation_Boost = 1.20
-  //   Color_Grade      = (1.04, 1.01, 0.95)
-} Visual_Style;
 
+  // Should the following be added ???
+  // Fog_Density      
+  // Fog_Color     
+  // Ambient_Sky    
+  // Ambient_Ground 
+  // Sun_Radiance    
+  // Shadow_Floor    
+  // Lightmap_Mult  
+  // Contrast_Power   
+  // Saturation_Boost
+  // Color_Grade      
+} Visual_Style;
 const Visual_Style STYLE = {
   .Vignette       = 0.35f,  // Moderate-strong vignette
   .Bloom_Strength = 0.08f,  // Subtle bloom
@@ -175,12 +175,27 @@ typedef struct {
 } Quality_Preset;
 const Quality_Preset QUALITY_PRESETS [QUALITY_COUNT] = {
   //                            Res        Scale  SPP  POM  DN   CB
-  [QUALITY_ULTRA]  = {"Ultra",  3840,2160, 1.00f,  4,  1,   2,   1}, 
+  [QUALITY_ULTRA]  = {"Crysis", 3840,2160, 1.00f,  4,  1,   2,   1}, 
   [QUALITY_HIGH]   = {"High",   2560,1440, 1.00f,  2,  1,   2,   1}, 
   [QUALITY_MEDIUM] = {"Medium", 1920,1080, 1.00f,  1,  1,   2,   1},
   [QUALITY_LOW]    = {"Low",    1600, 900, 1.00f,  1,  1,   1,   1},
   [QUALITY_POTATO] = {"Potato", 1280, 720, 0.667f, 1,  0,   1,   1}, 
 };
+
+// Convex Hull Limits
+#define HULL_MAX_VERTS    256 // Per-hull vertex cap (matches GPU array size in Gpu_Hull)
+#define HULL_MAX_ADJ      16  // Maximum adjacency entries per vertex (for hill-climb support)
+#define HULL_MAX_FACES    512 // Quickhull internal face cap during construction
+#define HULL_MAX_ENTITIES 32  // Maximum simultaneous hull collider instances
+
+// Player bounding box half-extents (x, y, z) used by the capsule collider
+const float PLAYER_HALF_EXTENTS[3] = {15.f, 32.f, 15.f};
+
+// ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+//
+// §15. Assets
+//
+// ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 
 // Body-part damage multiplier maps: grayscale TGA textures UV-mapped to player models
 #define DAMAGE_CACHE_MAX 64
@@ -190,14 +205,60 @@ typedef struct {
   int         Damage_Map_Count; // Number of damage maps for this model
 } Model_Damage_Entry;
 
-// Convex Hull Limits
-#define HULL_MAX_VERTS     256 // Per-hull vertex cap (matches GPU array size in Gpu_Hull)
-#define HULL_MAX_ADJ       16  // Maximum adjacency entries per vertex (for hill-climb support)
-#define HULL_MAX_FACES     512 // Quickhull internal face cap during construction
-#define HULL_MAX_ENTITIES  32  // Maximum simultaneous hull collider instances
+// Asset paths
+#define ASSET_ROOT "assets/" // Root directory for all game assets
 
-// Player bounding box half-extents (x, y, z) used by the capsule collider
-const float PLAYER_HALF_EXTENTS[3] = {15.f, 32.f, 15.f};
+// Default BSP map to load when no command-line argument is given
+const char *DEFAULT_MAP = "oa_dm1.bsp";
+
+// Paths to the weapon model's diffuse textures (body and sight)
+#define WEAPON_TEXTURE_COUNT 2
+const char *WEAPON_TEXTURE_PATHS[] = {ASSET_ROOT "models/weapons2/machinegun/mgun.tga",
+                                      ASSET_ROOT "models/weapons2/machinegun/sight.tga"};
+
+// Paths to the three-part machinegun weapon model (body, barrel, hand)
+#define WEAPON_BODY_PATH   ASSET_ROOT "models/weapons2/machinegun/machinegun.md3"
+#define WEAPON_BARREL_PATH ASSET_ROOT "models/weapons2/machinegun/machinegun_barrel.md3"
+#define WEAPON_HAND_PATH   ASSET_ROOT "models/weapons2/machinegun/machinegun_hand.md3"
+
+// Damage or "hit" texture manifest
+#define DAMAGE_MODEL_COUNT 15
+const Model_Damage_Entry DAMAGE_MAP_REGISTRY[DAMAGE_MODEL_COUNT] = {
+  {"grism",    {ASSET_ROOT "models/players/grism/enkiskin_dmg.tga"}, 1},
+  {"sarge",    {ASSET_ROOT "models/players/grism/enkiskin_dmg.tga"}, 1},
+  {"liz",      {ASSET_ROOT "models/players/liz/h_head_dmg.tga",
+                ASSET_ROOT "models/players/liz/u_torso_dmg.tga",
+                ASSET_ROOT "models/players/liz/l_legs_dmg.tga"}, 3},
+  {"major",    {ASSET_ROOT "models/players/major/head_dmg.tga",
+                ASSET_ROOT "models/players/major/torso_dmg.tga",
+                ASSET_ROOT "models/players/major/lower_dmg.tga"}, 3},
+  {"tony",     {ASSET_ROOT "models/players/tony/head_dmg.tga",
+                ASSET_ROOT "models/players/tony/suit_dmg.tga"}, 2},
+  {"assassin", {ASSET_ROOT "models/players/assassin/upper_dmg.tga",
+                ASSET_ROOT "models/players/assassin/lower_dmg.tga"}, 2},
+  {"smarine",  {ASSET_ROOT "models/players/smarine/2h_head_dmg.tga",
+                ASSET_ROOT "models/players/smarine/2u_torso_dmg.tga",
+                ASSET_ROOT "models/players/smarine/2l_legs_dmg.tga"}, 3},
+  {"beret",    {ASSET_ROOT "models/players/beret/skin1_dmg.tga",
+                ASSET_ROOT "models/players/beret/skin2_dmg.tga"}, 2},
+  {"gargoyle", {ASSET_ROOT "models/players/gargoyle/bared_dmg.tga"}, 1},
+  {"penguin",  {ASSET_ROOT "models/players/penguin/skin_dmg.tga"}, 1},
+  {"sergei",   {ASSET_ROOT "models/players/sergei/face_dmg.tga",
+                ASSET_ROOT "models/players/sergei/hairs_dmg.tga",
+                ASSET_ROOT "models/players/sergei/skin_dmg.tga"}, 3},
+  {"skelebot", {ASSET_ROOT "models/players/skelebot/skin1_dmg.tga",
+                ASSET_ROOT "models/players/skelebot/skin2_dmg.tga"}, 2},
+  {"merman",   {ASSET_ROOT "models/players/merman/skin_dmg.tga",
+                ASSET_ROOT "models/players/merman/fins_dmg.tga",
+                ASSET_ROOT "models/players/merman/brac_dmg.tga"}, 3},
+  {"sorceress", {ASSET_ROOT "models/players/sorceress/drowhead_dmg.tga",
+                 ASSET_ROOT "models/players/sorceress/drowbody_dmg.tga",
+                 ASSET_ROOT "models/players/sorceress/rings_dmg.tga"}, 3},
+  {"kyonshi",  {ASSET_ROOT "models/players/kyonshi/skin_dmg.tga",
+                ASSET_ROOT "models/players/kyonshi/torso_dmg.tga",
+                ASSET_ROOT "models/players/kyonshi/hair_dmg.tga",
+                ASSET_ROOT "models/players/kyonshi/eyes_dmg.tga",
+                ASSET_ROOT "models/players/kyonshi/lower_dmg.tga"}, 5}};
 
 // ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 //
@@ -217,43 +278,6 @@ typedef struct {float x, y, z, w;} vec4;
 // A 4×4 column-major matrix for view, projection, and model transforms
 typedef struct {float E[16];} mat4;
 
-// Per-scene environment settings
-typedef struct {
-  vec3   Sun_Direction;      // Normalized world-space sun direction
-  vec3   Sun_Color;          // Sun radiance (linear HDR)
-  float  Sun_Angular_Radius; // Disk angular radius in radians
-  float  Sun_Intensity;      // Radiance multiplier
-  vec3   Sky_Zenith;         // Sky color at zenith
-  vec3   Sky_Horizon;        // Sky color at horizon
-  float  Sky_Intensity;      // Sky ambient multiplier
-  vec3   Ambient_Up;         // Ambient irradiance from above
-  vec3   Ambient_Down;       // Ambient irradiance from below
-  vec3   Fog_Color;          // Fog/haze color
-  float  Fog_Density;        // Exponential fog density factor
-  float  Sun_Disc_Size;      // Visual angular size of sun disc
-  float  Sun_Disc_Intensity; // Brightness of the sun disc in the sky
-} Scene_Environment;
-
-const Scene_Environment DEFAULT_ENVIRONMENT = {
-  .Sun_Direction      = {0.5f, 0.7f,  0.5f},   // High sun angle
-  .Sun_Color          = {1.0f, 0.95f, 0.85f},  // Warm daylight
-  .Sun_Angular_Radius = 0.02f,                 // ~1.1 degrees (Earth sun ≈ 0.53°)
-  .Sun_Intensity      = 4.0f,                  // Strong direct light
-  .Sky_Zenith         = {0.15f, 0.25f, 0.55f}, // Deep blue zenith
-  .Sky_Horizon        = {0.4f,  0.5f,  0.6f},  // Hazy lighter blue at horizon
-  .Sky_Intensity      = 1.2f,                  // Sky brightness multiplier
-  .Ambient_Up         = {0.16f, 0.19f, 0.24f}, // Moderate cool fill - dark shadows but not black
-  .Ambient_Down       = {0.12f, 0.10f, 0.08f}, // Subtle warm ground bounce
-  .Fog_Color          = {0.35f, 0.38f, 0.42f}, // Subtle atmospheric haze
-  .Fog_Density        = 0.00008f,              // Barely visible distance haze
-  .Sun_Disc_Size      = 0.03f,                 // Visual disc angular radius
-  .Sun_Disc_Intensity = 8.0f,                  // Bright sun disc in sky
-};
-Scene_Environment Active_Environment;
-
-// Builds per-scene environment settings by examining BSP shader names
-Scene_Environment Environment_Infer_From_Scene (const Scene *S)
-
 // Sampled keyboard and mouse state for a single frame
 typedef struct {
   int   Forward, Back, Left, Right, Jump, Fire, Crouch; // Binary key states: 1 if held, 0 otherwise
@@ -270,13 +294,6 @@ typedef enum {
   OTHER_DEACTIVATED,   // Focus lost to another window
   MINIMIZE_DEACTIVATED // Window was minimized
 } Activated_Kind;
-
-// Aspect ratio constraints
-#define ASPECT_NARROW_X     21
-#define ASPECT_NARROW_Y     9
-#define ASPECT_WIDE_X       4
-#define ASPECT_WIDE_Y       3
-#define MINIMUM_WINDOW_SIZE 256
 
 // Projectile
 typedef struct {
@@ -367,456 +384,6 @@ typedef struct {
   Gpu_Buffer                 Buffer;  // GPU buffer holding the acceleration structure data
   VkDeviceAddress            Address; // Device address for referencing from shaders and TLAS builds
 } Acceleration_Structure;
-
-// Per-frame camera state uploaded to the GPU as a uniform buffer
-typedef struct {
-  vec3  Position, Velocity;               // World-space eye position and movement velocity
-  float Yaw, Pitch;                       // Euler angles in radians for horizontal and vertical look
-  mat4  Inverse_View, Inverse_Projection; // Inverse matrices for reconstructing world rays from screen coordinates
-  uint  Frame;                            // Monotonically increasing frame counter for temporal effects
-} Camera;
-
-// Interleaved vertex layout matching the GPU shader input (std430, 48 bytes per vertex)
-typedef struct {
-  float Position   [3], Padding_A;       // World-space XYZ position; padding aligns to 16 bytes
-  float Texture_Uv [2], Lightmap_Uv [2]; // Diffuse texture coordinates and lightmap atlas coordinates
-  float Normal     [3], Padding_B;       // Surface normal; padding aligns to 16 bytes
-} Vertex;
-
-// BSP Entity System
-//
-// The entity lump in BSP files is text key/value records. We tokenize and map known keys into
-// typed fields, then discard the raw pairs. The discriminant union is the authoritative runtime
-// representation. Unknown keys are silently ignored.
-//
-typedef enum {
-  NO_ENTITY = 0,
-
-  // World origin
-  ENTITY_WORLD,
-
-  // Player / camera / navigation
-  ENTITY_INFO_PLAYER_START,        // info_player_start - single-player spawn
-  ENTITY_INFO_PLAYER_SPAWN,        // info_player_deathmatch / team spawn (aliases map here)
-  ENTITY_INFO_PLAYER_INTERMISSION, // info_player_intermission - post-match camera
-  ENTITY_INFO_CAMERA,              // Fixed camera
-  ENTITY_INFO_CAMERA_PATH,         // Camera path node
-  ENTITY_INFO_NAV_NODE,            // AI/path node
-  ENTITY_INFO_OBJECTIVE_NODE,      // Objective marker node
-
-  // Rendering / environment
-  ENTITY_LIGHT,           // Omnidirectional light
-  ENTITY_LIGHT_SPOT,      // Spot light
-  ENTITY_ENV_FOG,         // Fog volume / exponential fog
-  ENTITY_ENV_WIND,        // Wind vector and gusting
-  ENTITY_ENV_SKY,         // Sky / sun / skybox controls
-  ENTITY_ENV_POSTPROCESS, // Tonemap/bloom/exposure controls
-  ENTITY_DECAL,           // Projected decal
-  ENTITY_PARTICLE_SYSTEM, // Particle emitter
-  ENTITY_SOUND_EMITTER,   // Ambient or positional sound (target_speaker)
-
-  // Static and dynamic props
-  ENTITY_PROP_STATIC,  // Static model instance (misc_model)
-  ENTITY_PROP_DYNAMIC, // Animated/dynamic prop
-  ENTITY_PROP_PHYSICS, // Physics-enabled prop
-
-  // Triggers
-  ENTITY_TRIGGER,          // Generic trigger volume
-  ENTITY_TRIGGER_ONCE,     // Fires once then disables
-  ENTITY_TRIGGER_MULTI,    // Re-fires after wait
-  ENTITY_TRIGGER_HURT,     // Damage volume
-  ENTITY_TRIGGER_TELEPORT, // Teleporter volume
-  ENTITY_TRIGGER_PUSH,     // Jump pad / push volume
-  ENTITY_TRIGGER_LADDER,   // Ladder volume
-  ENTITY_TRIGGER_WATER,    // Water volume trigger
-  ENTITY_TRIGGER_SCRIPT,   // Scripted trigger volume
-
-  // Targets and links
-  ENTITY_TARGET_POSITION,    // Destination point
-  ENTITY_TARGET_RELAY,       // Relay event
-  ENTITY_TARGET_DELAY,       // Delay proxy
-  ENTITY_TARGET_RANDOM,      // Random choice proxy
-  ENTITY_TARGET_CHANGELEVEL, // Exit transition node
-
-  // Movers
-  ENTITY_DOOR_SLIDING,  // Linear door
-  ENTITY_DOOR_ROTATING, // Hinged door
-  ENTITY_BUTTON,        // Press button
-  ENTITY_PLATFORM,      // Up/down lift
-  ENTITY_ELEVATOR,      // Multi-stop lift
-  ENTITY_TRAIN,         // Path-based mover
-  ENTITY_ROTATING,      // Rotating mover
-  ENTITY_CONVEYOR,      // Conveyor mover
-  ENTITY_BREAKABLE,     // Breakable brush/prop
-  ENTITY_EXPLOSIVE,     // Explosive object
-
-  // Items
-  ENTITY_ITEM_GENERIC, // General pickup
-  ENTITY_ITEM_WEAPON,  // Weapon pickup
-  ENTITY_ITEM_AMMO,    // Ammo pickup
-  ENTITY_ITEM_HEALTH,  // Health pickup
-  ENTITY_ITEM_ARMOR,   // Armor pickup
-  ENTITY_ITEM_POWERUP, // Timed powerup pickup
-  ENTITY_ITEM_KEY,     // Access pickup
-
-  // Combat and spawners
-  ENTITY_PROJECTILE_SPAWNER, // Spawns projectiles periodically or on trigger
-  ENTITY_NPC_SPAWNER,        // Spawns NPCs
-  ENTITY_ITEM_SPAWNER,       // Spawns items
-  ENTITY_TURRET,             // Mounted turret
-  ENTITY_VEHICLE,            // Vehicle actor
-  ENTITY_NPC,                // NPC actor
-
-  // Objectives and gameflow
-  ENTITY_OBJECTIVE,  // Objective entity (capture/defend/use/collect)
-  ENTITY_GAME_RULES, // Mode rules, score limits, time limits
-
-  // Pure logic blocks
-  ENTITY_LOGIC_RELAY,    // Relay
-  ENTITY_LOGIC_TIMER,    // Periodic fire
-  ENTITY_LOGIC_COUNTER,  // Count threshold
-  ENTITY_LOGIC_COMPARE,  // Compare values
-  ENTITY_LOGIC_BRANCH,   // If/else
-  ENTITY_LOGIC_RANDOM,   // Random chance
-  ENTITY_LOGIC_SEQUENCE, // Sequence of outputs
-  ENTITY_SCRIPT,         // Script controller
-
-  ENTITY_KIND_COUNT
-} Entity_Kind;
-
-// Weapon archetype identifiers (generic, engine-side)
-typedef enum {
-  WEAPON_NONE = 0,
-  WEAPON_MELEE,   // Gauntlet
-  WEAPON_PISTOL,
-  WEAPON_SMG,     // Machinegun
-  WEAPON_SHOTGUN,
-  WEAPON_RIFLE,
-  WEAPON_LMG,
-  WEAPON_SNIPER,
-  WEAPON_GRENADE, // Grenade launcher
-  WEAPON_ROCKET,  // Rocket launcher
-  WEAPON_ENERGY,  // Plasma gun
-  WEAPON_LIGHTNING,
-  WEAPON_RAIL,    // Railgun
-  WEAPON_BFG,
-  WEAPON_KIND_COUNT
-} Weapon_Kind;
-
-// Ammo identifiers 
-typedef enum {
-  AMMO_NONE = 0,
-  AMMO_BULLETS,
-  AMMO_SHELLS,
-  AMMO_SLUGS,
-  AMMO_GRENADES,
-  AMMO_ROCKETS,
-  AMMO_CELLS,
-  AMMO_ENERGY,
-  AMMO_KIND_COUNT
-} Ammo_Kind;
-
-// Powerup identifiers 
-typedef enum {
-  POWERUP_NONE = 0,
-  POWERUP_QUAD_DAMAGE,
-  POWERUP_HASTE,
-  POWERUP_INVISIBILITY,
-  POWERUP_REGENERATION,
-  POWERUP_FLIGHT,
-  POWERUP_ENV_SUIT,
-  POWERUP_INVULNERABLE,
-  POWERUP_KIND_COUNT
-} Powerup_Kind;
-
-// Objective identifiers )
-typedef enum {
-  OBJECTIVE_NONE = 0,
-  OBJECTIVE_USE,
-  OBJECTIVE_CAPTURE,
-  OBJECTIVE_DEFEND,
-  OBJECTIVE_COLLECT,
-  OBJECTIVE_DESTROY,
-  OBJECTIVE_ESCAPE,
-  OBJECTIVE_HOLD,
-  OBJECTIVE_KIND_COUNT
-} Objective_Kind;
-
-// Common entity attributes
-typedef struct {
-
-  // Identity / linkage
-  char Name    [64]; // Graph node name (e.g. "targetname")
-  char Target  [64]; // Primary target id
-  char Target2 [64]; // Secondary target id
-  char Parent  [64]; // Parent attachment id
-
-  // Transform
-  vec3  Origin; // World-space position
-  vec3  Angles; // Pitch/Yaw/Roll degrees
-  float Scale;  // Uniform scale
-
-  // Bounds for volumes and brush entities
-  vec3  Mins;   // Local or world mins
-  vec3  Maxs;   // Local or world maxs
-  float Radius; // Radius for spherical volumes
-  float Height; // Height for cylindrical volumes
-
-  // Rendering assets
-  char Model    [96];  // Model path (mesh, brush model token, etc)
-  char Material [96];  // Material/shader path
-  char Sound    [96];  // Sound file path
-  char Script   [96];  // Script path
-  char Message  [128]; // UI/message string
-  vec3 Color;          // RGB (0..1) where applicable
-  float Alpha;         // Opacity (1.0 default)
-
-  // Gameplay and physics
-  int   Spawnflags; // Generic spawnflags bitfield
-  int   Flags;      // Generic runtime flags (engine-defined)
-  int   Team;       // Team or faction id
-  int   Health;     // Hit points (0 if not damageable)
-  int   Armor;      // Armor points (0 if unused)
-  int   Damage;     // Damage (for hurt/explosive/etc)
-  int   Count;      // Generic count (quantity, etc)
-  float Speed;      // Generic speed (doors/movers/projectiles)
-  float Accel;    
-  float Decel;  
-  float Wait;       // Seconds
-  float Delay;      // Seconds
-  float Random;     // Random variance (seconds or scalar)
-} Entity_Common;
-
-// BSP Entity discriminate union
-typedef struct {
-  Entity_Kind   Kind;   // Discriminant tag
-  Entity_Common Common; // Shared attributes 
-  union { // case Kind is
-
-    // when ENTITY_WORLD =>
-    struct {
-      float Gravity;       // World gravity scalar (0 = engine default 800)
-      float Time_Limit;    // Match time limit (0 = none)
-      int   Score_Limit;   // Score limit (0 = none)
-      float Ambient_Light; // Scalar ambient floor
-    } world;
-
-    // when ENTITY_INFO_PLAYER_ =>
-    struct {
-      int   Player_Class;  // Class index (0 = default)
-      int   Loadout;       // Loadout id (0 = default)
-      float Fov;           // Suggested FOV (0 = engine default)
-      float View_Height;   // Standing view height (0 = engine default)
-      float Crouch_Height; // Crouch view height (0 = engine default)
-    } player;
-
-    // when ENTITY_LIGHT | ENTITY_LIGHT_SPOT =>
-    struct {
-      float Intensity;    // Luminous intensity / radius scalar
-      float Range;        // Explicit range (0 = derived from intensity)
-      float Inner_Angle;  // Spot inner cone degrees (spot only)
-      float Outer_Angle;  // Spot outer cone degrees (spot only)
-      int   Cast_Shadows; // Non-zero = shadow caster
-      float Falloff;      // 1 = linear, 2 = quadratic, etc
-    } light;
-
-    // when ENTITY_SOUND_EMITTER =>
-    struct {
-      float Volume;       // 0..1
-      float Pitch;        // 1 = normal
-      float Min_Distance; // Full volume within this distance
-      float Max_Distance; // Silence beyond this distance
-      int   Looping;      // Non-zero = loop
-    } sound;
-
-    // when ENTITY_DECAL =>
-    struct {
-      float Size_X, Size_Y; // Projected size
-      float Rotation;       // Degrees
-      float Fade_Time;      // Seconds until fully faded (0 = never)
-    } decal;
-
-    // when ENTITY_PARTICLE_SYSTEM =>
-    struct {
-      float Rate;     // Particles per second
-      float Lifetime; // Seconds
-      float Spread;   // Cone spread scalar
-      float Velocity; // Initial speed scalar
-    } particle;
-
-    // when ENTITY_TRIGGER* =>
-    struct {
-      int   Enabled;      // Non-zero = active
-      int   Filter_Team;  // 0 = any, else team id
-      int   Filter_Class; // 0 = any, else class id
-      int   Fire_Count;   // How many times it can fire (0 = infinite)
-    } trigger;
-
-    // when ENTITY_TRIGGER_TELEPORT =>
-    struct {
-      int   Preserve_Velocity; // Non-zero = keep incoming velocity
-    } teleport;
-
-    // when ENTITY_TRIGGER_PUSH =>
-    struct {
-      vec3  Push_Dir;   // Direction (unit or non-unit; engine normalizes)
-      float Push_Speed; // Magnitude
-    } push;
-
-    // when movers/doors/platform/train =>
-    struct {
-      vec3  Move_Dir;    // Movement direction (normalized by loader)
-      float Lip;         // Remaining overlap at end of travel
-      float Distance;    // Travel distance (0 = derived from bounds)
-      float Open_Angle;  // For rotating doors
-      int   Toggle;      // Non-zero = toggle behavior
-      int   Starts_Open; // Non-zero = initial state open/active
-    } mover;
-
-    // when ENTITY_BREAKABLE | ENTITY_EXPLOSIVE =>
-    struct {
-      float Explosion_Radius; // Blast radius
-      float Explosion_Force;  // Impulse scalar
-      int   Gib_Count;        // Debris count
-    } breakable;
-
-    // when ENTITY_ITEM_ =>
-    struct {
-      Weapon_Kind  Weapon;   // For ENTITY_ITEM_WEAPON
-      Ammo_Kind    Ammo;     // For ENTITY_ITEM_AMMO
-      Powerup_Kind Powerup;  // For ENTITY_ITEM_POWERUP
-      int          Key_Id;   // For ENTITY_ITEM_KEY
-      int          Respawn;  // Respawn seconds (0 = default)
-      float        Duration; // Powerup duration seconds (0 = default)
-    } item;
-
-    // when ENTITY_PROJECTILE_SPAWNER =>
-    struct {
-      float Fire_Rate;        // Shots per second
-      float Projectile_Speed; // Speed scalar
-      float Spread;           // Spread scalar
-      int   Burst;            // Shots per burst
-    } projectile_spawner;
-
-    // when ENTITY_TURRET =>
-    struct {
-      float Yaw_Rate;         // Degrees/sec
-      float Pitch_Rate;       // Degrees/sec
-      float Yaw_Min, Yaw_Max; // Limits
-      float Pitch_Min, Pitch_Max;
-      Weapon_Kind Weapon;
-    } turret;
-
-    // when ENTITY_VEHICLE =>
-    struct {
-      float Mass;         // kg scalar
-      float Engine_Power; // generic power scalar
-      float Turn_Rate;    // degrees/sec
-      int   Seats;        // seat count
-    } vehicle;
-
-    // when ENTITY_NPC =>
-    struct {
-      int   Npc_Class;    // class index
-      float Aggro_Radius; // detection range
-      float Walk_Speed;   // units/sec
-      float Run_Speed;    // units/sec
-    } npc;
-
-    // when ENTITY_OBJECTIVE =>
-    struct {
-      Objective_Kind Obj_Kind;
-      int   Required_Count; // e.g. collect N items
-      float Hold_Time;      // hold/capture seconds
-      int   Obj_Team;       // owning team (0 = neutral)
-    } objective;
-
-    // when ENTITY_LOGIC_* =>
-    struct {
-      int   Value_A;
-      int   Value_B;
-      int   Threshold;
-      float Interval;
-      float Chance; // 0..1
-    } logic;
-  };
-} BSP_Entity;
-
-#define MAX_BSP_ENTITIES 4096
-
-// Aggregate scene geometry and material data loaded from a BSP
-typedef struct {
-  Vertex  *Vertices;  uint Vertex_Count;    // Vertex array and its element count
-  uint    *Indices;   uint Index_Count;     // Index array (triangles) and its element count
-  vec4    *Materials; uint Material_Count;  // Per-surface RGBA material tints and their count
-  uint    *Texture_Ids;                     // Per-triangle texture index into the texture array
-  char   (*Texture_Names) [64];             // Shader/texture name strings from the BSP (64-char max each)
-  uint     Triangle_Count;                  // Total triangles (Index_Count / 3)
-  uint8_t *Lightmap_Atlas;                  // Packed lightmap atlas in RGBA8 format
-  uint     Lightmap_Width, Lightmap_Height; // Atlas dimensions in pixels
-  BSP_Entity *Entities;                     // Parsed entities from the BSP entity lump (heap-allocated)
-  uint        Entity_Count;                 // Number of valid entities
-} Scene;   
-
-// Single spawn point parsed from the BSP entity lump
-typedef struct {vec3 Origin; float Angle;} Spawn; // World-space origin and facing angle in degrees
-
-// Parsed weapon model assembled from multiple MD3 surfaces
-typedef struct {
-  Vertex *Vertices;     uint Vertex_Count;     // Merged vertex array from all surfaces
-  uint    *Indices;     uint Index_Count;      // Merged index array from all surfaces
-  uint    *Texture_Ids; uint Triangle_Count;   // Per-triangle texture index and total triangle count
-  float   Tag_Barrel[12];                      // Barrel attachment transform: origin[3] + axis[9]
-  float   Tag_Weapon[MD3_MAX_ANIM_FRAMES][12]; // Per-frame weapon tag transforms (up to 30 animation frames)
-  uint    Animation_Frame_Count;               // Number of valid frames in the Tag_Weapon array
-  char    Texture_Names[MD3_MAX_SURFACES][64]; // Texture path for each surface (body, barrel, hand)
-  uint    Surface_Count;                       // Number of surfaces composing this weapon (typically 3)
-} Weapon_Model;
-
-// Runtime weapon state combining the model data with per-frame animation and GPU resources
-typedef struct {
-  Weapon_Model           Model;                // Parsed model geometry and attachment tags
-  Vertex                *Transformed_Vertices; // Scratch buffer for CPU-side per-frame vertex transformation
-  int                    Is_Firing;            // Non-zero while the fire button is held
-  float                  Fire_Time, Bob_Time;  // Recoil decay timer and idle bob phase accumulator
-  Gpu_Buffer             Vertex_Buffer, Index_Buffer, Texture_Id_Buffer; // GPU buffers for weapon geometry
-  Acceleration_Structure Bottom_Level;         // BLAS for the weapon (rebuilt each frame)
-  Gpu_Buffer             Bottom_Level_Scratch; // Scratch buffer reused across BLAS rebuilds
-  uint                   Texture_Base_Index;   // Starting index into the global texture array for weapon textures
-} Weapon_Instance;
-
-// Animated entity with pre-computed per-frame vertex data for BLAS refit
-#define ENTITY_MAX_FRAMES 16
-typedef struct {
-  Vertex *Frame_Vertices[ENTITY_MAX_FRAMES]; // Pre-computed world-space vertices for each animation frame
-  uint    Frame_Count;                       // Number of animation frames (LEGS_IDLE = 10)
-  float   Frame_FPS;                         // Animation playback rate (from animation.cfg)
-  float   Animation_Time;                    // Elapsed time accumulator
-  uint    Vertex_Count, Index_Count, Triangle_Count;
-  uint   *Indices;                           // Shared index array (topology identical across frames)
-  uint   *Texture_Ids;                       // Per-triangle global texture indices
-  Vertex *Current_Vertices;                  // Pointer to the active frame's vertex data
-  Gpu_Buffer             Vertex_Buffer;      // Host-visible, re-uploaded each frame
-  Gpu_Buffer             Index_Buffer;       // Device-local, static
-  Gpu_Buffer             Texture_Id_Buffer;  // Device-local, static
-  Acceleration_Structure Bottom_Level;       // BLAS (refit each frame)
-  Gpu_Buffer             Bottom_Level_Scratch;
-  vec3                   GL_Origin;          // World-space position in GL Y-up coordinates (for TLAS transform)
-  float                  GL_Yaw;             // Entity yaw angle in GL space (radians)
-} Entity;
-
-// Player movement state
-typedef struct {
-  vec3  Position;      // World-space position of the player's bounding box origin
-  vec3  Velocity;      // Current velocity in units per second
-  float Yaw, Pitch;    // Look direction: yaw (horizontal) and pitch (vertical) in radians
-  int   On_Ground;     // Non-zero if the player is standing on a walkable surface
-  int   Jump_Held;     // Non-zero if the jump key was held last frame (prevents auto-bunny-hopping)
-  vec3  Ground_Normal; // Surface normal of the ground plane the player is standing on
-  int   Ground_Plane;  // Non-zero if the ground trace hit a valid plane (not an edge or brush start)
-  int   Ducked;        // Non-zero if the player is crouching
-  float View_Height;   // Camera height offset from Position.y (smoothly interpolated)
-} Player;
 
 // Quickhull internal types used during hull construction
 typedef struct {int A, B, C; int Dead;} Quickhull_Face;
@@ -1256,6 +823,491 @@ typedef struct {
   int  Flags, Contents; // Surface flags (e.g. translucent) and content flags (e.g. solid, water)
 } BSP_Shader;
 
+
+// Per-frame camera state uploaded to the GPU as a uniform buffer
+typedef struct {
+  vec3  Position, Velocity;               // World-space eye position and movement velocity
+  float Yaw, Pitch;                       // Euler angles in radians for horizontal and vertical look
+  mat4  Inverse_View, Inverse_Projection; // Inverse matrices for reconstructing world rays from screen coordinates
+  uint  Frame;                            // Monotonically increasing frame counter for temporal effects
+} Camera;
+
+// Interleaved vertex layout matching the GPU shader input (std430, 48 bytes per vertex)
+typedef struct {
+  float Position   [3], Padding_A;       // World-space XYZ position; padding aligns to 16 bytes
+  float Texture_Uv [2], Lightmap_Uv [2]; // Diffuse texture coordinates and lightmap atlas coordinates
+  float Normal     [3], Padding_B;       // Surface normal; padding aligns to 16 bytes
+} Vertex;
+
+// Per-scene environment settings
+typedef struct {
+  vec3   Sun_Direction;      // Normalized world-space sun direction
+  vec3   Sun_Color;          // Sun radiance (linear HDR)
+  float  Sun_Angular_Radius; // Disk angular radius in radians
+  float  Sun_Intensity;      // Radiance multiplier
+  vec3   Sky_Zenith;         // Sky color at zenith
+  vec3   Sky_Horizon;        // Sky color at horizon
+  float  Sky_Intensity;      // Sky ambient multiplier
+  vec3   Ambient_Up;         // Ambient irradiance from above
+  vec3   Ambient_Down;       // Ambient irradiance from below
+  vec3   Fog_Color;          // Fog/haze color
+  float  Fog_Density;        // Exponential fog density factor
+  float  Sun_Disc_Size;      // Visual angular size of sun disc
+  float  Sun_Disc_Intensity; // Brightness of the sun disc in the sky
+} Scene_Environment;
+
+const Scene_Environment DEFAULT_ENVIRONMENT = {
+  .Sun_Direction      = {0.5f, 0.7f,  0.5f},   // High sun angle
+  .Sun_Color          = {1.0f, 0.95f, 0.85f},  // Warm daylight
+  .Sun_Angular_Radius = 0.02f,                 // ~1.1 degrees (Earth sun ≈ 0.53°)
+  .Sun_Intensity      = 4.0f,                  // Strong direct light
+  .Sky_Zenith         = {0.15f, 0.25f, 0.55f}, // Deep blue zenith
+  .Sky_Horizon        = {0.4f,  0.5f,  0.6f},  // Hazy lighter blue at horizon
+  .Sky_Intensity      = 1.2f,                  // Sky brightness multiplier
+  .Ambient_Up         = {0.16f, 0.19f, 0.24f}, // Moderate cool fill - dark shadows but not black
+  .Ambient_Down       = {0.12f, 0.10f, 0.08f}, // Subtle warm ground bounce
+  .Fog_Color          = {0.35f, 0.38f, 0.42f}, // Subtle atmospheric haze
+  .Fog_Density        = 0.00008f,              // Barely visible distance haze
+  .Sun_Disc_Size      = 0.03f,                 // Visual disc angular radius
+  .Sun_Disc_Intensity = 8.0f,                  // Bright sun disc in sky
+};
+Scene_Environment Active_Environment;
+
+// BSP Entity System
+//
+// The entity lump in BSP files is text key/value records. We tokenize and map known keys into
+// typed fields, then discard the raw pairs. The discriminant union is the authoritative runtime
+// representation. Unknown keys are silently ignored.
+//
+typedef enum {
+  NO_ENTITY = 0,
+
+  // World origin
+  ENTITY_WORLD,
+
+  // Player / camera / navigation
+  ENTITY_INFO_PLAYER_START,        // info_player_start - single-player spawn
+  ENTITY_INFO_PLAYER_SPAWN,        // info_player_deathmatch / team spawn (aliases map here)
+  ENTITY_INFO_PLAYER_INTERMISSION, // info_player_intermission - post-match camera
+  ENTITY_INFO_CAMERA,              // Fixed camera
+  ENTITY_INFO_CAMERA_PATH,         // Camera path node
+  ENTITY_INFO_NAV_NODE,            // AI/path node
+  ENTITY_INFO_OBJECTIVE_NODE,      // Objective marker node
+
+  // Rendering / environment
+  ENTITY_LIGHT,           // Omnidirectional light
+  ENTITY_LIGHT_SPOT,      // Spot light
+  ENTITY_ENV_FOG,         // Fog volume / exponential fog
+  ENTITY_ENV_WIND,        // Wind vector and gusting
+  ENTITY_ENV_SKY,         // Sky / sun / skybox controls
+  ENTITY_ENV_POSTPROCESS, // Tonemap/bloom/exposure controls
+  ENTITY_DECAL,           // Projected decal
+  ENTITY_PARTICLE_SYSTEM, // Particle emitter
+  ENTITY_SOUND_EMITTER,   // Ambient or positional sound (target_speaker)
+
+  // Static and dynamic props
+  ENTITY_PROP_STATIC,  // Static model instance (misc_model)
+  ENTITY_PROP_DYNAMIC, // Animated/dynamic prop
+  ENTITY_PROP_PHYSICS, // Physics-enabled prop
+
+  // Triggers
+  ENTITY_TRIGGER,          // Generic trigger volume
+  ENTITY_TRIGGER_ONCE,     // Fires once then disables
+  ENTITY_TRIGGER_MULTI,    // Re-fires after wait
+  ENTITY_TRIGGER_HURT,     // Damage volume
+  ENTITY_TRIGGER_TELEPORT, // Teleporter volume
+  ENTITY_TRIGGER_PUSH,     // Jump pad / push volume
+  ENTITY_TRIGGER_LADDER,   // Ladder volume
+  ENTITY_TRIGGER_WATER,    // Water volume trigger
+  ENTITY_TRIGGER_SCRIPT,   // Scripted trigger volume
+
+  // Targets and links
+  ENTITY_TARGET_POSITION,    // Destination point
+  ENTITY_TARGET_RELAY,       // Relay event
+  ENTITY_TARGET_DELAY,       // Delay proxy
+  ENTITY_TARGET_RANDOM,      // Random choice proxy
+  ENTITY_TARGET_CHANGELEVEL, // Exit transition node
+
+  // Movers
+  ENTITY_DOOR_SLIDING,  // Linear door
+  ENTITY_DOOR_ROTATING, // Hinged door
+  ENTITY_BUTTON,        // Press button
+  ENTITY_PLATFORM,      // Up/down lift
+  ENTITY_ELEVATOR,      // Multi-stop lift
+  ENTITY_TRAIN,         // Path-based mover
+  ENTITY_ROTATING,      // Rotating mover
+  ENTITY_CONVEYOR,      // Conveyor mover
+  ENTITY_BREAKABLE,     // Breakable brush/prop
+  ENTITY_EXPLOSIVE,     // Explosive object
+
+  // Items
+  ENTITY_ITEM_GENERIC, // General pickup
+  ENTITY_ITEM_WEAPON,  // Weapon pickup
+  ENTITY_ITEM_AMMO,    // Ammo pickup
+  ENTITY_ITEM_HEALTH,  // Health pickup
+  ENTITY_ITEM_ARMOR,   // Armor pickup
+  ENTITY_ITEM_POWERUP, // Timed powerup pickup
+  ENTITY_ITEM_KEY,     // Access pickup
+
+  // Combat and spawners
+  ENTITY_PROJECTILE_SPAWNER, // Spawns projectiles periodically or on trigger
+  ENTITY_NPC_SPAWNER,        // Spawns NPCs
+  ENTITY_ITEM_SPAWNER,       // Spawns items
+  ENTITY_TURRET,             // Mounted turret
+  ENTITY_VEHICLE,            // Vehicle actor
+  ENTITY_NPC,                // NPC actor
+
+  // Objectives and gameflow
+  ENTITY_OBJECTIVE,  // Objective entity (capture/defend/use/collect)
+  ENTITY_GAME_RULES, // Mode rules, score limits, time limits
+
+  // Pure logic blocks
+  ENTITY_LOGIC_RELAY,    // Relay
+  ENTITY_LOGIC_TIMER,    // Periodic fire
+  ENTITY_LOGIC_COUNTER,  // Count threshold
+  ENTITY_LOGIC_COMPARE,  // Compare values
+  ENTITY_LOGIC_BRANCH,   // If/else
+  ENTITY_LOGIC_RANDOM,   // Random chance
+  ENTITY_LOGIC_SEQUENCE, // Sequence of outputs
+  ENTITY_SCRIPT,         // Script controller
+
+  ENTITY_KIND_COUNT
+} Entity_Kind;
+
+// Weapon archetype identifiers (generic, engine-side)
+typedef enum {
+  WEAPON_NONE = 0,
+  WEAPON_MELEE,   // Gauntlet
+  WEAPON_PISTOL,
+  WEAPON_SMG,     // Machinegun
+  WEAPON_SHOTGUN,
+  WEAPON_RIFLE,
+  WEAPON_LMG,
+  WEAPON_SNIPER,
+  WEAPON_GRENADE, // Grenade launcher
+  WEAPON_ROCKET,  // Rocket launcher
+  WEAPON_ENERGY,  // Plasma gun
+  WEAPON_LIGHTNING,
+  WEAPON_RAIL,    // Railgun
+  WEAPON_BFG,
+  WEAPON_KIND_COUNT
+} Weapon_Kind;
+
+// Ammo identifiers 
+typedef enum {
+  AMMO_NONE = 0,
+  AMMO_BULLETS,
+  AMMO_SHELLS,
+  AMMO_SLUGS,
+  AMMO_GRENADES,
+  AMMO_ROCKETS,
+  AMMO_CELLS,
+  AMMO_ENERGY,
+  AMMO_KIND_COUNT
+} Ammo_Kind;
+
+// Powerup identifiers 
+typedef enum {
+  POWERUP_NONE = 0,
+  POWERUP_QUAD_DAMAGE,
+  POWERUP_HASTE,
+  POWERUP_INVISIBILITY,
+  POWERUP_REGENERATION,
+  POWERUP_FLIGHT,
+  POWERUP_ENV_SUIT,
+  POWERUP_INVULNERABLE,
+  POWERUP_KIND_COUNT
+} Powerup_Kind;
+
+// Objective identifiers )
+typedef enum {
+  OBJECTIVE_NONE = 0,
+  OBJECTIVE_USE,
+  OBJECTIVE_CAPTURE,
+  OBJECTIVE_DEFEND,
+  OBJECTIVE_COLLECT,
+  OBJECTIVE_DESTROY,
+  OBJECTIVE_ESCAPE,
+  OBJECTIVE_HOLD,
+  OBJECTIVE_KIND_COUNT
+} Objective_Kind;
+
+// Common entity attributes
+typedef struct {
+
+  // Identity / linkage
+  char Name    [64]; // Graph node name (e.g. "targetname")
+  char Target  [64]; // Primary target id
+  char Target2 [64]; // Secondary target id
+  char Parent  [64]; // Parent attachment id
+
+  // Transform
+  vec3  Origin; // World-space position
+  vec3  Angles; // Pitch/Yaw/Roll degrees
+  float Scale;  // Uniform scale
+
+  // Bounds for volumes and brush entities
+  vec3  Mins;   // Local or world mins
+  vec3  Maxs;   // Local or world maxs
+  float Radius; // Radius for spherical volumes
+  float Height; // Height for cylindrical volumes
+
+  // Rendering assets
+  char Model    [96];  // Model path (mesh, brush model token, etc)
+  char Material [96];  // Material/shader path
+  char Sound    [96];  // Sound file path
+  char Script   [96];  // Script path
+  char Message  [128]; // UI/message string
+  vec3 Color;          // RGB (0..1) where applicable
+  float Alpha;         // Opacity (1.0 default)
+
+  // Gameplay and physics
+  int   Spawnflags; // Generic spawnflags bitfield
+  int   Flags;      // Generic runtime flags (engine-defined)
+  int   Team;       // Team or faction id
+  int   Health;     // Hit points (0 if not damageable)
+  int   Armor;      // Armor points (0 if unused)
+  int   Damage;     // Damage (for hurt/explosive/etc)
+  int   Count;      // Generic count (quantity, etc)
+  float Speed;      // Generic speed (doors/movers/projectiles)
+  float Accel;    
+  float Decel;  
+  float Wait;       // Seconds
+  float Delay;      // Seconds
+  float Random;     // Random variance (seconds or scalar)
+} Entity_Common;
+
+// BSP Entity discriminate union
+typedef struct {
+  Entity_Kind   Kind;   // Discriminant tag
+  Entity_Common Common; // Shared attributes 
+  union { // case Kind is
+
+    // when ENTITY_WORLD =>
+    struct {
+      float Gravity;       // World gravity scalar (0 = engine default 800)
+      float Time_Limit;    // Match time limit (0 = none)
+      int   Score_Limit;   // Score limit (0 = none)
+      float Ambient_Light; // Scalar ambient floor
+    } world;
+
+    // when ENTITY_INFO_PLAYER_ =>
+    struct {
+      int   Player_Class;  // Class index (0 = default)
+      int   Loadout;       // Loadout id (0 = default)
+      float Fov;           // Suggested FOV (0 = engine default)
+      float View_Height;   // Standing view height (0 = engine default)
+      float Crouch_Height; // Crouch view height (0 = engine default)
+    } player;
+
+    // when ENTITY_LIGHT | ENTITY_LIGHT_SPOT =>
+    struct {
+      float Intensity;    // Luminous intensity / radius scalar
+      float Range;        // Explicit range (0 = derived from intensity)
+      float Inner_Angle;  // Spot inner cone degrees (spot only)
+      float Outer_Angle;  // Spot outer cone degrees (spot only)
+      int   Cast_Shadows; // Non-zero = shadow caster
+      float Falloff;      // 1 = linear, 2 = quadratic, etc
+    } light;
+
+    // when ENTITY_SOUND_EMITTER =>
+    struct {
+      float Volume;       // 0..1
+      float Pitch;        // 1 = normal
+      float Min_Distance; // Full volume within this distance
+      float Max_Distance; // Silence beyond this distance
+      int   Looping;      // Non-zero = loop
+    } sound;
+
+    // when ENTITY_DECAL =>
+    struct {
+      float Size_X, Size_Y; // Projected size
+      float Rotation;       // Degrees
+      float Fade_Time;      // Seconds until fully faded (0 = never)
+    } decal;
+
+    // when ENTITY_PARTICLE_SYSTEM =>
+    struct {
+      float Rate;     // Particles per second
+      float Lifetime; // Seconds
+      float Spread;   // Cone spread scalar
+      float Velocity; // Initial speed scalar
+    } particle;
+
+    // when ENTITY_TRIGGER* =>
+    struct {
+      int   Enabled;      // Non-zero = active
+      int   Filter_Team;  // 0 = any, else team id
+      int   Filter_Class; // 0 = any, else class id
+      int   Fire_Count;   // How many times it can fire (0 = infinite)
+    } trigger;
+
+    // when ENTITY_TRIGGER_TELEPORT =>
+    struct {
+      int   Preserve_Velocity; // Non-zero = keep incoming velocity
+    } teleport;
+
+    // when ENTITY_TRIGGER_PUSH =>
+    struct {
+      vec3  Push_Dir;   // Direction (unit or non-unit; engine normalizes)
+      float Push_Speed; // Magnitude
+    } push;
+
+    // when movers/doors/platform/train =>
+    struct {
+      vec3  Move_Dir;    // Movement direction (normalized by loader)
+      float Lip;         // Remaining overlap at end of travel
+      float Distance;    // Travel distance (0 = derived from bounds)
+      float Open_Angle;  // For rotating doors
+      int   Toggle;      // Non-zero = toggle behavior
+      int   Starts_Open; // Non-zero = initial state open/active
+    } mover;
+
+    // when ENTITY_BREAKABLE | ENTITY_EXPLOSIVE =>
+    struct {
+      float Explosion_Radius; // Blast radius
+      float Explosion_Force;  // Impulse scalar
+      int   Gib_Count;        // Debris count
+    } breakable;
+
+    // when ENTITY_ITEM_ =>
+    struct {
+      Weapon_Kind  Weapon;   // For ENTITY_ITEM_WEAPON
+      Ammo_Kind    Ammo;     // For ENTITY_ITEM_AMMO
+      Powerup_Kind Powerup;  // For ENTITY_ITEM_POWERUP
+      int          Key_Id;   // For ENTITY_ITEM_KEY
+      int          Respawn;  // Respawn seconds (0 = default)
+      float        Duration; // Powerup duration seconds (0 = default)
+    } item;
+
+    // when ENTITY_PROJECTILE_SPAWNER =>
+    struct {
+      float Fire_Rate;        // Shots per second
+      float Projectile_Speed; // Speed scalar
+      float Spread;           // Spread scalar
+      int   Burst;            // Shots per burst
+    } projectile_spawner;
+
+    // when ENTITY_TURRET =>
+    struct {
+      float Yaw_Rate;         // Degrees/sec
+      float Pitch_Rate;       // Degrees/sec
+      float Yaw_Min, Yaw_Max; // Limits
+      float Pitch_Min, Pitch_Max;
+      Weapon_Kind Weapon;
+    } turret;
+
+    // when ENTITY_VEHICLE =>
+    struct {
+      float Mass;         // kg scalar
+      float Engine_Power; // generic power scalar
+      float Turn_Rate;    // degrees/sec
+      int   Seats;        // seat count
+    } vehicle;
+
+    // when ENTITY_NPC =>
+    struct {
+      int   Npc_Class;    // class index
+      float Aggro_Radius; // detection range
+      float Walk_Speed;   // units/sec
+      float Run_Speed;    // units/sec
+    } npc;
+
+    // when ENTITY_OBJECTIVE =>
+    struct {
+      Objective_Kind Obj_Kind;
+      int   Required_Count; // e.g. collect N items
+      float Hold_Time;      // hold/capture seconds
+      int   Obj_Team;       // owning team (0 = neutral)
+    } objective;
+
+    // when ENTITY_LOGIC_* =>
+    struct {
+      int   Value_A;
+      int   Value_B;
+      int   Threshold;
+      float Interval;
+      float Chance; // 0..1
+    } logic;
+  };
+} BSP_Entity;
+
+#define MAX_BSP_ENTITIES 4096
+
+// Aggregate scene geometry and material data loaded from a BSP
+typedef struct {
+  Vertex  *Vertices;  uint Vertex_Count;    // Vertex array and its element count
+  uint    *Indices;   uint Index_Count;     // Index array (triangles) and its element count
+  vec4    *Materials; uint Material_Count;  // Per-surface RGBA material tints and their count
+  uint    *Texture_Ids;                     // Per-triangle texture index into the texture array
+  char   (*Texture_Names) [64];             // Shader/texture name strings from the BSP (64-char max each)
+  uint     Triangle_Count;                  // Total triangles (Index_Count / 3)
+  uint8_t *Lightmap_Atlas;                  // Packed lightmap atlas in RGBA8 format
+  uint     Lightmap_Width, Lightmap_Height; // Atlas dimensions in pixels
+  BSP_Entity *Entities;                     // Parsed entities from the BSP entity lump (heap-allocated)
+  uint        Entity_Count;                 // Number of valid entities
+} Scene;   
+
+// Single spawn point parsed from the BSP entity lump
+typedef struct {vec3 Origin; float Angle;} Spawn; // World-space origin and facing angle in degrees
+
+// Parsed weapon model assembled from multiple MD3 surfaces
+typedef struct {
+  Vertex *Vertices;     uint Vertex_Count;     // Merged vertex array from all surfaces
+  uint    *Indices;     uint Index_Count;      // Merged index array from all surfaces
+  uint    *Texture_Ids; uint Triangle_Count;   // Per-triangle texture index and total triangle count
+  float   Tag_Barrel[12];                      // Barrel attachment transform: origin[3] + axis[9]
+  float   Tag_Weapon[MD3_MAX_ANIM_FRAMES][12]; // Per-frame weapon tag transforms (up to 30 animation frames)
+  uint    Animation_Frame_Count;               // Number of valid frames in the Tag_Weapon array
+  char    Texture_Names[MD3_MAX_SURFACES][64]; // Texture path for each surface (body, barrel, hand)
+  uint    Surface_Count;                       // Number of surfaces composing this weapon (typically 3)
+} Weapon_Model;
+
+// Runtime weapon state combining the model data with per-frame animation and GPU resources
+typedef struct {
+  Weapon_Model           Model;                // Parsed model geometry and attachment tags
+  Vertex                *Transformed_Vertices; // Scratch buffer for CPU-side per-frame vertex transformation
+  int                    Is_Firing;            // Non-zero while the fire button is held
+  float                  Fire_Time, Bob_Time;  // Recoil decay timer and idle bob phase accumulator
+  Gpu_Buffer             Vertex_Buffer, Index_Buffer, Texture_Id_Buffer; // GPU buffers for weapon geometry
+  Acceleration_Structure Bottom_Level;         // BLAS for the weapon (rebuilt each frame)
+  Gpu_Buffer             Bottom_Level_Scratch; // Scratch buffer reused across BLAS rebuilds
+  uint                   Texture_Base_Index;   // Starting index into the global texture array for weapon textures
+} Weapon_Instance;
+
+// Animated entity with pre-computed per-frame vertex data for BLAS refit
+#define ENTITY_MAX_FRAMES 16
+typedef struct {
+  Vertex *Frame_Vertices[ENTITY_MAX_FRAMES]; // Pre-computed world-space vertices for each animation frame
+  uint    Frame_Count;                       // Number of animation frames (LEGS_IDLE = 10)
+  float   Frame_FPS;                         // Animation playback rate (from animation.cfg)
+  float   Animation_Time;                    // Elapsed time accumulator
+  uint    Vertex_Count, Index_Count, Triangle_Count;
+  uint   *Indices;                           // Shared index array (topology identical across frames)
+  uint   *Texture_Ids;                       // Per-triangle global texture indices
+  Vertex *Current_Vertices;                  // Pointer to the active frame's vertex data
+  Gpu_Buffer             Vertex_Buffer;      // Host-visible, re-uploaded each frame
+  Gpu_Buffer             Index_Buffer;       // Device-local, static
+  Gpu_Buffer             Texture_Id_Buffer;  // Device-local, static
+  Acceleration_Structure Bottom_Level;       // BLAS (refit each frame)
+  Gpu_Buffer             Bottom_Level_Scratch;
+  vec3                   GL_Origin;          // World-space position in GL Y-up coordinates (for TLAS transform)
+  float                  GL_Yaw;             // Entity yaw angle in GL space (radians)
+} Entity;
+
+// Player movement state
+typedef struct {
+  vec3  Position;      // World-space position of the player's bounding box origin
+  vec3  Velocity;      // Current velocity in units per second
+  float Yaw, Pitch;    // Look direction: yaw (horizontal) and pitch (vertical) in radians
+  int   On_Ground;     // Non-zero if the player is standing on a walkable surface
+  int   Jump_Held;     // Non-zero if the jump key was held last frame (prevents auto-bunny-hopping)
+  vec3  Ground_Normal; // Surface normal of the ground plane the player is standing on
+  int   Ground_Plane;  // Non-zero if the ground trace hit a valid plane (not an edge or brush start)
+  int   Ducked;        // Non-zero if the player is crouching
+  float View_Height;   // Camera height offset from Position.y (smoothly interpolated)
+} Player;
+
 // Convert a BSP vertex from Quake 3's Z-up coordinate system to our Y-up system: (x,y,z) becomes (x,z,-y).
 Vertex Convert_BSP_Vertex (const BSP_Vertex *Source);
 
@@ -1277,6 +1329,9 @@ Spawn BSP_Find_Spawn (const uint8_t *File_Data, const BSP_Header *Header);
 // Stores results in Out_Entities and returns the count.
 uint BSP_Parse_Entities (const uint8_t *File_Data, const BSP_Header *Header,
                          BSP_Entity *Out_Entities, uint Max_Entities);
+
+// Builds per-scene environment settings by examining BSP shader names
+Scene_Environment Environment_Infer_From_Scene (const Scene *S);
 
 // Load a complete scene from a Quake 3 BSP file
 Scene Scene_Load_From_BSP (const char *Path, Spawn *Out_Spawn);
@@ -1649,60 +1704,9 @@ void Vulkan_Recreate_Swapchain ();
 void Vulkan_Create_Synchronization ();
 void Vulkan_Transition_Storage_Image ();
 
-// ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
-//
-// §15. Assets
-//
-// ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
-
-// Paths to the weapon model's diffuse textures (body and sight)
-#define WEAPON_TEXTURE_COUNT 2
-const char *WEAPON_TEXTURE_PATHS[] = {ASSET_ROOT "models/weapons2/machinegun/mgun.tga",
-                                      ASSET_ROOT "models/weapons2/machinegun/sight.tga"};
-
-// Paths to the three-part machinegun weapon model (body, barrel, hand)
-#define WEAPON_BODY_PATH   ASSET_ROOT "models/weapons2/machinegun/machinegun.md3"
-#define WEAPON_BARREL_PATH ASSET_ROOT "models/weapons2/machinegun/machinegun_barrel.md3"
-#define WEAPON_HAND_PATH   ASSET_ROOT "models/weapons2/machinegun/machinegun_hand.md3"
-
-// Damage or "hit" texture manifest
-#define DAMAGE_MODEL_COUNT 15
-const Model_Damage_Entry DAMAGE_MAP_REGISTRY[DAMAGE_MODEL_COUNT] = {
-  {"grism",    {ASSET_ROOT "models/players/grism/enkiskin_dmg.tga"}, 1},
-  {"sarge",    {ASSET_ROOT "models/players/grism/enkiskin_dmg.tga"}, 1},
-  {"liz",      {ASSET_ROOT "models/players/liz/h_head_dmg.tga",
-                ASSET_ROOT "models/players/liz/u_torso_dmg.tga",
-                ASSET_ROOT "models/players/liz/l_legs_dmg.tga"}, 3},
-  {"major",    {ASSET_ROOT "models/players/major/head_dmg.tga",
-                ASSET_ROOT "models/players/major/torso_dmg.tga",
-                ASSET_ROOT "models/players/major/lower_dmg.tga"}, 3},
-  {"tony",     {ASSET_ROOT "models/players/tony/head_dmg.tga",
-                ASSET_ROOT "models/players/tony/suit_dmg.tga"}, 2},
-  {"assassin", {ASSET_ROOT "models/players/assassin/upper_dmg.tga",
-                ASSET_ROOT "models/players/assassin/lower_dmg.tga"}, 2},
-  {"smarine",  {ASSET_ROOT "models/players/smarine/2h_head_dmg.tga",
-                ASSET_ROOT "models/players/smarine/2u_torso_dmg.tga",
-                ASSET_ROOT "models/players/smarine/2l_legs_dmg.tga"}, 3},
-  {"beret",    {ASSET_ROOT "models/players/beret/skin1_dmg.tga",
-                ASSET_ROOT "models/players/beret/skin2_dmg.tga"}, 2},
-  {"gargoyle", {ASSET_ROOT "models/players/gargoyle/bared_dmg.tga"}, 1},
-  {"penguin",  {ASSET_ROOT "models/players/penguin/skin_dmg.tga"}, 1},
-  {"sergei",   {ASSET_ROOT "models/players/sergei/face_dmg.tga",
-                ASSET_ROOT "models/players/sergei/hairs_dmg.tga",
-                ASSET_ROOT "models/players/sergei/skin_dmg.tga"}, 3},
-  {"skelebot", {ASSET_ROOT "models/players/skelebot/skin1_dmg.tga",
-                ASSET_ROOT "models/players/skelebot/skin2_dmg.tga"}, 2},
-  {"merman",   {ASSET_ROOT "models/players/merman/skin_dmg.tga",
-                ASSET_ROOT "models/players/merman/fins_dmg.tga",
-                ASSET_ROOT "models/players/merman/brac_dmg.tga"}, 3},
-  {"sorceress", {ASSET_ROOT "models/players/sorceress/drowhead_dmg.tga",
-                 ASSET_ROOT "models/players/sorceress/drowbody_dmg.tga",
-                 ASSET_ROOT "models/players/sorceress/rings_dmg.tga"}, 3},
-  {"kyonshi",  {ASSET_ROOT "models/players/kyonshi/skin_dmg.tga",
-                ASSET_ROOT "models/players/kyonshi/torso_dmg.tga",
-                ASSET_ROOT "models/players/kyonshi/hair_dmg.tga",
-                ASSET_ROOT "models/players/kyonshi/eyes_dmg.tga",
-                ASSET_ROOT "models/players/kyonshi/lower_dmg.tga"}, 5}};
+// Destroy old swapchain and create a new one matching the current surface size.
+// Called on window resize, fullscreen toggle, or VK_ERROR_OUT_OF_DATE_KHR.
+void Vulkan_Recreate_Swapchain ();
 
 // ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 //
@@ -3262,11 +3266,10 @@ void Vulkan_Create_Swapchain () {
 
 } // Vulkan_Create_Swapchain
 
-// ══════════════════════════════════════
+// ═════════════════════════════
 //   Vulkan_Recreate_Swapchain
-// ══════════════════════════════════════
-// Destroy old swapchain and create a new one matching the current surface size.
-// Called on window resize, fullscreen toggle, or VK_ERROR_OUT_OF_DATE_KHR.
+// ═════════════════════════════
+
 void Vulkan_Recreate_Swapchain () {
   vkDeviceWaitIdle (Device);
   VkSwapchainKHR Old = Swapchain;
@@ -3317,6 +3320,7 @@ void Vulkan_Recreate_Swapchain () {
   vkGetSwapchainImagesKHR (Device, Swapchain, &Swapchain_Image_Count, NULL);
   vkGetSwapchainImagesKHR (Device, Swapchain, &Swapchain_Image_Count, Swapchain_Images);
   printf ("[window] swapchain recreated %ux%u\n", Swapchain_Extent.width, Swapchain_Extent.height);
+
 } // Vulkan_Recreate_Swapchain
 
 // ══════════════════════════════════
@@ -3406,7 +3410,7 @@ void Vulkan_Transition_Storage_Image () {
 
 Vertex Convert_BSP_Vertex (const BSP_Vertex *Source) {
 
-  // Swizzle from Quake 3's Z-up coordinate system to our Y-up system: (x, y, z) becomes (x, z, -y)
+  // Swizzle from Id Software's Z-up coordinate system to our Y-up system: (x, y, z) becomes (x, z, -y)
   return (Vertex){
     .Position    = {Source->Position[0],        Source->Position[2],       -Source->Position[1]},
     .Texture_Uv  = {Source->Texture_Coords[0],  Source->Texture_Coords[1]},
@@ -6865,10 +6869,10 @@ ALuint Audio_Load_WAV (const char *Path) {
   if (memcmp (Header, "RIFF", 4) != 0 or memcmp (Header + 8, "WAVE", 4) != 0) { fclose (F); return 0; }
 
   // Parse format chunk
-  int Channels   = Header[22] | (Header[23] << 8);
+  int Channels    = Header[22] | (Header[23] << 8);
   int Sample_Rate = Header[24] | (Header[25] << 8) | (Header[26] << 16) | (Header[27] << 24);
-  int Bits       = Header[34] | (Header[35] << 8);
-  int Data_Size  = Header[40] | (Header[41] << 8) | (Header[42] << 16) | (Header[43] << 24);
+  int Bits        = Header[34] | (Header[35] << 8);
+  int Data_Size   = Header[40] | (Header[41] << 8) | (Header[42] << 16) | (Header[43] << 24);
 
   // Read PCM data
   void *Data = malloc (Data_Size);
@@ -6922,8 +6926,7 @@ void Audio_Init () {
   alGenSources (MAX_AUDIO_SOURCES, Audio.Sources);
   Audio.Source_Count = MAX_AUDIO_SOURCES;
 
-  // Load sounds: prefer WAV assets, fall back to modal synthesis
-  // Weapon fire: WAV > modal synthesis fallback (metallic mechanism + gas expansion)
+  // Load sounds
   Audio.Sound_Shoot = Audio.Buffer_Count;
   Audio.Buffers[Audio.Buffer_Count] = Audio_Load_WAV (ASSET_ROOT "sound/weapons/machinegun/machgf1b.wav");
   if (not Audio.Buffers[Audio.Buffer_Count]) {
@@ -6931,8 +6934,6 @@ void Audio_Init () {
     Audio.Buffers[Audio.Buffer_Count] = Audio_Generate_Weapon_Fire (0.8f);
   }
   Audio.Buffer_Count++;
-
-  // Explosion: WAV > modal synthesis fallback (broadband shock + debris impacts)
   Audio.Sound_Explode = Audio.Buffer_Count;
   Audio.Buffers[Audio.Buffer_Count] = Audio_Load_WAV (ASSET_ROOT "sound/weapons/rocket/rocklx1a.wav");
   if (not Audio.Buffers[Audio.Buffer_Count]) {
@@ -6940,33 +6941,24 @@ void Audio_Init () {
     Audio.Buffers[Audio.Buffer_Count] = Audio_Generate_Explosion_Modal (0.6f, 0.9f);
   }
   Audio.Buffer_Count++;
-
-  // Footsteps and movement: WAV > generic modal impact fallback
   Audio.Sound_Step_Stone = Audio.Buffer_Count;
   Audio.Buffers[Audio.Buffer_Count++] = Audio_Load_WAV_Or_Modal (
     ASSET_ROOT "sound/player/footsteps/step1.wav", MATERIAL_STONE, 0.4f, 0.15f, 0.5f);
-
-  // Metal footstep sound
   Audio.Sound_Step_Metal = Audio.Buffer_Count;
   Audio.Buffers[Audio.Buffer_Count++] = Audio_Load_WAV_Or_Modal (
     ASSET_ROOT "sound/player/footsteps/clank1.wav", MATERIAL_METAL, 0.5f, 0.12f, 0.5f);
-
-  // Jump sound
   Audio.Sound_Jump = Audio.Buffer_Count;
   Audio.Buffers[Audio.Buffer_Count++] = Audio_Load_WAV_Or_Modal (
     ASSET_ROOT "sound/player/footsteps/boot1.wav", MATERIAL_STONE, 0.6f, 0.1f, 0.4f);
-
-  // Landing sound
   Audio.Sound_Land = Audio.Buffer_Count;
   Audio.Buffers[Audio.Buffer_Count++] = Audio_Load_WAV_Or_Modal (
     ASSET_ROOT "sound/player/land1.wav", MATERIAL_STONE, 1.0f, 0.2f, 0.6f);
 
-  // OpenAL EFX reverb (room-scale reverb for physical presence)
-  // Use OpenAL's built-in EFX if available for natural room acoustics
+  // OpenAL EFX effects
   if (alcIsExtensionPresent (Audio.Device, "ALC_EXT_EFX")) {
-    LPALGENEFFECTS    alGenEffects    = (LPALGENEFFECTS)    alGetProcAddress ("alGenEffects");
-    LPALEFFECTI       alEffecti       = (LPALEFFECTI)       alGetProcAddress ("alEffecti");
-    LPALEFFECTF       alEffectf       = (LPALEFFECTF)       alGetProcAddress ("alEffectf");
+    LPALGENEFFECTS alGenEffects = (LPALGENEFFECTS) alGetProcAddress ("alGenEffects");
+    LPALEFFECTI    alEffecti    = (LPALEFFECTI)    alGetProcAddress ("alEffecti");
+    LPALEFFECTF    alEffectf    = (LPALEFFECTF)    alGetProcAddress ("alEffectf");
     LPALGENAUXILIARYEFFECTSLOTS alGenAuxiliaryEffectSlots =
       (LPALGENAUXILIARYEFFECTSLOTS) alGetProcAddress ("alGenAuxiliaryEffectSlots");
     LPALAUXILIARYEFFECTSLOTI alAuxiliaryEffectSloti =
@@ -7441,13 +7433,12 @@ glsl rchit Closest_Hit {
       float FT  = 1.0 - VH;  float T5 = FT * FT; T5 *= T5 * FT;
       vec3  F   = F0 + (1.0 - F0) * T5;
   
-      // Final specular and diffuse terms (energy-conserving: kD = 1 - kS)
+      // Final specular and diffuse terms
       Sp  = D * Vis * F;
       Df  = (1.0 - F) * (1.0 - M) * Albedo * 0.31831;  // 1/π
     }
   
-    // Hemisphere ambient diffuse (sky-ground gradient based on normal)
-    // Warm indoor bounce lighting - Q3 arenas have amber-toned fill light from torches and lava.
+    // Hemisphere ambient diffuse 
     vec3  Sky_Color    = Env_Ambient_Up.xyz;   // Per-scene ambient from above (sky contribution)
     vec3  Ground_Color = Env_Ambient_Down.xyz; // Per-scene ambient from below (ground bounce)
     float Hemisphere   = Normal.y * 0.5 + 0.5; // Zero is down, one up
@@ -7467,26 +7458,24 @@ glsl rchit Closest_Hit {
     vec3  Indirect_Specular = Ambient_Specular * Env_Color;
   
     // Indirect diffuse: hemisphere ambient weighted by (1 - metallic) since metals have no diffuse
-    vec3  Indirect_Diffuse = Ambient_Irradiance * Albedo * (1.0 - M) * (1.0 - Env_F);
+    vec3 Indirect_Diffuse = Ambient_Irradiance * Albedo * (1.0 - M) * (1.0 - Env_F);
     
     // Reflection-bounce hits detect this and skip tracing another reflection to limit
     // recursion to exactly one bounce
-    bool  Is_Reflection_Bounce = (gl_RayTminEXT > 0.005);
+    bool Is_Reflection_Bounce = (gl_RayTminEXT > 0.005);
 
     // Reflection culling
     bool  Refl_Active = not Is_Reflection_Bounce and (R < 0.55);
     float Refl_Dist = mix (800.0, 300.0, Budget);  // Adaptive reflection distance
-    float Reflection_Weight = (not Refl_Active or Hit_Dist > Refl_Dist) ? 0.0
-      : max (max (Env_F.r, Env_F.g), Env_F.b) * (1.0 - R * R);
+    float Reflection_Weight = (not Refl_Active or Hit_Dist > Refl_Dist)
+                                ? 0.0
+                                : max (max (Env_F.r, Env_F.g), Env_F.b) * (1.0 - R * R);
     vec3  Reflection_Color  = vec3 (0.0);
   
     // Trace reflection ray for smooth/metallic surfaces
     if (Reflection_Weight > 0.10) {
       vec3 Refl_Dir = reflect (-V, Normal);
       Payload = vec4 (0.0, 0.0, 0.0, -1.0);
-
-      // gl_RayFlagsOpaqueEXT skips any-hit shader (all geometry is opaque) - saves
-      // ~1 cycle/leaf on NVIDIA RT cores.
       traceRayEXT (Top_Level, gl_RayFlagsOpaqueEXT,
                    0xFF,
                    0, 1, 0,
@@ -7506,11 +7495,11 @@ glsl rchit Closest_Hit {
   
     // Compute final shading based on instance type
     vec3 Color;
-    float Shadow_Dist = mix (600.0, 200.0, Budget);  // Adaptive shadow ray cutoff distance
+    float Shadow_Dist = mix (600.0, 200.0, Budget); // Adaptive shadow ray cutoff distance
   
     // Apply per-instance lighting model
     if (Is_Weapon) {
-      vec3 Direct = (Df + Sp) * Lr * NL;
+      vec3 Direct    = (Df + Sp) * Lr * NL;
       vec3 Wpn_Full  = Direct * 0.9 + (Indirect_Diffuse + Traced_Specular) * 1.5;
       vec3 Wpn_Cheap = Ambient_Irradiance * Albedo * 2.5 + Albedo * max(NL, 0.3);
       Color = mix (Wpn_Full, Wpn_Cheap, Budget);
@@ -7518,7 +7507,8 @@ glsl rchit Closest_Hit {
     // Entity: direct sun + shadows + hemisphere ambient, no lightmap (MD3 models have no LM UVs)
     } else if (Is_Entity) {
       float Shadow_Factor = (NL > 0.0 and not Is_Reflection_Bounce and Hit_Dist < Shadow_Dist)
-        ? Trace_Shadow (Position, Normal, Ld, Primitive, Instance, Frame, Env_Sun_Dir.w) : 1.0;
+                              ? Trace_Shadow (Position, Normal, Ld, Primitive, Instance, Frame, Env_Sun_Dir.w)
+                              : 1.0;
       vec3 Direct = (Df + Sp) * Lr * NL * Shadow_Factor;
 
       // Entity color: balanced ambient - not too bright (avoids glow), not too dark (avoids silhouette)
@@ -7586,33 +7576,26 @@ glsl rmiss Ray_Miss {
     vec4  Env_Fog_Color;    // xyz = fog color
   };
   
-  // Ray_Miss main
+  // Ray_Miss shader main
   void main () {
 
     // Per-scene procedural sky with sun disc
-    vec3  Dir       = gl_WorldRayDirectionEXT;
-    float Vertical  = max (Dir.y, 0.0);
-
-    // Sqrt() is a hardware instruction (1 cycle NVIDIA/AMD), pow(x,0.5) uses log+exp (~8 cycles)
-    vec3  Sky       = mix (Env_Sky_Horizon.xyz, Env_Sky_Zenith.xyz, sqrt (Vertical));
+    vec3  Dir      = gl_WorldRayDirectionEXT;
+    float Vertical = max (Dir.y, 0.0);
+    vec3  Sky      = mix (Env_Sky_Horizon.xyz, Env_Sky_Zenith.xyz, sqrt (Vertical));
     Sky *= Env_Sky_Zenith.w;  // Sky intensity multiplier
   
     // Sun disc - bright spot in the sky at sun direction
-    // Dir is already normalized (ray direction), Env_Sun_Dir.xyz normalized on CPU
     float Sun_Cos   = dot (Dir, Env_Sun_Dir.xyz);
 
     // Cos(disc_size) pre-computed on CPU - eliminates per-pixel transcendental
-    float Disc_Edge = Env_Sky_Horizon.w;  // Already cos(sun_disc_size) from CPU
+    float Disc_Edge = Env_Sky_Horizon.w;  // Already cos(sun_disc_size)
     float Sun_Edge  = clamp ((Sun_Cos - Disc_Edge) / (1.0 - Disc_Edge), 0.0, 1.0);
     float Sun_Glow  = Sun_Edge * Sun_Edge; Sun_Glow *= Sun_Glow;  // x^4
     Sky += Env_Sun_Color.xyz * Sun_Glow * Env_Ambient_Up.w;  // sun_disc_intensity
   
     // Atmospheric haze near horizon (Mie-like forward scattering glow)
     float Horizon_Glow = exp (-Vertical * 8.0);  // Concentrated near horizon
-
-    // Replace 2× length() + 2× division with single inversesqrt(D²·S²).
-    // dot(A/|A|, B/|B|) = dot(A,B) / (|A|·|B|) = dot(A,B) · inversesqrt(dot(A,A)·dot(B,B)).
-    // Saves 2 length + 2 div > 1 dot + 1 dot + 1 mul + 1 rsq + 1 mul (~4 MUFU cycles saved).
     vec2  Dir_XZ = vec2 (Dir.x, Dir.z);
     vec2  Sun_XZ = vec2 (Env_Sun_Dir.x, Env_Sun_Dir.z);
     float Sun_Horizon = max (dot (Dir_XZ, Sun_XZ) * inversesqrt (
@@ -7732,7 +7715,7 @@ glsl comp Physics {
   
   // Convex hull support functions
   
-  // Brute-force support: O(n) linear scan over all hull vertices. Best for small hulls (< 64 verts)
+  // Brute-force: O(n) linear scan over all hull vertices. Best for small hulls (< 64 verts)
   vec3 hull_support_brute (vec3 direction) {
     float best_dot = -1e30;
     int   best_idx = 0;
@@ -7743,9 +7726,7 @@ glsl comp Physics {
     return Hull_Vertices[best_idx].xyz;
   }
   
-  // Hill-climbing support: O(sqrt(n)) amortized using per-vertex adjacency table.
-  // Starts from vertex 0 and follows neighbors that increase dot(vertex, direction) until a
-  // local maximum is reached. On a convex hull, the local maximum IS the global maximum.
+  // Hill-climbing: O(sqrt(n)) amortized using per-vertex adjacency table
   vec3 hull_support_hill (vec3 direction) {
     int current = 0;
     float current_dot = dot (Hull_Vertices[0].xyz, direction);
@@ -8203,6 +8184,7 @@ glsl comp Physics {
 
       // Check if the projectile hit geometry
       if (rayQueryGetIntersectionTypeEXT (rq, true) == gl_RayQueryCommittedIntersectionTriangleEXT) {
+
         // Hit something - mark dead and record hit position + UV for damage map lookup
         float t = rayQueryGetIntersectionTEXT (rq, true);
         Projectiles[i].Position += dir * t;
@@ -8246,26 +8228,21 @@ glsl comp Physics {
 glsl comp Denoise {
   #version 460
   
-  layout(binding = 0, rgba16f) uniform image2D Input_Image;    // Read: noisy color (linear HDR)
-  layout(binding = 1, rgba16f) uniform image2D Output_Image;   // Write: filtered color (linear HDR)
+  layout(binding = 0, rgba16f) uniform image2D Input_Image;  // Read: noisy color (linear HDR)
+  layout(binding = 1, rgba16f) uniform image2D Output_Image; // Write: filtered color (linear HDR)
   layout(binding = 2, r32f)  uniform image2D Depth_Image;    // Read: hit distance for edge stopping
   
   layout(push_constant) uniform Denoise_Push {
-    int Step_Size;   // A-trous step size: 1, 2, 4 for iterations
-    int Budget_256;  // Budget × 256 (0 = full quality, 256 = cheap path)
+    int Step_Size;  // A-trous step size: 1, 2, 4 for iterations
+    int Budget_256; // Budget × 256 (0 = full quality, 256 = cheap path)
   };
   
   layout(local_size_x = 8, local_size_y = 8) in;
   
-  // 3×3 a-trous kernel weights (Gaussian-like, symmetric)
+  // A 3×3 a-trous kernel weights (Gaussian-like, symmetric)
   const float Kernel[3] = float[3](1.0, 2.0 / 3.0, 1.0 / 6.0);
   
   // Depth-based normal from 3 cached depth values
-  // Instead of calling Depth_Normal() per sample (3 imageLoads × 9 samples = 27 loads),
-  // load all depths once and compute normals from cached values.
-  // Savings: 27 imageLoad > 0 extra imageLoad (normals computed from already-fetched depths).
-  // On NVIDIA: imageLoad from L2 = 20-40 cycles; 27 eliminated = ~540-1080 cycles saved per pixel.
-  // On AMD RDNA: image_load = ~32 cycles from L2; 27 eliminated = ~864 cycles saved per pixel.
   vec3 Normal_From_Depths (float D_C, float D_R, float D_U) {
     return normalize (vec3 (D_C - D_R, D_C - D_U, 1.0));
   }
@@ -8308,7 +8285,7 @@ glsl comp Denoise {
     vec3  Sum    = vec3 (0.0);
     float Weight = 0.0;
   
-    // 3×3 sparse kernel at current step size - depths already cached
+    // A 3×3 sparse kernel at current step size - depths already cached
     for (int I = 0; I < 9; I++) {
       vec3  S_Color = imageLoad (Input_Image, Sample_Positions[I]).rgb;
       float S_Depth = Depths[I];
@@ -8396,6 +8373,7 @@ glsl comp Post_Process {
     return M;
   }
   
+  // Postprocess shader main
   void main () {
     ivec2 Pixel = ivec2 (gl_GlobalInvocationID.xy);
     ivec2 Size  = imageSize (Color_Image);
@@ -8478,15 +8456,15 @@ glsl comp Post_Process {
         // the surface has changed (new geometry, lighting change, disocclusion).
         // Boost alpha toward 1.0 to reject stale history aggressively.
         //
-        float Cur_Lum  = dot (Color, vec3 (0.2126, 0.7152, 0.0722));
+        float Cur_Lum  = dot (Color,   vec3 (0.2126, 0.7152, 0.0722));
         float Hist_Lum = dot (History, vec3 (0.2126, 0.7152, 0.0722));
         float Lum_Diff = abs (Cur_Lum - Hist_Lum) / max (Cur_Lum, 0.01);
-        float Anti_Lag = clamp (Lum_Diff * 3.0, 0.0, 1.0);  // >33% luminance change > full reject
+        float Anti_Lag = clamp (Lum_Diff * 3.0, 0.0, 1.0); // Reject
   
         // Disocclusion detection
         vec2 Screen_Disp = vec2 (Prev_Pixel - Pixel) / vec2 (Size);
         float Disp_Len = length (Screen_Disp);
-        float Disocclusion = clamp (Disp_Len * 20.0, 0.0, 1.0);  // >5% screen = fully rejected
+        float Disocclusion = clamp (Disp_Len * 20.0, 0.0, 1.0); // Rejected
   
         // Temporal blend
         float Is_Static = step (Speed, 5.0);
