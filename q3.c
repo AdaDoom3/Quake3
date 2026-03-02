@@ -3280,23 +3280,24 @@ void Vulkan_Recreate_Swapchain () {
     Image_Count = Capabilities.maxImageCount;
 
   // Create the new swapchain, chaining from the old one
-  VK_CHECK (vkCreateSwapchainKHR (Device,
-    &(VkSwapchainCreateInfoKHR){
-      .sType            = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR,
-      .surface          = Surface,
-      .minImageCount    = Image_Count,
-      .imageFormat      = Swapchain_Format,
-      .imageColorSpace  = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR,
-      .imageExtent      = Swapchain_Extent,
-      .imageArrayLayers = 1,
-      .imageUsage       = VK_IMAGE_USAGE_TRANSFER_DST_BIT,
-      .imageSharingMode = VK_SHARING_MODE_EXCLUSIVE,
-      .preTransform     = Capabilities.currentTransform,
-      .compositeAlpha   = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR,
-      .presentMode      = VK_PRESENT_MODE_FIFO_KHR,
-      .clipped          = VK_TRUE,
-      .oldSwapchain     = Old},
-    NULL, &Swapchain));
+  VK_CHECK (vkCreateSwapchainKHR (/*device      =>*/ Device,
+                                  /*pCreateInfo =>*/ &(VkSwapchainCreateInfoKHR){
+                                    .sType            = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR,
+                                    .surface          = Surface,
+                                    .minImageCount    = Image_Count,
+                                    .imageFormat      = Swapchain_Format,
+                                    .imageColorSpace  = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR,
+                                    .imageExtent      = Swapchain_Extent,
+                                    .imageArrayLayers = 1,
+                                    .imageUsage       = VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+                                    .imageSharingMode = VK_SHARING_MODE_EXCLUSIVE,
+                                    .preTransform     = Capabilities.currentTransform,
+                                    .compositeAlpha   = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR,
+                                    .presentMode      = VK_PRESENT_MODE_FIFO_KHR,
+                                    .clipped          = VK_TRUE,
+                                    .oldSwapchain     = Old},
+                                  /*pAllocator  =>*/ NULL,
+                                  /*pSwapchain  =>*/ &Swapchain));
 
   // Destroy the old swapchain and retrieve new image handles
   vkDestroySwapchainKHR (Device, Old, NULL);
@@ -4599,10 +4600,11 @@ void Scene_Load_Textures (const Scene *Scene_Data) {
   free (Material_PBR);
 
   // Upload per-triangle texture IDs as a storage buffer
-  Texture_Id_Buffer = Buffer_Stage_Upload (Command_Buffer, Queue,
-                                           Scene_Data->Texture_Ids,
-                                           sizeof (uint) * Scene_Data->Triangle_Count,
-                                           VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+  Texture_Id_Buffer = Buffer_Stage_Upload (/*Command_Buffer =>*/ Command_Buffer,
+                                           /*Queue          =>*/ Queue,
+                                           /*Data           =>*/ Scene_Data->Texture_Ids,
+                                           /*Size           =>*/ sizeof (uint) * Scene_Data->Triangle_Count,
+                                           /*Usage          =>*/ VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
 
   // Log texture loading statistics and material names
   printf ("[textures] loaded %u/%u diffuse, %u PBR from disk, %u PBR generated, total %u slots\n",
