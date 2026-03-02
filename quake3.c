@@ -4,15 +4,15 @@
 //          
 //                                        Vulkan-based Id Tech inspired hybrid raytracing game engine     
 //
-// §1.  Settings              
-// §2.  Types                 
-// §3.  Context               
-// §4.  Math                  
-// §5.  Memory                
-// §6.  Textures              
-// §7.  Models                
-// §8.  Scene                 
-// §9.  Acceleration Structures
+// §1. Settings              
+// §2. Types                 
+// §3. Context               
+// §4. Math                  
+// §5. Memory                
+// §6. Textures              
+// §7. Models                
+// §8. Scene                 
+// §9. Acceleration Structures
 // §10. Physics               
 // §11. Pipeline              
 // §12. Shaders               
@@ -25,28 +25,27 @@
 //                 
 // ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 
-// Language Extensions
-#include <iso646.h>
-#include <stdbool.h>
-
-// Media Layer/Graphics
-#include <SDL2/SDL.h>
-#include <SDL2/SDL_vulkan.h>
-#include <vulkan/vulkan.h>
-
 // Standard Libraries
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
-#include <math.h>
+#include <stdbool.h>
 #include <assert.h>
+#include <math.h>
 
-// Platform Compatibility
-#ifdef _WIN32
-typedef unsigned int uint;
-#endif
+// Media Layer
+#include <SDL2/SDL.h>
+#include <SDL2/SDL_vulkan.h>
+#include <vulkan/vulkan.h>
+#include <AL/al.h>
+#include <AL/alc.h>
+#include <AL/efx.h>
   
+// Language Extensions
+#include <iso646.h>
+typedef unsigned int uint;
+
 // ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 //
 // §1. Settings
@@ -57,21 +56,11 @@ typedef unsigned int uint;
 const char *ENGINE_NAME    = "q3";
 const char *ENGINE_VERSION = "0.1.0";
 
-// Vulkan limits and versioning
-#define VULKAN_API_VERSION       VK_API_VERSION_1_3 // Minimum Vulkan API level (synchronization2, dynamic rendering)
-#define SWAPCHAIN_MAX_IMAGES     8                  // Upper bound for swapchain image handle array
-#define DESCRIPTOR_TEXTURE_SLOTS 1536               // Maximum entries in the bindless texture array (binding 12) — 256 materials × 6 maps (diffuse, normal, roughness, metalness, emissive, height)
-#define RAY_RECURSION_DEPTH      2                  // Primary ray + shadow ray
-
 // Enable the Khronos validation layer for debug builds
 const uint  VALIDATION_LAYER_COUNT = 1;
 const char *VALIDATION_LAYERS[]    = {"VK_LAYER_KHRONOS_validation"};
 
 // Required device extensions: swapchain, accel struct, RT pipeline, deferred ops, ray query, push descriptor
-// Mesa driver notes
-// Set LP_NUM_THREADS=N for lavapipe multi-threaded software rendering.
-// Set RADV_PERFTEST=rt for RADV ray tracing optimizations.
-// Set ANV_ENABLE_PIPELINE_CACHE=1 for Intel ANV pipeline caching.
 const uint DEVICE_EXTENSION_COUNT = 6;
 const char *DEVICE_EXTENSIONS[] = {VK_KHR_SWAPCHAIN_EXTENSION_NAME,
                                    VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME,
@@ -80,24 +69,27 @@ const char *DEVICE_EXTENSIONS[] = {VK_KHR_SWAPCHAIN_EXTENSION_NAME,
                                    VK_KHR_RAY_QUERY_EXTENSION_NAME,
                                    VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME};
 
+// Vulkan limits and versioning
+#define VULKAN_API_VERSION       VK_API_VERSION_1_3 // Minimum Vulkan API level (synchronization2, dynamic rendering)
+#define SWAPCHAIN_MAX_IMAGES     8                  // Upper bound for swapchain image handle array
+#define DESCRIPTOR_TEXTURE_SLOTS 1536               // Maximum entries in the bindless texture array (binding 12) - 256 materials × 6 maps (diffuse, normal, roughness, metalness, emissive, height)
+#define RAY_RECURSION_DEPTH      2                  // Primary ray + shadow ray
+
 // Windowing and viewport settings
 #define FIELD_OF_VIEW  90.f    // Vertical field-of-view in degrees
 #define NEAR_CLIP      0.1f    // Near clip plane distance
 #define FAR_CLIP       10000.f // Far clip plane distance
 #define MAX_DELTA_TIME 0.05f   // Clamp to 20 fps minimum (prevents physics tunneling)
 
-// Visual style
-// Style knobs define the artistic look of the game and are independent of
-// quality/performance tier.  Changing quality should NOT change the look.
+// Visual style knobs define the artistic look of the game and are independent of
+// quality/performance tier. Changing quality should NOT change the look.
 // Shader-side style knobs (fog, ambient, sun, shadows, reflections) are
-// hardcoded in GLSL closesthit/postprocess shaders — these C-side values
+// hardcoded in GLSL closesthit/postprocess shaders - these C-side values
 // feed the postprocess push constants (bloom, vignette, exposure).
 typedef struct {
-  float Vignette;         // Vignette darkening intensity
-  float Bloom_Strength;   // Bloom glow intensity
-  float Exposure;         // Tonemapping exposure multiplier
-
-  // Shader-side style (hardcoded in GLSL, documented here for reference):
+  float Vignette;       // Vignette darkening intensity
+  float Bloom_Strength; // Bloom glow intensity
+  float Exposure;       // Tonemapping exposure multiplier
   //   Fog_Density      = 7.0e-5     (closesthit.glsl)
   //   Fog_Color        = (0.30, 0.26, 0.22)
   //   Ambient_Sky      = (0.28, 0.24, 0.18)
@@ -110,28 +102,20 @@ typedef struct {
   //   Color_Grade      = (1.04, 1.01, 0.95)
 } Visual_Style;
 
-static const Visual_Style STYLE = {
-  .Vignette       = 0.35f,   // Moderate-strong vignette
-  .Bloom_Strength = 0.08f,   // Subtle bloom
-  .Exposure       = 1.75f,   // Slightly lower exposure — just enough to deepen without losing detail
-};
+const Visual_Style STYLE = {
+  .Vignette       = 0.35f,  // Moderate-strong vignette
+  .Bloom_Strength = 0.08f,  // Subtle bloom
+  .Exposure       = 1.75f}; // Slightly lower exposure - just enough to deepen without losing detail
 
-// Per-scene environment settings (Q2RTX-inspired)
-// These control the sun, sky, ambient, and fog for each map.
-// Inferred from BSP skybox textures when available, otherwise defaults.
-// Matches Q2RTX's global_ubo approach of per-scene lighting parameters.
-// Scene_Environment struct defined after vec3 typedef (see below)
-
-// Quality presets
-// Quality knobs control performance-affecting parameters only.  The visual
+// Quality knobs control performance-affecting parameters only. The visual
 // style (bloom, vignette, exposure, fog, color grading) is defined in STYLE
 // above and stays constant across all tiers.
 typedef enum {
-  QUALITY_ULTRA,    // 4K   native — maximum fidelity, 4 SPP
-  QUALITY_HIGH,     // 1440p native — high fidelity
-  QUALITY_MEDIUM,   // 1080p native — balanced (default)
-  QUALITY_LOW,      // 1080p at 75% — performance-friendly
-  QUALITY_POTATO,   // 720p native — minimum playable
+  QUALITY_ULTRA,    // 4K   native - maximum fidelity, 4 SPP
+  QUALITY_HIGH,     // 1440p native - high fidelity
+  QUALITY_MEDIUM,   // 1080p native - balanced (default)
+  QUALITY_LOW,      // 1080p at 75% - performance-friendly
+  QUALITY_POTATO,   // 720p native - minimum playable
   QUALITY_COUNT
 } Quality_Level;
 
@@ -145,7 +129,7 @@ typedef struct {
   int         Checkerboard;     // 1 = half-width dispatch (Q2RTX-style temporal checkerboard)
 } Quality_Preset;
 
-static const Quality_Preset QUALITY_PRESETS[QUALITY_COUNT] = {
+const Quality_Preset QUALITY_PRESETS [QUALITY_COUNT] = {
   //                              Res        Scale  SPP  POM  DN   CB
   [QUALITY_ULTRA]  = {"Ultra",  3840,2160, 1.00f,  4,  1,   2,   0},  // 3840×2160 native
   [QUALITY_HIGH]   = {"High",   2560,1440, 1.00f,  2,  1,   2,   0},  // 2560×1440 native
@@ -156,6 +140,7 @@ static const Quality_Preset QUALITY_PRESETS[QUALITY_COUNT] = {
 
 // Asset paths
 #define ASSET_ROOT  "assets/"  // Root directory for all game assets
+
 // Default BSP map to load when no command-line argument is given
 const char *DEFAULT_MAP = "oa_dm1.bsp";
 
@@ -169,7 +154,7 @@ const char *WEAPON_TEXTURE_PATHS[] = {ASSET_ROOT "models/weapons2/machinegun/mgu
 #define WEAPON_BARREL_PATH ASSET_ROOT "models/weapons2/machinegun/machinegun_barrel.md3"
 #define WEAPON_HAND_PATH   ASSET_ROOT "models/weapons2/machinegun/machinegun_hand.md3"
 
-// Player physics constants designed to mirror the Quake 3 movement parameters.  The GPU physics compute shader (§10) references these same
+// Player physics constants designed to mirror the Quake 3 movement parameters. The GPU physics compute shader (§10) references these same
 // values as specialization constants compiled into the SPIR-V module.
 #define GRAVITY             800.f  // Downward acceleration in units per second squared
 #define GROUND_FRICTION     6.f    // Friction coefficient applied while on walkable ground
@@ -188,26 +173,26 @@ const char *WEAPON_TEXTURE_PATHS[] = {ASSET_ROOT "models/weapons2/machinegun/mgu
 // Player bounding box half-extents (x, y, z) used by the capsule collider
 const float PLAYER_HALF_EXTENTS[3] = {15.f, 32.f, 15.f};
 
-// Capsule spine half-length: half_height minus radius.  For a 32-unit tall, 15-unit radius capsule
+// Capsule spine half-length: half_height minus radius. For a 32-unit tall, 15-unit radius capsule
 // the spine is 32 - 15 = 17 units.
 #define PLAYER_CAPSULE_SPINE 17.f
 
 // Projectile constants
-#define MAX_PROJECTILES    64  // Maximum simultaneous projectiles in flight
-#define ROCKET_SPEED       900.f  // Rocket projectile speed (units/second)
-#define ROCKET_DAMAGE      100    // Direct hit damage
-#define ROCKET_SPLASH      120.f  // Splash damage radius
-#define ROCKET_LIFETIME    10.f   // Seconds before projectile expires
-#define FIRE_COOLDOWN      0.8f   // Minimum seconds between shots
+#define MAX_PROJECTILES 64    // Maximum simultaneous projectiles in flight
+#define ROCKET_SPEED    900.f // Rocket projectile speed (units/second)
+#define ROCKET_DAMAGE   100   // Direct hit damage
+#define ROCKET_SPLASH   120.f // Splash damage radius
+#define ROCKET_LIFETIME 10.f  // Seconds before projectile expires
+#define FIRE_COOLDOWN   0.8f  // Minimum seconds between shots
 
 // Material surface types for footstep and impact sounds
-#define MATERIAL_DEFAULT   0
-#define MATERIAL_METAL     1
-#define MATERIAL_STONE     2
-#define MATERIAL_WOOD      3
-#define MATERIAL_FLESH     4
-#define MATERIAL_WATER     5
-#define MATERIAL_COUNT     6
+#define MATERIAL_DEFAULT 0
+#define MATERIAL_METAL   1
+#define MATERIAL_STONE   2
+#define MATERIAL_WOOD    3
+#define MATERIAL_FLESH   4
+#define MATERIAL_WATER   5
+#define MATERIAL_COUNT   6
 
 // Body-part damage multiplier maps: grayscale TGA textures UV-mapped to player models.
 // Brightness = damage multiplier: 255 = critical (exposed head/eyes), 0 = heavy armor.
@@ -215,29 +200,45 @@ const float PLAYER_HALF_EXTENTS[3] = {15.f, 32.f, 15.f};
 // The maps encode anatomical vulnerability: face/eyes = critical, exposed flesh = high,
 // fabric/scales = medium, metal armor = low, robot chassis = minimal.
 typedef struct {
-  const char *Model_Name;              // Player model directory name
-  const char *Damage_Maps[6];          // Up to 6 damage map TGA paths per model (NULL-terminated)
-  int         Damage_Map_Count;        // Number of damage maps for this model
+  const char *Model_Name;       // Player model directory name
+  const char *Damage_Maps[6];   // Up to 6 damage map TGA paths per model (NULL-terminated)
+  int         Damage_Map_Count; // Number of damage maps for this model
 } Model_Damage_Entry;
 
 #define DAMAGE_MODEL_COUNT 14
 const Model_Damage_Entry DAMAGE_MAP_REGISTRY[DAMAGE_MODEL_COUNT] = {
-  {"grism",     {ASSET_ROOT "models/players/grism/enkiskin_dmg.tga"},                                                                                                               1},
-  {"sarge",     {ASSET_ROOT "models/players/grism/enkiskin_dmg.tga"},                                                                                                               1},
-  {"liz",       {ASSET_ROOT "models/players/liz/h_head_dmg.tga", ASSET_ROOT "models/players/liz/u_torso_dmg.tga", ASSET_ROOT "models/players/liz/l_legs_dmg.tga"},                  3},
-  {"major",     {ASSET_ROOT "models/players/major/head_dmg.tga", ASSET_ROOT "models/players/major/torso_dmg.tga", ASSET_ROOT "models/players/major/lower_dmg.tga"},                  3},
-  {"tony",      {ASSET_ROOT "models/players/tony/head_dmg.tga", ASSET_ROOT "models/players/tony/suit_dmg.tga"},                                                                     2},
-  {"assassin",  {ASSET_ROOT "models/players/assassin/upper_dmg.tga", ASSET_ROOT "models/players/assassin/lower_dmg.tga"},                                                           2},
-  {"smarine",   {ASSET_ROOT "models/players/smarine/2h_head_dmg.tga", ASSET_ROOT "models/players/smarine/2u_torso_dmg.tga", ASSET_ROOT "models/players/smarine/2l_legs_dmg.tga"},   3},
-  {"beret",     {ASSET_ROOT "models/players/beret/skin1_dmg.tga", ASSET_ROOT "models/players/beret/skin2_dmg.tga"},                                                                 2},
-  {"gargoyle",  {ASSET_ROOT "models/players/gargoyle/bared_dmg.tga"},                                                                                                               1},
-  {"penguin",   {ASSET_ROOT "models/players/penguin/skin_dmg.tga"},                                                                                                                  1},
-  {"sergei",    {ASSET_ROOT "models/players/sergei/face_dmg.tga", ASSET_ROOT "models/players/sergei/hairs_dmg.tga", ASSET_ROOT "models/players/sergei/skin_dmg.tga"},                3},
-  {"skelebot",  {ASSET_ROOT "models/players/skelebot/skin1_dmg.tga", ASSET_ROOT "models/players/skelebot/skin2_dmg.tga"},                                                           2},
-  {"merman",    {ASSET_ROOT "models/players/merman/skin_dmg.tga", ASSET_ROOT "models/players/merman/fins_dmg.tga", ASSET_ROOT "models/players/merman/brac_dmg.tga"},                3},
-  {"kyonshi",   {ASSET_ROOT "models/players/kyonshi/skin_dmg.tga", ASSET_ROOT "models/players/kyonshi/torso_dmg.tga", ASSET_ROOT "models/players/kyonshi/hair_dmg.tga",
-                 ASSET_ROOT "models/players/kyonshi/eyes_dmg.tga", ASSET_ROOT "models/players/kyonshi/lower_dmg.tga"},                                                              5},
-};
+  {"grism",    {ASSET_ROOT "models/players/grism/enkiskin_dmg.tga"}, 1},
+  {"sarge",    {ASSET_ROOT "models/players/grism/enkiskin_dmg.tga"}, 1},
+  {"liz",      {ASSET_ROOT "models/players/liz/h_head_dmg.tga",
+                ASSET_ROOT "models/players/liz/u_torso_dmg.tga",
+                ASSET_ROOT "models/players/liz/l_legs_dmg.tga"}, 3},
+  {"major",    {ASSET_ROOT "models/players/major/head_dmg.tga",
+                ASSET_ROOT "models/players/major/torso_dmg.tga",
+                ASSET_ROOT "models/players/major/lower_dmg.tga"}, 3},
+  {"tony",     {ASSET_ROOT "models/players/tony/head_dmg.tga",
+                ASSET_ROOT "models/players/tony/suit_dmg.tga"}, 2},
+  {"assassin", {ASSET_ROOT "models/players/assassin/upper_dmg.tga",
+                ASSET_ROOT "models/players/assassin/lower_dmg.tga"}, 2},
+  {"smarine",  {ASSET_ROOT "models/players/smarine/2h_head_dmg.tga",
+                ASSET_ROOT "models/players/smarine/2u_torso_dmg.tga",
+                ASSET_ROOT "models/players/smarine/2l_legs_dmg.tga"}, 3},
+  {"beret",    {ASSET_ROOT "models/players/beret/skin1_dmg.tga",
+                ASSET_ROOT "models/players/beret/skin2_dmg.tga"}, 2},
+  {"gargoyle", {ASSET_ROOT "models/players/gargoyle/bared_dmg.tga"}, 1},
+  {"penguin",  {ASSET_ROOT "models/players/penguin/skin_dmg.tga"}, 1},
+  {"sergei",   {ASSET_ROOT "models/players/sergei/face_dmg.tga",
+                ASSET_ROOT "models/players/sergei/hairs_dmg.tga",
+                ASSET_ROOT "models/players/sergei/skin_dmg.tga"}, 3},
+  {"skelebot", {ASSET_ROOT "models/players/skelebot/skin1_dmg.tga",
+                ASSET_ROOT "models/players/skelebot/skin2_dmg.tga"}, 2},
+  {"merman",   {ASSET_ROOT "models/players/merman/skin_dmg.tga",
+                ASSET_ROOT "models/players/merman/fins_dmg.tga",
+                ASSET_ROOT "models/players/merman/brac_dmg.tga"}, 3},
+  {"kyonshi",  {ASSET_ROOT "models/players/kyonshi/skin_dmg.tga",
+                ASSET_ROOT "models/players/kyonshi/torso_dmg.tga",
+                ASSET_ROOT "models/players/kyonshi/hair_dmg.tga",
+                ASSET_ROOT "models/players/kyonshi/eyes_dmg.tga",
+                ASSET_ROOT "models/players/kyonshi/lower_dmg.tga"}, 5}};
 
 // Sorceress and additional entries use a separate constant to keep the registry clean
 const Model_Damage_Entry DAMAGE_MAP_EXTRA[] = {
@@ -302,23 +303,28 @@ typedef struct {
   float  Sun_Disc_Intensity; // Brightness of the sun disc in the sky
 } Scene_Environment;
 
-static const Scene_Environment DEFAULT_ENVIRONMENT = {
-  .Sun_Direction      = { 0.5f, 0.7f, 0.5f },     // Q2RTX-style high sun angle
-  .Sun_Color          = { 1.0f, 0.95f, 0.85f },    // Warm daylight
-  .Sun_Angular_Radius = 0.02f,                       // ~1.1 degrees (Earth sun ≈ 0.53°)
-  .Sun_Intensity      = 4.0f,                        // Strong direct light
-  .Sky_Zenith         = { 0.15f, 0.25f, 0.55f },    // Deep blue zenith
-  .Sky_Horizon        = { 0.4f, 0.5f, 0.6f },       // Hazy lighter blue at horizon
-  .Sky_Intensity      = 1.2f,                        // Sky brightness multiplier
-  .Ambient_Up         = { 0.16f, 0.19f, 0.24f },    // Moderate cool fill — dark shadows but not black
-  .Ambient_Down       = { 0.12f, 0.10f, 0.08f },    // Subtle warm ground bounce
-  .Fog_Color          = { 0.35f, 0.38f, 0.42f },     // Subtle atmospheric haze
-  .Fog_Density        = 0.00008f,                    // Barely visible distance haze
-  .Sun_Disc_Size      = 0.03f,                       // Visual disc angular radius
-  .Sun_Disc_Intensity = 8.0f,                        // Bright sun disc in sky
+const Scene_Environment DEFAULT_ENVIRONMENT = {
+  .Sun_Direction      = {0.5f, 0.7f,  0.5f},   // Q2RTX-style high sun angle
+  .Sun_Color          = {1.0f, 0.95f, 0.85f},  // Warm daylight
+  .Sun_Angular_Radius = 0.02f,                 // ~1.1 degrees (Earth sun ≈ 0.53°)
+  .Sun_Intensity      = 4.0f,                  // Strong direct light
+  .Sky_Zenith         = {0.15f, 0.25f, 0.55f}, // Deep blue zenith
+  .Sky_Horizon        = {0.4f,  0.5f,  0.6f},  // Hazy lighter blue at horizon
+  .Sky_Intensity      = 1.2f,                  // Sky brightness multiplier
+  .Ambient_Up         = {0.16f, 0.19f, 0.24f}, // Moderate cool fill - dark shadows but not black
+  .Ambient_Down       = {0.12f, 0.10f, 0.08f}, // Subtle warm ground bounce
+  .Fog_Color          = {0.35f, 0.38f, 0.42f}, // Subtle atmospheric haze
+  .Fog_Density        = 0.00008f,              // Barely visible distance haze
+  .Sun_Disc_Size      = 0.03f,                 // Visual disc angular radius
+  .Sun_Disc_Intensity = 8.0f,                  // Bright sun disc in sky
 };
+Scene_Environment Active_Environment;
 
-static Scene_Environment Active_Environment;
+// Builds per-scene environment settings by examining BSP shader names.
+// If a skybox texture is found, loads it and extracts dominant colors for
+// sky zenith/horizon and ambient hemisphere. Otherwise uses defaults.
+// Inspired by Q2RTX's per-map environment configuration.
+Scene_Environment Environment_Infer_From_Scene (const Scene *S)
 
 // Sampled keyboard and mouse state for a single frame
 typedef struct {
@@ -326,18 +332,15 @@ typedef struct {
   float Delta_X, Delta_Y;                               // Mouse displacement in pixels since last frame
 } Input;
 
-// Windowing & Cursor
-// Ported from Neo Engine's battle-tested windowing state machine.
-// Controls fullscreen toggle, menu/game cursor management, activation,
-// and aspect-ratio-constrained resizing.
-typedef enum { FULLSCREEN_MODE, WINDOWED_MODE } Window_Mode_Kind;
-typedef enum { GAME_PLAYING, GAME_MENU }        Game_Mode_Kind;
-typedef enum { CURSOR_SYSTEM, CURSOR_ACTIVE, CURSOR_INACTIVE } Cursor_Kind;
+// Windowing and Cursor
+typedef enum {GAME_PLAYING,    GAME_MENU}                      Game_Mode_Kind;
+typedef enum {FULLSCREEN_MODE, WINDOWED_MODE}                  Window_Mode_Kind;
+typedef enum {CURSOR_SYSTEM,   CURSOR_ACTIVE, CURSOR_INACTIVE} Cursor_Kind;
 typedef enum {
-  OTHER_ACTIVATED,        // Alt-tab or focus gained normally
-  CLICK_ACTIVATED,        // Window activated by mouse click
-  OTHER_DEACTIVATED,      // Focus lost to another window
-  MINIMIZE_DEACTIVATED    // Window was minimized
+  OTHER_ACTIVATED,     // Alt-tab or focus gained normally
+  CLICK_ACTIVATED,     // Window activated by mouse click
+  OTHER_DEACTIVATED,   // Focus lost to another window
+  MINIMIZE_DEACTIVATED // Window was minimized
 } Activated_Kind;
 
 // Aspect ratio constraints (ported from Neo Engine's Resize)
@@ -351,17 +354,17 @@ typedef enum {
 
 // Projectile
 typedef struct {
-  vec3  Position;        // World position
+  vec3  Position;     // World position
   float Pad_A;
-  vec3  Velocity;        // Units per second
-  float Lifetime;        // Seconds remaining before expiry
-  int   Active;          // 1 = live, 0 = dead
-  int   Material_Hit;    // Surface material on impact (for sound selection)
-  float Radius;          // Collision radius
-  float Damage;          // Base damage on impact (before body-part multiplier)
-  float Hit_U, Hit_V;    // UV coordinates at impact point (for damage map sampling)
-  int   Instance_Hit;    // TLAS instance index of hit object (-1 = none, 0 = world, 1 = weapon, >=2 = player)
-  int   Pad_B;           // Alignment padding
+  vec3  Velocity;     // Units per second
+  float Lifetime;     // Seconds remaining before expiry
+  int   Active;       // 1 = live, 0 = dead
+  int   Material_Hit; // Surface material on impact (for sound selection)
+  float Radius;       // Collision radius
+  float Damage;       // Base damage on impact (before body-part multiplier)
+  float Hit_U, Hit_V; // UV coordinates at impact point (for damage map sampling)
+  int   Instance_Hit; // TLAS instance index of hit object (-1 = none, 0 = world, 1 = weapon, >=2 = player)
+  int   Pad_B;        // Alignment padding
 } Projectile;
 
 typedef struct {
@@ -373,10 +376,10 @@ typedef struct {
 
 // GPU-side mirror of Projectile_Pool (std430, uploaded to physics compute)
 typedef struct {
-  float Position[3];  float Pad_A;
-  float Velocity[3];  float Lifetime;
-  int   Active;       int   Material_Hit;
-  float Radius;       float Damage;
+  float Position[3]; float Pad_A;
+  float Velocity[3]; float Lifetime;
+  int   Active;      int   Material_Hit;
+  float Radius;      float Damage;
   float Hit_U, Hit_V; // UV at impact point (written by GPU on hit)
   int   Instance_Hit; // TLAS instance that was hit (-1 = none)
   int   Pad_B;
@@ -391,15 +394,10 @@ typedef struct {
 
 // Material System
 typedef struct {
-  int   Type;           // MATERIAL_DEFAULT, MATERIAL_METAL, etc.
-  float Damage_Scale;   // 0.0 (armored) to 1.0 (exposed)
-  char  Name[32];       // Human-readable name
+  int   Type;         // MATERIAL_DEFAULT, MATERIAL_METAL, etc.
+  float Damage_Scale; // 0.0 (armored) to 1.0 (exposed)
+  char  Name[32];     // Human-readable name
 } Material;
-
-// Audio System (OpenAL + Opus)
-#include <AL/al.h>
-#include <AL/alc.h>
-#include <AL/efx.h>
 
 #define MAX_AUDIO_BUFFERS 32
 #define MAX_AUDIO_SOURCES 16
@@ -411,21 +409,19 @@ typedef struct {
   int         Buffer_Count;
   ALuint      Sources[MAX_AUDIO_SOURCES];
   int         Source_Count;
-
-  // Named sound indices
-  int         Sound_Shoot;        // Weapon fire
-  int         Sound_Explode;      // Rocket impact
-  int         Sound_Step_Stone;   // Footstep on stone
-  int         Sound_Step_Metal;   // Footstep on metal
-  int         Sound_Jump;         // Jump
-  int         Sound_Land;         // Land after jump
-  float       Step_Accumulator;   // Distance accumulator for footstep timing
-  int         Was_On_Ground;      // Previous frame ground state (for land detection)
+  int         Sound_Shoot;  
+  int         Sound_Explode;   
+  int         Sound_Step_Stone; // Footstep on stone
+  int         Sound_Step_Metal; // Footstep on metal
+  int         Sound_Jump;
+  int         Sound_Land;       // Land after jump
+  float       Step_Accumulator; // Distance accumulator for footstep timing
+  int         Was_On_Ground;    // Previous frame ground state (for land detection)
 } Audio_System;
 
 // GPU-resident buffer with its backing memory and optional device address
 typedef struct {
-  VkBuffer        Buffer;  // Vulkan buffer handle
+  VkBuffer        Buffer; 
   VkDeviceMemory  Memory;  // Device memory allocation backing the buffer
   VkDeviceAddress Address; // Buffer device address for shader access (zero if not requested)
   uint64_t        Size;    // Allocation size in bytes
@@ -433,7 +429,7 @@ typedef struct {
 
 // GPU-resident image with its backing memory, view, and format metadata
 typedef struct {
-  VkImage        Image;  // Vulkan image handle
+  VkImage        Image; 
   VkDeviceMemory Memory; // Device memory allocation backing the image
   VkImageView    View;   // Image view used for sampling or storage access
   VkFormat       Format; // Pixel format of the image
@@ -465,103 +461,101 @@ typedef struct {
 //
 // One entity schema, one runtime union, no per-game structs.
 //
-// The entity lump in BSP files is text key/value records.  We tokenize and map known keys into
-// typed fields, then discard the raw pairs.  The discriminant union is the authoritative runtime
-// representation.  Unknown keys are silently ignored.
+// The entity lump in BSP files is text key/value records. We tokenize and map known keys into
+// typed fields, then discard the raw pairs. The discriminant union is the authoritative runtime
+// representation. Unknown keys are silently ignored.
 //
-// Entity attribute rule: if an attribute exists at all, it exists exactly once in BSP_Entity
-// (either in Common, or in the union arm only if it is inherently type-specific).
 typedef enum {
-  ENTITY_NONE = 0,
+  NO_ENTITY = 0,
 
-  // World / rules
-  ENTITY_WORLD,                           // worldspawn — map metadata and global rules
+  // World origin
+  ENTITY_WORLD,
 
   // Player / camera / navigation
-  ENTITY_INFO_PLAYER_START,               // info_player_start — single-player spawn
-  ENTITY_INFO_PLAYER_SPAWN,               // info_player_deathmatch / team spawn (aliases map here)
-  ENTITY_INFO_PLAYER_INTERMISSION,        // info_player_intermission — post-match camera
-  ENTITY_INFO_CAMERA,                     // Fixed camera
-  ENTITY_INFO_CAMERA_PATH,               // Camera path node
-  ENTITY_INFO_NAV_NODE,                   // AI/path node
-  ENTITY_INFO_OBJECTIVE_NODE,             // Objective marker node
+  ENTITY_INFO_PLAYER_START,        // info_player_start - single-player spawn
+  ENTITY_INFO_PLAYER_SPAWN,        // info_player_deathmatch / team spawn (aliases map here)
+  ENTITY_INFO_PLAYER_INTERMISSION, // info_player_intermission - post-match camera
+  ENTITY_INFO_CAMERA,              // Fixed camera
+  ENTITY_INFO_CAMERA_PATH,         // Camera path node
+  ENTITY_INFO_NAV_NODE,            // AI/path node
+  ENTITY_INFO_OBJECTIVE_NODE,      // Objective marker node
 
   // Rendering / environment
-  ENTITY_LIGHT,                           // Omnidirectional light
-  ENTITY_LIGHT_SPOT,                      // Spot light
-  ENTITY_ENV_FOG,                         // Fog volume / exponential fog
-  ENTITY_ENV_WIND,                        // Wind vector and gusting
-  ENTITY_ENV_SKY,                         // Sky / sun / skybox controls
-  ENTITY_ENV_POSTPROCESS,                 // Tonemap/bloom/exposure controls
-  ENTITY_DECAL,                           // Projected decal
-  ENTITY_PARTICLE_SYSTEM,                 // Particle emitter
-  ENTITY_SOUND_EMITTER,                   // Ambient or positional sound (target_speaker)
+  ENTITY_LIGHT,           // Omnidirectional light
+  ENTITY_LIGHT_SPOT,      // Spot light
+  ENTITY_ENV_FOG,         // Fog volume / exponential fog
+  ENTITY_ENV_WIND,        // Wind vector and gusting
+  ENTITY_ENV_SKY,         // Sky / sun / skybox controls
+  ENTITY_ENV_POSTPROCESS, // Tonemap/bloom/exposure controls
+  ENTITY_DECAL,           // Projected decal
+  ENTITY_PARTICLE_SYSTEM, // Particle emitter
+  ENTITY_SOUND_EMITTER,   // Ambient or positional sound (target_speaker)
 
-  // Static / dynamic props
-  ENTITY_PROP_STATIC,                     // Static model instance (misc_model)
-  ENTITY_PROP_DYNAMIC,                    // Animated/dynamic prop
-  ENTITY_PROP_PHYSICS,                    // Physics-enabled prop
+  // Static and dynamic props
+  ENTITY_PROP_STATIC,  // Static model instance (misc_model)
+  ENTITY_PROP_DYNAMIC, // Animated/dynamic prop
+  ENTITY_PROP_PHYSICS, // Physics-enabled prop
 
   // Triggers
-  ENTITY_TRIGGER,                         // Generic trigger volume
-  ENTITY_TRIGGER_ONCE,                    // Fires once then disables
-  ENTITY_TRIGGER_MULTI,                   // Re-fires after wait
-  ENTITY_TRIGGER_HURT,                    // Damage volume
-  ENTITY_TRIGGER_TELEPORT,               // Teleporter volume
-  ENTITY_TRIGGER_PUSH,                    // Jump pad / push volume
-  ENTITY_TRIGGER_LADDER,                  // Ladder volume
-  ENTITY_TRIGGER_WATER,                   // Water volume trigger
-  ENTITY_TRIGGER_SCRIPT,                  // Scripted trigger volume
+  ENTITY_TRIGGER,          // Generic trigger volume
+  ENTITY_TRIGGER_ONCE,     // Fires once then disables
+  ENTITY_TRIGGER_MULTI,    // Re-fires after wait
+  ENTITY_TRIGGER_HURT,     // Damage volume
+  ENTITY_TRIGGER_TELEPORT, // Teleporter volume
+  ENTITY_TRIGGER_PUSH,     // Jump pad / push volume
+  ENTITY_TRIGGER_LADDER,   // Ladder volume
+  ENTITY_TRIGGER_WATER,    // Water volume trigger
+  ENTITY_TRIGGER_SCRIPT,   // Scripted trigger volume
 
-  // Targets / logic links (name/target graph)
-  ENTITY_TARGET_POSITION,                 // Destination point
-  ENTITY_TARGET_RELAY,                    // Relay event
-  ENTITY_TARGET_DELAY,                    // Delay proxy
-  ENTITY_TARGET_RANDOM,                   // Random choice proxy
-  ENTITY_TARGET_CHANGELEVEL,              // Exit / level transition node
+  // Targets and links
+  ENTITY_TARGET_POSITION,    // Destination point
+  ENTITY_TARGET_RELAY,       // Relay event
+  ENTITY_TARGET_DELAY,       // Delay proxy
+  ENTITY_TARGET_RANDOM,      // Random choice proxy
+  ENTITY_TARGET_CHANGELEVEL, // Exit / level transition node
 
-  // Movers / doors / platforms
-  ENTITY_DOOR_SLIDING,                    // Linear door
-  ENTITY_DOOR_ROTATING,                   // Hinged door
-  ENTITY_BUTTON,                          // Press button
-  ENTITY_PLATFORM,                        // Up/down lift
-  ENTITY_ELEVATOR,                        // Multi-stop lift
-  ENTITY_TRAIN,                           // Path-based mover
-  ENTITY_ROTATING,                        // Rotating mover
-  ENTITY_CONVEYOR,                        // Conveyor volume/mover
-  ENTITY_BREAKABLE,                       // Breakable brush/prop
-  ENTITY_EXPLOSIVE,                       // Explosive object
+  // Movers
+  ENTITY_DOOR_SLIDING,  // Linear door
+  ENTITY_DOOR_ROTATING, // Hinged door
+  ENTITY_BUTTON,        // Press button
+  ENTITY_PLATFORM,      // Up/down lift
+  ENTITY_ELEVATOR,      // Multi-stop lift
+  ENTITY_TRAIN,         // Path-based mover
+  ENTITY_ROTATING,      // Rotating mover
+  ENTITY_CONVEYOR,      // Conveyor volume/mover
+  ENTITY_BREAKABLE,     // Breakable brush/prop
+  ENTITY_EXPLOSIVE,     // Explosive object
 
-  // Items / pickups
-  ENTITY_ITEM_GENERIC,                    // General pickup (holdables, etc.)
-  ENTITY_ITEM_WEAPON,                     // Weapon pickup
-  ENTITY_ITEM_AMMO,                       // Ammo pickup
-  ENTITY_ITEM_HEALTH,                     // Health pickup
-  ENTITY_ITEM_ARMOR,                      // Armor pickup
-  ENTITY_ITEM_POWERUP,                    // Timed powerup pickup
-  ENTITY_ITEM_KEY,                        // Key / access pickup
+  // Items
+  ENTITY_ITEM_GENERIC, // General pickup (holdables, etc.)
+  ENTITY_ITEM_WEAPON,  // Weapon pickup
+  ENTITY_ITEM_AMMO,    // Ammo pickup
+  ENTITY_ITEM_HEALTH,  // Health pickup
+  ENTITY_ITEM_ARMOR,   // Armor pickup
+  ENTITY_ITEM_POWERUP, // Timed powerup pickup
+  ENTITY_ITEM_KEY,     // Key / access pickup
 
-  // Combat / spawners
-  ENTITY_PROJECTILE_SPAWNER,              // Spawns projectiles periodically or on trigger
-  ENTITY_NPC_SPAWNER,                     // Spawns NPCs
-  ENTITY_ITEM_SPAWNER,                    // Spawns items
-  ENTITY_TURRET,                          // Mounted turret
-  ENTITY_VEHICLE,                         // Vehicle actor
-  ENTITY_NPC,                             // NPC actor
+  // Combat and spawners
+  ENTITY_PROJECTILE_SPAWNER, // Spawns projectiles periodically or on trigger
+  ENTITY_NPC_SPAWNER,        // Spawns NPCs
+  ENTITY_ITEM_SPAWNER,       // Spawns items
+  ENTITY_TURRET,             // Mounted turret
+  ENTITY_VEHICLE,            // Vehicle actor
+  ENTITY_NPC,                // NPC actor
 
-  // Objectives / gameflow
-  ENTITY_OBJECTIVE,                       // Objective entity (capture/defend/use/collect)
-  ENTITY_GAME_RULES,                      // Mode rules, score limits, time limits
+  // Objectives and gameflow
+  ENTITY_OBJECTIVE,  // Objective entity (capture/defend/use/collect)
+  ENTITY_GAME_RULES, // Mode rules, score limits, time limits
 
-  // Pure logic blocks (no geometry)
-  ENTITY_LOGIC_RELAY,                     // Relay
-  ENTITY_LOGIC_TIMER,                     // Periodic fire
-  ENTITY_LOGIC_COUNTER,                   // Count threshold
-  ENTITY_LOGIC_COMPARE,                   // Compare values
-  ENTITY_LOGIC_BRANCH,                    // If/else
-  ENTITY_LOGIC_RANDOM,                    // Random chance
-  ENTITY_LOGIC_SEQUENCE,                  // Sequence of outputs
-  ENTITY_SCRIPT,                          // Script controller
+  // Pure logic blocks
+  ENTITY_LOGIC_RELAY,    // Relay
+  ENTITY_LOGIC_TIMER,    // Periodic fire
+  ENTITY_LOGIC_COUNTER,  // Count threshold
+  ENTITY_LOGIC_COMPARE,  // Compare values
+  ENTITY_LOGIC_BRANCH,   // If/else
+  ENTITY_LOGIC_RANDOM,   // Random chance
+  ENTITY_LOGIC_SEQUENCE, // Sequence of outputs
+  ENTITY_SCRIPT,         // Script controller
 
   ENTITY_KIND_COUNT
 } Entity_Kind;
@@ -569,23 +563,23 @@ typedef enum {
 // Weapon archetype identifiers (generic, engine-side)
 typedef enum {
   WEAPON_NONE = 0,
-  WEAPON_MELEE,          // gauntlet
+  WEAPON_MELEE,   // Gauntlet
   WEAPON_PISTOL,
-  WEAPON_SMG,            // machinegun
+  WEAPON_SMG,     // Machinegun
   WEAPON_SHOTGUN,
   WEAPON_RIFLE,
   WEAPON_LMG,
   WEAPON_SNIPER,
-  WEAPON_GRENADE,        // grenade launcher
-  WEAPON_ROCKET,         // rocket launcher
-  WEAPON_ENERGY,         // plasma gun
+  WEAPON_GRENADE, // Grenade launcher
+  WEAPON_ROCKET,  // Rocket launcher
+  WEAPON_ENERGY,  // Plasma gun
   WEAPON_LIGHTNING,
-  WEAPON_RAIL,           // railgun
+  WEAPON_RAIL,    // Railgun
   WEAPON_BFG,
   WEAPON_KIND_COUNT
 } Weapon_Kind;
 
-// Ammo identifiers (generic)
+// Ammo identifiers 
 typedef enum {
   AMMO_NONE = 0,
   AMMO_BULLETS,
@@ -598,7 +592,7 @@ typedef enum {
   AMMO_KIND_COUNT
 } Ammo_Kind;
 
-// Powerup identifiers (generic)
+// Powerup identifiers 
 typedef enum {
   POWERUP_NONE = 0,
   POWERUP_QUAD_DAMAGE,
@@ -606,12 +600,12 @@ typedef enum {
   POWERUP_INVISIBILITY,
   POWERUP_REGENERATION,
   POWERUP_FLIGHT,
-  POWERUP_ENV_SUIT,      // battle suit / enviro
+  POWERUP_ENV_SUIT,
   POWERUP_INVULNERABLE,
   POWERUP_KIND_COUNT
 } Powerup_Kind;
 
-// Objective identifiers (generic)
+// Objective identifiers )
 typedef enum {
   OBJECTIVE_NONE = 0,
   OBJECTIVE_USE,
@@ -624,92 +618,91 @@ typedef enum {
   OBJECTIVE_KIND_COUNT
 } Objective_Kind;
 
-// Common entity attribute superset.
-// One-and-only place for shared attributes — no duplication across union arms.
+// Common entity attributes
 typedef struct {
+
   // Identity / linkage
-  char Name    [64];      // "targetname" / unique id / graph node name
-  char Target  [64];      // primary target id
-  char Target2 [64];      // secondary target id
-  char Parent  [64];      // parent attachment id
+  char Name    [64]; // Graph node name (e.g. "targetname")
+  char Target  [64]; // primary target id
+  char Target2 [64]; // secondary target id
+  char Parent  [64]; // parent attachment id
 
   // Transform
-  vec3  Origin;           // World-space position
-  vec3  Angles;           // Pitch/Yaw/Roll degrees
-  float Scale;            // Uniform scale (1.0 default)
+  vec3  Origin; // World-space position
+  vec3  Angles; // Pitch/Yaw/Roll degrees
+  float Scale;  // Uniform scale (1.0 default)
 
-  // Bounds (for volumes and brush entities)
-  vec3  Mins;             // Local or world mins
-  vec3  Maxs;             // Local or world maxs
-  float Radius;           // Radius for spherical volumes (0 if unused)
-  float Height;           // Height for cylindrical volumes (0 if unused)
+  // Bounds for volumes and brush entities
+  vec3  Mins;   // Local or world mins
+  vec3  Maxs;   // Local or world maxs
+  float Radius; // Radius for spherical volumes (0 if unused)
+  float Height; // Height for cylindrical volumes (0 if unused)
 
-  // Rendering / assets
-  char Model    [96];     // Model path (mesh, brush model token, etc)
-  char Material [96];     // Material/shader path
-  char Sound    [96];     // Sound file path
-  char Script   [96];     // Script path
-  char Message  [128];    // UI/message string
-  vec3 Color;             // RGB (0..1) where applicable
-  float Alpha;            // Opacity (1.0 default)
+  // Rendering assets
+  char Model    [96];  // Model path (mesh, brush model token, etc)
+  char Material [96];  // Material/shader path
+  char Sound    [96];  // Sound file path
+  char Script   [96];  // Script path
+  char Message  [128]; // UI/message string
+  vec3 Color;          // RGB (0..1) where applicable
+  float Alpha;         // Opacity (1.0 default)
 
-  // Gameplay / physics
-  int   Spawnflags;       // Generic spawnflags bitfield
-  int   Flags;            // Generic runtime flags (engine-defined)
-  int   Team;             // Team or faction id
-  int   Health;           // Hit points (0 if not damageable)
-  int   Armor;            // Armor points (0 if unused)
-  int   Damage;           // Damage (for hurt/explosive/etc)
-  int   Count;            // Generic count (ammo amount, quantity, etc)
-  float Speed;            // Generic speed (doors/movers/projectiles)
-  float Accel;            // Acceleration (movers)
-  float Decel;            // Deceleration (movers)
-  float Wait;             // Wait time (seconds)
-  float Delay;            // Delay before fire (seconds)
-  float Random;           // Random variance (seconds or scalar)
+  // Gameplay and physics
+  int   Spawnflags; // Generic spawnflags bitfield
+  int   Flags;      // Generic runtime flags (engine-defined)
+  int   Team;       // Team or faction id
+  int   Health;     // Hit points (0 if not damageable)
+  int   Armor;      // Armor points (0 if unused)
+  int   Damage;     // Damage (for hurt/explosive/etc)
+  int   Count;      // Generic count (ammo amount, quantity, etc)
+  float Speed;      // Generic speed (doors/movers/projectiles)
+  float Accel;      // Acceleration (movers)
+  float Decel;      // Deceleration (movers)
+  float Wait;       // Wait time (seconds)
+  float Delay;      // Delay before fire (seconds)
+  float Random;     // Random variance (seconds or scalar)
 } Entity_Common;
 
-// BSP Entity — discriminated union.  The Common struct carries the superset.
-// The union carries only what cannot reasonably be shared.
+// BSP Entity discriminate union
 typedef struct {
-  Entity_Kind    Kind;    // Discriminant tag
-  Entity_Common  Common;  // Shared attributes (single authoritative copy)
+  Entity_Kind   Kind;   // Discriminant tag
+  Entity_Common Common; // Shared attributes 
   union { // case Kind is
 
     // when ENTITY_WORLD =>
     struct {
-      float Gravity;        // World gravity scalar (0 = engine default 800)
-      float Time_Limit;     // Match time limit (0 = none)
-      int   Score_Limit;    // Score limit (0 = none)
-      float Ambient_Light;  // Scalar ambient floor
+      float Gravity;       // World gravity scalar (0 = engine default 800)
+      float Time_Limit;    // Match time limit (0 = none)
+      int   Score_Limit;   // Score limit (0 = none)
+      float Ambient_Light; // Scalar ambient floor
     } world;
 
-    // when ENTITY_INFO_PLAYER_* =>
+    // when ENTITY_INFO_PLAYER_ =>
     struct {
-      int   Player_Class;   // Class index (0 = default)
-      int   Loadout;        // Loadout id (0 = default)
-      float Fov;            // Suggested FOV (0 = engine default)
-      float View_Height;    // Standing view height (0 = engine default)
-      float Crouch_Height;  // Crouch view height (0 = engine default)
+      int   Player_Class;  // Class index (0 = default)
+      int   Loadout;       // Loadout id (0 = default)
+      float Fov;           // Suggested FOV (0 = engine default)
+      float View_Height;   // Standing view height (0 = engine default)
+      float Crouch_Height; // Crouch view height (0 = engine default)
     } player;
 
     // when ENTITY_LIGHT | ENTITY_LIGHT_SPOT =>
     struct {
-      float Intensity;      // Luminous intensity / radius scalar
-      float Range;          // Explicit range (0 = derived from intensity)
-      float Inner_Angle;    // Spot inner cone degrees (spot only)
-      float Outer_Angle;    // Spot outer cone degrees (spot only)
-      int   Cast_Shadows;   // Non-zero = shadow caster
-      float Falloff;        // 1 = linear, 2 = quadratic, etc
+      float Intensity;    // Luminous intensity / radius scalar
+      float Range;        // Explicit range (0 = derived from intensity)
+      float Inner_Angle;  // Spot inner cone degrees (spot only)
+      float Outer_Angle;  // Spot outer cone degrees (spot only)
+      int   Cast_Shadows; // Non-zero = shadow caster
+      float Falloff;      // 1 = linear, 2 = quadratic, etc
     } light;
 
     // when ENTITY_SOUND_EMITTER =>
     struct {
-      float Volume;         // 0..1
-      float Pitch;          // 1 = normal
-      float Min_Distance;   // Full volume within this distance
-      float Max_Distance;   // Silence beyond this distance
-      int   Looping;        // Non-zero = loop
+      float Volume;       // 0..1
+      float Pitch;        // 1 = normal
+      float Min_Distance; // Full volume within this distance
+      float Max_Distance; // Silence beyond this distance
+      int   Looping;      // Non-zero = loop
     } sound;
 
     // when ENTITY_DECAL =>
@@ -721,18 +714,18 @@ typedef struct {
 
     // when ENTITY_PARTICLE_SYSTEM =>
     struct {
-      float Rate;           // Particles per second
-      float Lifetime;       // Seconds
-      float Spread;         // Cone spread scalar
-      float Velocity;       // Initial speed scalar
+      float Rate;     // Particles per second
+      float Lifetime; // Seconds
+      float Spread;   // Cone spread scalar
+      float Velocity; // Initial speed scalar
     } particle;
 
     // when ENTITY_TRIGGER* =>
     struct {
-      int   Enabled;        // Non-zero = active
-      int   Filter_Team;    // 0 = any, else team id
-      int   Filter_Class;   // 0 = any, else class id
-      int   Fire_Count;     // How many times it can fire (0 = infinite)
+      int   Enabled;      // Non-zero = active
+      int   Filter_Team;  // 0 = any, else team id
+      int   Filter_Class; // 0 = any, else class id
+      int   Fire_Count;   // How many times it can fire (0 = infinite)
     } trigger;
 
     // when ENTITY_TRIGGER_TELEPORT =>
@@ -742,18 +735,18 @@ typedef struct {
 
     // when ENTITY_TRIGGER_PUSH =>
     struct {
-      vec3  Push_Dir;        // Direction (unit or non-unit; engine normalizes)
-      float Push_Speed;      // Magnitude
+      vec3  Push_Dir;   // Direction (unit or non-unit; engine normalizes)
+      float Push_Speed; // Magnitude
     } push;
 
     // when movers/doors/platform/train =>
     struct {
-      vec3  Move_Dir;       // Movement direction (normalized by loader)
-      float Lip;            // Remaining overlap at end of travel
-      float Distance;       // Travel distance (0 = derived from bounds)
-      float Open_Angle;     // For rotating doors
-      int   Toggle;         // Non-zero = toggle behavior
-      int   Starts_Open;    // Non-zero = initial state open/active
+      vec3  Move_Dir;    // Movement direction (normalized by loader)
+      float Lip;         // Remaining overlap at end of travel
+      float Distance;    // Travel distance (0 = derived from bounds)
+      float Open_Angle;  // For rotating doors
+      int   Toggle;      // Non-zero = toggle behavior
+      int   Starts_Open; // Non-zero = initial state open/active
     } mover;
 
     // when ENTITY_BREAKABLE | ENTITY_EXPLOSIVE =>
@@ -763,55 +756,55 @@ typedef struct {
       int   Gib_Count;        // Debris count
     } breakable;
 
-    // when ENTITY_ITEM_* =>
+    // when ENTITY_ITEM_ =>
     struct {
-      Weapon_Kind  Weapon;    // For ENTITY_ITEM_WEAPON
-      Ammo_Kind    Ammo;      // For ENTITY_ITEM_AMMO
-      Powerup_Kind Powerup;   // For ENTITY_ITEM_POWERUP
-      int          Key_Id;    // For ENTITY_ITEM_KEY
-      int          Respawn;   // Respawn seconds (0 = default)
-      float        Duration;  // Powerup duration seconds (0 = default)
+      Weapon_Kind  Weapon;   // For ENTITY_ITEM_WEAPON
+      Ammo_Kind    Ammo;     // For ENTITY_ITEM_AMMO
+      Powerup_Kind Powerup;  // For ENTITY_ITEM_POWERUP
+      int          Key_Id;   // For ENTITY_ITEM_KEY
+      int          Respawn;  // Respawn seconds (0 = default)
+      float        Duration; // Powerup duration seconds (0 = default)
     } item;
 
     // when ENTITY_PROJECTILE_SPAWNER =>
     struct {
-      float Fire_Rate;       // Shots per second
-      float Projectile_Speed;// Speed scalar
-      float Spread;          // Spread scalar
-      int   Burst;           // Shots per burst
+      float Fire_Rate;        // Shots per second
+      float Projectile_Speed; // Speed scalar
+      float Spread;           // Spread scalar
+      int   Burst;            // Shots per burst
     } projectile_spawner;
 
     // when ENTITY_TURRET =>
     struct {
-      float Yaw_Rate;        // Degrees/sec
-      float Pitch_Rate;      // Degrees/sec
-      float Yaw_Min, Yaw_Max;// Limits
+      float Yaw_Rate;         // Degrees/sec
+      float Pitch_Rate;       // Degrees/sec
+      float Yaw_Min, Yaw_Max; // Limits
       float Pitch_Min, Pitch_Max;
       Weapon_Kind Weapon;
     } turret;
 
     // when ENTITY_VEHICLE =>
     struct {
-      float Mass;            // kg scalar
-      float Engine_Power;    // generic power scalar
-      float Turn_Rate;       // degrees/sec
-      int   Seats;           // seat count
+      float Mass;         // kg scalar
+      float Engine_Power; // generic power scalar
+      float Turn_Rate;    // degrees/sec
+      int   Seats;        // seat count
     } vehicle;
 
     // when ENTITY_NPC =>
     struct {
-      int   Npc_Class;       // class index
-      float Aggro_Radius;    // detection range
-      float Walk_Speed;      // units/sec
-      float Run_Speed;       // units/sec
+      int   Npc_Class;    // class index
+      float Aggro_Radius; // detection range
+      float Walk_Speed;   // units/sec
+      float Run_Speed;    // units/sec
     } npc;
 
     // when ENTITY_OBJECTIVE =>
     struct {
       Objective_Kind Obj_Kind;
-      int   Required_Count;  // e.g. collect N items
-      float Hold_Time;       // hold/capture seconds
-      int   Obj_Team;        // owning team (0 = neutral)
+      int   Required_Count; // e.g. collect N items
+      float Hold_Time;      // hold/capture seconds
+      int   Obj_Team;       // owning team (0 = neutral)
     } objective;
 
     // when ENTITY_LOGIC_* =>
@@ -820,7 +813,7 @@ typedef struct {
       int   Value_B;
       int   Threshold;
       float Interval;
-      float Chance;          // 0..1
+      float Chance; // 0..1
     } logic;
   };
 } BSP_Entity;
@@ -843,63 +836,6 @@ typedef struct {
 
 // Single spawn point parsed from the BSP entity lump
 typedef struct {vec3 Origin; float Angle;} Spawn; // World-space origin and facing angle in degrees
-
-// BSP lump directory entry: byte offset and length of a data lump within the file
-typedef struct {int Offset, Length;} BSP_Lump;
-
-// BSP file header: magic number, version, and the 17-entry lump directory
-typedef struct {
-  uint     Magic, Version; // Magic (0x50534249 = "IBSP") and format version (46 for Quake 3)
-  BSP_Lump Lumps [BSP_LUMP_COUNT]; // Directory of data lumps indexed by BSP_ENTITIES..BSP_LIGHTMAPS
-} BSP_Header;
-
-// BSP vertex as stored on disk: position, two UV sets, normal, and vertex color
-typedef struct {
-  float   Position        [3]; // World XYZ
-  float   Texture_Coords  [2]; // Diffuse UVs 
-  float   Lightmap_Coords [2]; // Lightmap UVs
-  float   Normal          [3]; // Unit surface normal
-  uint8_t Color           [4]; // Vertex color (RGBA, 8 bits per channel)
-} BSP_Vertex;
-
-// BSP face/surface descriptor: references into vertex, index, and lightmap data
-typedef struct {
-  int   Shader_Index;                            // Material shader
-  int   Fog_Volume;                              // Fog reference
-  int   Type;                                    // Surface type (planar/patch/mesh)
-  int   First_Vertex,       Vertex_Count;        // Starting vertex index and count in the global vertex array
-  int   First_Index,        Index_Count;         // Starting element index and count in the global index array
-  int   Lightmap_Index;                          // Lightmap page index (-1 if none)
-  int   Lightmap_X,         Lightmap_Y;          // Top-left corner of this face's lightmap within its page
-  int   Lightmap_Width,     Lightmap_Height;     // Dimensions of the lightmap region in texels
-  float Lightmap_Origin[3], Lightmap_Vectors[9]; // World-space lightmap placement (origin + 2 basis vectors + normal)
-  int   Patch_Width,        Patch_Height;        // Control point grid dimensions (only valid for patch surfaces)
-} BSP_Face;
-
-// BSP shader entry: maps a surface material name to content and surface flags
-typedef struct {
-  char Name[64];        // Shader path (e.g. "textures/gothic_wall/wall01")
-  int  Flags, Contents; // Surface flags (e.g. translucent) and content flags (e.g. solid, water)
-} BSP_Shader;
-
-// MD3 surface header: describes one mesh within an MD3 model file
-typedef struct {
-  int  Magic;                                   // Surface magic identifier (always IDP3)
-  char Name[64];                                // Null-terminated surface name
-  int  Flags;                                   // Surface flags (unused in Quake 3)
-  int  Number_Of_Frames, Number_Of_Shaders;     // Animation frame count and attached shader count
-  int  Number_Of_Vertices, Number_Of_Triangles; // Per-frame vertex count and triangle count
-  int  Triangles_Offset, Shaders_Offset;        // Byte offsets from surface start to triangle and shader data
-  int  Texture_Coordinates_Offset;              // Byte offset to the per-vertex texture coordinate array
-  int  Vertices_Offset, End_Offset;             // Byte offset to compressed vertex frames and to the next surface
-} MD3_Surface;
-
-// MD3 tag: a named attachment point with position and orientation for linking model parts
-typedef struct {
-  char  Name[64];  // Null-terminated tag name (e.g. "tag_barrel", "tag_weapon")
-  float Origin[3]; // World-space position of the attachment point
-  float Axis[9];   // A 3×3 rotation matrix (row-major) defining the tag's local coordinate frame
-} MD3_Tag;
 
 // Parsed weapon model assembled from multiple MD3 surfaces (body, barrel, hand)
 typedef struct {
@@ -970,49 +906,7 @@ typedef struct {int V0, V1, Face;}      QH_Edge;
 //
 // ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 
-// Central rendering context holding all Vulkan state, GPU resources, and synchronization objects
-SDL_Window      *Window;             // SDL window for presentation and input
-Quality_Level    Active_Quality = QUALITY_POTATO;   // Default to Potato (720p native — sharp, fast on lavapipe)
-int              Width;                   // Window width in pixels (output/display resolution)
-int              Height;                  // Window height in pixels
-float            Active_Render_Scale;     // Internal RT render scale (from quality preset)
-int              Active_Denoise_Passes;  // A-trous denoise iterations (from quality preset)
-int              Active_Checkerboard;    // 1 = half-width dispatch (Q2RTX-style checkerboard)
-int              Render_Width;            // Internal RT render resolution (Width * Render_Scale)
-int              Render_Height;           // Internal RT render resolution (Height * Render_Scale)
-VkInstance       Instance;           // Vulkan instance with validation layers
-VkSurfaceKHR     Surface;            // Window surface for presentation
-VkPhysicalDevice Physical_Device;    // Selected GPU with ray tracing support
-VkDevice         Device;             // Logical device created from the physical device
-VkQueue          Queue;              // Universal queue for graphics, compute, and transfer
-uint             Queue_Family_Index; // Index of the queue family supporting all operations
-
-// Swapchain state
-VkSwapchainKHR Swapchain;                               // Presentation swapchain
-VkImage        Swapchain_Images [SWAPCHAIN_MAX_IMAGES]; // Swapchain image handles (up to 8 for triple+ buffering)
-VkImageView    Swapchain_Views  [SWAPCHAIN_MAX_IMAGES]; // Image views corresponding to each swapchain image
-uint           Swapchain_Image_Count;                   // Actual number of swapchain images acquired
-VkFormat       Swapchain_Format;                        // Surface format of the swapchain (e.g. B8G8R8A8_SRGB)
-VkExtent2D     Swapchain_Extent;                        // Swapchain resolution in pixels
-
-// Command recording and CPU-GPU synchronization
-VkCommandPool   Command_Pool;              // Command pool for allocating command buffers
-VkCommandBuffer Command_Buffer;            // Single reusable command buffer for all GPU work
-VkFence         Fence;                     // CPU-GPU synchronization fence for frame serialization
-VkSemaphore     Semaphore_Image_Available; // Signals when a swapchain image is ready
-VkSemaphore     Semaphore_Render_Finished; // Signals when rendering is complete for presentation
-
-// Ray tracing extension state
-VkPhysicalDeviceRayTracingPipelinePropertiesKHR Raytracing_Properties; // Shader binding table (SBT) alignment and handle sizes
-
-// X-macro for declaring Vulkan function pointer variables from their spec names
-#define DECLARE_VK(vk, alias) PFN_##vk alias;
-
-// X-macro for loading Vulkan function pointers from the logical device at runtime
-#define LOAD_VK(vk, alias) alias = (PFN_##vk) vkGetDeviceProcAddr (Device, #vk);
-
-// Master list of ray tracing extension functions loaded via vkGetDeviceProcAddr.
-// Each entry maps the Vulkan spec name to a shorter alias used throughout this file.
+// List of required ray tracing extension functions
 #define VULKAN_FUNCTIONS(_) \
   _(vkCreateAccelerationStructureKHR,           vkCreateAccelerationStructure)           /* Creates a BLAS or TLAS */ \
   _(vkDestroyAccelerationStructureKHR,          vkDestroyAccelerationStructure)          /* Destroys an acceleration structure */ \
@@ -1024,17 +918,32 @@ VkPhysicalDeviceRayTracingPipelinePropertiesKHR Raytracing_Properties; // Shader
   _(vkCmdTraceRaysKHR,                          vkCmdTraceRays)                          /* Records a ray dispatch command */
 VULKAN_FUNCTIONS (DECLARE_VK)
 
+// Convenience macro for declaring Vulkan function pointer variables from their spec names
+#define DECLARE_VK(vk, alias) PFN_##vk alias;
+
+// Convenience macro for loading Vulkan function pointers from the logical device at runtime
+#define LOAD_VK(vk, alias) alias = (PFN_##vk) vkGetDeviceProcAddr (Device, #vk);
+
 // Assertion to validate Vulkan return values; prints the error code, file, and line number then exits
 #define VK_CHECK(Call) do { \
   VkResult _Result = (Call); \
   if (_Result) {fprintf (stderr, "[vulkan] error %d at %s:%d\n", _Result, __FILE__, __LINE__); exit (1);} \
 } while (0)
 
-// GPU storage images and scene data buffers
-Gpu_Image  Raytracing_Storage_Image;                     // Storage image written by ray generation shader
-Gpu_Buffer Camera_Uniform_Buffer;                        // Uniform buffer for the Camera struct
-Gpu_Buffer Vertex_Buffer, Index_Buffer, Material_Buffer; // Scene geometry and material data on GPU
-Gpu_Buffer Texture_Id_Buffer;                            // Per-triangle texture index buffer
+// Command recording and CPU-GPU synchronization
+VkCommandPool   Command_Pool;              // Command pool for allocating command buffers
+VkCommandBuffer Command_Buffer;            // Single reusable command buffer for all GPU work
+VkFence         Fence;                     // CPU-GPU synchronization fence for frame serialization
+VkSemaphore     Semaphore_Image_Available; // Signals when a swapchain image is ready
+VkSemaphore     Semaphore_Render_Finished; // Signals when rendering is complete for presentation
+
+// Swapchain state
+VkSwapchainKHR Swapchain;                               // Presentation swapchain
+VkImage        Swapchain_Images [SWAPCHAIN_MAX_IMAGES]; // Swapchain image handles (up to 8 for triple+ buffering)
+VkImageView    Swapchain_Views  [SWAPCHAIN_MAX_IMAGES]; // Image views corresponding to each swapchain image
+uint           Swapchain_Image_Count;                   // Actual number of swapchain images acquired
+VkFormat       Swapchain_Format;                        // Surface format of the swapchain (e.g. B8G8R8A8_SRGB)
+VkExtent2D     Swapchain_Extent;                        // Swapchain resolution in pixels
 
 // Diffuse texture array
 VkImage        *Texture_Images;   // Array of diffuse texture images
@@ -1051,17 +960,8 @@ VkDeviceMemory Lightmap_Memory;  // Backing memory for the lightmap image
 VkImageView    Lightmap_View;    // Image view for lightmap sampling
 VkSampler      Lightmap_Sampler; // Sampler for lightmap lookups (linear, clamp-to-edge)
 
-// Acceleration structures
-Acceleration_Structure Bottom_Level, Top_Level; // BLAS for world geometry and TLAS combining all instances
-
-// Host-visible instance buffer for writing TLAS instance descriptors each frame
-Gpu_Buffer Top_Level_Instance_Buffer;
-
-// Persistent scratch memory reused across per-frame TLAS rebuilds
-Gpu_Buffer Top_Level_Scratch_Buffer;
-
 // Ray tracing pipeline and shader binding table
-VkPipelineCache  Pipeline_Cache;              // Shared pipeline cache — amortizes SPIR-V→ISA compilation
+VkPipelineCache  Pipeline_Cache;              // Shared pipeline cache - amortizes SPIR-V→ISA compilation
 VkPipelineLayout Pipeline_Layout;             // Pipeline layout with descriptor set bindings
 VkPipeline       Pipeline;                    // Ray tracing pipeline (rgen, rchit, rmiss, shadow rmiss)
 Gpu_Buffer       Shader_Binding_Table_Buffer; // Buffer holding the shader binding table
@@ -1076,16 +976,6 @@ VkStridedDeviceAddressRegionKHR Shader_Binding_Callable;       // SBT region for
 VkDescriptorSetLayout Descriptor_Set_Layout; // Layout describing all 12 descriptor bindings
 VkDescriptorPool      Descriptor_Pool;       // Pool from which the single descriptor set is allocated
 VkDescriptorSet       Descriptor_Set;        // Descriptor set binding all resources to the pipeline
-
-// GPU physics pipeline state
-VkPipeline            Physics_Pipeline;          // Compute pipeline for physics simulation
-VkPipelineLayout      Physics_Pipeline_Layout;   // Pipeline layout with push constants for Gpu_Input
-VkDescriptorSetLayout Physics_Descriptor_Layout; // Layout: TLAS + vertex + index + player + hull (5 bindings)
-VkDescriptorPool      Physics_Descriptor_Pool;   // Pool for the physics descriptor set
-VkDescriptorSet       Physics_Descriptor_Set;    // Descriptor set binding physics resources
-Gpu_Buffer            Player_State_Buffer;       // SSBO holding the Gpu_Player state (read-write each frame)
-Gpu_Buffer            Hull_Storage_Buffer;       // SSBO holding Gpu_Hull vertex + adjacency data (binding 4)
-Gpu_Buffer            Projectile_Buffer;         // SSBO holding Gpu_Projectile_Pool (binding 5)
 
 // Post-processing pipeline
 VkPipeline            Postprocess_Pipeline;
@@ -1108,6 +998,46 @@ VkDescriptorPool      Denoise_Descriptor_Pool;
 VkDescriptorSet       Denoise_Descriptor_Sets[2];  // Ping-pong: [0] reads A writes B, [1] reads B writes A
 Gpu_Image             Denoise_Ping_Image;           // Ping-pong buffer for spatial denoising
 
+// Shader binding table (SBT) alignment and handle sizes
+VkPhysicalDeviceRayTracingPipelinePropertiesKHR Raytracing_Properties; 
+
+// BLAS for world geometry and TLAS combining all instances
+Acceleration_Structure Bottom_Level, Top_Level; 
+
+// GPU physics pipeline state
+VkPipeline            Physics_Pipeline;          // Compute pipeline for physics simulation
+VkPipelineLayout      Physics_Pipeline_Layout;   // Pipeline layout with push constants for Gpu_Input
+VkDescriptorSetLayout Physics_Descriptor_Layout; // Layout: TLAS + vertex + index + player + hull (5 bindings)
+VkDescriptorPool      Physics_Descriptor_Pool;   // Pool for the physics descriptor set
+VkDescriptorSet       Physics_Descriptor_Set;    // Descriptor set binding physics resources
+Gpu_Buffer            Player_State_Buffer;       // SSBO holding the Gpu_Player state (read-write each frame)
+Gpu_Buffer            Hull_Storage_Buffer;       // SSBO holding Gpu_Hull vertex + adjacency data (binding 4)
+Gpu_Buffer            Projectile_Buffer;         // SSBO holding Gpu_Projectile_Pool (binding 5)
+
+// Central rendering context holding all Vulkan state, GPU resources, and synchronization objects
+SDL_Window      *Window;                // SDL window for presentation and input
+int              Width;                 // Window width in pixels (output/display resolution)
+int              Height;                // Window height in pixels
+float            Active_Render_Scale;   // Internal RT render scale (from quality preset)
+int              Active_Denoise_Passes; // A-trous denoise iterations (from quality preset)
+int              Active_Checkerboard;   // 1 = half-width dispatch (Q2RTX-style checkerboard)
+int              Render_Width;          // Internal RT render resolution (Width * Render_Scale)
+int              Render_Height;         // Internal RT render resolution (Height * Render_Scale)
+VkInstance       Instance;              // Vulkan instance with validation layers
+VkSurfaceKHR     Surface;               // Window surface for presentation
+VkPhysicalDevice Physical_Device;       // Selected GPU with ray tracing support
+VkDevice         Device;                // Logical device created from the physical device
+VkQueue          Queue;                 // Universal queue for graphics, compute, and transfer
+uint             Queue_Family_Index;    // Index of the queue family supporting all operations
+
+// GPU storage images and scene data buffers
+Gpu_Buffer Top_Level_Instance_Buffer;                    // Host-visible instance buffer for writing TLAS instance descriptors each frame
+Gpu_Buffer Top_Level_Scratch_Buffer;                     // Persistent scratch memory reused across per-frame TLAS rebuilds
+Gpu_Image  Raytracing_Storage_Image;                     // Storage image written by ray generation shader
+Gpu_Buffer Camera_Uniform_Buffer;                        // Uniform buffer for the Camera struct
+Gpu_Buffer Vertex_Buffer, Index_Buffer, Material_Buffer; // Scene geometry and material data on GPU
+Gpu_Buffer Texture_Id_Buffer;                            // Per-triangle texture index buffer
+
 // Audio
 Audio_System Audio;
 
@@ -1121,21 +1051,22 @@ float Delta_Time; // Time elapsed since the previous frame in seconds
 // Runtime mode flags (set by command-line arguments)
 int   Skip_Postprocess; // Non-zero to bypass the post-processing compute pass
 
-// Windowing state (Neo Engine-style state machine)
+// Windowing state and settings
+Quality_Level    Active_Quality      = QUALITY_POTATO;
 Window_Mode_Kind Current_Window_Mode = WINDOWED_MODE;
 Game_Mode_Kind   Current_Game_Mode   = GAME_PLAYING;
 Cursor_Kind      Current_Cursor_Kind = CURSOR_SYSTEM;
 Activated_Kind   Current_Activated   = OTHER_ACTIVATED;
-int              Input_Active        = 1;           // Process input when active (disabled on deactivation)
-int              Cursor_Centering    = 0;           // Center cursor each frame (game mode)
-int              In_Menu             = 0;           // 1 = menu mode, 0 = game mode
-int              Saved_Cursor_X, Saved_Cursor_Y;    // Cursor position saved across mode transitions
-int              Windowed_X, Windowed_Y;            // Saved window position before fullscreen
-int              Windowed_W, Windowed_H;            // Saved window size before fullscreen
-int              Swapchain_Dirty     = 0;           // Non-zero when swapchain needs recreation
-SDL_Cursor      *SDL_Cursor_Arrow;                  // System arrow cursor (menu default)
-SDL_Cursor      *SDL_Cursor_Hand;                   // Active cursor (hovering interactive UI)
-SDL_Cursor      *SDL_Cursor_Crosshair;              // Inactive cursor (menu, not hovering)
+int              Input_Active        = 1;        // Process input when active (disabled on deactivation)
+int              Cursor_Centering    = 0;        // Center cursor each frame (game mode)
+int              In_Menu             = 0;        // 1 = menu mode, 0 = game mode
+int              Saved_Cursor_X, Saved_Cursor_Y; // Cursor position saved across mode transitions
+int              Windowed_X, Windowed_Y;         // Saved window position before fullscreen
+int              Windowed_W, Windowed_H;         // Saved window size before fullscreen
+int              Swapchain_Dirty     = 0;        // Non-zero when swapchain needs recreation
+SDL_Cursor      *SDL_Cursor_Arrow;               // System arrow cursor (menu default)
+SDL_Cursor      *SDL_Cursor_Hand;                // Active cursor (hovering interactive UI)
+SDL_Cursor      *SDL_Cursor_Crosshair;           // Inactive cursor (menu, not hovering)
 
 // ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 //
@@ -1228,10 +1159,33 @@ void Image_Layout_Barrier (VkCommandBuffer      Command_Buffer, VkImage         
                            VkPipelineStageFlags Source_Stage,   VkPipelineStageFlags Destination_Stage);
 
 // Create a sampler with linear filtering and repeating address mode on all axes
-VkSampler Sampler_Create_Repeating (void);
+VkSampler Sampler_Create_Repeating ();
 
 // Create a sampler with linear filtering and clamp-to-edge on all axes
-VkSampler Sampler_Create_Clamping (void);
+VkSampler Sampler_Create_Clamping ();
+
+// Load a damage map TGA and sample it at normalized UV coordinates (0-1 range).
+// Returns a damage multiplier in [0.0, 1.0] where 0.0 = fully armored, 1.0 = critical.
+// The damage map is loaded on demand and cached in a table.
+#define DAMAGE_CACHE_MAX 64
+
+// Loaded damage mapping
+typedef struct {
+  char     Path[256];
+  uint8_t *Pixels;
+  uint     Width, Height;
+} Damage_Map_Cache_Entry;
+
+// Global damage map collection
+int                    Damage_Cache_Count = 0;
+Damage_Map_Cache_Entry Damage_Cache[DAMAGE_CACHE_MAX];
+
+// Free all cached damage map pixel data
+void Damage_Cache_Free ()
+
+// Look up the damage map path for a given model name and body part index (0=head, 1=upper, 2=lower)
+const char *Damage_Map_For_Model (const char *Model_Name, int Part_Index);
+float Damage_Map_Sample (const char *Path, float U, float V);
 
 // ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 //
@@ -1240,7 +1194,26 @@ VkSampler Sampler_Create_Clamping (void);
 // ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 
 // Quake 3 animated model (MD3) format
-#define MD3_MAGIC           0x33504449u // "IDP3" as a 32-bit little-endian integer
+#define MD3_MAGIC 0x33504449u // "IDP3" as a 32-bit little-endian integer
+
+// MD3 surface header: describes one mesh within an MD3 model file
+typedef struct {
+  int  Magic;                                   // Surface magic identifier (always IDP3)
+  char Name[64];                                // Null-terminated surface name
+  int  Flags;                                   // Surface flags (unused in Quake 3)
+  int  Number_Of_Frames, Number_Of_Shaders;     // Animation frame count and attached shader count
+  int  Number_Of_Vertices, Number_Of_Triangles; // Per-frame vertex count and triangle count
+  int  Triangles_Offset, Shaders_Offset;        // Byte offsets from surface start to triangle and shader data
+  int  Texture_Coordinates_Offset;              // Byte offset to the per-vertex texture coordinate array
+  int  Vertices_Offset, End_Offset;             // Byte offset to compressed vertex frames and to the next surface
+} MD3_Surface;
+
+// MD3 tag: a named attachment point with position and orientation for linking model parts
+typedef struct {
+  char  Name[64];  // Null-terminated tag name (e.g. "tag_barrel", "tag_weapon")
+  float Origin[3]; // World-space position of the attachment point
+  float Axis[9];   // A 3×3 rotation matrix (row-major) defining the tag's local coordinate frame
+} MD3_Tag;
 
 // Parse a single MD3 surface's geometry (vertices, indices, texture coordinates) into the growing output arrays. An optional 12-float
 // transform (origin + 3×3 axis matrix) can pre-transform vertices and normals. Quake 3 coordinate swizzle (x,y,z)->(x,z,-y) is
@@ -1261,7 +1234,7 @@ void MD3_Parse_Surface_At_Frame (const uint8_t *Surface_Data, int Frame,
 
 // Load the three-part machinegun weapon model (body, barrel, hand) from MD3 files.
 // The barrel is pre-transformed by tag_barrel; animation frames are extracted from tag_weapon in the hand model.
-Weapon_Model Weapon_Model_Load (void);
+Weapon_Model Weapon_Model_Load ();
 
 // Load an entity model and pre-compute all animation frames (LEGS_IDLE = 10 frames).
 // Adds entity texture entries to the scene's material list BEFORE Scene_Load_Textures.
@@ -1273,6 +1246,13 @@ void Entity_Bottom_Level_Initialize (Entity *Enemy);
 
 // Refit entity BLAS after uploading the current animation frame's vertices.
 void Entity_Bottom_Level_Rebuild (Entity *Enemy);
+
+// Compose two tag transforms (each float[12]: origin[3] + axis[9]).
+// Result = A ∘ B: applies B first, then A. (new_pos = R_A * (R_B * v + O_B) + O_A)
+void Tag_Compose 
+// Returns 1 if found, 0 if not. Writes the 12-float transform (origin[3] + axis[9]) to Out.
+int MD3_Find_Tag_At_Frame (const uint8_t *Data, int Tag_Count, int Tags_Offset,
+                                   int Frame, const char *Name, float Out[12])
 
 // ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 //
@@ -1302,6 +1282,44 @@ void Entity_Bottom_Level_Rebuild (Entity *Enemy);
 #define TESSELLATION_LEVEL   5           // Number of subdivisions per Bézier patch edge
 #define LIGHTMAP_PAGE_SIZE   128         // Width and height in texels of each lightmap page
 
+// BSP lump directory entry: byte offset and length of a data lump within the file
+typedef struct {int Offset, Length;} BSP_Lump;
+
+// BSP file header: magic number, version, and the 17-entry lump directory
+typedef struct {
+  uint     Magic, Version;         // Magic (0x50534249 = "IBSP") and format version (46 for Quake 3)
+  BSP_Lump Lumps [BSP_LUMP_COUNT]; // Directory of data lumps indexed by BSP_ENTITIES..BSP_LIGHTMAPS
+} BSP_Header;
+
+// BSP vertex as stored on disk: position, two UV sets, normal, and vertex color
+typedef struct {
+  float   Position        [3]; // World XYZ
+  float   Texture_Coords  [2]; // Diffuse UVs 
+  float   Lightmap_Coords [2]; // Lightmap UVs
+  float   Normal          [3]; // Unit surface normal
+  uint8_t Color           [4]; // Vertex color (RGBA, 8 bits per channel)
+} BSP_Vertex;
+
+// BSP face/surface descriptor: references into vertex, index, and lightmap data
+typedef struct {
+  int   Shader_Index;                            // Material shader
+  int   Fog_Volume;                              // Fog reference
+  int   Type;                                    // Surface type (planar/patch/mesh)
+  int   First_Vertex,       Vertex_Count;        // Starting vertex index and count in the global vertex array
+  int   First_Index,        Index_Count;         // Starting element index and count in the global index array
+  int   Lightmap_Index;                          // Lightmap page index (-1 if none)
+  int   Lightmap_X,         Lightmap_Y;          // Top-left corner of this face's lightmap within its page
+  int   Lightmap_Width,     Lightmap_Height;     // Dimensions of the lightmap region in texels
+  float Lightmap_Origin[3], Lightmap_Vectors[9]; // World-space lightmap placement (origin + 2 basis vectors + normal)
+  int   Patch_Width,        Patch_Height;        // Control point grid dimensions (only valid for patch surfaces)
+} BSP_Face;
+
+// BSP shader entry: maps a surface material name to content and surface flags
+typedef struct {
+  char Name[64];        // Shader path (e.g. "textures/gothic_wall/wall01")
+  int  Flags, Contents; // Surface flags (e.g. translucent) and content flags (e.g. solid, water)
+} BSP_Shader;
+
 // Convert a BSP vertex from Quake 3's Z-up coordinate system to our Y-up system: (x,y,z) becomes (x,z,-y).
 Vertex Convert_BSP_Vertex (const BSP_Vertex *Source);
 
@@ -1327,7 +1345,7 @@ uint BSP_Parse_Entities (const uint8_t *File_Data, const BSP_Header *Header,
 // Load a complete scene from a Quake 3 BSP file. This parses vertices, indices, faces (planar,
 // mesh, and patch types), shader references, and lightmap pages (packed into a single atlas).
 // Collision detection is handled entirely on the GPU via ray tracing against the TLAS, so no
-// CPU-side collision map is built — the BSP tree structure is only used for geometry extraction.
+// CPU-side collision map is built - the BSP tree structure is only used for geometry extraction.
 Scene Scene_Load_From_BSP (const char *Path, Spawn *Out_Spawn);
 
 // Load textures for every material in the scene. Attempts to load TGA files from the assets
@@ -1344,7 +1362,7 @@ void Weapon_Load_Textures (Weapon_Instance *Weapon);
 //
 // ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 
-// Build the world geometry's bottom-level acceleration structure (BLAS).  Uploads the scene
+// Build the world geometry's bottom-level acceleration structure (BLAS). Uploads the scene
 // vertex, index, and material buffers to the GPU, then constructs a single BLAS geometry
 // entry covering all triangles. Uses PREFER_FAST_TRACE since the world is static.
 Acceleration_Structure Build_World_Bottom_Level (const Scene *Scene_Data);
@@ -1373,7 +1391,7 @@ void Top_Level_Rebuild (Acceleration_Structure *World, Acceleration_Structure *W
 //
 // §10. Physics
 //
-//   GPU-only physics via ray tracing against the TLAS.  The compute shader traces rays from the player's expanded shape against world
+//   GPU-only physics via ray tracing against the TLAS. The compute shader traces rays from the player's expanded shape against world
 //   geometry, resolves contacts via a slide-move algorithm, and writes back the updated Gpu_Player state.
 //
 //   Six collider shapes, each defining a support function s(d̂) : S² → ℝ³:
@@ -1392,7 +1410,7 @@ void Top_Level_Rebuild (Acceleration_Structure *World, Acceleration_Structure *W
 // Collider Shape Enumeration
 //
 // Six collider shapes, each defining a support function s(d̂) : S² → ℝ³ from unit directions to
-// surface offsets.  The GPU physics compute shader switches on this enum to select the appropriate
+// surface offsets. The GPU physics compute shader switches on this enum to select the appropriate
 // Minkowski support mapping.
 enum Collider_Shape {SHAPE_SPHERE,    // Projectiles:       s(d̂) = d̂ · r                                   
                      SHAPE_CAPSULE,   // Player, NPCs:      s(d̂) = d̂ · r + (0, sign(d̂.y) · spine, 0)      
@@ -1425,10 +1443,7 @@ typedef struct {
 } Gpu_Input;
 
 // fp16 RLE packing for push constants
-// Push constants are scalar registers (AMD SGPRs / NVIDIA c[0x0], 1-cycle read).
-// We pack 8 floats + frame counter into 5 dwords (20 bytes vs 36) using IEEE 754
-// half-precision pairs.  GLSL unpacks with unpackHalf2x16() — 1 ALU op on all HW.
-static inline uint16_t Float_To_Half (float Value) {
+uint16_t Float_To_Half (float Value) {
   uint32_t Bits; memcpy (&Bits, &Value, 4);
   uint32_t Sign = (Bits >> 16) & 0x8000;
   int      Exp  = ((Bits >> 23) & 0xFF) - 127 + 15;
@@ -1437,19 +1452,15 @@ static inline uint16_t Float_To_Half (float Value) {
   if (Exp >= 31) return (uint16_t)(Sign | 0x7C00);  // Overflow → ±inf
   return (uint16_t)(Sign | ((uint32_t)Exp << 10) | Mant);
 }
-static inline uint32_t Pack_Half2x16 (float A, float B) {
+uint32_t Pack_Half2x16 (float A, float B) {
   return (uint32_t)Float_To_Half (A) | ((uint32_t)Float_To_Half (B) << 16);
 }
-static inline void Pack_Mat4_Half (const mat4 *M, uint32_t Out[8]) {
+void Pack_Mat4_Half (const mat4 *M, uint32_t Out[8]) {
   for (int I = 0; I < 8; I++)
     Out[I] = Pack_Half2x16 (M->E[I * 2], M->E[I * 2 + 1]);
 }
 
 // Push constants for the post-processing compute shader (56 bytes)
-// fp16 pair-packing: each uint holds two half-floats via packHalf2x16 encoding.
-// Frame_Count rides in upper 16 bits of Dt_Frame as a uint16 (good for 65535 frames).
-// Reprojection matrix (Proj * Prev_View * Inverse_View) is compressed to 8 × uint via
-// packHalf2x16 — sufficient precision at low render resolution for motion-vector TAA.
 typedef struct {
   float    Time;            // Full-precision seconds since start
   uint32_t Dt_Frame;        // [15:0] = half(Delta_Time), [31:16] = Frame_Count
@@ -1458,11 +1469,11 @@ typedef struct {
   uint32_t Bloom_Vignette;  // [15:0] = half(Bloom_Strength), [31:16] = half(Vignette_Strength)
   uint32_t Reproject[8];    // packHalf2x16-compressed 4×4 reprojection matrix (Proj * Prev_View * Inv_View)
   uint32_t Inv_Proj_Diag;   // [15:0] = half(InvProj[0][0]), [31:16] = half(InvProj[1][1])
-  uint32_t Sun_Screen_Pos;  // [15:0] = half(Sun_Screen_U), [31:16] = half(Sun_Screen_V) — for god rays
+  uint32_t Sun_Screen_Pos;  // [15:0] = half(Sun_Screen_U), [31:16] = half(Sun_Screen_V) - for god rays
   uint32_t Sun_Params;      // [15:0] = half(God_Ray_Intensity), [31:16] = half(Sun_On_Screen) (0 or 1)
 } Gpu_Postprocess_Push;
 
-// CPU-side convex hull produced by the Quickhull algorithm.  Stores vertex positions and per-vertex
+// CPU-side convex hull produced by the Quickhull algorithm. Stores vertex positions and per-vertex
 // adjacency for hill-climbing support queries.
 typedef struct {
   vec3  Vertices  [HULL_MAX_VERTS];               // Hull vertex positions in local space
@@ -1483,7 +1494,7 @@ typedef struct {
   int   Pad;
 } Gpu_Hull;
 
-// Build a convex hull from a point cloud using the Quickhull algorithm.  Returns the hull
+// Build a convex hull from a point cloud using the Quickhull algorithm. Returns the hull
 // with deduplicated vertices and per-vertex adjacency tables for GPU hill-climbing support.
 Convex_Hull Quickhull (const vec3 *Points, uint Count);
 
@@ -1510,7 +1521,7 @@ void Physics_Resources_Create (const Player *Initial_State);
 
 // Dispatch the physics compute shader for one frame: push the current input, execute a single
 // workgroup, wait for completion, then read back the updated Gpu_Player state into a CPU-side
-// Player struct.  The compute shader handles mouse look, acceleration, gravity, friction,
+// Player struct. The compute shader handles mouse look, acceleration, gravity, friction,
 // jump, crouch, and slide-move collision resolution against the TLAS.
 Player Physics_Dispatch (Input In, float Delta_Time);
 
@@ -1535,6 +1546,101 @@ void Descriptor_Set_Create (Weapon_Instance *Weapon, Entity *Enemy);
 
 // ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 //
+// §13. Audio
+//
+// ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+//
+// Each material is modeled as a bank of damped resonators (modes). An impact excitation
+// (short force pulse) drives all modes simultaneously. The resonator bank produces emergent
+// timbre from the object's physical resonances - not from hand-crafted oscillators.
+//
+// Based on James/Zheng/Chadwick rigid-body sound synthesis:
+//   - Modal frequencies and T60 decay times per material
+//   - Contact impulse shapes the excitation
+//   - Acceleration noise restores high-frequency realism
+//
+
+#define MODAL_SAMPLE_RATE 22050
+#define MODAL_MAX_MODES   12
+
+typedef struct {
+  float a1, a2; // Feedback coefficients (from frequency and damping)
+  float b0;     // Input gain (mode excitation weight)
+  float y1, y2; // Filter state
+} Mode_Resonator;
+
+void Mode_Init (Mode_Resonator *M, float Freq_Hz, float T60, float Gain)
+float Mode_Tick (Mode_Resonator *M, float X);
+
+// Material mode tables: {frequency_Hz, T60_seconds, gain}
+// Derived from measured rigid-body resonances (SIGGRAPH modal synthesis literature)
+typedef struct {float Freq; float T60; float Gain;} Mode_Spec;
+
+// Stone: dense, high frequencies, medium-long decay
+const Mode_Spec Modes_Stone[] = {
+  {1200, 0.08,  0.35}, {2400,  0.05, 0.25}, {3600, 0.03, 0.15},
+  {4800, 0.02,  0.10}, { 800,  0.10, 0.30}, {1800, 0.06, 0.20},
+  {5500, 0.015, 0.08}, {6200,  0.01, 0.05}, { 950, 0.09, 0.25},
+  {3200, 0.04,  0.12}, {7000, 0.008, 0.03}, { 420, 0.12, 0.18}};
+
+// Metal: bright, ringing, long decay
+const Mode_Spec Modes_Metal[] = {
+  { 880, 0.40, 0.30}, {1760, 0.30, 0.25}, {2640, 0.20, 0.18},
+  {3520, 0.15, 0.12}, {4400, 0.10, 0.08}, {5280, 0.08, 0.05},
+  { 440, 0.50, 0.35}, {1320, 0.35, 0.22}, {6600, 0.05, 0.03},
+  {2200, 0.25, 0.15}, {7700, 0.04, 0.02}, { 660, 0.45, 0.28}};
+
+// Wood: warm, short decay, lower partials
+const Mode_Spec Modes_Wood[] = {
+  { 350, 0.06,  0.40}, { 700, 0.04,  0.30}, {1400, 0.03, 0.20},
+  {2100, 0.02,  0.12}, {2800, 0.015, 0.08}, { 500, 0.05, 0.35},
+  {1050, 0.035, 0.25}, {3500, 0.01,  0.05}, { 175, 0.08, 0.30},
+  {1750, 0.025, 0.15}, {4200, 0.008, 0.03}, { 280, 0.07, 0.22}};
+
+// Flesh: very dull, extremely short decay
+const Mode_Spec Modes_Flesh[] = {
+  {200, 0.02,  0.50}, {400, 0.015, 0.30}, {600, 0.01,  0.15},
+  {150, 0.025, 0.40}, {300, 0.018, 0.25}, {500, 0.012, 0.18},
+  {100, 0.03,  0.35}, {250, 0.02,  0.22}, {700, 0.008, 0.10},
+  {350, 0.016, 0.20}, {800, 0.006, 0.05}, {450, 0.013, 0.12}};
+
+const Mode_Spec *Material_Modes[] = {Modes_Stone,  // MATERIAL_DEFAULT = stone-like
+                                     Modes_Metal,  // MATERIAL_METAL
+                                     Modes_Stone,  // MATERIAL_STONE
+                                     Modes_Wood,   // MATERIAL_WOOD
+                                     Modes_Flesh,  // MATERIAL_FLESH
+                                     Modes_Stone}; // MATERIAL_WATER (splashy, use stone as base)
+
+// Generate a PCM buffer from a modal resonator bank excited by a contact impulse.
+// Impulse_Strength controls excitation energy (0-1), Duration is output length.
+ALuint Audio_Generate_Modal_Impact (int Material, float Impulse_Strength,
+                                    float Duration, float Volume);
+
+// Load a WAV file from disk into an OpenAL buffer. Supports 8/16-bit mono/stereo PCM.
+// Returns 0 on failure.
+ALuint Audio_Load_WAV (const char *Path);
+
+// Weapon fire = sharp metallic transient (bolt mechanism) + propellant gas expansion.
+// Uses metal modes for the mechanism and broadband noise for the gas.
+ALuint Audio_Generate_Weapon_Fire (float Volume);
+
+// Explosion = broadband transient + N debris modal impacts (per SIGGRAPH 2008 scaling work).
+// The initial shock is a burst of all-mode excitation, followed by randomized sub-impacts.
+ALuint Audio_Generate_Explosion_Modal (float Duration, float Volume);
+
+// Try to load a WAV from disk; if missing, fall back to modal synthesis.
+// This layering lets us use real recordings when available and physically-based
+// synthesis as a fallback - the best of both worlds.
+ALuint Audio_Load_WAV_Or_Modal (const char *Path, int Material, float Impulse,
+                                        float Duration, float Volume);
+
+void Audio_Shutdown ();
+void Audio_Update_Footsteps (Player *P, float Dt);
+void Audio_Play (int Sound_Index, float Volume);
+void Audio_Init ();
+
+// ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+//
 // §12. Shaders
 //
 // ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
@@ -1542,23 +1648,37 @@ void Descriptor_Set_Create (Weapon_Instance *Weapon, Entity *Enemy);
 // Read a SPIR-V binary file from disk and wrap it in a Vulkan shader module.
 VkShaderModule Shader_Module_Load (const char *Path);
 
-// Closest-hit shader (rchit).  Interpolates vertex attributes at the hit point using barycentric coordinates, samples the albedo from the
+// Closest-hit shader (rchit). Interpolates vertex attributes at the hit point using barycentric coordinates, samples the albedo from the
 // bindless texture array, applies lightmap-based illumination for BSP geometry or simple directional lighting for the weapon model, traces
 // a shadow ray toward the sun, and returns the final color.
-// glsl rchit Closest_Hit;
+glsl rchit Closest_Hit;
 
-// Primary miss shader (rmiss).  Called when a ray from the ray generation shader misses all geometry. Returns a procedural sky gradient
+// Primary miss shader (rmiss). Called when a ray from the ray generation shader misses all geometry. Returns a procedural sky gradient
 // interpolated from a pale horizon color to a deeper blue at the zenith, based on the ray's vertical component.
-// glsl rmiss Primary_Miss;
+glsl rmiss Primary_Miss;
 
-// Shadow miss shader (rmiss, index 1).  Called when a shadow ray reaches the sun without hitting any occluder. Sets the shadow factor to
+// Shadow miss shader (rmiss, index 1). Called when a shadow ray reaches the sun without hitting any occluder. Sets the shadow factor to
 // 1.0 to indicate full illumination; if the ray had hit geometry, the closest-hit shader would not be invoked (due to
 // SkipClosestHitShader flag) and the factor remains at 0.0.
-// glsl rmiss Shadow_Miss;
+glsl rmiss Shadow_Miss;
+
+// A-Trous Wavelet Spatial Denoiser (Q2RTX / SVGF-inspired)
+//
+// Core idea from Schied et al. "Spatiotemporal Variance-Guided Filtering" (HPG 2017):
+// Run a sparse 3×3 kernel at exponentially increasing step sizes (1, 2, 4).
+// 3 iterations × 9 taps = 27 taps total, but covers a 9×9 pixel area effectively.
+// Edge-stopping functions on depth and luminance prevent blurring across edges.
+//
+// This filter cleans up:
+//   - Shadow noise from stochastic shadow sampling
+//   - Reflection noise from single-bounce traces
+//   - General 1-spp ray tracing noise
+// without the temporal lag/ghosting that TAA introduces.
+glsl comp Denoise;
 
 // ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 //
-// §13. Render
+// §13. Engine
 //
 // ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 
@@ -1567,17 +1687,47 @@ VkShaderModule Shader_Module_Load (const char *Path);
 void Camera_Upload (Camera *State, float Field_Of_View, uint Weapon_Texture_Base, uint PBR_Stride_Value, uint Active_SPP);
 
 // Update the weapon viewmodel's vertex positions each frame based on the camera orientation,
-// idle bob animation, and recoil animation from firing.  The transformed vertices are written
+// idle bob animation, and recoil animation from firing. The transformed vertices are written
 // to the CPU scratch buffer and subsequently uploaded to the GPU for BLAS rebuild.
 void Weapon_Update (Weapon_Instance *Weapon, const Camera *Camera_Data, float Delta_Time, int Fire);
 
 // Sample the current keyboard and mouse state from SDL, returning the frame's input snapshot.
 // Also processes SDL_QUIT and ESCAPE key events to set the global Quit flag.
-Input Poll_Input (void);
+Input Poll_Input ();
 
 // Record and submit one frame of ray tracing: bind the pipeline and descriptors, dispatch
 // traceRaysKHR for every pixel, blit the storage image to the swapchain, and present.
 void Raytracing_Frame (Gpu_Postprocess_Push PP);
+
+// Ported from Neo Engine's Resize function.
+// Ensures window aspect ratio stays between 4:3 (wide) and 21:9 (narrow).
+// Width/height are clamped to minimum 256px.
+void Constrain_Aspect_Ratio (int *W, int *H);
+
+// Change the visible cursor style in menu mode (rollover support).
+// Active = hovering interactive UI, Inactive = general menu, System = default arrow.
+void Set_Menu_Cursor (Cursor_Kind Kind);
+
+// Switch from game to menu: show cursor, unclip, stop centering.
+// Saves cursor position for restoration when returning to game.
+void Enter_Menu_Mode ();
+
+// Switch from menu to game: hide cursor, clip to window, center each frame.
+void Enter_Game_Mode ();
+
+// F11: toggle between windowed and fullscreen desktop mode.
+// Saves/restores window position and size across transitions.
+void Toggle_Fullscreen ();
+
+// Ported from Neo Engine's activation state machine.
+// Handles focus gain/loss, minimize, and click-activate transitions.
+// Each case is explicit to avoid branching bugs (per Neo Engine convention).
+void Handle_Activation (Activated_Kind New_State);
+
+// Process SDL events and sample keyboard/mouse state.
+// Integrates with the Neo Engine-style windowing state machine for
+// focus changes, fullscreen toggle, menu/game transitions, and resize.
+Input Poll_Input ();
 
 // ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 //
@@ -1593,6 +1743,8 @@ void Vulkan_Create_Swapchain ();
 void Vulkan_Recreate_Swapchain ();
 void Vulkan_Create_Synchronization ();
 void Vulkan_Transition_Storage_Image ();
+
+
 
 // ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 //
@@ -2274,23 +2426,9 @@ uint8_t *TGA_Load (const char *Path, uint *Out_Width, uint *Out_Height) {
 
 } // Tga_Load
 
-// ═══════════════════════════════════
+// ═════════════════════
 //   Damage_Map_Sample
-// ═══════════════════════════════════
-//
-// Load a damage map TGA and sample it at normalized UV coordinates (0-1 range).
-// Returns a damage multiplier in [0.0, 1.0] where 0.0 = fully armored, 1.0 = critical.
-// The damage map is loaded on demand and cached in a static table.
-#define DAMAGE_CACHE_MAX 64
-
-typedef struct {
-  char     Path[256];
-  uint8_t *Pixels;
-  uint     Width, Height;
-} Damage_Map_Cache_Entry;
-
-static Damage_Map_Cache_Entry Damage_Cache[DAMAGE_CACHE_MAX];
-static int                     Damage_Cache_Count = 0;
+// ═════════════════════
 
 float Damage_Map_Sample (const char *Path, float U, float V) {
   // Find or load the damage map
@@ -2340,8 +2478,11 @@ const char *Damage_Map_For_Model (const char *Model_Name, int Part_Index) {
   return NULL; // Unknown model
 }
 
-// Free all cached damage map pixel data
-void Damage_Cache_Free (void) {
+// ═════════════════════
+//   Damage_Cache_Free
+// ═════════════════════
+
+void Damage_Cache_Free () {
   for (int I = 0; I < Damage_Cache_Count; I++) free (Damage_Cache[I].Pixels);
   Damage_Cache_Count = 0;
 }
@@ -2352,9 +2493,9 @@ void Damage_Cache_Free (void) {
 //
 // ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 
-// ═══════════════════════
+// ═════════════════════
 //   MD3_Parse_Surface
-// ═══════════════════════
+// ═════════════════════
 
 void MD3_Parse_Surface (const uint8_t *Surface_Data,
                         Vertex **Inout_Vertices,    uint *Inout_Vertex_Count,
@@ -2441,9 +2582,9 @@ void MD3_Parse_Surface (const uint8_t *Surface_Data,
   *Inout_Triangle_Count += Surface->Number_Of_Triangles;
 }
 
-// ═══════════════════════════════════
+// ══════════════════════════════
 //   MD3_Parse_Surface_At_Frame
-// ═══════════════════════════════════
+// ══════════════════════════════
 
 void MD3_Parse_Surface_At_Frame (const uint8_t *Surface_Data, int Frame,
                                   Vertex **Inout_Vertices,    uint *Inout_Vertex_Count,
@@ -2518,7 +2659,8 @@ void MD3_Parse_Surface_At_Frame (const uint8_t *Surface_Data, int Frame,
   *Inout_Vertex_Count   += Surface->Number_Of_Vertices;
   *Inout_Index_Count    += Surface->Number_Of_Triangles * 3;
   *Inout_Triangle_Count += Surface->Number_Of_Triangles;
-}
+
+} // MD3_Parse_Surface_At_Frame
 
 // ══════════════════════
 //   Weapon_Model_Load
@@ -2665,13 +2807,11 @@ Weapon_Model Weapon_Model_Load () {
 
 } // Weapon_Model_Load
 
-// ═══════════════════════════════
-//   Entity_Load
-// ═══════════════════════════════
+// ═════════════════════════
+//   MD3_Find_Tag_At_Frame
+// ═════════════════════════
 
-// Helper: find a named tag at a specific animation frame in an MD3 file's tag array.
-// Returns 1 if found, 0 if not. Writes the 12-float transform (origin[3] + axis[9]) to Out.
-static int MD3_Find_Tag_At_Frame (const uint8_t *Data, int Tag_Count, int Tags_Offset,
+int MD3_Find_Tag_At_Frame (const uint8_t *Data, int Tag_Count, int Tags_Offset,
                                    int Frame, const char *Name, float Out[12]) {
   const MD3_Tag *Tags = (const MD3_Tag *)(Data + Tags_Offset + Frame * Tag_Count * sizeof (MD3_Tag));
   for (int I = 0; I < Tag_Count; I++) {
@@ -2684,13 +2824,11 @@ static int MD3_Find_Tag_At_Frame (const uint8_t *Data, int Tag_Count, int Tags_O
   return 0;
 }
 
-// ═══════════════════
+// ═══════════════
 //   Tag_Compose
-// ═══════════════════
-//
-// Compose two tag transforms (each float[12]: origin[3] + axis[9]).
-// Result = A ∘ B: applies B first, then A.  (new_pos = R_A * (R_B * v + O_B) + O_A)
-static void Tag_Compose (const float *A, const float *B, float *C) {
+// ═══════════════
+
+void Tag_Compose (const float *A, const float *B, float *C) {
   // C.origin = R_A * B.origin + A.origin
   C[0] = A[3]*B[0] + A[6]*B[1] + A[9]*B[2]  + A[0];
   C[1] = A[4]*B[0] + A[7]*B[1] + A[10]*B[2] + A[1];
@@ -2705,8 +2843,11 @@ static void Tag_Compose (const float *A, const float *B, float *C) {
   }
 }
 
-// Helper: load an MD3 file into memory, returning the data pointer and file size.
-static uint8_t *MD3_Load_File (const char *Path, long *Out_Size) {
+// ═════════════════
+//   MD3_Load_File
+// ═════════════════
+
+uint8_t *MD3_Load_File (const char *Path, long *Out_Size) {
   FILE *F = fopen (Path, "rb");
   if (not F) return NULL;
   fseek (F, 0, SEEK_END);
@@ -2724,8 +2865,8 @@ static uint8_t *MD3_Load_File (const char *Path, long *Out_Size) {
 // ═══════════════════════════════
 //
 // Assemble the full entity model (legs + torso + head + gun + barrel) for a single
-// animation frame into temporary arrays.  Caller owns the returned vertex/index/texture data.
-static void Entity_Assemble_Frame (int Legs_Frame, int Torso_Frame,
+// animation frame into temporary arrays. Caller owns the returned vertex/index/texture data.
+void Entity_Assemble_Frame (int Legs_Frame, int Torso_Frame,
                                    uint Body_Mat, uint Gun_Mat, const float World[12],
                                    Vertex **Out_Verts, uint *Out_Vert_Count,
                                    uint **Out_Indices, uint *Out_Index_Count,
@@ -2885,7 +3026,7 @@ Entity Entity_Load (Scene *S, Spawn Spawn_Point) {
   E.GL_Yaw    = EA;         // Entity yaw in GL space (rotation around Y-axis)
 
   // Determine animation frame range
-  // LEGS_IDLE: cfg frame 234, 10 frames, 10 fps.  MD3 offset = 63 → frames 171..180
+  // LEGS_IDLE: cfg frame 234, 10 frames, 10 fps. MD3 offset = 63 → frames 171..180
   // TORSO_STAND: frame 151, 1 frame (static)
   long Tmp;
   uint8_t *Lower_Check = MD3_Load_File (ASSET_ROOT "models/players/sarge/lower.md3", &Tmp);
@@ -2927,7 +3068,7 @@ Entity Entity_Load (Scene *S, Spawn Spawn_Point) {
       E.Indices        = Idx;
       E.Texture_Ids    = Tex;
 
-    // Subsequent frames must match topology — free duplicate index/texture arrays
+    // Subsequent frames must match topology - free duplicate index/texture arrays
     } else {
       free (Idx);
       free (Tex);
@@ -2947,7 +3088,7 @@ Entity Entity_Load (Scene *S, Spawn Spawn_Point) {
 
 // ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 //
-// §8. Scene — Setup
+// §8. Scene - Setup
 //
 // ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 
@@ -2996,7 +3137,7 @@ void Vulkan_Create_Instance () {
                               /*pAllocator  =>*/ NULL,
                               /*pInstance   =>*/ &Instance));
 
-  if (not Have_Validation) printf ("[vulkan] validation layer not found — running without validation\n");
+  if (not Have_Validation) printf ("[vulkan] validation layer not found - running without validation\n");
 
   // Release the temporary extensions array now that the instance owns the data
   free (Extensions);
@@ -3136,7 +3277,7 @@ void Vulkan_Create_Swapchain () {
   VkSurfaceCapabilitiesKHR Capabilities;
   vkGetPhysicalDeviceSurfaceCapabilitiesKHR (Physical_Device, Surface, &Capabilities);
 
-  // When currentExtent is 0xFFFFFFFF the surface size is undefined — use the window size instead
+  // When currentExtent is 0xFFFFFFFF the surface size is undefined - use the window size instead
   if (Capabilities.currentExtent.width == 0xFFFFFFFF) {
     int W, H;
     SDL_Vulkan_GetDrawableSize (Window, &W, &H);
@@ -3194,7 +3335,7 @@ void Vulkan_Recreate_Swapchain () {
   VkSurfaceCapabilitiesKHR Capabilities;
   vkGetPhysicalDeviceSurfaceCapabilitiesKHR (Physical_Device, Surface, &Capabilities);
 
-  // When currentExtent is 0xFFFFFFFF the surface size is undefined — use the window size instead
+  // When currentExtent is 0xFFFFFFFF the surface size is undefined - use the window size instead
   if (Capabilities.currentExtent.width == 0xFFFFFFFF) {
     int W, H;
     SDL_Vulkan_GetDrawableSize (Window, &W, &H);
@@ -3315,12 +3456,12 @@ void Vulkan_Transition_Storage_Image () {
 
 // ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 //
-// §8. Scene — BSP Loading
+// §8. Scene - BSP Loading
 //
 // ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 
 // ══════════════════════
-//   Convert_BSP_Vertex
+//   Convert_BSP_Vertex  
 // ══════════════════════
 
 Vertex Convert_BSP_Vertex (const BSP_Vertex *Source) {
@@ -3334,9 +3475,9 @@ Vertex Convert_BSP_Vertex (const BSP_Vertex *Source) {
   };
 }
 
-// ══════════════════
+// ═══════════════════
 //   Bezier_Evaluate
-// ══════════════════
+// ═══════════════════
 
 vec3 Bezier_Evaluate (vec3 Control_A, vec3 Control_B, vec3 Control_C, float Parameter) {
 
@@ -3347,9 +3488,9 @@ vec3 Bezier_Evaluate (vec3 Control_A, vec3 Control_B, vec3 Control_C, float Para
               Scale (Control_C, Parameter * Parameter));
 }
 
-// ═══════════════════════
+// ════════════════════════
 //   BSP_Tessellate_Patch
-// ═══════════════════════
+// ════════════════════════
 
 uint BSP_Tessellate_Patch (const BSP_Vertex *Control_Grid, int Patch_Width, int Patch_Height,
                           Vertex **Inout_Vertices, uint *Inout_Vertex_Count,
@@ -3449,9 +3590,9 @@ uint BSP_Tessellate_Patch (const BSP_Vertex *Control_Grid, int Patch_Width, int 
 
 } // BSP_Tessellate_Patch
 
-// ══════════════════════════
+// ═══════════════════════
 //   Scene_Load_From_BSP
-// ══════════════════════════
+// ═══════════════════════
 
 Scene Scene_Load_From_BSP (const char *Path, Spawn *Out_Spawn) {
 
@@ -3667,13 +3808,10 @@ Scene Scene_Load_From_BSP (const char *Path, Spawn *Out_Spawn) {
 
 } // Scene_Load_From_BSP
 
-// ═══════════════════════════════════
+// ════════════════════════════════
 //   Environment_Infer_From_Scene
-// ═══════════════════════════════════
-// Builds per-scene environment settings by examining BSP shader names.
-// If a skybox texture is found, loads it and extracts dominant colors for
-// sky zenith/horizon and ambient hemisphere.  Otherwise uses defaults.
-// Inspired by Q2RTX's per-map environment configuration.
+// ════════════════════════════════
+
 Scene_Environment Environment_Infer_From_Scene (const Scene *S) {
   Scene_Environment Env = DEFAULT_ENVIRONMENT;
 
@@ -3786,10 +3924,10 @@ Scene_Environment Environment_Infer_From_Scene (const Scene *S) {
       // Release the sky texture pixel data
       free (Pixels);
     } else {
-      printf ("[environment] sky texture not found at %s — using defaults\n", Sky_Path);
+      printf ("[environment] sky texture not found at %s - using defaults\n", Sky_Path);
     }
   } else {
-    printf ("[environment] no sky shader found — using default environment\n");
+    printf ("[environment] no sky shader found - using default environment\n");
   }
 
   // 3. Check worldspawn entity for any explicit overrides
@@ -3809,11 +3947,12 @@ Scene_Environment Environment_Infer_From_Scene (const Scene *S) {
           Env.Ambient_Up.x, Env.Ambient_Up.y, Env.Ambient_Up.z,
           Env.Ambient_Down.x, Env.Ambient_Down.y, Env.Ambient_Down.z);
   return Env;
-}
 
-// ═══════════════════════
+} // Environment_Infer_From_Scene
+
+// ══════════════════
 //   BSP_Find_Spawn
-// ═══════════════════════
+// ══════════════════
 
 Spawn BSP_Find_Spawn (const uint8_t *File_Data, const BSP_Header *Header) {
   const char *Entities = (const char *)(File_Data + Header->Lumps[BSP_ENTITIES].Offset);
@@ -3903,12 +4042,13 @@ Spawn BSP_Find_Spawn (const uint8_t *File_Data, const BSP_Header *Header) {
 
 } // BSP_Find_Spawn
 
-// ═══════════════════════
+// ══════════════════════
 //   BSP_Parse_Entities
-// ═══════════════════════
+// ══════════════════════
 
-static void Classify_Entity (const char *Classname, int Length, BSP_Entity *E) {
-  // Macros for concise string matching — populate Kind and sub-kind in one step
+void Classify_Entity (const char *Classname, int Length, BSP_Entity *E) {
+
+  // Macros for concise string matching - populate Kind and sub-kind in one step
   #define MATCH(STR, KIND) \
     if (Length == (int)sizeof(STR) - 1 and memcmp (Classname, STR, sizeof(STR) - 1) == 0) { E->Kind = KIND; return; }
   #define MATCH_WEAPON(STR, WK, CNT) \
@@ -3991,9 +4131,11 @@ static void Classify_Entity (const char *Classname, int Length, BSP_Entity *E) {
   #undef MATCH_HEALTH
   #undef MATCH_ARMOR
   #undef MATCH_POWERUP
-
-  // Unknown classname — Kind stays ENTITY_NONE
 }
+
+// ══════════════════════
+//   BSP_Parse_Entities
+// ══════════════════════
 
 uint BSP_Parse_Entities (const uint8_t *File_Data, const BSP_Header *Header,
                          BSP_Entity *Out_Entities, uint Max_Entities) {
@@ -4048,7 +4190,7 @@ uint BSP_Parse_Entities (const uint8_t *File_Data, const BSP_Header *Header,
         memcpy(DST, Val, _n); DST[_n] = 0; \
       } while(0)
 
-      // Dispatch on key name — populate Entity_Common fields directly
+      // Dispatch on key name - populate Entity_Common fields directly
       if (Key_Len == 9 and memcmp (Key, "classname", 9) == 0) {
         Classname_Len = Val_Len < 63 ? Val_Len : 63;
         memcpy (Classname, Val, Classname_Len);
@@ -4141,11 +4283,12 @@ uint BSP_Parse_Entities (const uint8_t *File_Data, const BSP_Header *Header,
 
   // Return result
   return Count;
-}
+
+} // Parse_BSP_Entities
 
 // ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 //
-// §8. Scene — Texture Loading
+// §8. Scene - Texture Loading
 //
 // ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 
@@ -4186,8 +4329,8 @@ void Scene_Load_Textures (const Scene *Scene_Data) {
 
   // Per-material PBR classification
   // Hand-tuned roughness and metalness for each BSP texture based on real-world
-  // material properties.  These override the uniform fallback when no explicit
-  // PBR map exists.  Values are [roughness_byte, metalness_byte] (0-255 → 0.0-1.0).
+  // material properties. These override the uniform fallback when no explicit
+  // PBR map exists. Values are [roughness_byte, metalness_byte] (0-255 → 0.0-1.0).
   // Stored as a parallel array: Material_PBR[material_index] = {R, M}.
   uint8_t (*Material_PBR)[2] = calloc (Material_Count, sizeof (uint8_t[2]));
   for (uint I = 0; I < Material_Count; I++) {
@@ -4198,68 +4341,68 @@ void Scene_Load_Textures (const Scene *Scene_Data) {
 
     // Stone / brick / block: rough, non-metallic
     if (strstr (N, "gothic_block") or strstr (N, "gothic_wall/street"))
-      { Material_PBR[I][0] = 204; Material_PBR[I][1] = 0; }     // R=0.80, M=0.00 — rough stone
+      { Material_PBR[I][0] = 204; Material_PBR[I][1] = 0; }     // R=0.80, M=0.00 - rough stone
     else if (strstr (N, "proto_brik"))
-      { Material_PBR[I][0] = 209; Material_PBR[I][1] = 0; }     // R=0.82, M=0.00 — brick
+      { Material_PBR[I][0] = 209; Material_PBR[I][1] = 0; }     // R=0.82, M=0.00 - brick
     else if (strstr (N, "gothic_wall"))
-      { Material_PBR[I][0] = 191; Material_PBR[I][1] = 0; }     // R=0.75, M=0.00 — generic wall
+      { Material_PBR[I][0] = 191; Material_PBR[I][1] = 0; }     // R=0.75, M=0.00 - generic wall
 
     // Metal trim / rust
     else if (strstr (N, "pitted_rust"))
-      { Material_PBR[I][0] = 166; Material_PBR[I][1] = 153; }   // R=0.65, M=0.60 — corroded metal
+      { Material_PBR[I][0] = 166; Material_PBR[I][1] = 153; }   // R=0.65, M=0.60 - corroded metal
     else if (strstr (N, "deeprust"))
-      { Material_PBR[I][0] = 191; Material_PBR[I][1] = 128; }   // R=0.75, M=0.50 — heavy rust
+      { Material_PBR[I][0] = 191; Material_PBR[I][1] = 128; }   // R=0.75, M=0.50 - heavy rust
     else if (strstr (N, "pewter"))
       { Material_PBR[I][0] = strstr(N,"dirty") ? 140 : 102;     // dirty=0.55, clean=0.40
         Material_PBR[I][1] = strstr(N,"dirty") ? 166 : 179; }   // dirty=0.65, clean=0.70
     else if (strstr (N, "border7") or strstr (N, "baseboard"))
-      { Material_PBR[I][0] = 153; Material_PBR[I][1] = 89; }    // R=0.60, M=0.35 — mixed trim
+      { Material_PBR[I][0] = 153; Material_PBR[I][1] = 89; }    // R=0.60, M=0.35 - mixed trim
 
     // Tech walls
     else if (strstr (N, "atech"))
-      { Material_PBR[I][0] = 115; Material_PBR[I][1] = 128; }   // R=0.45, M=0.50 — brushed metal panels
+      { Material_PBR[I][0] = 115; Material_PBR[I][1] = 128; }   // R=0.45, M=0.50 - brushed metal panels
     else if (strstr (N, "ceilingtech"))
-      { Material_PBR[I][0] = 140; Material_PBR[I][1] = 77; }    // R=0.55, M=0.30 — ceiling panel
+      { Material_PBR[I][0] = 140; Material_PBR[I][1] = 77; }    // R=0.55, M=0.30 - ceiling panel
 
     // Wood
     else if (strstr (N, "wood"))
-      { Material_PBR[I][0] = 204; Material_PBR[I][1] = 0; }     // R=0.80, M=0.00 — dry wood
+      { Material_PBR[I][0] = 204; Material_PBR[I][1] = 0; }     // R=0.80, M=0.00 - dry wood
 
     // Floor
     else if (strstr (N, "gothic_floor") or strstr (N, "floor"))
-      { Material_PBR[I][0] = 166; Material_PBR[I][1] = 0; }     // R=0.65, M=0.00 — worn floor stone
+      { Material_PBR[I][0] = 166; Material_PBR[I][1] = 0; }     // R=0.65, M=0.00 - worn floor stone
 
-    // Light panels (EMISSIVE — PBR values less important)
+    // Light panels (EMISSIVE - PBR values less important)
     else if (strstr (N, "light") or strstr (N, "xlight"))
-      { Material_PBR[I][0] = 77;  Material_PBR[I][1] = 0; }     // R=0.30, M=0.00 — smooth glass cover
+      { Material_PBR[I][0] = 77;  Material_PBR[I][1] = 0; }     // R=0.30, M=0.00 - smooth glass cover
 
     // Skull / bone decorations
     else if (strstr (N, "skull"))
-      { Material_PBR[I][0] = 191; Material_PBR[I][1] = 13; }    // R=0.75, M=0.05 — bone
+      { Material_PBR[I][0] = 191; Material_PBR[I][1] = 13; }    // R=0.75, M=0.05 - bone
 
     // Lava
     else if (strstr (N, "lava"))
-      { Material_PBR[I][0] = 26;  Material_PBR[I][1] = 0; }     // R=0.10, M=0.00 — molten liquid
+      { Material_PBR[I][0] = 26;  Material_PBR[I][1] = 0; }     // R=0.10, M=0.00 - molten liquid
 
     // SFX (flames, beams, flares)
     else if (strstr (N, "sfx/flame") or strstr (N, "sfx/beam") or strstr (N, "flameflare"))
-      { Material_PBR[I][0] = 26;  Material_PBR[I][1] = 0; }     // R=0.10, M=0.00 — emissive effect
+      { Material_PBR[I][0] = 26;  Material_PBR[I][1] = 0; }     // R=0.10, M=0.00 - emissive effect
 
     // Window / glass
     else if (strstr (N, "window"))
-      { Material_PBR[I][0] = 51;  Material_PBR[I][1] = 26; }    // R=0.20, M=0.10 — smooth glass
+      { Material_PBR[I][0] = 51;  Material_PBR[I][1] = 26; }    // R=0.20, M=0.10 - smooth glass
 
     // Torch model
     else if (strstr (N, "torch"))
-      { Material_PBR[I][0] = 153; Material_PBR[I][1] = 77; }    // R=0.60, M=0.30 — metal + wood
+      { Material_PBR[I][0] = 153; Material_PBR[I][1] = 77; }    // R=0.60, M=0.30 - metal + wood
 
     // Player skin (cloth + leather + armor plates)
     else if (strstr (N, "players/"))
-      { Material_PBR[I][0] = 179; Material_PBR[I][1] = 20; }    // R=0.70, M=0.08 — mostly cloth, hint of metal
+      { Material_PBR[I][0] = 179; Material_PBR[I][1] = 20; }    // R=0.70, M=0.08 - mostly cloth, hint of metal
 
     // Weapon metal
     else if (strstr (N, "weapons"))
-      { Material_PBR[I][0] = 77;  Material_PBR[I][1] = 217; }   // R=0.30, M=0.85 — gun steel
+      { Material_PBR[I][0] = 77;  Material_PBR[I][1] = 217; }   // R=0.30, M=0.85 - gun steel
   }
 
   // Initialize PBR loading counters
@@ -4325,7 +4468,7 @@ void Scene_Load_Textures (const Scene *Scene_Data) {
         uint8_t Base_M = Material_PBR[Index][1];
 
         if (Diff and DW > 1 and DH > 1) {
-          // We have real diffuse pixels — generate a full-resolution PBR map
+          // We have real diffuse pixels - generate a full-resolution PBR map
           uint Pixel_Count = DW * DH;
           uint8_t *Gen = malloc (Pixel_Count * 4);
 
@@ -4453,7 +4596,7 @@ void Scene_Load_Textures (const Scene *Scene_Data) {
           free (Gen);
           PBR_Generated++;
 
-        // No diffuse data — use 1×1 classified fallback
+        // No diffuse data - use 1×1 classified fallback
         } else {
           if (Map_Type == 2) {
             uint8_t R_Pixel[4] = {Base_R, Base_R, Base_R, 255};
@@ -4499,14 +4642,14 @@ void Scene_Load_Textures (const Scene *Scene_Data) {
                                 Scene_Data->Lightmap_Width, Scene_Data->Lightmap_Height,
                                 VK_FORMAT_R8G8B8A8_SRGB,
                                 &Lightmap_Image, &Lightmap_Memory, &Lightmap_View);
-    printf ("[lightmap] uploaded %ux%u atlas (SRGB — auto-linearized on sample)\n", Scene_Data->Lightmap_Width, Scene_Data->Lightmap_Height);
+    printf ("[lightmap] uploaded %ux%u atlas (SRGB - auto-linearized on sample)\n", Scene_Data->Lightmap_Width, Scene_Data->Lightmap_Height);
   } else {
     uint8_t White[4] = {255, 255, 255, 255};
     Texture_Upload_With_Format (Command_Buffer, Queue, White, 1, 1,
                                 VK_FORMAT_R8G8B8A8_SRGB,
                                 &Lightmap_Image, &Lightmap_Memory, &Lightmap_View);
   }
-} // Scene_Load_Textures
+} // BSP_Parse_Entities
 
 // ════════════════════════
 //   Weapon_Load_Textures
@@ -4519,8 +4662,8 @@ void Weapon_Load_Textures (Weapon_Instance *Weapon) {
 
   // 6 map types per weapon texture: diffuse, normal, roughness, metalness, emissive, height
   // Layout: [diffuse_0, diffuse_1, ..., normal_0, normal_1, ..., roughness_0, ...] etc.
-  static const char *Weapon_PBR_Suffixes[] = {"", "_n", "_r", "_m", "_e", "_h"};
-  static const uint8_t Weapon_PBR_Fallbacks[][4] = {
+  const char *Weapon_PBR_Suffixes[] = {"", "_n", "_r", "_m", "_e", "_h"};
+  const uint8_t Weapon_PBR_Fallbacks[][4] = {
     {180, 180, 180, 255},   // diffuse: grey
     {128, 128, 255, 255},   // normal: flat (0,0,1) encoded as (128,128,255)
     { 30,  30,  30, 255},   // roughness: smooth metallic weapon (0.12)
@@ -4584,9 +4727,9 @@ void Weapon_Load_Textures (Weapon_Instance *Weapon) {
 //
 // ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 
-// ═══════════════════════════════
+// ════════════════════════════
 //   Build_World_Bottom_Level
-// ═══════════════════════════════
+// ════════════════════════════
 
 Acceleration_Structure Build_World_Bottom_Level (const Scene *Scene_Data) {
 
@@ -4706,9 +4849,9 @@ Acceleration_Structure Build_World_Bottom_Level (const Scene *Scene_Data) {
 
 } // Build_World_Bottom_Level
 
-// ═══════════════════════════════════
+// ══════════════════════════════════
 //   Weapon_Bottom_Level_Initialize
-// ═══════════════════════════════════
+// ══════════════════════════════════
 
 void Weapon_Bottom_Level_Initialize (Weapon_Instance *Weapon) {
   if (not Weapon->Model.Vertex_Count) return;
@@ -4846,7 +4989,7 @@ void Weapon_Bottom_Level_Rebuild (Weapon_Instance *Weapon) {
       .indexData.deviceAddress  = Weapon->Index_Buffer.Address}};
 
   // BLAS refit (MODE_UPDATE) instead of full rebuild
-  // The weapon mesh topology never changes — only vertex positions move.
+  // The weapon mesh topology never changes - only vertex positions move.
   // MODE_UPDATE re-computes AABBs in-place without rebuilding the BVH tree,
   // which is 5-10× faster than a full build on NVIDIA RT cores.
   // srcAccelerationStructure = dst for in-place update.
@@ -4885,9 +5028,9 @@ void Weapon_Bottom_Level_Rebuild (Weapon_Instance *Weapon) {
   VK_CHECK (vkQueueWaitIdle (Queue));
 }
 
-// ════════════════════════════════════
+// ══════════════════════════════════
 //   Entity_Bottom_Level_Initialize
-// ════════════════════════════════════
+// ══════════════════════════════════
 
 void Entity_Bottom_Level_Initialize (Entity *Enemy) {
   if (not Enemy->Vertex_Count) return;
@@ -5065,10 +5208,10 @@ void Top_Level_Initialize (uint Maximum_Instances) {
   // Query TLAS build sizes from the driver
   // ALLOW_UPDATE_BIT
   // Requesting update capability at creation time tells the driver to build the
-  // BVH in a format amenable to in-place refitting.  On NVIDIA, this selects a
+  // BVH in a format amenable to in-place refitting. On NVIDIA, this selects a
   // "refit-friendly" BVH2 layout; on AMD, it avoids the compact PLOC builder.
   // Per-frame, we then use MODE_UPDATE (refit) instead of full MODE_BUILD,
-  // which only touches BVH nodes whose child AABBs changed — typically O(log N)
+  // which only touches BVH nodes whose child AABBs changed - typically O(log N)
   // instead of O(N log N) for a full SAH rebuild.
   VkAccelerationStructureBuildGeometryInfoKHR Build_Info = {
     .sType         = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR,
@@ -5108,9 +5251,9 @@ void Top_Level_Initialize (uint Maximum_Instances) {
       .accelerationStructure = Top_Level.Handle});
 } // Top_Level_Initialize
 
-// ═════════════════════════
+// ═════════════════════
 //   Top_Level_Rebuild
-// ═════════════════════════
+// ═════════════════════
 
 void Top_Level_Rebuild (Acceleration_Structure *World, Acceleration_Structure *Weapon, Acceleration_Structure *Enemy,
                         const float *Player_Body_Transform) {
@@ -5154,14 +5297,14 @@ void Top_Level_Rebuild (Acceleration_Structure *World, Acceleration_Structure *W
     Instances[2].accelerationStructureReference = Enemy->Address;
     Instance_Count = 3;
 
-    // Instance 3 (optional): player body — same BLAS as entity, repositioned at the player's location.
+    // Instance 3 (optional): player body - same BLAS as entity, repositioned at the player's location.
     // Mask 0x02: invisible to primary rays (camera is inside the model) but visible to shadow
     // and reflection rays so the player casts shadows and appears in floor/wall reflections.
     if (Player_Body_Transform) {
       // Copy the 3×4 affine transform (row-major: 3 rows × 4 cols)
       memcpy (&Instances[3].transform, Player_Body_Transform, sizeof (float) * 12);
       Instances[3].mask                           = 0x02;
-      Instances[3].instanceCustomIndex            = 2;  // Same as entity — shares entity buffers
+      Instances[3].instanceCustomIndex            = 2;  // Same as entity - shares entity buffers
       Instances[3].flags                          = VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR;
       Instances[3].accelerationStructureReference = Enemy->Address;  // Reuse the enemy BLAS
       Instance_Count = 4;
@@ -5186,14 +5329,14 @@ void Top_Level_Rebuild (Acceleration_Structure *World, Acceleration_Structure *W
       .data.deviceAddress = Top_Level_Instance_Buffer.Address}};
 
   // TLAS refit instead of full rebuild
-  // On the first frame, we must BUILD (no existing BVH to refit).  On subsequent
+  // On the first frame, we must BUILD (no existing BVH to refit). On subsequent
   // frames, MODE_UPDATE performs BVH refit: walks the existing tree bottom-up and
-  // re-computes each node's AABB from its children.  For a 2-instance TLAS
+  // re-computes each node's AABB from its children. For a 2-instance TLAS
   // (world + weapon) where only the weapon transform changes, this is
-  // near-instant — the driver touches ~4 BVH nodes instead of rebuilding.
+  // near-instant - the driver touches ~4 BVH nodes instead of rebuilding.
   // On NVIDIA Turing+, refit is handled by dedicated BVH hardware units;
   // on AMD RDNA2+, it's a single dispatch of the GFX BVH microcode.
-  static int First_Build = 1;
+  int First_Build = 1;
   VkAccelerationStructureBuildGeometryInfoKHR Build_Info = {
     .sType                     = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR,
     .type                      = VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR,
@@ -5241,27 +5384,34 @@ void Raytracing_Pipeline_Create () {
   // Define the 16 descriptor bindings for the ray tracing pipeline
   // Bindings 12-14 are entity geometry; binding 15 is the texture array (must be last for variable count)
   VkDescriptorSetLayoutBinding Bindings[] = {
-    {0,  VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, 1,   VK_SHADER_STAGE_RAYGEN_BIT_KHR | VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR, NULL},
-    {1,  VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,              1,   VK_SHADER_STAGE_RAYGEN_BIT_KHR,                                        NULL},
-    {2,  VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,             1,   VK_SHADER_STAGE_RAYGEN_BIT_KHR | VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR | VK_SHADER_STAGE_MISS_BIT_KHR, NULL},
-    {3,  VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,             1,   VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR,                                   NULL},
-    {4,  VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,             1,   VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR,                                   NULL},
-    {5,  VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,             1,   VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR,                                   NULL},
-    {6,  VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,             1,   VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR,                                   NULL},
-    {7,  VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,     1,   VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR,                                   NULL},
-    {8,  VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,             1,   VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR,                                   NULL},
-    {9,  VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,             1,   VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR,                                   NULL},
-    {10, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,             1,   VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR,                                   NULL},
-    {11, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,              1,   VK_SHADER_STAGE_RAYGEN_BIT_KHR,                                        NULL}, // Depth output
-    {12, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,             1,   VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR,                                   NULL}, // Entity vertices
-    {13, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,             1,   VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR,                                   NULL}, // Entity indices
-    {14, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,             1,   VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR,                                   NULL}, // Entity texture IDs
-    {15, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,     DESCRIPTOR_TEXTURE_SLOTS, VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR,           NULL}, // Textures (must be last for variable count)
+    {0,  VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, 1, VK_SHADER_STAGE_RAYGEN_BIT_KHR
+                                                         | VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR, NULL},
+    {1,  VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,              1, VK_SHADER_STAGE_RAYGEN_BIT_KHR,      NULL},
+    {2,  VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,             1, VK_SHADER_STAGE_RAYGEN_BIT_KHR
+                                                         | VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR
+                                                         | VK_SHADER_STAGE_MISS_BIT_KHR,        NULL},
+    {3,  VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,             1, VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR, NULL},
+    {4,  VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,             1, VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR, NULL},
+    {5,  VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,             1, VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR, NULL},
+    {6,  VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,             1, VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR, NULL},
+    {7,  VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,     1, VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR, NULL},
+    {8,  VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,             1, VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR, NULL},
+    {9,  VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,             1, VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR, NULL},
+    {10, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,             1, VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR, NULL},
+    {11, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,              1, VK_SHADER_STAGE_RAYGEN_BIT_KHR,      NULL}, // Depth output
+    {12, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,             1, VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR, NULL}, // Entity vertices
+    {13, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,             1, VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR, NULL}, // Entity indices
+    {14, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,             1, VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR, NULL}, // Entity texture IDs
+    {15, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, DESCRIPTOR_TEXTURE_SLOTS, VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR, NULL}, // Textures (must be last for variable count)
   };
 
-  // The texture array binding (15, highest) uses partially-bound and variable-count flags
+  // The texture array binding uses partially-bound and variable-count flags
   VkDescriptorBindingFlags Binding_Flags[] =
-    {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT | VK_DESCRIPTOR_BINDING_VARIABLE_DESCRIPTOR_COUNT_BIT};
+    {0, 0, 0, 0, 0,
+     0, 0, 0, 0, 0,
+     0, 0, 0, 0, 0,
+      VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT
+    | VK_DESCRIPTOR_BINDING_VARIABLE_DESCRIPTOR_COUNT_BIT};
 
   // Chain the binding flags extension into the descriptor set layout creation
   VkDescriptorSetLayoutBindingFlagsCreateInfo Binding_Flags_Info = {
@@ -5287,10 +5437,10 @@ void Raytracing_Pipeline_Create () {
                                     NULL, &Pipeline_Layout));
 
   // Load the four SPIR-V shader modules from pre-compiled files
-  VkShaderModule Ray_Generation_Module = Shader_Module_Load (Shader_Path(raygen));
-  VkShaderModule Closest_Hit_Module    = Shader_Module_Load (Shader_Path(closesthit));
-  VkShaderModule Primary_Miss_Module   = Shader_Module_Load (Shader_Path(miss));
-  VkShaderModule Shadow_Miss_Module    = Shader_Module_Load (Shader_Path(shadow_miss));
+  VkShaderModule Ray_Generation_Module = Shader_Module_Load (Shader_Path (Ray_Generation));
+  VkShaderModule Closest_Hit_Module    = Shader_Module_Load (Shader_Path (Closest_Hit));
+  VkShaderModule Primary_Miss_Module   = Shader_Module_Load (Shader_Path (miss));
+  VkShaderModule Shadow_Miss_Module    = Shader_Module_Load (Shader_Path (shadow_miss));
 
   // Define the pipeline shader stages (raygen, two miss, one closest-hit)
   VkPipelineShaderStageCreateInfo Stages[] = {
@@ -5301,30 +5451,17 @@ void Raytracing_Pipeline_Create () {
 
   // Define the shader groups: raygen (0), primary miss (1), shadow miss (2), hit group (3)
   VkRayTracingShaderGroupCreateInfoKHR Groups[] = {
-    {VK_STRUCTURE_TYPE_RAY_TRACING_SHADER_GROUP_CREATE_INFO_KHR, NULL, VK_RAY_TRACING_SHADER_GROUP_TYPE_GENERAL_KHR,                0, VK_SHADER_UNUSED_KHR, VK_SHADER_UNUSED_KHR, VK_SHADER_UNUSED_KHR, NULL},
-    {VK_STRUCTURE_TYPE_RAY_TRACING_SHADER_GROUP_CREATE_INFO_KHR, NULL, VK_RAY_TRACING_SHADER_GROUP_TYPE_GENERAL_KHR,                1, VK_SHADER_UNUSED_KHR, VK_SHADER_UNUSED_KHR, VK_SHADER_UNUSED_KHR, NULL},
-    {VK_STRUCTURE_TYPE_RAY_TRACING_SHADER_GROUP_CREATE_INFO_KHR, NULL, VK_RAY_TRACING_SHADER_GROUP_TYPE_GENERAL_KHR,                2, VK_SHADER_UNUSED_KHR, VK_SHADER_UNUSED_KHR, VK_SHADER_UNUSED_KHR, NULL},
+    {VK_STRUCTURE_TYPE_RAY_TRACING_SHADER_GROUP_CREATE_INFO_KHR, NULL, VK_RAY_TRACING_SHADER_GROUP_TYPE_GENERAL_KHR, 0, VK_SHADER_UNUSED_KHR, VK_SHADER_UNUSED_KHR, VK_SHADER_UNUSED_KHR, NULL},
+    {VK_STRUCTURE_TYPE_RAY_TRACING_SHADER_GROUP_CREATE_INFO_KHR, NULL, VK_RAY_TRACING_SHADER_GROUP_TYPE_GENERAL_KHR, 1, VK_SHADER_UNUSED_KHR, VK_SHADER_UNUSED_KHR, VK_SHADER_UNUSED_KHR, NULL},
+    {VK_STRUCTURE_TYPE_RAY_TRACING_SHADER_GROUP_CREATE_INFO_KHR, NULL, VK_RAY_TRACING_SHADER_GROUP_TYPE_GENERAL_KHR, 2, VK_SHADER_UNUSED_KHR, VK_SHADER_UNUSED_KHR, VK_SHADER_UNUSED_KHR, NULL},
     {VK_STRUCTURE_TYPE_RAY_TRACING_SHADER_GROUP_CREATE_INFO_KHR, NULL, VK_RAY_TRACING_SHADER_GROUP_TYPE_TRIANGLES_HIT_GROUP_KHR, VK_SHADER_UNUSED_KHR, 3, VK_SHADER_UNUSED_KHR, VK_SHADER_UNUSED_KHR, NULL}};
 
-  // Pipeline cache
-  // A shared pipeline cache lets the driver reuse compiled shader ISA across
-  // pipeline objects and across runs (if persisted to disk).  Even in-memory,
-  // it amortizes the SPIR-V → native code compilation across our RT, compute,
-  // and physics pipelines.  On NVIDIA, this bypasses ptxas re-invocations;
-  // on AMD, it skips the ACO/LLPC compilation passes.
+  // A shared pipeline cache lets the driver reuse compiled shader ISA across pipeline objects and across runs (if persisted to disk). 
   VK_CHECK (vkCreatePipelineCache (Device,
     &(VkPipelineCacheCreateInfo){.sType = VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO},
     NULL, &Pipeline_Cache));
 
   // Create the ray tracing pipeline with recursion depth of 2 (primary + shadow rays)
-  // Driver optimization notes
-  // • VK_PIPELINE_CREATE_RAY_TRACING_SKIP_AABBS_BIT_KHR would skip procedural
-  //   AABB tests (our scene is triangle-only) but requires rayTraversalPrimitiveCulling
-  //   feature.  When available, enable it to remove a branch per BVH leaf on NVIDIA RT cores.
-  // • maxPipelineRayRecursionDepth = 2 (primary + reflection).  Shadow rays on reflection
-  //   bounces are skipped, so we never exceed depth 2.  Depth 2 vs 3 halves the continuation
-  //   stack allocation on NVIDIA (1 frame × payload instead of 2), improving warp occupancy.
-  // • Pipeline cache (Pipeline_Cache) amortizes SPIR-V compilation across all 3 pipelines.
   VK_CHECK (vkCreateRayTracingPipelines (Device, VK_NULL_HANDLE, Pipeline_Cache, 1,
                                          &(VkRayTracingPipelineCreateInfoKHR){
                                            .sType                        = VK_STRUCTURE_TYPE_RAY_TRACING_PIPELINE_CREATE_INFO_KHR,
@@ -5343,9 +5480,9 @@ void Raytracing_Pipeline_Create () {
   vkDestroyShaderModule (Device, Shadow_Miss_Module,    NULL);
 }
 
-// ══════════════════════════════════
+// ═══════════════════════════════
 //   Shader_Binding_Table_Create
-// ══════════════════════════════════
+// ═══════════════════════════════
 
 void Shader_Binding_Table_Create () {
   uint Handle_Size      = Raytracing_Properties.shaderGroupHandleSize;
@@ -5388,13 +5525,13 @@ void Shader_Binding_Table_Create () {
 
 // ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 //
-// §12. Pipeline — Descriptors
+// §12. Pipeline - Descriptors
 //
 // ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 
-// ════════════════════════
+// ═════════════════════════
 //   Descriptor_Set_Create
-// ════════════════════════
+// ═════════════════════════
 
 void Descriptor_Set_Create (Weapon_Instance *Weapon, Entity *Enemy) {
 
@@ -5433,17 +5570,17 @@ void Descriptor_Set_Create (Weapon_Instance *Weapon, Entity *Enemy) {
     .accelerationStructureCount = 1,
     .pAccelerationStructures    = &Top_Level.Handle};
   VkDescriptorImageInfo  Image_Info             = {.imageView = Raytracing_Storage_Image.View, .imageLayout = VK_IMAGE_LAYOUT_GENERAL};
-  VkDescriptorBufferInfo Camera_Info            = {Camera_Uniform_Buffer.Buffer, 0, Camera_Uniform_Buffer.Size};
-  VkDescriptorBufferInfo Vertex_Info            = {Vertex_Buffer.Buffer,         0, Vertex_Buffer.Size};
-  VkDescriptorBufferInfo Index_Info             = {Index_Buffer.Buffer,          0, Index_Buffer.Size};
-  VkDescriptorBufferInfo Material_Info          = {Material_Buffer.Buffer,       0, Material_Buffer.Size};
-  VkDescriptorBufferInfo Texture_Id_Info        = {Texture_Id_Buffer.Buffer,     0, Texture_Id_Buffer.Size};
+  VkDescriptorBufferInfo Camera_Info            = {Camera_Uniform_Buffer.Buffer,     0, Camera_Uniform_Buffer.Size};
+  VkDescriptorBufferInfo Vertex_Info            = {Vertex_Buffer.Buffer,             0, Vertex_Buffer.Size};
+  VkDescriptorBufferInfo Index_Info             = {Index_Buffer.Buffer,              0, Index_Buffer.Size};
+  VkDescriptorBufferInfo Material_Info          = {Material_Buffer.Buffer,           0, Material_Buffer.Size};
+  VkDescriptorBufferInfo Texture_Id_Info        = {Texture_Id_Buffer.Buffer,         0, Texture_Id_Buffer.Size};
   VkDescriptorBufferInfo Weapon_Vertex_Info     = {Weapon->Vertex_Buffer.Buffer,     0, Weapon->Vertex_Buffer.Size};
   VkDescriptorBufferInfo Weapon_Index_Info      = {Weapon->Index_Buffer.Buffer,      0, Weapon->Index_Buffer.Size};
   VkDescriptorBufferInfo Weapon_Texture_Id_Info = {Weapon->Texture_Id_Buffer.Buffer, 0, Weapon->Texture_Id_Buffer.Size};
-  VkDescriptorBufferInfo Entity_Vertex_Info      = {Enemy->Vertex_Buffer.Buffer,      0, Enemy->Vertex_Buffer.Size};
-  VkDescriptorBufferInfo Entity_Index_Info       = {Enemy->Index_Buffer.Buffer,       0, Enemy->Index_Buffer.Size};
-  VkDescriptorBufferInfo Entity_Texture_Id_Info  = {Enemy->Texture_Id_Buffer.Buffer,  0, Enemy->Texture_Id_Buffer.Size};
+  VkDescriptorBufferInfo Entity_Vertex_Info     = {Enemy->Vertex_Buffer.Buffer,      0, Enemy->Vertex_Buffer.Size};
+  VkDescriptorBufferInfo Entity_Index_Info      = {Enemy->Index_Buffer.Buffer,       0, Enemy->Index_Buffer.Size};
+  VkDescriptorBufferInfo Entity_Texture_Id_Info = {Enemy->Texture_Id_Buffer.Buffer,  0, Enemy->Texture_Id_Buffer.Size};
 
   // Build the texture array descriptor info for all loaded textures (world + weapon)
   VkDescriptorImageInfo *Texture_Infos = calloc (Texture_Count, sizeof (VkDescriptorImageInfo));
@@ -5463,22 +5600,22 @@ void Descriptor_Set_Create (Weapon_Instance *Weapon, Entity *Enemy) {
 
   // Write all 16 descriptor bindings in one batch
   VkWriteDescriptorSet Writes[] = {
-    {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, &Acceleration_Write, Descriptor_Set, 0,  0, 1,             VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, NULL,           NULL,                    NULL},
-    {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, Descriptor_Set, 1,  0, 1,                            VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,              &Image_Info,    NULL,                    NULL},
-    {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, Descriptor_Set, 2,  0, 1,                            VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,             NULL,           &Camera_Info,            NULL},
-    {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, Descriptor_Set, 3,  0, 1,                            VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,             NULL,           &Vertex_Info,            NULL},
-    {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, Descriptor_Set, 4,  0, 1,                            VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,             NULL,           &Index_Info,             NULL},
-    {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, Descriptor_Set, 5,  0, 1,                            VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,             NULL,           &Material_Info,          NULL},
-    {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, Descriptor_Set, 6,  0, 1,                            VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,             NULL,           &Texture_Id_Info,        NULL},
-    {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, Descriptor_Set, 7,  0, 1,                            VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,     &Lightmap_Info, NULL,                    NULL},
-    {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, Descriptor_Set, 8,  0, 1,                            VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,             NULL,           &Weapon_Vertex_Info,     NULL},
-    {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, Descriptor_Set, 9,  0, 1,                            VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,             NULL,           &Weapon_Index_Info,      NULL},
-    {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, Descriptor_Set, 10, 0, 1,                            VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,             NULL,           &Weapon_Texture_Id_Info, NULL},
-    {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, Descriptor_Set, 11, 0, 1,                            VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,              &Depth_Info,    NULL,                    NULL},
-    {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, Descriptor_Set, 12, 0, 1,                            VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,             NULL,           &Entity_Vertex_Info,     NULL},
-    {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, Descriptor_Set, 13, 0, 1,                            VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,             NULL,           &Entity_Index_Info,      NULL},
-    {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, Descriptor_Set, 14, 0, 1,                            VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,             NULL,           &Entity_Texture_Id_Info, NULL},
-    {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, Descriptor_Set, 15, 0, Texture_Count,                VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,     Texture_Infos,  NULL,                    NULL},
+    {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, &Acceleration_Write, Descriptor_Set, 0,  0, 1, VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, NULL,           NULL,                    NULL},
+    {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, Descriptor_Set, 1,  0, 1,                VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,              &Image_Info,    NULL,                    NULL},
+    {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, Descriptor_Set, 2,  0, 1,                VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,             NULL,           &Camera_Info,            NULL},
+    {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, Descriptor_Set, 3,  0, 1,                VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,             NULL,           &Vertex_Info,            NULL},
+    {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, Descriptor_Set, 4,  0, 1,                VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,             NULL,           &Index_Info,             NULL},
+    {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, Descriptor_Set, 5,  0, 1,                VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,             NULL,           &Material_Info,          NULL},
+    {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, Descriptor_Set, 6,  0, 1,                VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,             NULL,           &Texture_Id_Info,        NULL},
+    {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, Descriptor_Set, 7,  0, 1,                VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,     &Lightmap_Info, NULL,                    NULL},
+    {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, Descriptor_Set, 8,  0, 1,                VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,             NULL,           &Weapon_Vertex_Info,     NULL},
+    {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, Descriptor_Set, 9,  0, 1,                VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,             NULL,           &Weapon_Index_Info,      NULL},
+    {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, Descriptor_Set, 10, 0, 1,                VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,             NULL,           &Weapon_Texture_Id_Info, NULL},
+    {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, Descriptor_Set, 11, 0, 1,                VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,              &Depth_Info,    NULL,                    NULL},
+    {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, Descriptor_Set, 12, 0, 1,                VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,             NULL,           &Entity_Vertex_Info,     NULL},
+    {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, Descriptor_Set, 13, 0, 1,                VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,             NULL,           &Entity_Index_Info,      NULL},
+    {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, Descriptor_Set, 14, 0, 1,                VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,             NULL,           &Entity_Texture_Id_Info, NULL},
+    {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, Descriptor_Set, 15, 0, Texture_Count,    VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,     Texture_Infos,  NULL,                    NULL},
   };
 
   // Update Vulkan state
@@ -5489,7 +5626,7 @@ void Descriptor_Set_Create (Weapon_Instance *Weapon, Entity *Enemy) {
 
 // ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 //
-// §13. Shaders — Module Loading
+// §13. Shaders - Module Loading
 //
 // ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 
@@ -5527,7 +5664,7 @@ VkShaderModule Shader_Module_Load (const char *Path) {
 
 // ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 //
-// §13. Shaders — GLSL Source (compiled offline to SPIR-V)
+// §13. Shaders - GLSL Source (compiled offline to SPIR-V)
 //
 // The four shader stages (Ray_Generation, Closest_Hit, Primary_Miss, Shadow_Miss) and the
 // physics compute shader are defined as glsl blocks earlier in the specification section.
@@ -5538,7 +5675,7 @@ VkShaderModule Shader_Module_Load (const char *Path) {
 
 // ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 //
-// §12. Pipeline — Camera Upload
+// §12. Pipeline - Camera Upload
 //
 // ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 
@@ -5562,13 +5699,13 @@ void Camera_Upload (Camera *State, float Field_Of_View, uint Weapon_Texture_Base
     uint  Active_SPP;
 
     // Environment parameters (std140 aligned)
-    float Sun_Dir[4];        // xyz = direction, w = angular_radius
-    float Sun_Color[4];      // xyz = color, w = intensity
-    float Sky_Zenith[4];     // xyz = zenith color, w = sky_intensity
-    float Sky_Horizon[4];    // xyz = horizon color, w = sun_disc_size
-    float Ambient_Up[4];     // xyz = ambient up, w = sun_disc_intensity
-    float Ambient_Down[4];   // xyz = ambient down, w = fog_density
-    float Fog_Color[4];      // xyz = fog color, w = unused
+    float Sun_Dir      [4]; // xyz = direction, w = angular_radius
+    float Sun_Color    [4]; // xyz = color, w = intensity
+    float Sky_Zenith   [4]; // xyz = zenith color, w = sky_intensity
+    float Sky_Horizon  [4]; // xyz = horizon color, w = sun_disc_size
+    float Ambient_Up   [4]; // xyz = ambient up, w = sun_disc_intensity
+    float Ambient_Down [4]; // xyz = ambient down, w = fog_density
+    float Fog_Color    [4]; // xyz = fog color, w = unused
   } Uniform;
 
   // Compute the inverse matrices for reconstructing world-space rays from screen coordinates
@@ -5582,32 +5719,26 @@ void Camera_Upload (Camera *State, float Field_Of_View, uint Weapon_Texture_Base
   // Pack environment parameters into the uniform (vec4-aligned for std140)
   Scene_Environment *E = &Active_Environment;
   vec3 Nd = Normalize (E->Sun_Direction);
-  Uniform.Sun_Dir[0] = Nd.x; Uniform.Sun_Dir[1] = Nd.y; Uniform.Sun_Dir[2] = Nd.z;
-  Uniform.Sun_Dir[3] = E->Sun_Angular_Radius;
-  Uniform.Sun_Color[0] = E->Sun_Color.x; Uniform.Sun_Color[1] = E->Sun_Color.y;
-  Uniform.Sun_Color[2] = E->Sun_Color.z; Uniform.Sun_Color[3] = E->Sun_Intensity;
-  Uniform.Sky_Zenith[0] = E->Sky_Zenith.x; Uniform.Sky_Zenith[1] = E->Sky_Zenith.y;
-  Uniform.Sky_Zenith[2] = E->Sky_Zenith.z; Uniform.Sky_Zenith[3] = E->Sky_Intensity;
-  Uniform.Sky_Horizon[0] = E->Sky_Horizon.x; Uniform.Sky_Horizon[1] = E->Sky_Horizon.y;
+  Uniform.Sun_Dir     [3] = E->Sun_Angular_Radius;
+  Uniform.Sun_Dir     [0] = Nd.x; Uniform.Sun_Dir[1] = Nd.y; Uniform.Sun_Dir[2] = Nd.z;
+  Uniform.Sun_Color   [0] = E->Sun_Color.x;   Uniform.Sun_Color   [1] = E->Sun_Color.y;
+  Uniform.Sun_Color   [2] = E->Sun_Color.z;   Uniform.Sun_Color   [3] = E->Sun_Intensity;
+  Uniform.Sky_Zenith  [0] = E->Sky_Zenith.x;  Uniform.Sky_Zenith  [1] = E->Sky_Zenith.y;
+  Uniform.Sky_Zenith  [2] = E->Sky_Zenith.z;  Uniform.Sky_Zenith  [3] = E->Sky_Intensity;
+  Uniform.Sky_Horizon [0] = E->Sky_Horizon.x; Uniform.Sky_Horizon [1] = E->Sky_Horizon.y;
 
-  // Pre-compute cos(Sun_Disc_Size) on CPU — eliminates cos() per miss invocation
-  Uniform.Sky_Horizon[2] = E->Sky_Horizon.z; Uniform.Sky_Horizon[3] = cosf (E->Sun_Disc_Size);
-  Uniform.Ambient_Up[0] = E->Ambient_Up.x; Uniform.Ambient_Up[1] = E->Ambient_Up.y;
-  Uniform.Ambient_Up[2] = E->Ambient_Up.z; Uniform.Ambient_Up[3] = E->Sun_Disc_Intensity;
-  Uniform.Ambient_Down[0] = E->Ambient_Down.x; Uniform.Ambient_Down[1] = E->Ambient_Down.y;
-  Uniform.Ambient_Down[2] = E->Ambient_Down.z; Uniform.Ambient_Down[3] = E->Fog_Density;
-  Uniform.Fog_Color[0] = E->Fog_Color.x; Uniform.Fog_Color[1] = E->Fog_Color.y;
-  Uniform.Fog_Color[2] = E->Fog_Color.z; Uniform.Fog_Color[3] = 0;
+  // Pre-compute cos(Sun_Disc_Size) on CPU - eliminates cos() per miss invocation
+  Uniform.Sky_Horizon  [2] = E->Sky_Horizon.z;  Uniform.Sky_Horizon  [3] = cosf (E->Sun_Disc_Size);
+  Uniform.Ambient_Up   [0] = E->Ambient_Up.x;   Uniform.Ambient_Up   [1] = E->Ambient_Up.y;
+  Uniform.Ambient_Up   [2] = E->Ambient_Up.z;   Uniform.Ambient_Up   [3] = E->Sun_Disc_Intensity;
+  Uniform.Ambient_Down [0] = E->Ambient_Down.x; Uniform.Ambient_Down [1] = E->Ambient_Down.y;
+  Uniform.Ambient_Down [2] = E->Ambient_Down.z; Uniform.Ambient_Down [3] = E->Fog_Density;
+  Uniform.Fog_Color    [0] = E->Fog_Color.x;    Uniform.Fog_Color    [1] = E->Fog_Color.y;
+  Uniform.Fog_Color    [2] = E->Fog_Color.z;    Uniform.Fog_Color    [3] = 0;
 
   // Upload the uniform data to the camera buffer
   Buffer_Upload (Camera_Uniform_Buffer, &Uniform, sizeof (Uniform));
 }
-
-// ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
-//
-// §12. Pipeline — Weapon Update
-//
-// ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 
 // ═════════════════
 //   Weapon_Update
@@ -5694,7 +5825,7 @@ void Weapon_Update (Weapon_Instance *Weapon, const Camera *Camera_Data, float De
                                  + Camera_Basis[Row * 3 + 1] * Tag_Y_Up[1 * 3 + Column]
                                  + Camera_Basis[Row * 3 + 2] * Tag_Y_Up[2 * 3 + Column];
 
-  // Scale the viewmodel down — no depth hack, so we shrink the model in world space
+  // Scale the viewmodel down - no depth hack, so we shrink the model in world space
   float Model_Scale = 0.45f;
 
   // Transform each vertex from model space (Q3 Z-up) to world space (Y-up).
@@ -5721,20 +5852,18 @@ void Weapon_Update (Weapon_Instance *Weapon, const Camera *Camera_Data, float De
     Weapon->Transformed_Vertices[Index].Texture_Uv[0] = Weapon->Model.Vertices[Index].Texture_Uv[0];
     Weapon->Transformed_Vertices[Index].Texture_Uv[1] = Weapon->Model.Vertices[Index].Texture_Uv[1];
   }
-}
+} // Weapon_Update
 
 // ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 //
-// §14. Render — Windowing & Input
+// §14. Render - Windowing & Input
 //
 // ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 
-// ═══════════════════════════
+// ══════════════════════════
 //   Constrain_Aspect_Ratio
-// ═══════════════════════════
-// Ported from Neo Engine's Resize function.
-// Ensures window aspect ratio stays between 4:3 (wide) and 21:9 (narrow).
-// Width/height are clamped to minimum 256px.
+// ══════════════════════════
+
 void Constrain_Aspect_Ratio (int *W, int *H) {
   if (*W < MINIMUM_WINDOW_SIZE) *W = MINIMUM_WINDOW_SIZE;
   int Min_H = MINIMUM_WINDOW_SIZE * ASPECT_NARROW_Y / ASPECT_NARROW_X;
@@ -5755,11 +5884,10 @@ void Constrain_Aspect_Ratio (int *W, int *H) {
   *H = Fit_H;
 }
 
-// ══════════════════════
+// ═══════════════════
 //   Set_Menu_Cursor
-// ══════════════════════
-// Change the visible cursor style in menu mode (rollover support).
-// Active = hovering interactive UI, Inactive = general menu, System = default arrow.
+// ═══════════════════
+
 void Set_Menu_Cursor (Cursor_Kind Kind) {
   if (Kind == Current_Cursor_Kind) return;
   Current_Cursor_Kind = Kind;
@@ -5771,12 +5899,11 @@ void Set_Menu_Cursor (Cursor_Kind Kind) {
   }
 }
 
-// ══════════════════════
+// ═══════════════════
 //   Enter_Menu_Mode
-// ══════════════════════
-// Switch from game to menu: show cursor, unclip, stop centering.
-// Saves cursor position for restoration when returning to game.
-void Enter_Menu_Mode (void) {
+// ═══════════════════
+
+void Enter_Menu_Mode () {
   if (In_Menu) return;
   In_Menu = 1;
   Cursor_Centering = 0;
@@ -5789,11 +5916,11 @@ void Enter_Menu_Mode (void) {
   printf ("[window] entered menu mode\n");
 }
 
-// ══════════════════════
+// ═══════════════════
 //   Enter_Game_Mode
-// ══════════════════════
-// Switch from menu to game: hide cursor, clip to window, center each frame.
-void Enter_Game_Mode (void) {
+// ═══════════════════
+
+void Enter_Game_Mode () {
   if (not In_Menu) return;
 
   // Save cursor position for when we return to menu
@@ -5806,12 +5933,11 @@ void Enter_Game_Mode (void) {
   printf ("[window] entered game mode\n");
 }
 
-// ══════════════════════════
-//   Toggle_Fullscreen
-// ══════════════════════════
-// F11: toggle between windowed and fullscreen desktop mode.
-// Saves/restores window position and size across transitions.
-void Toggle_Fullscreen (void) {
+// ═════════════════════
+//   Toggle_Fullscreen  
+// ═════════════════════
+
+void Toggle_Fullscreen () {
   if (Current_Window_Mode == WINDOWED_MODE) {
     // Save windowed geometry for restoration
     SDL_GetWindowPosition (Window, &Windowed_X, &Windowed_Y);
@@ -5832,12 +5958,10 @@ void Toggle_Fullscreen (void) {
   }
 }
 
-// ══════════════════════════
+// ═════════════════════
 //   Handle_Activation
-// ══════════════════════════
-// Ported from Neo Engine's activation state machine.
-// Handles focus gain/loss, minimize, and click-activate transitions.
-// Each case is explicit to avoid branching bugs (per Neo Engine convention).
+// ═════════════════════
+
 void Handle_Activation (Activated_Kind New_State) {
   if (New_State == Current_Activated) return;
 
@@ -5915,14 +6039,13 @@ void Handle_Activation (Activated_Kind New_State) {
       break;
   }
   Current_Activated = New_State;
-}
+
+} // Handle_Activation
 
 // ══════════════
 //   Poll_Input
 // ══════════════
-// Process SDL events and sample keyboard/mouse state.
-// Integrates with the Neo Engine-style windowing state machine for
-// focus changes, fullscreen toggle, menu/game transitions, and resize.
+
 Input Poll_Input () {
   Input Input_Data = {0};
   SDL_Event Event;
@@ -6009,11 +6132,12 @@ Input Poll_Input () {
 
   // Return result
   return Input_Data;
-}
+
+} // Poll_Input
 
 // ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 //
-// §14. Render — Frame
+// §14. Render - Frame
 //
 // ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 
@@ -6048,8 +6172,8 @@ void Raytracing_Frame (Gpu_Postprocess_Push PP) {
                            Pipeline_Layout, 0, 1, &Descriptor_Set, 0, NULL);
 
   // Q2RTX-style checkerboard: dispatch at half width, each thread remaps to a
-  // checkerboard pixel.  Untouched pixels keep their previous value; the postprocess
-  // reconstructs them from traced neighbors before TAA.  On lavapipe (CPU) this
+  // checkerboard pixel. Untouched pixels keep their previous value; the postprocess
+  // reconstructs them from traced neighbors before TAA. On lavapipe (CPU) this
   // halves actual thread count, saving ~35% frame time.
   int RT_Dispatch_W = Active_Checkerboard ? (Render_Width + 1) / 2 : Render_Width;
   vkCmdTraceRays (Command_Buffer,
@@ -6077,7 +6201,7 @@ void Raytracing_Frame (Gpu_Postprocess_Push PP) {
 
     // A-trous spatial denoiser (Q2RTX/SVGF-inspired)
     // Iteration count controlled by quality preset (Potato=0, Low=1, Medium+=2).
-    // Passes Budget to the shader — at high budget (cheap path), denoiser is a passthrough.
+    // Passes Budget to the shader - at high budget (cheap path), denoiser is a passthrough.
     int Steps[] = {1, 2};
     int Denoise_Passes = Active_Denoise_Passes;
     if (Denoise_Passes > 0) {
@@ -6357,7 +6481,7 @@ void Denoise_Pipeline_Create (void) {
 // §10. Physics
 //
 //   Six collider shapes (sphere, capsule, AABB, cylinder, ellipsoid, HULL), three ray strategies,
-//   one grade cascade.  The support function s(d) maps unit directions to surface offsets:
+//   one grade cascade. The support function s(d) maps unit directions to surface offsets:
 //
 //     SPHERE      s(d) = d * r                                   Projectiles, pickups
 //     CAPSULE     s(d) = d * r + (0, sign(d.y) * spine, 0)      Player, NPCs
@@ -6374,7 +6498,7 @@ void Denoise_Pipeline_Create (void) {
 //   QH_Dist
 // ═══════════
 
-static float QH_Dist (vec3 P, vec3 A, vec3 B, vec3 C) {
+float QH_Dist (vec3 P, vec3 A, vec3 B, vec3 C) {
 
   // Compute the signed distance from point P to the plane defined by triangle (A, B, C)
   vec3 Normal = Cross (Subtract (B, A), Subtract (C, A));
@@ -6846,7 +6970,7 @@ Player Physics_Dispatch (Input In, float Dt) {
 
 // ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 //
-// §13. Shaders — GLSL Source (compiled offline to SPIR-V)
+// §13. Shaders - GLSL Source (compiled offline to SPIR-V)
 //
 // The four shader stages (Ray_Generation, Closest_Hit, Primary_Miss, Shadow_Miss) and the physics
 // compute shader (with hull support functions) are defined as glsl blocks in the specification.
@@ -6870,32 +6994,8 @@ Player Physics_Dispatch (Input In, float Dt) {
 //
 // ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 
-// Opus support removed: using WAV assets with modal synthesis enhancement
-
-// ═══════════════════════════════════════════════════════════
-//   Physically-based Modal Synthesis Audio (SIGGRAPH-grade)
-// ═══════════════════════════════════════════════════════════
-//
-// Each material is modeled as a bank of damped resonators (modes). An impact excitation
-// (short force pulse) drives all modes simultaneously. The resonator bank produces emergent
-// timbre from the object's physical resonances — not from hand-crafted oscillators.
-//
-// Based on James/Zheng/Chadwick rigid-body sound synthesis:
-//   - Modal frequencies and T60 decay times per material
-//   - Contact impulse shapes the excitation
-//   - Acceleration noise restores high-frequency realism
-#define MODAL_SAMPLE_RATE 22050
-#define MODAL_MAX_MODES   12
-
-typedef struct {
-  float a1, a2;   // Feedback coefficients (from frequency and damping)
-  float b0;       // Input gain (mode excitation weight)
-  float y1, y2;   // Filter state
-} Mode_Resonator;
-
-static void Mode_Init (Mode_Resonator *M, float Freq_Hz, float T60, float Gain) {
-  // r from T60: amplitude decays by 60 dB over T60 seconds
-  float R = powf (0.001f, 1.f / (T60 * MODAL_SAMPLE_RATE));
+void Mode_Init (Mode_Resonator *M, float Freq_Hz, float T60, float Gain) {
+  float R = powf (0.001f, 1.f / (T60 * MODAL_SAMPLE_RATE)); // r from T60: amplitude decays by 60 dB over T60 seconds
   float W = 2.f * 3.14159265f * Freq_Hz / MODAL_SAMPLE_RATE;
   M->a1 = 2.f * R * cosf (W);
   M->a2 = -(R * R);
@@ -6903,62 +7003,20 @@ static void Mode_Init (Mode_Resonator *M, float Freq_Hz, float T60, float Gain) 
   M->y1 = M->y2 = 0.f;
 }
 
-static inline float Mode_Tick (Mode_Resonator *M, float X) {
+float Mode_Tick (Mode_Resonator *M, float X) {
   float Y = M->a1 * M->y1 + M->a2 * M->y2 + M->b0 * X;
   M->y2 = M->y1;
   M->y1 = Y;
   return Y;
 }
 
-// Material mode tables: {frequency_Hz, T60_seconds, gain}
-// Derived from measured rigid-body resonances (SIGGRAPH modal synthesis literature)
-typedef struct { float Freq; float T60; float Gain; } Mode_Spec;
-
-// Stone: dense, high frequencies, medium-long decay
-static const Mode_Spec Modes_Stone[] = {
-  {1200, 0.08, 0.35}, {2400, 0.05, 0.25}, {3600, 0.03, 0.15},
-  {4800, 0.02, 0.10}, { 800, 0.10, 0.30}, {1800, 0.06, 0.20},
-  {5500, 0.015, 0.08}, {6200, 0.01, 0.05}, {950, 0.09, 0.25},
-  {3200, 0.04, 0.12}, {7000, 0.008, 0.03}, {420, 0.12, 0.18}};
-
-// Metal: bright, ringing, long decay
-static const Mode_Spec Modes_Metal[] = {
-  {880, 0.40, 0.30}, {1760, 0.30, 0.25}, {2640, 0.20, 0.18},
-  {3520, 0.15, 0.12}, {4400, 0.10, 0.08}, {5280, 0.08, 0.05},
-  {440, 0.50, 0.35}, {1320, 0.35, 0.22}, {6600, 0.05, 0.03},
-  {2200, 0.25, 0.15}, {7700, 0.04, 0.02}, {660, 0.45, 0.28}};
-
-// Wood: warm, short decay, lower partials
-static const Mode_Spec Modes_Wood[] = {
-  {350, 0.06, 0.40}, {700, 0.04, 0.30}, {1400, 0.03, 0.20},
-  {2100, 0.02, 0.12}, {2800, 0.015, 0.08}, {500, 0.05, 0.35},
-  {1050, 0.035, 0.25}, {3500, 0.01, 0.05}, {175, 0.08, 0.30},
-  {1750, 0.025, 0.15}, {4200, 0.008, 0.03}, {280, 0.07, 0.22}};
-
-// Flesh: very dull, extremely short decay
-static const Mode_Spec Modes_Flesh[] = {
-  {200, 0.02, 0.50}, {400, 0.015, 0.30}, {600, 0.01, 0.15},
-  {150, 0.025, 0.40}, {300, 0.018, 0.25}, {500, 0.012, 0.18},
-  {100, 0.03, 0.35}, {250, 0.02, 0.22}, {700, 0.008, 0.10},
-  {350, 0.016, 0.20}, {800, 0.006, 0.05}, {450, 0.013, 0.12}};
-
-static const Mode_Spec *Material_Modes[] = {
-  Modes_Stone,  // MATERIAL_DEFAULT = stone-like
-  Modes_Metal,  // MATERIAL_METAL
-  Modes_Stone,  // MATERIAL_STONE
-  Modes_Wood,   // MATERIAL_WOOD
-  Modes_Flesh,  // MATERIAL_FLESH
-  Modes_Stone,  // MATERIAL_WATER (splashy, use stone as base)
-};
-
 // ═══════════════════════════════
 //   Audio_Generate_Modal_Impact
 // ═══════════════════════════════
-//
-// Generate a PCM buffer from a modal resonator bank excited by a contact impulse.
-// Impulse_Strength controls excitation energy (0-1), Duration is output length.
-static ALuint Audio_Generate_Modal_Impact (int Material, float Impulse_Strength,
-                                            float Duration, float Volume) {
+
+ALuint Audio_Generate_Modal_Impact (int Material, float Impulse_Strength,
+                                            float Duration, float Volume)
+{
   int Samples = (int)(MODAL_SAMPLE_RATE * Duration);
   short *Data = malloc (Samples * sizeof (short));
 
@@ -7014,13 +7072,11 @@ static ALuint Audio_Generate_Modal_Impact (int Material, float Impulse_Strength,
   return Buffer;
 }
 
-// ═══════════════════════════════════
+// ══════════════════════════════════
 //   Audio_Generate_Explosion_Modal
-// ═══════════════════════════════════
-//
-// Explosion = broadband transient + N debris modal impacts (per SIGGRAPH 2008 scaling work).
-// The initial shock is a burst of all-mode excitation, followed by randomized sub-impacts.
-static ALuint Audio_Generate_Explosion_Modal (float Duration, float Volume) {
+// ══════════════════════════════════
+
+ALuint Audio_Generate_Explosion_Modal (float Duration, float Volume) {
   int Samples = (int)(MODAL_SAMPLE_RATE * Duration);
   short *Data = calloc (Samples, sizeof (short));
 
@@ -7098,13 +7154,11 @@ static ALuint Audio_Generate_Explosion_Modal (float Duration, float Volume) {
   return Buffer;
 }
 
-// ═══════════════════════════════
+// ══════════════════════════════
 //   Audio_Generate_Weapon_Fire
-// ═══════════════════════════════
-//
-// Weapon fire = sharp metallic transient (bolt mechanism) + propellant gas expansion.
-// Uses metal modes for the mechanism and broadband noise for the gas.
-static ALuint Audio_Generate_Weapon_Fire (float Volume) {
+// ══════════════════════════════
+
+ALuint Audio_Generate_Weapon_Fire (float Volume) {
   float Duration = 0.2f;
   int Samples = (int)(MODAL_SAMPLE_RATE * Duration);
   short *Data = malloc (Samples * sizeof (short));
@@ -7150,13 +7204,11 @@ static ALuint Audio_Generate_Weapon_Fire (float Volume) {
   return Buffer;
 }
 
-// ═══════════════════════
+// ══════════════════
 //   Audio_Load_WAV
-// ═══════════════════════
-//
-// Load a WAV file from disk into an OpenAL buffer. Supports 8/16-bit mono/stereo PCM.
-// Returns 0 on failure.
-static ALuint Audio_Load_WAV (const char *Path) {
+// ══════════════════
+
+ALuint Audio_Load_WAV (const char *Path) {
   FILE *F = fopen (Path, "rb");
   if (not F) return 0;
 
@@ -7195,14 +7247,11 @@ static ALuint Audio_Load_WAV (const char *Path) {
   return Buffer;
 }
 
-// ═════════════════════════════════
+// ════════════════════════════════
 //   Audio_Load_WAV_Or_Synthesize
-// ═════════════════════════════════
-//
-// Try to load a WAV from disk; if missing, fall back to modal synthesis.
-// This layering lets us use real recordings when available and physically-based
-// synthesis as a fallback — the best of both worlds.
-static ALuint Audio_Load_WAV_Or_Modal (const char *Path, int Material, float Impulse,
+// ════════════════════════════════
+
+ALuint Audio_Load_WAV_Or_Modal (const char *Path, int Material, float Impulse,
                                         float Duration, float Volume) {
   ALuint Buf = Audio_Load_WAV (Path);
   if (Buf) { printf ("[audio] loaded %s\n", Path); return Buf; }
@@ -7210,11 +7259,11 @@ static ALuint Audio_Load_WAV_Or_Modal (const char *Path, int Material, float Imp
   return Audio_Generate_Modal_Impact (Material, Impulse, Duration, Volume);
 }
 
-// ════════════════
+// ══════════════
 //   Audio_Init
-// ════════════════
+// ══════════════
 
-void Audio_Init (void) {
+void Audio_Init () {
   memset (&Audio, 0, sizeof Audio);
 
   // Open audio device
@@ -7285,7 +7334,7 @@ void Audio_Init (void) {
       alGenEffects (1, &Effect);
       alEffecti (Effect, AL_EFFECT_TYPE, AL_EFFECT_REVERB);
 
-      // Subtle room reverb: moderate decay, not too wet — physically based indoor arena
+      // Subtle room reverb: moderate decay, not too wet - physically based indoor arena
       alEffectf (Effect, AL_REVERB_DECAY_TIME, 1.2f);    // 1.2s decay for indoor arena
       alEffectf (Effect, AL_REVERB_GAIN, 0.4f);           // Not too loud
       alEffectf (Effect, AL_REVERB_GAINHF, 0.6f);         // Keep some high-frequency
@@ -7310,9 +7359,9 @@ void Audio_Init (void) {
   printf ("[audio] initialized: %d buffers, %d sources\n", Audio.Buffer_Count, Audio.Source_Count);
 }
 
-// ═════════════════
+// ══════════════
 //   Audio_Play
-// ═════════════════
+// ══════════════
 
 void Audio_Play (int Sound_Index, float Volume) {
   if (not Audio.Device or Sound_Index < 0 or Sound_Index >= Audio.Buffer_Count) return;
@@ -7330,9 +7379,9 @@ void Audio_Play (int Sound_Index, float Volume) {
   }
 }
 
-// ═══════════════════════════════
+// ══════════════════════════
 //   Audio_Update_Footsteps
-// ═══════════════════════════════
+// ══════════════════════════
 
 void Audio_Update_Footsteps (Player *P, float Dt) {
   if (not Audio.Device) return;
@@ -7363,7 +7412,7 @@ void Audio_Update_Footsteps (Player *P, float Dt) {
 //   Audio_Shutdown
 // ═══════════════════
 
-void Audio_Shutdown (void) {
+void Audio_Shutdown () {
   if (not Audio.Device) return;
   alDeleteSources (Audio.Source_Count, Audio.Sources);
   alDeleteBuffers (Audio.Buffer_Count, Audio.Buffers);
@@ -7464,13 +7513,1552 @@ void Projectile_Pool_Readback (void) {
 
 // ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 //
-// §14. Main
+// §12. Shaders - Embedded GLSL Source
+//
+//   The following glsl shader blocks are extracted by nob.c at build time, compiled to SPIR-V via
+//   glslangValidator --target-env vulkan1.3, and loaded at runtime via Shader_Module_Load.
 //
 // ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 
-// ════════
-//   Main
-// ════════
+glsl rgen Ray_Generation {
+  #version 460
+  #extension GL_EXT_ray_tracing : require
+  
+  layout(binding = 0) uniform accelerationStructureEXT  Top_Level;
+  layout(binding = 1, rgba16f) uniform image2D            Storage_Image;
+  layout(binding = 2) uniform Camera_Uniform {
+    mat4  Inverse_View; mat4 Inverse_Projection;
+    uint  Frame; uint Weapon_Texture_Base; uint PBR_Stride; uint Active_SPP;
+    vec4  Env_Sun_Dir;      // xyz = direction, w = angular_radius
+    vec4  Env_Sun_Color;    // xyz = color, w = intensity
+    vec4  Env_Sky_Zenith;   // xyz = zenith color, w = sky_intensity
+    vec4  Env_Sky_Horizon;  // xyz = horizon color, w = cos(sun_disc_size)
+    vec4  Env_Ambient_Up;   // xyz = ambient up, w = sun_disc_intensity
+    vec4  Env_Ambient_Down; // xyz = ambient down, w = fog_density
+    vec4  Env_Fog_Color;    // xyz = fog color
+  };
+  layout(binding = 11, r32f) uniform image2D             Depth_Output;
+  
+  layout(location = 0) rayPayloadEXT vec4 Payload;  // rgb = color, a = hit distance
+  
+  // Stratified sub-pixel jitter for multi-sample anti-aliasing
+  // PCG integer hash replaces sin()-based hash.
+  //   sin() = MUFU.SIN on NVIDIA (4 cycles, 1/SM throughput) or v_sin_f32 on AMD (4 cycles, 1/4 rate)
+  //   Integer ops = IMAD/SHR/XOR on NVIDIA (1 cycle each, full-rate) or v_mul_lo_u32 on AMD (full-rate)
+  // Net savings: ~8 cycles/sample from eliminating the transcendental unit bottleneck.
+  // The PCG hash (O'Neill 2014) has superior statistical quality: passes TestU01 BigCrush.
+  uint PCG (uint V) {
+    uint S = V * 747796405u + 2891336453u;
+    uint W = ((S >> ((S >> 28u) + 4u)) ^ S) * 277803737u;
+    return (W >> 22u) ^ W;
+  }
+  
+  void main () {
+    int SPP = int (Active_SPP & 0xFFu);
+
+    // Checkerboard half-width dispatch: when gl_LaunchSizeEXT.x < image width,
+    // the CPU dispatched at half width. Remap each thread to its checkerboard
+    // pixel: Px.x = LaunchID.x * 2 + ((LaunchID.y + Frame) & 1).
+    // UV uses the full image size for correct projection mapping.
+    ivec2 Img_Size = imageSize (Storage_Image);
+    ivec2 Px;
+    if (int(gl_LaunchSizeEXT.x) < Img_Size.x) {
+      Px.x = int(gl_LaunchIDEXT.x) * 2 + ((int(gl_LaunchIDEXT.y) + int(Frame)) & 1);
+      Px.y = int(gl_LaunchIDEXT.y);
+      if (Px.x >= Img_Size.x) return;
+    } else {
+      Px = ivec2 (gl_LaunchIDEXT.xy);
+    }
+
+    vec3  Origin     = (Inverse_View * vec4 (0, 0, 0, 1)).xyz;
+    vec3  Color_Sum  = vec3 (0.0);
+    float Depth_Sum  = 0.0;
+
+    // Ray direction from pixel position (use full image size for correct UV mapping)
+    vec2  Pixel  = vec2 (Px) + 0.5;
+    vec2  Uv     = Pixel / vec2 (Img_Size);
+    vec2  Ndc    = fma (Uv, vec2 (2.0), vec2 (-1.0));
+    vec4  Target    = Inverse_Projection * vec4 (Ndc.x, Ndc.y, 0.0, 1.0);
+    vec4  Direction = Inverse_View * vec4 (normalize (Target.xyz / Target.w), 0.0);
+  
+    // Accumulate color and depth across all samples
+    for (int S = 0; S < SPP; S++) {
+      Payload = vec4 (0.0, 0.0, 0.0, 10000.0);
+
+      // Mask 0xFD: primary rays see everything EXCEPT player body (bit 1 = 0x02).
+      traceRayEXT (Top_Level, gl_RayFlagsOpaqueEXT, 0xFD, 0, 0, 0,
+                   Origin, 0.001, Direction.xyz, 10000.0, 0);
+  
+      // Accumulate sample result
+      Color_Sum += Payload.rgb;
+      Depth_Sum += Payload.a;
+    }
+  
+    // Average samples - on NVIDIA, the compiler fuses this into a single FMA chain
+    vec3  Final_Color = Color_Sum * (1.0 / float (SPP));
+    float Final_Depth = Depth_Sum * (1.0 / float (SPP));
+  
+    // Write final color and depth to storage images (Px is remapped for checkerboard)
+    imageStore (Storage_Image, Px, vec4 (Final_Color, 1.0));
+    imageStore (Depth_Output,  Px, vec4 (Final_Depth, 0.0, 0.0, 0.0));
+  }
+}
+
+// ═══════════════
+//   Closest_Hit 
+// ═══════════════
+
+glsl rchit Closest_Hit {
+  #version 460
+  #extension GL_EXT_ray_tracing : require
+  #extension GL_EXT_ray_query : require
+  #extension GL_EXT_nonuniform_qualifier : require
+  
+  layout(binding = 0) uniform accelerationStructureEXT Top_Level;
+  layout(binding = 2) uniform Camera_Uniform {
+    mat4  Inverse_View; mat4 Inverse_Projection;
+    uint  Frame; uint Weapon_Texture_Base; uint PBR_Stride; uint Active_SPP;
+    vec4  Env_Sun_Dir;      // xyz = direction, w = angular_radius
+    vec4  Env_Sun_Color;    // xyz = color, w = intensity
+    vec4  Env_Sky_Zenith;   // xyz = zenith color, w = sky_intensity
+    vec4  Env_Sky_Horizon;  // xyz = horizon color, w = cos(sun_disc_size)
+    vec4  Env_Ambient_Up;   // xyz = ambient up, w = sun_disc_intensity
+    vec4  Env_Ambient_Down; // xyz = ambient down, w = fog_density
+    vec4  Env_Fog_Color;    // xyz = fog color
+  };
+  
+  // Scene geometry
+  layout(binding = 3, std430) readonly buffer Vertex_Data   { vec4 Data[]; } Vertices;
+  layout(binding = 4, std430) readonly buffer Index_Data    { uint Data[]; } Indices;
+  layout(binding = 5, std430) readonly buffer Material_Data { vec4 Data[]; } Materials;
+  layout(binding = 6, std430) readonly buffer Tex_Id_Data   { uint Data[]; } Texture_Ids;
+  layout(binding = 7)         uniform sampler2D              Lightmap;
+  
+  // Weapon geometry
+  layout(binding = 8,  std430) readonly buffer Weapon_Vertex_Data { vec4 Data[]; } Weapon_Vertices;
+  layout(binding = 9,  std430) readonly buffer Weapon_Index_Data  { uint Data[]; } Weapon_Indices;
+  layout(binding = 10, std430) readonly buffer Weapon_Tex_Id_Data { uint Data[]; } Weapon_Tex_Ids;
+  
+  // Entity geometry
+  layout(binding = 12, std430) readonly buffer Entity_Vertex_Data { vec4 Data[]; } Entity_Vertices;
+  layout(binding = 13, std430) readonly buffer Entity_Index_Data  { uint Data[]; } Entity_Indices;
+  layout(binding = 14, std430) readonly buffer Entity_Tex_Id_Data { uint Data[]; } Entity_Tex_Ids;
+  
+  // Bindless texture array (binding 15: must be highest for variable descriptor count)
+  layout(binding = 15) uniform sampler2D Textures[];
+  
+  layout(location = 0) rayPayloadInEXT vec4 Payload;  // rgb = color, a = hit distance
+
+  // Shadow rays now use inline rayQueryEXT - no payload needed (saves continuation stack)
+  hitAttributeEXT vec2 Barycentrics;
+  
+  // PCG hash for stochastic effects (soft shadows, importance sampling)
+  uint PCG (uint V) {
+    uint S = V * 747796405u + 2891336453u;
+    uint W = ((S >> ((S >> 28u) + 4u)) ^ S) * 277803737u;
+    return (W >> 22u) ^ W;
+  }
+  
+  // Soft shadow ray direction (extracted to avoid code duplication)
+  // Computes a jittered direction on a disk around the light direction for soft shadows.
+  // Previously duplicated in entity + world shadow paths (~20 lines each).
+  // On NVIDIA: saves ~1 KB instruction cache from deduplicated code.
+  vec3 Soft_Shadow_Dir (vec3 Ld, uint Prim, uint Inst, uint Frame, float Disk_Radius) {
+    uint Seed  = PCG (Prim * 1973u + Inst * 9277u + Frame * 26699u);
+    float Ang  = float (Seed) * 2.3283064e-10 * 6.2831853;
+    float Rad  = sqrt (float (PCG (Seed)) * 2.3283064e-10) * Disk_Radius;
+    vec3 Lt    = (abs (Ld.y) < 0.99) ? normalize (cross (Ld, vec3 (0, 1, 0)))
+                                      : normalize (cross (Ld, vec3 (1, 0, 0)));
+    vec3 Lb    = cross (Ld, Lt);
+    return normalize (Ld + Lt * (cos (Ang) * Rad) + Lb * (sin (Ang) * Rad));
+  }
+  
+  // Extracted shadow trace (deduplicated from entity + world paths)
+  // Both paths used identical rayQueryEXT code: same mask (0xFE), offset (Normal*0.1),
+  // tmin (0.001), tmax (600.0), and shadow factor (1.0 : 0.05).
+  // Saves ~15 lines of duplicated code + instruction cache pressure.
+  float Trace_Shadow (vec3 Origin, vec3 Normal, vec3 Ld, uint Prim, uint Inst, uint Frame, float Disk_Radius) {
+    vec3 Shadow_Dir = Soft_Shadow_Dir (Ld, Prim, Inst, Frame, Disk_Radius);
+    rayQueryEXT Shadow_Query;
+    rayQueryInitializeEXT (Shadow_Query, Top_Level,
+      gl_RayFlagsTerminateOnFirstHitEXT | gl_RayFlagsOpaqueEXT,
+      0xFE, Origin + Normal * 0.1, 0.001, Shadow_Dir, 600.0);
+    rayQueryProceedEXT (Shadow_Query);
+    return (rayQueryGetIntersectionTypeEXT (Shadow_Query, true)
+      == gl_RayQueryCommittedIntersectionNoneEXT) ? 1.0 : 0.05;
+  }
+  
+  // Read a vertex attribute (48 bytes = 12 floats per vertex) from the appropriate buffer
+  // Dispatch: Instance 0 = world, 1 = weapon, 2 = entity
+  vec4 Read_Raw (uint I, uint Slot, uint Instance) {
+    if (Instance == 2u) return Entity_Vertices.Data[I * 3 + Slot];
+    if (Instance == 1u) return Weapon_Vertices.Data[I * 3 + Slot];
+    return Vertices.Data[I * 3 + Slot];
+  }
+  vec3 Read_Position   (uint I, uint Inst) { return Read_Raw (I, 0, Inst).xyz; }
+  vec2 Read_Tex_Uv     (uint I, uint Inst) { return Read_Raw (I, 1, Inst).xy;  }
+  vec2 Read_Lightmap_Uv(uint I, uint Inst) { return Read_Raw (I, 1, Inst).zw;  }
+  vec3 Read_Normal     (uint I, uint Inst) { return Read_Raw (I, 2, Inst).xyz; }
+  
+  void main () {
+    // Determine which instance we hit: 0 = world, 1 = weapon, 2 = entity
+    uint  Instance     = gl_InstanceCustomIndexEXT;
+    bool  Is_Weapon    = (Instance == 1u);
+    bool  Is_Entity     = (Instance == 2u);
+    uint  Primitive    = gl_PrimitiveID;
+  
+    // Adaptive quality budget: 0.0 = full quality (60fps+), 1.0 = minimal work (< 5fps)
+    // At low fps, skip expensive operations so frames are cheaper → higher fps → TAA fills detail.
+    float Budget = float ((Active_SPP >> 8u) & 0xFFu) / 255.0;
+  
+    // Fetch triangle vertex indices from the appropriate buffer
+    uint I0, I1, I2;
+    if (Is_Entity) {
+      I0 = Entity_Indices.Data[Primitive * 3 + 0];
+      I1 = Entity_Indices.Data[Primitive * 3 + 1];
+      I2 = Entity_Indices.Data[Primitive * 3 + 2];
+    } else if (Is_Weapon) {
+      I0 = Weapon_Indices.Data[Primitive * 3 + 0];
+      I1 = Weapon_Indices.Data[Primitive * 3 + 1];
+      I2 = Weapon_Indices.Data[Primitive * 3 + 2];
+    } else {
+      I0 = Indices.Data[Primitive * 3 + 0];
+      I1 = Indices.Data[Primitive * 3 + 1];
+      I2 = Indices.Data[Primitive * 3 + 2];
+    }
+  
+    // Batched vertex attribute reads
+    // Read all 3 vec4 slots per vertex in one go (9 buffer reads instead of 12).
+    // Each vertex = 3 vec4: [Position.xyz, _], [TexUV.xy, LmUV.xy], [Normal.xyz, _]
+    vec3 Bary   = vec3 (1.0 - Barycentrics.x - Barycentrics.y, Barycentrics.x, Barycentrics.y);
+    vec4 V0_S0  = Read_Raw (I0, 0, Instance), V0_S1 = Read_Raw (I0, 1, Instance), V0_S2 = Read_Raw (I0, 2, Instance);
+    vec4 V1_S0  = Read_Raw (I1, 0, Instance), V1_S1 = Read_Raw (I1, 1, Instance), V1_S2 = Read_Raw (I1, 2, Instance);
+    vec4 V2_S0  = Read_Raw (I2, 0, Instance), V2_S1 = Read_Raw (I2, 1, Instance), V2_S2 = Read_Raw (I2, 2, Instance);
+    vec3 Position  = V0_S0.xyz * Bary.x + V1_S0.xyz * Bary.y + V2_S0.xyz * Bary.z;
+    vec2 Tex_Coord = V0_S1.xy  * Bary.x + V1_S1.xy  * Bary.y + V2_S1.xy  * Bary.z;
+    vec2 Lm_Coord  = V0_S1.zw  * Bary.x + V1_S1.zw  * Bary.y + V2_S1.zw  * Bary.z;
+    vec3 Normal    = normalize (V0_S2.xyz * Bary.x + V1_S2.xyz * Bary.y + V2_S2.xyz * Bary.z);
+  
+    // Fetch the texture ID for this triangle and sample the albedo
+    uint Tex_Id;
+    if (Is_Entity)       Tex_Id = Entity_Tex_Ids.Data[Primitive];
+    else if (Is_Weapon) Tex_Id = Weapon_Tex_Ids.Data[Primitive] + Weapon_Texture_Base;
+    else                Tex_Id = Texture_Ids.Data[Primitive];
+  
+    // Build tangent frame (Frisvad method) for normal mapping + parallax
+    // Needed before texture sampling: parallax offsets UVs, which affects all map reads.
+    // Frisvad's construction produces analytically orthonormal vectors -
+    // the normalize() calls are mathematically redundant. Removing them saves 2× (dot+rsq+3×mul)
+    // = 10 VALU instructions. On NVIDIA, rsq is a 4-cycle MUFU op; eliminating 2 saves 8 cycles.
+    vec3 Geo_Normal = Normal;  // Preserve geometric normal for parallax
+    vec3 T_Axis, B_Axis;
+    if (Geo_Normal.z < -0.999) {
+      T_Axis = vec3 (0.0, -1.0, 0.0);
+      B_Axis = vec3 (-1.0, 0.0, 0.0);
+    } else {
+      float Inv = 1.0 / (1.0 + Geo_Normal.z);
+      T_Axis = vec3 (1.0 - Geo_Normal.x * Geo_Normal.x * Inv, -Geo_Normal.x * Geo_Normal.y * Inv, -Geo_Normal.x);
+      B_Axis = vec3 (-Geo_Normal.x * Geo_Normal.y * Inv, 1.0 - Geo_Normal.y * Geo_Normal.y * Inv, -Geo_Normal.y);
+    }
+  
+    // Parallax occlusion mapping from height map
+    vec3  V  = -gl_WorldRayDirectionEXT;
+    float Hit_Dist = gl_HitTEXT;
+
+    // Adaptive parallax: 300u at full quality, 0u at Budget=1 (pure lightmap fallback).
+    float Parallax_Dist = 300.0 * (1.0 - Budget);
+    if (not Is_Weapon and not Is_Entity and Tex_Id < PBR_Stride and Hit_Dist < Parallax_Dist) {
+
+      // Transform view to tangent space for parallax ray marching
+      vec3 V_Tangent = vec3 (dot (V, T_Axis), dot (V, B_Axis), dot (V, Geo_Normal));
+
+      // Scale parallax depth: 0.03 units - subtle but visible on close surfaces
+      vec2 Parallax_Dir = V_Tangent.xy / max (V_Tangent.z, 0.1) * 0.03;
+  
+      // Hybrid linear-binary parallax 
+      uint Height_Tex = nonuniformEXT(Tex_Id + PBR_Stride * 5u);
+      float Layer_Depth = 1.0 / 4.0;  // 4 coarse steps
+      float Current_Depth = 0.0;
+      vec2  Current_Uv = Tex_Coord;
+      vec2  Uv_Step = -Parallax_Dir * Layer_Depth;
+      float H_Sample = textureLod (Textures[Height_Tex], Current_Uv, 0.0).r;
+  
+      // Phase 1: 4 coarse linear steps to find the crossing interval
+      for (int Step = 0; Step < 4; Step++) {
+        Current_Uv += Uv_Step;
+        H_Sample = textureLod (Textures[Height_Tex], Current_Uv, 0.0).r;
+        Current_Depth += Layer_Depth;
+      }
+  
+      // Phase 2: 3 binary search steps to refine within the crossing interval
+      vec2 Lo_Uv = Current_Uv - Uv_Step;  float Lo_D = Current_Depth - Layer_Depth;
+      vec2 Hi_Uv = Current_Uv;             float Hi_D = Current_Depth;
+      for (int B = 0; B < 3; B++) {
+        vec2  Mid_Uv = (Lo_Uv + Hi_Uv) * 0.5;
+        float Mid_D  = (Lo_D + Hi_D) * 0.5;
+        float Mid_H  = textureLod (Textures[Height_Tex], Mid_Uv, 0.0).r;
+        if (Mid_D < Mid_H) { Lo_Uv = Mid_Uv; Lo_D = Mid_D; }
+        else                { Hi_Uv = Mid_Uv; Hi_D = Mid_D; }
+      }
+      Tex_Coord = Hi_Uv;
+    }
+  
+    // Sample PBR texture maps
+    vec3  Albedo     = textureLod (Textures[nonuniformEXT(Tex_Id)], Tex_Coord, 0.0).rgb;
+    vec3  Normal_Map = vec3 (0.0, 0.0, 1.0);
+    float R = 0.5;
+    float M = 0.0;
+    vec3  Emissive  = vec3 (0.0);
+  
+    // Sample PBR maps for world geometry, entities, and weapon
+    float PBR_Dist = mix (1000.0, 200.0, Budget);
+    if (not Is_Weapon and Tex_Id < PBR_Stride) {
+
+      // World / Entity PBR: maps laid out at [diffuse_0..N, normal_0..N, roughness_0..N, ...]
+      if (Hit_Dist < PBR_Dist) {
+        Normal_Map = textureLod (Textures[nonuniformEXT(Tex_Id + PBR_Stride)],      Tex_Coord, 0.0).rgb * 2.0 - 1.0;
+        R          = textureLod (Textures[nonuniformEXT(Tex_Id + PBR_Stride * 2u)], Tex_Coord, 0.0).r;
+        M          = textureLod (Textures[nonuniformEXT(Tex_Id + PBR_Stride * 3u)], Tex_Coord, 0.0).r;
+      }
+      Emissive   = textureLod (Textures[nonuniformEXT(Tex_Id + PBR_Stride * 4u)], Tex_Coord, 0.0).rgb;
+
+    // Weapon PBR: 6 map types × 2 surfaces, stride = 2
+    // Eliminates 2 local variables and 4 subtractions per invocation ???
+    } else if (Is_Weapon) {
+      Normal_Map = textureLod (Textures[nonuniformEXT(Tex_Id + 2u)],  Tex_Coord, 0.0).rgb * 2.0 - 1.0;
+      R          = textureLod (Textures[nonuniformEXT(Tex_Id + 4u)],  Tex_Coord, 0.0).r;
+      M          = textureLod (Textures[nonuniformEXT(Tex_Id + 6u)],  Tex_Coord, 0.0).r;
+      Emissive   = textureLod (Textures[nonuniformEXT(Tex_Id + 8u)],  Tex_Coord, 0.0).rgb;
+
+    // Fallback for textures outside the PBR material range: derive from albedo statistics
+    } else {
+      float Lu = dot (Albedo, vec3 (0.2126, 0.7152, 0.0722));
+      float Hi = max (Albedo.r, max (Albedo.g, Albedo.b));
+      float Sa = (Hi - min (Albedo.r, min (Albedo.g, Albedo.b))) / max (Hi, 1e-3);
+      R = mix (0.60, 0.90, 1.0 - Lu);   // Rougher default - less "wet" look on stone/brick
+      M = smoothstep (0.35, 0.15, Sa) * smoothstep (0.45, 0.2, Lu) * 0.4;
+    }
+  
+    // Normal mapping: always apply TBN transform
+    Normal = normalize (T_Axis * Normal_Map.x + B_Axis * Normal_Map.y + Geo_Normal * Normal_Map.z);
+  
+    // PBR material parameters
+    vec3  F0 = mix (vec3 (0.04), Albedo, M);
+    float NV = max (dot (Normal, V), 1e-3);
+  
+    // Direct lighting: Cook-Torrance microfacet BRDF
+    vec3  Ld = normalize (Env_Sun_Dir.xyz);         // Per-scene sun direction
+    vec3  Lr = Env_Sun_Color.xyz * Env_Sun_Color.w; // Per-scene sun radiance (color × intensity)
+    float NL  = max (dot (Normal, Ld), 0.0);
+  
+    // Skip full BRDF when surface faces away from sun
+    vec3  Sp  = vec3 (0.0);
+    vec3  Df  = vec3 (0.0);
+    if (NL > 0.0) {
+      vec3  H   = normalize (V + Ld);
+      float NH  = max (dot (Normal, H),  0.0);
+      float VH  = max (dot (V, H),       0.0);
+      float a   = R * R,  a2 = max (a * a, 1e-4); // Clamp to avoid NaN at R=0
+      float k   = (R + 1.0) * (R + 1.0) * 0.125;
+  
+      // GGX/Trowbridge-Reitz normal distribution
+      float Denom = NH * NH * (a2 - 1.0) + 1.0;
+      float D     = a2 / (3.14159 * Denom * Denom);
+  
+      // Smith geometry (height-correlated visibility)
+      float G1_L = NL / (NL * (1.0 - k) + k);
+      float G1_V = NV / (NV * (1.0 - k) + k);
+      float Vis  = G1_L * G1_V / max (4.0 * NL * NV, 1e-4);
+  
+      // Schlick Fresnel
+      float FT  = 1.0 - VH;  float T5 = FT * FT; T5 *= T5 * FT;
+      vec3  F   = F0 + (1.0 - F0) * T5;
+  
+      // Final specular and diffuse terms (energy-conserving: kD = 1 - kS)
+      Sp  = D * Vis * F;
+      Df  = (1.0 - F) * (1.0 - M) * Albedo * 0.31831;  // 1/π
+    }
+  
+    // Hemisphere ambient diffuse (sky-ground gradient based on normal)
+    // Warm indoor bounce lighting - Q3 arenas have amber-toned fill light from torches and lava.
+    vec3  Sky_Color    = Env_Ambient_Up.xyz;   // Per-scene ambient from above (sky contribution)
+    vec3  Ground_Color = Env_Ambient_Down.xyz; // Per-scene ambient from below (ground bounce)
+    float Hemisphere   = Normal.y * 0.5 + 0.5; // Zero is down, one up
+    vec3  Ambient_Irradiance = mix (Ground_Color, Sky_Color, Hemisphere);
+  
+    // Ambient specular: pre-integrated split-sum approximation (Karis 2013)
+    // Approximates ∫(BRDF * Li) with env BRDF LUT replaced by analytic fit
+    float Env_FT   = 1.0 - NV;  float Env_T5 = Env_FT * Env_FT; Env_T5 *= Env_T5 * Env_FT;
+    vec3  Env_F    = F0 + (max (vec3 (1.0 - R), F0) - F0) * Env_T5;     // Roughness-aware Fresnel
+    vec2  Env_BRDF = vec2 (1.0 - R * 0.5, R * 0.08);  // Analytic fit to DFG LUT
+    vec3  Ambient_Specular = Env_F * Env_BRDF.x + Env_BRDF.y;
+  
+    // Reflect the view vector off the surface to tint specular with sky direction
+    vec3  Reflect_Dir = reflect (-V, Normal);
+    float Refl_Up     = Reflect_Dir.y * 0.5 + 0.5;
+    vec3  Env_Color   = mix (Ground_Color, Sky_Color * 1.2, Refl_Up); // Restrained - real reflections do the heavy lifting
+    vec3  Indirect_Specular = Ambient_Specular * Env_Color;
+  
+    // Indirect diffuse: hemisphere ambient weighted by (1 - metallic) since metals have no diffuse
+    vec3  Indirect_Diffuse = Ambient_Irradiance * Albedo * (1.0 - M) * (1.0 - Env_F);
+    
+    // Reflection-bounce hits detect this and skip tracing another reflection to limit
+    // recursion to exactly one bounce
+    bool  Is_Reflection_Bounce = (gl_RayTminEXT > 0.005);
+
+    // Reflection culling
+    bool  Refl_Active = not Is_Reflection_Bounce and (R < 0.55);
+    float Refl_Dist = mix (800.0, 300.0, Budget);  // Adaptive reflection distance
+    float Reflection_Weight = (not Refl_Active or Hit_Dist > Refl_Dist) ? 0.0
+      : max (max (Env_F.r, Env_F.g), Env_F.b) * (1.0 - R * R);
+    vec3  Reflection_Color  = vec3 (0.0);
+  
+    // Trace reflection ray for smooth/metallic surfaces
+    if (Reflection_Weight > 0.10) {
+      vec3 Refl_Dir = reflect (-V, Normal);
+      Payload = vec4 (0.0, 0.0, 0.0, -1.0);
+
+      // gl_RayFlagsOpaqueEXT skips any-hit shader (all geometry is opaque) - saves
+      // ~1 cycle/leaf on NVIDIA RT cores.
+      traceRayEXT (Top_Level, gl_RayFlagsOpaqueEXT,
+                   0xFF,
+                   0, 1, 0,
+                   Position + Normal * 0.2,
+                   0.01,  // tmin=0.01 marks this as a reflection bounce
+                   Refl_Dir,
+                   mix (500.0, 200.0, Budget),  // Adaptive tmax - shorter trace at low fps
+                   0);
+      Reflection_Color = Payload.rgb;
+    }
+  
+    // Blend reflection into indirect specular: replace the hemisphere approximation
+    // with actual traced reflection, weighted by the Fresnel term.
+    vec3 Traced_Specular = Env_F * mix (Indirect_Specular / max (Env_F, vec3(0.01)),
+                                         Reflection_Color,
+                                         vec3 (Reflection_Weight));
+  
+    // Compute final shading based on instance type
+    vec3 Color;
+    float Shadow_Dist = mix (600.0, 200.0, Budget);  // Adaptive shadow ray cutoff distance
+  
+    // Apply per-instance lighting model
+    if (Is_Weapon) {
+      // Weapon: direct light + boosted ambient + traced reflections.
+      vec3 Direct = (Df + Sp) * Lr * NL;
+      vec3 Wpn_Full  = Direct * 0.9 + (Indirect_Diffuse + Traced_Specular) * 1.5;
+      vec3 Wpn_Cheap = Ambient_Irradiance * Albedo * 2.5 + Albedo * max(NL, 0.3);
+      Color = mix (Wpn_Full, Wpn_Cheap, Budget);
+
+    // Entity: direct sun + shadows + hemisphere ambient, no lightmap (MD3 models have no LM UVs)
+    } else if (Is_Entity) {
+      float Shadow_Factor = (NL > 0.0 and not Is_Reflection_Bounce and Hit_Dist < Shadow_Dist)
+        ? Trace_Shadow (Position, Normal, Ld, Primitive, Instance, Frame, Env_Sun_Dir.w) : 1.0;
+      vec3 Direct = (Df + Sp) * Lr * NL * Shadow_Factor;
+
+      // Entity color: balanced ambient - not too bright (avoids glow), not too dark (avoids silhouette)
+      vec3 Entity_Full  = Direct + Indirect_Diffuse * 0.8 + Traced_Specular;
+      vec3 Entity_Cheap = Ambient_Irradiance * Albedo * 0.9 + Albedo * max(NL, 0.2) * 0.4;
+      Color = mix (Entity_Full, Entity_Cheap, Budget);
+
+      // Subtle saturation boost for entities - counteracts ambient washout on character models
+      float Ent_Luma = dot (Color, vec3 (0.2126, 0.7152, 0.0722));
+      Color = mix (vec3 (Ent_Luma), Color, 1.15);  // 15% saturation increase
+    } else {
+      vec3 Lm = textureLod (Lightmap, Lm_Coord, 0.0).rgb * 4.0;  // Lightmap auto-linearized via SRGB format
+  
+      // Inline ray query for shadows
+      float Shadow_Factor = (NL > 0.0 and not Is_Reflection_Bounce and Hit_Dist < Shadow_Dist)
+        ? Trace_Shadow (Position, Normal, Ld, Primitive, Instance, Frame, Env_Sun_Dir.w) : 1.0;
+  
+      // Dual-path rendering with Budget blend
+      vec3 Direct = (Df + Sp) * Lr * NL * Shadow_Factor;
+      vec3 Baked_GI = Albedo * Lm * (1.0 - M);
+  
+      // Cheap path: just lightmap + emissive (minimal ambient to keep shadows dark)
+      vec3 Cheap = Baked_GI + Ambient_Irradiance * Albedo * 0.15 + Emissive * 5.0;
+  
+      // Full path: complete PBR lighting (direct at full strength for strong light/shadow contrast)
+      vec3 Full = Baked_GI + Direct + Indirect_Diffuse + Traced_Specular + Emissive * 5.0;
+  
+      // Blend: Budget is the knob. 0 = full raytraced, 1 = pure lightmap.
+      Color = mix (Full, Cheap, Budget);
+  
+      // Dynamic environment fog
+      if (not Is_Reflection_Bounce) {
+        float Fog_Distance  = gl_HitTEXT;
+
+        // Per-scene exponential fog - adds depth to corridors
+        float Fog_Amount    = 1.0 - exp (-Fog_Distance * Env_Ambient_Down.w);
+        vec3  Fog_Color     = Env_Fog_Color.xyz;  // Per-scene fog color
+        Color = mix (Color, Fog_Color, Fog_Amount);
+      }
+    }
+  
+    // Output shaded color and hit distance
+    Payload = vec4 (Color, gl_HitTEXT);
+  }
+} // Closest_Hit
+  
+// ════════════
+//   Ray_Miss 
+// ════════════
+
+glsl rmiss Ray_Miss {
+  #version 460
+  #extension GL_EXT_ray_tracing : require
+  
+  layout(location = 0) rayPayloadInEXT vec4 Payload;
+  layout(binding = 2) uniform Camera_Uniform {
+    mat4  Inverse_View; mat4 Inverse_Projection;
+    uint  Frame; uint Weapon_Texture_Base; uint PBR_Stride; uint Active_SPP;
+    vec4  Env_Sun_Dir;      // xyz = direction, w = angular_radius
+    vec4  Env_Sun_Color;    // xyz = color, w = intensity
+    vec4  Env_Sky_Zenith;   // xyz = zenith color, w = sky_intensity
+    vec4  Env_Sky_Horizon;  // xyz = horizon color, w = cos(sun_disc_size)
+    vec4  Env_Ambient_Up;   // xyz = ambient up, w = sun_disc_intensity
+    vec4  Env_Ambient_Down; // xyz = ambient down, w = fog_density
+    vec4  Env_Fog_Color;    // xyz = fog color
+  };
+  
+  // Ray_Miss main
+  void main () {
+
+    // Per-scene procedural sky with sun disc (Q2RTX-inspired)
+    vec3  Dir       = gl_WorldRayDirectionEXT;
+    float Vertical  = max (Dir.y, 0.0);
+
+    // Sqrt() is a hardware instruction (1 cycle NVIDIA/AMD), pow(x,0.5) uses log+exp (~8 cycles)
+    vec3  Sky       = mix (Env_Sky_Horizon.xyz, Env_Sky_Zenith.xyz, sqrt (Vertical));
+    Sky *= Env_Sky_Zenith.w;  // Sky intensity multiplier
+  
+    // Sun disc: bright spot in the sky at sun direction (Q2RTX: physical_sky.comp)
+    // Dir is already normalized (ray direction), Env_Sun_Dir.xyz normalized on CPU
+    float Sun_Cos   = dot (Dir, Env_Sun_Dir.xyz);
+
+    // Cos(disc_size) pre-computed on CPU - eliminates per-pixel transcendental
+    float Disc_Edge = Env_Sky_Horizon.w;  // Already cos(sun_disc_size) from CPU
+    float Sun_Edge  = clamp ((Sun_Cos - Disc_Edge) / (1.0 - Disc_Edge), 0.0, 1.0);
+    float Sun_Glow  = Sun_Edge * Sun_Edge; Sun_Glow *= Sun_Glow;  // x^4
+    Sky += Env_Sun_Color.xyz * Sun_Glow * Env_Ambient_Up.w;  // sun_disc_intensity
+  
+    // Atmospheric haze near horizon (Mie-like forward scattering glow)
+    float Horizon_Glow = exp (-Vertical * 8.0);  // Concentrated near horizon
+
+    // Replace 2× length() + 2× division with single inversesqrt(D²·S²).
+    // dot(A/|A|, B/|B|) = dot(A,B) / (|A|·|B|) = dot(A,B) · inversesqrt(dot(A,A)·dot(B,B)).
+    // Saves 2 length + 2 div → 1 dot + 1 dot + 1 mul + 1 rsq + 1 mul (~4 MUFU cycles saved).
+    vec2  Dir_XZ = vec2 (Dir.x, Dir.z);
+    vec2  Sun_XZ = vec2 (Env_Sun_Dir.x, Env_Sun_Dir.z);
+    float Sun_Horizon = max (dot (Dir_XZ, Sun_XZ) * inversesqrt (
+      max (dot (Dir_XZ, Dir_XZ) * dot (Sun_XZ, Sun_XZ), 1e-12)), 0.0);
+
+    // Pow(x,8) → ((x²)²)² (3 muls vs transcendental)
+    float SH2 = Sun_Horizon * Sun_Horizon; float SH4 = SH2 * SH2; float SH8 = SH4 * SH4;
+    Sky += Env_Sun_Color.xyz * Horizon_Glow * SH8 * 0.3;
+  
+    // Output sky color at maximum distance
+    Payload = vec4 (Sky, 10000.0);  // Sky = max distance
+  }
+} // Ray_Miss
+  
+// ═══════════════
+//   Shadow_Miss 
+// ═══════════════
+
+glsl rmiss Shadow_Miss {
+  #version 460
+  #extension GL_EXT_ray_tracing : require
+  
+  layout(location = 1) rayPayloadInEXT float Shadow_Factor;
+  
+  void main () {
+    // Shadow ray reached the light source without hitting anything - fully lit
+    Shadow_Factor = 1.0;
+  }
+}
+
+// ═══════════
+//   Physics
+// ═══════════
+
+glsl comp Physics {
+  #version 460
+  #extension GL_EXT_ray_tracing : require
+  #extension GL_EXT_ray_query : require
+  
+  // Descriptor bindings
+  layout(binding = 0) uniform accelerationStructureEXT Top_Level;
+  layout(binding = 1, std430) readonly buffer Vertex_Data { vec4 Data[]; } Vertices;
+  layout(binding = 2, std430) readonly buffer Index_Data  { uint Data[]; } Indices;
+  
+  layout(binding = 3, std430) buffer Player_Buffer {
+    vec3  Position;     float Pad_A;
+    vec3  Velocity;     float Pad_B;
+    float Yaw, Pitch;
+    int   On_Ground, Jump_Held;
+    vec3  Ground_Normal; float Pad_C;
+    int   Ground_Plane, Ducked;
+    float View_Height, Stuck_Time;
+    float Speed_Last;  int Shape;
+    vec3  Extents;     float Pad_D;
+    float Spine;       float Pad_E1, Pad_E2, Pad_E3;
+  } Player;
+  
+  layout(binding = 4, std430) readonly buffer Hull_Buffer {
+    vec4  Hull_Vertices [256];
+    int   Hull_Adjacency[256][16];
+    int   Hull_Count;
+    float Hull_Radius;
+    vec3  Hull_Centroid;
+    int   Hull_Pad;
+  };
+  
+  struct Gpu_Projectile {
+    vec3  Position;      float Pad_A;
+    vec3  Velocity;      float Lifetime;
+    int   Active;        int   Material_Hit;
+    float Radius;        float Damage;
+    float Hit_U, Hit_V;  // UV at impact point (for CPU-side damage map lookup)
+    int   Instance_Hit;  // TLAS instance index of the object hit (-1 = none)
+    int   Pad_B;
+  };
+  
+  layout(binding = 5, std430) buffer Projectile_Buffer {
+    Gpu_Projectile Projectiles[64];
+    int   Projectile_Count;
+    float Fire_Cooldown;
+    float Proj_Pad[2];
+  };
+  
+  layout(push_constant) uniform Push {
+    int   Forward, Back, Left, Right;
+    int   Jump, Fire, Crouch, Pad;
+    float Delta_X, Delta_Y, Dt, Pad2;
+  } Input;
+  
+  layout(local_size_x = 1) in;
+  
+  // Physics constants
+  const float GRAVITY              = 800.0;
+  const float GROUND_FRICTION      = 6.0;
+  const float STOP_SPEED           = 100.0;
+  const float GROUND_ACCELERATE    = 10.0;
+  const float AIR_ACCELERATE       = 1.0;
+  const float MAXIMUM_SPEED        = 320.0;
+  const float JUMP_VELOCITY        = 270.0;
+  const float STEP_SIZE            = 18.0;
+  const float MINIMUM_WALK_NORMAL  = 0.7;
+  const float OVERBOUNCE           = 1.001;
+  const int   MAXIMUM_CLIP_PLANES  = 5;
+  const float DEFAULT_VIEW_HEIGHT  = 26.0;
+  const float CROUCH_VIEW_HEIGHT   = 12.0;
+  const float MOUSE_SENSITIVITY    = 0.003;
+  
+  // Collider shape constants
+  const int SHAPE_SPHERE    = 0;
+  const int SHAPE_CAPSULE   = 1;
+  const int SHAPE_AABB      = 2;
+  const int SHAPE_CYLINDER  = 3;
+  const int SHAPE_ELLIPSOID = 4;
+  const int SHAPE_HULL      = 5;
+  
+  // Convex hull support functions
+  
+  // Brute-force support: O(n) linear scan over all hull vertices. Best for small hulls (< 64 verts).
+  vec3 hull_support_brute (vec3 direction) {
+    float best_dot = -1e30;
+    int   best_idx = 0;
+    for (int i = 0; i < Hull_Count; i++) {
+      float d = dot (Hull_Vertices[i].xyz, direction);
+      if (d > best_dot) { best_dot = d; best_idx = i; }
+    }
+    return Hull_Vertices[best_idx].xyz;
+  }
+  
+  // Hill-climbing support: O(sqrt(n)) amortized using per-vertex adjacency table.
+  // Starts from vertex 0 and follows neighbors that increase dot(vertex, direction) until a
+  // local maximum is reached. On a convex hull, the local maximum IS the global maximum.
+  vec3 hull_support_hill (vec3 direction) {
+    int current = 0;
+    float current_dot = dot (Hull_Vertices[0].xyz, direction);
+  
+    // Walk neighbors until no improvement is found
+    for (int iteration = 0; iteration < 256; iteration++) {
+      int best_neighbor = -1;
+      float best_dot    = current_dot;
+  
+      // Check all neighbors of the current vertex
+      for (int slot = 0; slot < 16; slot++) {
+        int neighbor = Hull_Adjacency[current][slot];
+        if (neighbor < 0) break;
+        float d = dot (Hull_Vertices[neighbor].xyz, direction);
+        if (d > best_dot) { best_dot = d; best_neighbor = neighbor; }
+      }
+  
+      // If no neighbor improves the dot product, we've found the support point
+      if (best_neighbor < 0) break;
+      current     = best_neighbor;
+      current_dot = best_dot;
+    }
+    return Hull_Vertices[current].xyz;
+  }
+  
+  // Adaptive dispatcher: brute-force for small hulls, hill-climbing for large ones
+  vec3 hull_support (vec3 direction) {
+    if (Hull_Count < 64) return hull_support_brute (direction);
+    return hull_support_hill (direction);
+  }
+  
+  // Map a unit direction to the shape's surface offset (Minkowski support mapping)
+  vec3 shape_offset (vec3 d) {
+    switch (Player.Shape) {
+      case SHAPE_SPHERE:
+        return d * Player.Extents.x;
+  
+      case SHAPE_CAPSULE:
+        return d * Player.Extents.x + vec3 (0.0, sign(d.y) * Player.Spine, 0.0);
+  
+      case SHAPE_AABB:
+        return sign(d) * Player.Extents;
+  
+      case SHAPE_CYLINDER: {
+        vec2  xz    = d.xz;
+        float len   = length (xz);
+        vec2  disc  = (len > 1e-6) ? xz / len * Player.Extents.x : vec2(0.0);
+        return vec3 (disc.x, sign(d.y) * Player.Extents.y, disc.y);
+      }
+  
+      case SHAPE_ELLIPSOID: {
+        vec3 scaled = d / Player.Extents;
+        float len   = length (scaled);
+        return (len > 1e-6) ? normalize(scaled) * Player.Extents : vec3(0.0);
+      }
+  
+      case SHAPE_HULL:
+        return hull_support (d);
+  
+      default:
+        return d * Player.Extents.x;
+    }
+  }
+  
+  // Ray trace helper
+  struct Trace_Result {
+    float Fraction;
+    vec3  Normal;
+    bool  Hit;
+  };
+  
+  // Cast a swept shape from Origin along Direction for up to Distance units.
+  // We approximate the expanded shape by casting multiple rays offset by the support function
+  // in cardinal + diagonal directions, taking the nearest hit.
+  Trace_Result trace_shape (vec3 Origin, vec3 Direction, float Distance) {
+    Trace_Result result;
+    result.Fraction = 1.0;
+    result.Normal   = vec3 (0.0, 1.0, 0.0);
+    result.Hit      = false;
+
+    // Skip zero-length traces
+    if (Distance < 1e-6) return result;
+    vec3 dir_norm = normalize (Direction);
+  
+    // 7 probe directions: 6 cardinal axes + movement direction (optimized from 28 for performance)
+    vec3 probes[7] = vec3[7](
+      vec3( 1, 0, 0), vec3(-1, 0, 0), vec3(0, 1, 0), vec3(0,-1, 0), vec3(0, 0, 1), vec3(0, 0,-1),
+      dir_norm
+    );
+
+    // Test each probe direction for collisions
+    for (int i = 0; i < 7; i++) {
+      vec3 offset = shape_offset (normalize(probes[i]));
+      vec3 ray_origin = Origin + offset;
+  
+      // Initialize and execute the ray query
+      rayQueryEXT rq;
+      rayQueryInitializeEXT (rq, Top_Level, gl_RayFlagsOpaqueEXT, 0xFF,
+                             ray_origin, 0.0, dir_norm, Distance);
+  
+      // Process all traversal steps
+      while (rayQueryProceedEXT (rq)) {}
+  
+      // Record hit if closer than previous best
+      if (rayQueryGetIntersectionTypeEXT (rq, true) == gl_RayQueryCommittedIntersectionTriangleEXT) {
+        float t = rayQueryGetIntersectionTEXT (rq, true);
+        if (t < result.Fraction * Distance) {
+          // Reconstruct the triangle normal from vertices
+          uint prim = rayQueryGetIntersectionPrimitiveIndexEXT (rq, true);
+          uint i0 = Indices.Data[prim * 3 + 0];
+          uint i1 = Indices.Data[prim * 3 + 1];
+          uint i2 = Indices.Data[prim * 3 + 2];
+          vec3 v0 = Vertices.Data[i0 * 3].xyz;
+          vec3 v1 = Vertices.Data[i1 * 3].xyz;
+          vec3 v2 = Vertices.Data[i2 * 3].xyz;
+          vec3 n  = normalize (cross (v1 - v0, v2 - v0));
+  
+          // Ensure the normal faces toward the ray origin
+          if (dot (n, dir_norm) > 0.0) n = -n;
+  
+          // Update result with this closer hit
+          result.Fraction = t / Distance;
+          result.Normal   = n;
+          result.Hit      = true;
+        }
+      }
+    }
+  
+    // Return result
+    return result;
+
+  } // trace_shape
+  
+  // Cast a short ray downward to detect ground contact
+  void ground_trace () {
+    vec3 down_offset = shape_offset (vec3 (0, -1, 0));
+    vec3 origin      = Player.Position + down_offset;
+    float dist       = 0.5;
+
+    // Cast a short downward ray query
+    rayQueryEXT rq;
+    rayQueryInitializeEXT (rq, Top_Level, gl_RayFlagsOpaqueEXT, 0xFF,
+                           origin, 0.0, vec3 (0, -1, 0), dist);
+    while (rayQueryProceedEXT (rq)) {}
+
+    // Classify surface as walkable ground or steep slope
+    if (rayQueryGetIntersectionTypeEXT (rq, true) == gl_RayQueryCommittedIntersectionTriangleEXT) {
+      uint prim = rayQueryGetIntersectionPrimitiveIndexEXT (rq, true);
+      uint i0 = Indices.Data[prim * 3 + 0];
+      uint i1 = Indices.Data[prim * 3 + 1];
+      uint i2 = Indices.Data[prim * 3 + 2];
+      vec3 v0 = Vertices.Data[i0 * 3].xyz;
+      vec3 v1 = Vertices.Data[i1 * 3].xyz;
+      vec3 v2 = Vertices.Data[i2 * 3].xyz;
+      vec3 n  = normalize (cross (v1 - v0, v2 - v0));
+      if (n.y < 0.0) n = -n;
+
+      // Set ground state based on surface steepness
+      if (n.y >= MINIMUM_WALK_NORMAL) {
+        Player.On_Ground    = 1;
+        Player.Ground_Normal = n;
+        Player.Ground_Plane  = 1;
+      } else {
+        Player.On_Ground    = 0;
+        Player.Ground_Plane  = 0;
+      }
+    } else {
+      Player.On_Ground    = 0;
+      Player.Ground_Plane  = 0;
+    }
+  }
+  
+  // Clip velocity
+  vec3 clip_velocity (vec3 vel, vec3 normal) {
+    float backoff = dot (vel, normal) * OVERBOUNCE;
+    return vel - normal * backoff;
+  }
+  
+  // Slide move
+  void slide_move () {
+    vec3  planes[5];
+    int   plane_count = 0;
+    vec3  vel         = Player.Velocity;
+    float time_left   = Input.Dt;
+  
+    // If on ground, add the ground plane as the first clip plane
+    if (Player.On_Ground == 1) {
+      planes[plane_count++] = Player.Ground_Normal;
+      vel = clip_velocity (vel, Player.Ground_Normal);
+    }
+  
+    // Iteratively trace and clip against contact planes
+    for (int bump = 0; bump < 4 and time_left > 0.001; bump++) {
+      vec3  move_dir  = vel * time_left;
+      float move_dist = length (move_dir);
+      if (move_dist < 0.001) break;
+
+      // Trace movement against world geometry
+      Trace_Result trace = trace_shape (Player.Position, move_dir, move_dist);
+
+      // Advance position by the free distance before collision
+      if (trace.Fraction > 0.0)
+        Player.Position += normalize(move_dir) * move_dist * trace.Fraction;
+
+      // Exit if no collision occurred
+      if (not trace.Hit) break;
+
+      // Reduce remaining time by the fraction traveled
+      time_left *= (1.0 - trace.Fraction);
+
+      // Avoid duplicating a plane we've already clipped against
+      bool duplicate = false;
+      for (int p = 0; p < plane_count; p++)
+        if (dot (trace.Normal, planes[p]) > 0.99) { duplicate = true; break; }
+      if (duplicate) continue;
+
+      // Add new plane to the clip set
+      if (plane_count < MAXIMUM_CLIP_PLANES)
+        planes[plane_count++] = trace.Normal;
+  
+      // Clip velocity against all accumulated planes
+      vel = clip_velocity (vel, trace.Normal);
+  
+      // If velocity points into a previously established plane, clip against both
+      for (int p = 0; p < plane_count; p++) {
+        if (dot (vel, planes[p]) >= 0.0) continue;
+        vel = clip_velocity (vel, planes[p]);
+  
+        // If still heading into another plane, slide along the crease
+        for (int q = 0; q < plane_count; q++) {
+          if (q == p or dot (vel, planes[q]) >= 0.0) continue;
+          vec3 crease = cross (planes[p], planes[q]);
+          float len   = length (crease);
+          if (len > 1e-6) {
+            crease /= len;
+            vel = crease * dot (vel, crease);
+          }
+        }
+        break;
+      }
+    }
+
+    // Store the final clipped velocity
+    Player.Velocity = vel;
+  }
+
+  // Step move
+  void step_move () {
+    // Save state before the step attempt
+    vec3 start_pos = Player.Position;
+    vec3 start_vel = Player.Velocity;
+  
+    // Try a normal slide move first
+    slide_move ();
+    vec3 flat_pos = Player.Position;
+  
+    // Reset and try stepping up
+    Player.Position = start_pos;
+    Player.Velocity = start_vel;
+  
+    // Step up
+    Trace_Result up = trace_shape (Player.Position, vec3(0, STEP_SIZE, 0), STEP_SIZE);
+    if (up.Fraction > 0.0)
+      Player.Position.y += STEP_SIZE * up.Fraction;
+  
+    // Slide forward from the raised position
+    slide_move ();
+  
+    // Step down to find the ground
+    Trace_Result down = trace_shape (Player.Position, vec3(0, -STEP_SIZE, 0), STEP_SIZE);
+    if (down.Hit and down.Normal.y >= MINIMUM_WALK_NORMAL) {
+      Player.Position.y -= STEP_SIZE * down.Fraction;
+  
+      // Keep the stepped result only if it moved us farther horizontally
+      vec2 step_delta = Player.Position.xz - start_pos.xz;
+      vec2 flat_delta = flat_pos.xz - start_pos.xz;
+      if (dot (step_delta, step_delta) <= dot (flat_delta, flat_delta)) {
+        Player.Position = flat_pos;
+        Player.Velocity = start_vel;
+        slide_move ();
+      }
+    } else {
+      Player.Position = flat_pos;
+    }
+  }
+  
+  // Stuck recovery
+  void recover () {
+    // Cast rays in 6 cardinal directions and nudge the player away from walls
+    vec3 dirs[6] = vec3[6](
+      vec3(1,0,0), vec3(-1,0,0), vec3(0,1,0), vec3(0,-1,0), vec3(0,0,1), vec3(0,0,-1));
+
+    // Probe each direction and push out of intersecting geometry
+    for (int i = 0; i < 6; i++) {
+      vec3 offset  = shape_offset (dirs[i]);
+      float expect = length (offset);
+
+      // Trace ray in this direction to detect overlap
+      rayQueryEXT rq;
+      rayQueryInitializeEXT (rq, Top_Level, gl_RayFlagsOpaqueEXT, 0xFF,
+                             Player.Position, 0.0, dirs[i], expect);
+      while (rayQueryProceedEXT (rq)) {}
+
+      // Nudge player away if inside geometry
+      if (rayQueryGetIntersectionTypeEXT (rq, true) == gl_RayQueryCommittedIntersectionTriangleEXT) {
+        float t = rayQueryGetIntersectionTEXT (rq, true);
+        if (t < expect) {
+          float penetration = expect - t;
+          Player.Position -= dirs[i] * (penetration + 0.125);
+        }
+      }
+    }
+  }
+  
+  // Physics shader main
+  void main () {
+  
+    // Mouse look
+    Player.Yaw   -= Input.Delta_X * MOUSE_SENSITIVITY;
+    Player.Pitch -= Input.Delta_Y * MOUSE_SENSITIVITY;
+    Player.Pitch  = clamp (Player.Pitch, -1.5, 1.5);
+  
+    // Build a movement basis from yaw (must match camera: Forward = (sy, 0, -cy))
+    float cy = cos (Player.Yaw), sy = sin (Player.Yaw);
+    vec3 forward = vec3 ( sy, 0, -cy);
+    vec3 right   = vec3 ( cy, 0,  sy);
+  
+    // Compute the wish direction and speed from keyboard input
+    vec3 wish = vec3 (0.0);
+    if (Input.Forward == 1) wish += forward;
+    if (Input.Back    == 1) wish -= forward;
+    if (Input.Right   == 1) wish += right;
+    if (Input.Left    == 1) wish -= right;
+    float wish_speed = MAXIMUM_SPEED;
+    if (length (wish) > 0.001) wish = normalize (wish); else wish_speed = 0.0;
+  
+    // Crouch handling
+    float target_view = DEFAULT_VIEW_HEIGHT;
+    if (Input.Crouch == 1) {
+      Player.Ducked = 1;
+      target_view = CROUCH_VIEW_HEIGHT;
+    } else {
+      Player.Ducked = 0;
+    }
+  
+    // Ground trace
+    ground_trace ();
+  
+    // Apply ground or air movement
+    if (Player.On_Ground == 1) {
+  
+      // Friction
+      float speed = length (Player.Velocity);
+      if (speed > 0.1) {
+        float control = max (speed, STOP_SPEED);
+        float drop    = control * GROUND_FRICTION * Input.Dt;
+        float scale   = max (speed - drop, 0.0) / speed;
+        Player.Velocity *= scale;
+      }
+  
+      // Ground acceleration (Quake 3 style)
+      float current_speed = dot (Player.Velocity, wish);
+      float add_speed     = wish_speed - current_speed;
+      if (add_speed > 0.0) {
+        float accel_speed = GROUND_ACCELERATE * wish_speed * Input.Dt;
+        if (accel_speed > add_speed) accel_speed = add_speed;
+        Player.Velocity += wish * accel_speed;
+      }
+  
+      // Jump
+      if (Input.Jump == 1 and Player.Jump_Held == 0) {
+        Player.Velocity.y = JUMP_VELOCITY;
+        Player.On_Ground  = 0;
+      }
+
+    // Air acceleration (enables strafe-jumping)
+    } else {
+      float current_speed = dot (Player.Velocity, wish);
+      float add_speed     = wish_speed - current_speed;
+      if (add_speed > 0.0) {
+        float accel_speed = AIR_ACCELERATE * wish_speed * Input.Dt;
+        if (accel_speed > add_speed) accel_speed = add_speed;
+        Player.Velocity += wish * accel_speed;
+      }
+  
+      // Gravity
+      Player.Velocity.y -= GRAVITY * Input.Dt;
+    }
+  
+    // Track jump key state (prevent auto-bunny-hopping)
+    Player.Jump_Held = Input.Jump;
+  
+    // Move and collide
+    if (Player.On_Ground == 1)
+      step_move ();
+    else
+      slide_move ();
+  
+    // Stuck recovery
+    recover ();
+  
+    // Re-check ground after movement
+    ground_trace ();
+  
+    // Smoothly interpolate the view height toward the target
+    float delta = target_view - Player.View_Height;
+    if (abs(delta) < 0.1) Player.View_Height = target_view;
+    else Player.View_Height += delta * min (Input.Dt * 10.0, 1.0);
+
+    // Record horizontal speed for HUD/diagnostics
+    Player.Speed_Last = length (Player.Velocity.xz);
+  
+    // Projectile update
+    // Decrement fire cooldown
+    if (Fire_Cooldown > 0.0) Fire_Cooldown -= Input.Dt;
+  
+    // Spawn a new projectile on fire button press
+    if (Input.Fire == 1 and Fire_Cooldown <= 0.0 and Projectile_Count < 64) {
+      vec3 cam_forward = vec3 (sy, -sin(Player.Pitch), -cy * cos(Player.Pitch));
+      cam_forward = normalize (cam_forward);
+      vec3 eye = Player.Position + vec3 (0.0, Player.View_Height, 0.0);
+
+      // Initialize the new projectile
+      int idx = Projectile_Count;
+      Projectiles[idx].Position     = eye + cam_forward * 20.0;
+      Projectiles[idx].Velocity     = cam_forward * 900.0;
+      Projectiles[idx].Lifetime     = 10.0;
+      Projectiles[idx].Active       = 1;
+      Projectiles[idx].Material_Hit = 0;
+      Projectiles[idx].Radius       = 3.0;
+      Projectiles[idx].Damage       = 100.0;
+      Projectiles[idx].Hit_U        = 0.0;
+      Projectiles[idx].Hit_V        = 0.0;
+      Projectiles[idx].Instance_Hit = -1;
+      Projectile_Count = idx + 1;
+      Fire_Cooldown = 0.8;
+    }
+  
+    // Advance each active projectile: move, trace against TLAS, kill on impact or timeout
+    for (int i = 0; i < Projectile_Count; i++) {
+      if (Projectiles[i].Active == 0) continue;
+
+      // Decrement lifetime and kill expired projectiles
+      Projectiles[i].Lifetime -= Input.Dt;
+      if (Projectiles[i].Lifetime <= 0.0) { Projectiles[i].Active = 0; continue; }
+
+      // Compute movement direction and distance for this timestep
+      vec3 dir = normalize (Projectiles[i].Velocity);
+      float dist = length (Projectiles[i].Velocity) * Input.Dt;
+  
+      // Ray trace to check for collision
+      rayQueryEXT rq;
+      rayQueryInitializeEXT (rq, Top_Level, gl_RayFlagsOpaqueEXT, 0xFF,
+                             Projectiles[i].Position, 0.0, dir, dist);
+      while (rayQueryProceedEXT (rq)) {}
+
+      // Check if the projectile hit geometry
+      if (rayQueryGetIntersectionTypeEXT (rq, true) == gl_RayQueryCommittedIntersectionTriangleEXT) {
+        // Hit something - mark dead and record hit position + UV for damage map lookup
+        float t = rayQueryGetIntersectionTEXT (rq, true);
+        Projectiles[i].Position += dir * t;
+        Projectiles[i].Active = 0;
+  
+        // Extract the instance index to identify what was hit (world vs player model)
+        Projectiles[i].Instance_Hit = rayQueryGetIntersectionInstanceCustomIndexEXT (rq, true);
+  
+        // Extract barycentrics and primitive index to compute the hit UV
+        vec2 bary = rayQueryGetIntersectionBarycentricsEXT (rq, true);
+        uint prim = rayQueryGetIntersectionPrimitiveIndexEXT (rq, true);
+  
+        // Look up the three vertex indices for the hit triangle
+        uint i0 = Indices.Data[prim * 3 + 0];
+        uint i1 = Indices.Data[prim * 3 + 1];
+        uint i2 = Indices.Data[prim * 3 + 2];
+  
+        // Read texture UVs from vertex data (vec4[1].xy = texture UV)
+        vec2 uv0 = Vertices.Data[i0 * 3 + 1].xy;
+        vec2 uv1 = Vertices.Data[i1 * 3 + 1].xy;
+        vec2 uv2 = Vertices.Data[i2 * 3 + 1].xy;
+  
+        // Interpolate UV at hit point using barycentric coordinates
+        vec3 bary3 = vec3 (1.0 - bary.x - bary.y, bary.x, bary.y);
+        vec2 hit_uv = uv0 * bary3.x + uv1 * bary3.y + uv2 * bary3.z;
+        Projectiles[i].Hit_U = hit_uv.x;
+        Projectiles[i].Hit_V = hit_uv.y;
+
+      // No hit - advance position
+      } else {
+        Projectiles[i].Position += dir * dist;
+      }
+    }
+  }
+} // Physics
+
+// ═══════════
+//   Denoise
+// ═══════════
+
+glsl comp Denoise {
+  #version 460
+  
+  layout(binding = 0, rgba16f) uniform image2D Input_Image;    // Read: noisy color (linear HDR)
+  layout(binding = 1, rgba16f) uniform image2D Output_Image;   // Write: filtered color (linear HDR)
+  layout(binding = 2, r32f)  uniform image2D Depth_Image;    // Read: hit distance for edge stopping
+  
+  layout(push_constant) uniform Denoise_Push {
+    int Step_Size;   // A-trous step size: 1, 2, 4 for iterations
+    int Budget_256;  // Budget × 256 (0 = full quality, 256 = cheap path)
+  };
+  
+  layout(local_size_x = 8, local_size_y = 8) in;
+  
+  // 3×3 a-trous kernel weights (Gaussian-like, symmetric)
+  const float Kernel[3] = float[3](1.0, 2.0 / 3.0, 1.0 / 6.0);
+  
+  // Depth-based normal from 3 cached depth values
+  // Instead of calling Depth_Normal() per sample (3 imageLoads × 9 samples = 27 loads),
+  // load all depths once and compute normals from cached values.
+  // Savings: 27 imageLoad → 0 extra imageLoad (normals computed from already-fetched depths).
+  // On NVIDIA: imageLoad from L2 = 20-40 cycles; 27 eliminated = ~540-1080 cycles saved per pixel.
+  // On AMD RDNA: image_load = ~32 cycles from L2; 27 eliminated = ~864 cycles saved per pixel.
+  vec3 Normal_From_Depths (float D_C, float D_R, float D_U) {
+    return normalize (vec3 (D_C - D_R, D_C - D_U, 1.0));
+  }
+  
+  // Denoise main
+  void main () {
+    ivec2 Pixel = ivec2 (gl_GlobalInvocationID.xy);
+    ivec2 Size  = imageSize (Input_Image);
+    if (Pixel.x >= Size.x or Pixel.y >= Size.y) return;
+
+    // Load center pixel color
+    vec3  Center_Color = imageLoad (Input_Image, Pixel).rgb;
+  
+    // Budget is informational - denoiser always runs when dispatched.
+    // The CPU controls whether to dispatch denoise via Active_Denoise_Passes.
+  
+    // Batch-load all depth values for the 3×3 kernel in one shot
+    // Preload 9 depth values - center normal uses Depths[5] (right) and Depths[7] (up).
+    // Combined with 9 color loads = 18 total, vs. original 45 = 60% fewer memory ops.
+    float Depths[9];
+    ivec2 Sample_Positions[9];
+    int Idx = 0;
+    for (int Dy = -1; Dy <= 1; Dy++) {
+      for (int Dx = -1; Dx <= 1; Dx++) {
+        Sample_Positions[Idx] = clamp (Pixel + ivec2 (Dx, Dy) * Step_Size, ivec2 (0), Size - 1);
+        Depths[Idx] = imageLoad (Depth_Image, Sample_Positions[Idx]).r;
+        Idx++;
+      }
+    }
+    float Center_Depth = Depths[4];  // Center of 3×3 = index 4
+  
+    // Center normal from preloaded batch: Depths[5] = right, Depths[7] = up (at Step_Size offset).
+    // At larger step sizes, kernel-spaced gradients are more appropriate for the a-trous edge stopping.
+    vec3  Center_Normal = Normal_From_Depths (Center_Depth, Depths[5], Depths[7]);
+
+    // Compute center pixel luminance for edge stopping
+    float Center_Lum = log2 (1.0 + dot (Center_Color, vec3 (0.2126, 0.7152, 0.0722)));
+
+    // Initialize accumulator for weighted filter output
+    vec3  Sum    = vec3 (0.0);
+    float Weight = 0.0;
+  
+    // 3×3 sparse kernel at current step size - depths already cached
+    for (int I = 0; I < 9; I++) {
+      vec3  S_Color = imageLoad (Input_Image, Sample_Positions[I]).rgb;
+      float S_Depth = Depths[I];
+      float S_Lum   = log2 (1.0 + dot (S_Color, vec3 (0.2126, 0.7152, 0.0722)));
+  
+      // Spatial weight: Gaussian kernel
+      int Dx = (I % 3) - 1, Dy = (I / 3) - 1;
+      float W_Spatial = Kernel[abs(Dx)] * Kernel[abs(Dy)];
+  
+      // Depth edge stopping (sharper threshold preserves geometric edges)
+      float Depth_Diff = abs (Center_Depth - S_Depth) / max (Center_Depth, 0.1);
+      float W_Depth = exp (-Depth_Diff * 100.0);
+  
+      // Normal edge stopping: compute sample normal from cached depths.
+      // Use right neighbor (I+1 if in same row) and below neighbor (I+3 if exists).
+      // Fallback: use center depth if neighbor is out of the 3×3 grid.
+      float S_D_Right = ((I % 3) < 2) ? Depths[I + 1] : S_Depth;
+      float S_D_Up    = (I < 6) ? Depths[I + 3] : S_Depth;
+      vec3  S_Normal  = Normal_From_Depths (S_Depth, S_D_Right, S_D_Up);
+
+      // Pow(x,32) → chained squaring (5 muls vs log+mul+exp transcendental)
+      // On NVIDIA: saves ~6 MUFU cycles; on AMD: saves ~8 SALU cycles per sample
+      float Ndot = max (dot (Center_Normal, S_Normal), 0.0);
+      Ndot *= Ndot; Ndot *= Ndot; Ndot *= Ndot; Ndot *= Ndot; Ndot *= Ndot;  // x^32
+      float W_Normal = Ndot;
+  
+      // Luminance edge stopping (tighter threshold preserves color edges)
+      float Lum_Diff = abs (Center_Lum - S_Lum);
+      float W_Lum = exp (-Lum_Diff * Lum_Diff * 500.0);
+
+      // Combine all edge-stopping weights and accumulate
+      float W = W_Spatial * W_Depth * W_Normal * W_Lum;
+      Sum += S_Color * W;
+      Weight += W;
+    }
+
+    // Compute weighted average and store filtered result
+    vec3 Result = Sum / max (Weight, 1e-6);
+    imageStore (Output_Image, Pixel, vec4 (Result, 1.0));
+  }
+  }
+  
+  glsl shader postprocess comp {
+  #version 460
+  
+  layout(binding = 0, rgba16f) uniform image2D Color_Image;   // RT output (linear HDR, read-write in-place)
+  layout(binding = 1, r32f)    uniform image2D Depth_Image;   // Ray hit distance from closest-hit shader
+  layout(binding = 2, rgba16f) uniform image2D History_Image; // Previous frame for temporal accumulation (linear HDR)
+  layout(binding = 3, rgba16f) uniform image2D Display_Image; // Final tonemapped output (written instead of Color_Image)
+  
+  // Run-length-encoded push constants
+  layout(push_constant) uniform Push {
+    float Time;           // Full-precision seconds since start
+    uint  Dt_Frame;       // [15:0] = half(Delta_Time), [31:16] = Frame_Count
+    uint  Velocity;       // packHalf2x16(Velocity_X, Velocity_Z)
+    uint  Speed_Exposure; // packHalf2x16(Speed, Exposure)
+    uint  Bloom_Vignette; // packHalf2x16(Bloom_Strength, Vignette_Strength)
+    uint  Reproject[8];   // packHalf2x16-compressed 4×4 reprojection matrix (Proj * Prev_View * Inv_View)
+    uint  Inv_Proj_Diag;  // [15:0] = half(InvProj[0][0]), [31:16] = half(InvProj[1][1])
+    uint  Sun_Screen_Pos; // packHalf2x16(Sun_Screen_U, Sun_Screen_V)
+    uint  Sun_Params;     // packHalf2x16(God_Ray_Intensity, Sun_On_Screen)
+  } Params;
+  
+  layout(local_size_x = 8, local_size_y = 8) in;
+  
+  // Shared memory focus depth broadcast
+  shared float Focus_Depth_Shared;
+  
+  // Spatiotemporal hash for film grain
+  float hash (vec2 p) {
+    vec3 p3 = fract (vec3 (p.xyx) * 0.1031);
+    p3 += dot (p3, p3.yzx + 33.33);
+    return fract ((p3.x + p3.y) * p3.z);
+  }
+  
+  // Decode compressed reprojection matrix from push constants
+  mat4 Decode_Reproject () {
+    mat4 M;
+    for (int I = 0; I < 8; I++) {
+      vec2 Pair = unpackHalf2x16 (Params.Reproject[I]);
+      M[I / 2][I % 2 * 2]     = Pair.x;
+      M[I / 2][I % 2 * 2 + 1] = Pair.y;
+    }
+    return M;
+  }
+  
+  void main () {
+    ivec2 Pixel = ivec2 (gl_GlobalInvocationID.xy);
+    ivec2 Size  = imageSize (Color_Image);
+  
+    // Unpack fp16 RLE push constants (1 ALU op each via unpackHalf2x16)
+    float Delta_Time     = unpackHalf2x16 (Params.Dt_Frame).x;
+    uint  Frame_Count    = (Params.Dt_Frame >> 16) & 0xFFFFu;
+    vec2  Vel            = unpackHalf2x16 (Params.Velocity);
+    vec2  SE             = unpackHalf2x16 (Params.Speed_Exposure);
+    float Speed          = SE.x;
+    float Exposure       = SE.y;
+    vec2  BV             = unpackHalf2x16 (Params.Bloom_Vignette);
+    float Bloom_Strength = BV.x;
+    float Vignette       = BV.y;
+  
+    // Elect lane 0 to load focus depth, broadcast to workgroup via LDS
+    if (gl_LocalInvocationIndex == 0u)
+      Focus_Depth_Shared = imageLoad (Depth_Image, Size / 2).r;
+    barrier ();
+
+    // Early-out for pixels outside the image bounds
+    if (Pixel.x >= Size.x or Pixel.y >= Size.y) return;
+
+    // Load current pixel color and depth
+    vec2 UV = (vec2 (Pixel) + 0.5) / vec2 (Size);
+    vec3 Color = imageLoad (Color_Image, Pixel).rgb;
+    float Depth = imageLoad (Depth_Image, Pixel).r;
+
+    // Contrast Adaptive Sharpening (CAS) - FidelityFX-style pre-TAA sharpening.
+    // Applied here in raw linear HDR space so center + neighbors are in the same
+    // domain. Reinhard-compresses min/max to [0,1] for adaptive weight calculation,
+    // then sharpens in linear space. Counteracts bilinear upscale softness and
+    // checkerboard stale-pixel blur without introducing space-mismatch artifacts.
+    {
+      vec3 N = imageLoad (Color_Image, ivec2 (Pixel.x, max (Pixel.y - 1, 0))).rgb;
+      vec3 S = imageLoad (Color_Image, ivec2 (Pixel.x, min (Pixel.y + 1, Size.y - 1))).rgb;
+      vec3 W = imageLoad (Color_Image, ivec2 (max (Pixel.x - 1, 0), Pixel.y)).rgb;
+      vec3 E = imageLoad (Color_Image, ivec2 (min (Pixel.x + 1, Size.x - 1), Pixel.y)).rgb;
+      vec3 Mn = min (min (N, S), min (W, E));
+      vec3 Mx = max (max (N, S), max (W, E));
+      // Reinhard-compress to [0,1] for adaptive weight (handles HDR > 1.0 gracefully)
+      vec3 Mn_T = Mn / (1.0 + Mn);
+      vec3 Mx_T = Mx / (1.0 + Mx);
+      vec3 Rcp_Range = 1.0 / (Mx_T - Mn_T + 0.04);
+      vec3 Sharpness = clamp (min (Mn_T, 1.0 - Mx_T) * Rcp_Range, 0.0, 1.0) * 0.5;
+      vec3 Avg = (N + S + W + E) * 0.25;
+      Color = max (mix (Avg, Color, 1.0 + Sharpness * 2.0), vec3 (0.0));
+    }
+
+    // 0. Temporal accumulation (TAA) with motion-vector reprojection
+    // Previous TAA blended History[Pixel] with Color[Pixel] - same screen
+    // coordinate. When the camera translates, world geometry shifts on screen
+    // (parallax), causing the old frame's content to ghost into the new frame.
+    // Surfaces at glancing angles (like a wall beside the player) have the
+    // worst parallax and the most visible ghosting.
+    //
+    // Fix: reconstruct each pixel's view-space position from depth + inverse
+    // projection, then reproject through Prev_View * Inverse_View to find where
+    // that world point appeared last frame. Sample history from *that* location
+    // instead of the current pixel. Neighborhood clamping prevents stale data
+    // from bleeding in when the reprojected sample is disoccluded.
+    if (Frame_Count > 0u) {
+      // Reconstruct view-space position from NDC + linear hit distance
+      vec2  Inv_P       = unpackHalf2x16 (Params.Inv_Proj_Diag);
+      vec2  NDC         = UV * 2.0 - 1.0;
+      vec3  View_Dir    = normalize (vec3 (NDC.x * Inv_P.x, NDC.y * Inv_P.y, -1.0));
+      vec3  View_Pos    = View_Dir * Depth;
+  
+      // Reproject: Proj * Prev_View * Inverse_View * View_Pos → previous clip-space
+      mat4  R           = Decode_Reproject ();
+      vec4  Prev_Clip   = R * vec4 (View_Pos, 1.0);
+      vec2  Prev_UV     = Prev_Clip.xy / Prev_Clip.w * 0.5 + 0.5;
+  
+      // Fetch history from reprojected location (nearest-neighbor - imageLoad requires integer coords)
+      ivec2 Prev_Pixel  = ivec2 (Prev_UV * vec2 (Size));
+      bool  On_Screen   = all (greaterThanEqual (Prev_Pixel, ivec2 (0))) and
+                          all (lessThan (Prev_Pixel, Size));
+  
+      // Blend current frame with reprojected history
+      if (On_Screen) {
+        vec3 History = imageLoad (History_Image, Prev_Pixel).rgb;
+  
+        // Q2RTX-inspired variance-based neighborhood clamping
+        // Instead of simple min/max (too wide in HDR), compute mean ± k*sigma.
+        // This creates a tight, statistically-motivated clamp that rejects ghost
+        // colors aggressively while allowing natural temporal blending.
+        vec3 M1 = Color, M2 = Color * Color;  // Moments for variance computation
+        const ivec2 Offsets[4] = ivec2[4](ivec2(-1,0), ivec2(1,0), ivec2(0,-1), ivec2(0,1));
+        for (int I = 0; I < 4; I++) {
+          vec3 NS = imageLoad (Color_Image, clamp (Pixel + Offsets[I], ivec2(0), Size - 1)).rgb;
+          M1 += NS; M2 += NS * NS;
+        }
+        M1 /= 5.0; M2 /= 5.0;
+        vec3 Sigma = sqrt (max (M2 - M1 * M1, vec3 (0.0)));
+
+        // Tight clamp: mean ± 0.5 sigma rejects stale history aggressively
+        History = clamp (History, M1 - Sigma * 0.5, M1 + Sigma * 0.5);
+  
+        // Q2RTX-inspired anti-lag: luminance-based history rejection
+        // If the clamped history still differs significantly from the current frame,
+        // the surface has changed (new geometry, lighting change, disocclusion).
+        // Boost alpha toward 1.0 to reject stale history aggressively.
+        float Cur_Lum  = dot (Color, vec3 (0.2126, 0.7152, 0.0722));
+        float Hist_Lum = dot (History, vec3 (0.2126, 0.7152, 0.0722));
+        float Lum_Diff = abs (Cur_Lum - Hist_Lum) / max (Cur_Lum, 0.01);
+        float Anti_Lag = clamp (Lum_Diff * 3.0, 0.0, 1.0);  // >33% luminance change → full reject
+  
+        // Disocclusion detection
+        vec2 Screen_Disp = vec2 (Prev_Pixel - Pixel) / vec2 (Size);
+        float Disp_Len = length (Screen_Disp);
+        float Disocclusion = clamp (Disp_Len * 20.0, 0.0, 1.0);  // >5% screen = fully rejected
+  
+        // Temporal blend (Q2RTX-inspired two-mode system)
+        float Is_Static = step (Speed, 5.0);
+  
+        // Static: 1/N convergence floored high - always keep 30% fresh frame
+        float Static_Alpha = max (1.0 / max (float (Frame_Count), 1.0), 0.30);
+  
+        // Moving: very aggressive current-frame dominance.
+        // Q2RTX philosophy: spatial denoiser handles noise, TAA should NOT ghost.
+        float Motion      = clamp (Speed * 0.02, 0.0, 1.0);  // ISA: reciprocal multiply vs division
+        float Base        = mix (0.50, 0.95, Motion);  // Even slow motion → 50% current frame
+        float Fps_Adapt   = clamp ((Delta_Time - 0.016) * 20.0, 0.0, 1.0);
+        float Moving_Alpha = max (max (max (Base, Fps_Adapt), Disocclusion), Anti_Lag);
+
+        // Blend between and moving alpha based on camera speed
+        float Alpha = mix (Moving_Alpha, Static_Alpha, Is_Static);
+
+        Color = mix (History, Color, Alpha);
+      }
+
+      // Off-screen → keep current frame as-is (no history to blend)
+    }
+
+    // Write blended result to history for next frame (pre-tonemap, linear HDR)
+    imageStore (History_Image, Pixel, vec4 (Color, 1.0));
+  
+    // DOF and motion blur disabled - at low internal resolution (384×216 → 1080p)
+    // the bilinear upscale already softens the image. Adding blur on top of that
+    // makes the output unacceptably blurry and hard to read. These effects should
+    // be re-enabled when GPU_RT runs at native resolution.
+  
+    // 1. Bloom: 4-tap cross bright extraction + sun rays
+    // Horizontal + vertical taps create a cross-shaped bloom pattern (fake god rays)
+    // Bloom threshold in linear space (0.4 linear ≈ 0.66 sRGB - bright highlights only)
+    vec3 Bl = max (imageLoad (Color_Image, clamp (Pixel + ivec2 ( 3, 0), ivec2 (0), Size - 1)).rgb - 0.4, vec3 (0.0))
+             + max (imageLoad (Color_Image, clamp (Pixel + ivec2 (-3, 0), ivec2 (0), Size - 1)).rgb - 0.4, vec3 (0.0))
+             + max (imageLoad (Color_Image, clamp (Pixel + ivec2 (0,  3), ivec2 (0), Size - 1)).rgb - 0.4, vec3 (0.0))
+             + max (imageLoad (Color_Image, clamp (Pixel + ivec2 (0, -3), ivec2 (0), Size - 1)).rgb - 0.4, vec3 (0.0));
+    Color += Bl * Bloom_Strength;
+  
+    // 1b. Screen-space god rays (Q2RTX-inspired radial light shafts)
+    // When the sun is on screen, march radially from each pixel toward the sun
+    // position, accumulating bright sky samples. This creates volumetric-looking
+    // light shafts streaming from the sun through gaps in geometry.
+    vec2  Sun_UV  = unpackHalf2x16 (Params.Sun_Screen_Pos);
+    vec2  Sun_P   = unpackHalf2x16 (Params.Sun_Params);
+    float GR_Intensity = Sun_P.x;
+    float Sun_Visible  = Sun_P.y;
+
+    // Apply god rays when sun is visible on screen
+    if (Sun_Visible > 0.5 and GR_Intensity > 0.0) {
+      vec2 Delta = Sun_UV - UV;
+      float Dist = length (Delta);
+      if (Dist > 0.001) {
+        vec2  Dir    = Delta / Dist;
+
+        // Incremental stepping replaces multiply-per-iteration
+        // Saves 8 float casts + 8 vec2 multiplies (replaced with 8 vec2 additions)
+        vec2  Step_Vec = Dir * (min (Dist, 0.3) / 8.0);
+        vec3  Accum  = vec3 (0.0);
+        float Falloff = 1.0;
+        vec2  Sample_UV = UV;
+        for (int S = 1; S <= 8; S++) {
+          Sample_UV += Step_Vec;
+          ivec2 Sample_Px = ivec2 (Sample_UV * vec2 (Size));
+          if (all (greaterThanEqual (Sample_Px, ivec2 (0))) and all (lessThan (Sample_Px, Size))) {
+            vec3  Sample_C = imageLoad (Color_Image, Sample_Px).rgb;
+            float Sample_D = imageLoad (Depth_Image, Sample_Px).r;
+
+            // Only accumulate sky/bright pixels (depth > 5000 = sky, or very bright)
+            float Is_Sky = step (5000.0, Sample_D);
+            float Bright = max (dot (Sample_C, vec3 (0.333)) - 0.3, 0.0);
+            Accum += Sample_C * max (Is_Sky, Bright * 0.5) * Falloff;
+          }
+          Falloff *= 0.85;  // Exponential decay away from sun
+        }
+
+        // Fade god rays based on distance from sun center (stronger near sun)
+        float Sun_Fade = 1.0 - clamp (Dist * 2.0, 0.0, 1.0);
+        Color += Accum * GR_Intensity * Sun_Fade / 8.0;
+      }
+    }
+  
+    // 2. Vignette + saturation + tonemap (all in linear space)
+    vec2  FC = UV - 0.5;
+    float D2 = dot (FC, FC);
+    Color  = Color * (1.0 - D2 * Vignette);
+    Color *= Exposure;
+  
+    // Saturation boost before tonemapping: push colors away from grey
+    float Luma = dot (Color, vec3 (0.2126, 0.7152, 0.0722));
+    Color = mix (vec3 (Luma), Color, 1.35);  // 35% saturation increase - punchy colors
+
+    // Warm color grading
+    Color *= vec3 (1.05, 1.01, 0.92);  // Warm grade: boost reds, cut blues slightly
+  
+    // ACES filmic tone mapping (operates on linear HDR values)
+    Color  = clamp (Color * (2.51 * Color + 0.03) / (Color * (2.43 * Color + 0.59) + 0.14), 0.0, 1.0);
+  
+    // Post-tonemap contrast: shadow deepening for rich, cinematic look.
+    // pow(1.16) darkens midtones/shadows while keeping highlights readable.
+    Color = pow (max (Color, vec3 (0.0)), vec3 (1.16));
+  
+    // 3. Blue-noise dithering (Q2RTX-inspired)
+    // Dither by ±0.5/255 in the output before sRGB conversion to prevent banding
+    // in dark gradients. The blit to B8G8R8A8_SRGB swapchain handles sRGB encoding.
+    float Dither = hash (vec2 (Pixel) + Params.Time * 1.618) - 0.5;  // [-0.5, 0.5]
+    Color += Dither / 255.0;
+
+    // Write final color to the display output image (NOT Color_Image, which must
+    // stay in raw RT space so checkerboard stale pixels remain consistent)
+    imageStore (Display_Image, Pixel, vec4 (clamp (Color, 0.0, 1.0), 1.0));
+  }
+} // Denoise
+
+// ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+//
+// §14. Main
+//
+// ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 
 int main (int Argc, char **Argv) {
 
@@ -7525,7 +9113,7 @@ int main (int Argc, char **Argv) {
     else Map_Name = Argv[I];
   }
 
-  // Apply quality preset — CLI --res and --spp override preset values
+  // Apply quality preset - CLI --res and --spp override preset values
   const Quality_Preset *QP = &QUALITY_PRESETS[Active_Quality];
   if (not Override_Res) { Width = QP->Width; Height = QP->Height; }
   Active_Render_Scale  = QP->Render_Scale;
@@ -7579,7 +9167,7 @@ int main (int Argc, char **Argv) {
           Render_Width, Render_Height, Width, Height, Active_Render_Scale * 100.f);
 
   // Create the ray tracing storage image (render target) and depth image (R32F for postprocess DOF)
-  // Storage images use internal render resolution — bilinear blit upscales to window/swapchain
+  // Storage images use internal render resolution - bilinear blit upscales to window/swapchain
   Raytracing_Storage_Image = Image_Storage_Create (Render_Width, Render_Height);
   Vulkan_Transition_Storage_Image ();
 
@@ -7622,7 +9210,7 @@ int main (int Argc, char **Argv) {
     vkFreeCommandBuffers (Device, Command_Pool, 1, &Cmd);
   }
 
-  // Create history image for temporal accumulation (TAA) — same size as render target
+  // Create history image for temporal accumulation (TAA) - same size as render target
   History_Image = Image_Storage_Create (Render_Width, Render_Height);
   {
     VkCommandBuffer Cmd;
@@ -7642,9 +9230,9 @@ int main (int Argc, char **Argv) {
     vkFreeCommandBuffers (Device, Command_Pool, 1, &Cmd);
   }
 
-  // Create postprocess output image — postprocess writes here instead of back to
+  // Create postprocess output image - postprocess writes here instead of back to
   // Color_Image, so that Color_Image (raw RT) stays in a consistent space across
-  // frames.  Critical for checkerboard: stale pixels remain raw RT, not tonemapped.
+  // frames. Critical for checkerboard: stale pixels remain raw RT, not tonemapped.
   Postprocess_Output_Image = Image_Storage_Create (Render_Width, Render_Height);
   {
     VkCommandBuffer Cmd;
@@ -7670,7 +9258,7 @@ int main (int Argc, char **Argv) {
     VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
     VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
 
-  // Load the BSP scene and spawn point (no CPU collision map — GPU handles physics via TLAS)
+  // Load the BSP scene and spawn point (no CPU collision map - GPU handles physics via TLAS)
   Spawn Spawn_Point;
   Scene Scene_Data = Scene_Load_From_BSP (Map_Path, &Spawn_Point);
 
@@ -7753,7 +9341,7 @@ int main (int Argc, char **Argv) {
   uint Active_SPP = Override_SPP ? (uint)Override_SPP : (uint)QUALITY_PRESETS[Active_Quality].SPP;
 
   // Log diagnostic output
-  printf ("[init] ready — entering game loop\n");
+  printf ("[init] ready - entering game loop\n");
 
   // Physics-only test mode
   // Run with --physics-test to skip rendering and simulate movement at fixed 60fps.
@@ -7810,7 +9398,7 @@ int main (int Argc, char **Argv) {
 
   // Benchmark mode
   // Run with --benchmark N to render N frames of automated camera movement, then exit with
-  // detailed performance statistics.  The camera performs a slow yaw rotation from spawn to
+  // detailed performance statistics. The camera performs a slow yaw rotation from spawn to
   // exercise all shader paths (direct light, shadow, indirect, parallax, fog).
   //
   // Useful for A/B comparisons:
@@ -7828,7 +9416,7 @@ int main (int Argc, char **Argv) {
 
     // Warm up: render 3 frames to trigger LLVM JIT compilation and fill CPU caches.
     // On lavapipe, the first Raytracing_Frame() invocation triggers shader compilation
-    // (SPIR-V → NIR → LLVM IR → x86 machine code), costing 500-700ms.  Running warmup
+    // (SPIR-V → NIR → LLVM IR → x86 machine code), costing 500-700ms. Running warmup
     // frames before the timer ensures benchmark numbers reflect steady-state performance.
     printf ("[benchmark] warming up (5 frames)...\n");
     {
@@ -8077,7 +9665,7 @@ int main (int Argc, char **Argv) {
       vkQueueWaitIdle (Queue);
 
       // Map the readback buffer and write a TGA file
-      // Storage is R16G16B16A16_SFLOAT — convert fp16 to 8-bit sRGB for TGA output
+      // Storage is R16G16B16A16_SFLOAT - convert fp16 to 8-bit sRGB for TGA output
       uint16_t *Pixels_F16;
       vkMapMemory (Device, Readback.Memory, 0, Pixel_Size, 0, (void **)&Pixels_F16);
 
@@ -8152,8 +9740,8 @@ int main (int Argc, char **Argv) {
 
     // Wait for the previous frame's RT submission to complete before reusing Command_Buffer.
     // Physics_Dispatch, Weapon_Bottom_Level_Rebuild, and Top_Level_Rebuild all reset the
-    // shared Command_Buffer — which is still pending from Raytracing_Frame's Fence-guarded
-    // submission on the previous iteration.  This wait ensures the GPU has retired that work.
+    // shared Command_Buffer - which is still pending from Raytracing_Frame's Fence-guarded
+    // submission on the previous iteration. This wait ensures the GPU has retired that work.
     VK_CHECK (vkWaitForFences (Device, 1, &Fence, VK_TRUE, UINT64_MAX));
 
     // Compute delta time from the high-resolution performance counter
@@ -8199,7 +9787,7 @@ int main (int Argc, char **Argv) {
     // Update audio: footsteps, landing sounds
     Audio_Update_Footsteps (&Physics, Dt);
 
-    // Update the camera from the physics result — add View_Height to get eye position
+    // Update the camera from the physics result - add View_Height to get eye position
     Cam.Position   = Physics.Position;
     Cam.Position.y += Physics.View_Height;  // Raise camera from feet to eye level (26 units standing)
     Cam.Yaw        = Physics.Yaw;
@@ -8329,9 +9917,9 @@ int main (int Argc, char **Argv) {
   vkDestroyPipelineLayout      (Device, Denoise_Pipeline_Layout, NULL);
   vkDestroyDescriptorPool      (Device, Denoise_Descriptor_Pool, NULL);
   vkDestroyDescriptorSetLayout (Device, Denoise_Descriptor_Layout, NULL);
-  vkDestroyImageView (Device, Denoise_Ping_Image.View, NULL);
-  vkDestroyImage     (Device, Denoise_Ping_Image.Image, NULL);
-  vkFreeMemory       (Device, Denoise_Ping_Image.Memory, NULL);
+  vkDestroyImageView           (Device, Denoise_Ping_Image.View, NULL);
+  vkDestroyImage               (Device, Denoise_Ping_Image.Image, NULL);
+  vkFreeMemory                 (Device, Denoise_Ping_Image.Memory, NULL);
   vkDestroyPipeline            (Device, Postprocess_Pipeline, NULL);
   vkDestroyPipelineLayout      (Device, Postprocess_Pipeline_Layout, NULL);
   vkDestroyDescriptorPool      (Device, Postprocess_Descriptor_Pool, NULL);
@@ -8449,1636 +10037,17 @@ int main (int Argc, char **Argv) {
     vkDestroyImageView (Device, Swapchain_Views[I], NULL);
 
   // Core Vulkan objects
-  vkDestroySemaphore  (Device, Semaphore_Image_Available, NULL);
-  vkDestroySemaphore  (Device, Semaphore_Render_Finished, NULL);
-  vkDestroyFence      (Device, Fence, NULL);
-  vkDestroyCommandPool (Device, Command_Pool, NULL);
+  vkDestroySemaphore    (Device, Semaphore_Image_Available, NULL);
+  vkDestroySemaphore    (Device, Semaphore_Render_Finished, NULL);
+  vkDestroyFence        (Device, Fence, NULL);
+  vkDestroyCommandPool  (Device, Command_Pool, NULL);
   vkDestroySwapchainKHR (Device, Swapchain, NULL);
-  vkDestroyDevice     (Device, NULL);
-  vkDestroySurfaceKHR (Instance, Surface, NULL);
-  vkDestroyInstance   (Instance, NULL);
+  vkDestroyDevice       (Device, NULL);
+  vkDestroySurfaceKHR   (Instance, Surface, NULL);
+  vkDestroyInstance     (Instance, NULL);
+
+  // Media layer
   SDL_DestroyWindow (Window);
   SDL_Quit ();
   return 0;
-}
-
-// ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
-//
-// §12. Shaders — Embedded GLSL Source
-//
-//   The following glsl shader blocks are extracted by nob.c at build time, compiled to SPIR-V via
-//   glslangValidator --target-env vulkan1.3, and loaded at runtime via Shader_Module_Load.
-//
-// ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
-
-glsl shader raygen rgen {
-  #version 460
-  #extension GL_EXT_ray_tracing : require
-  
-  layout(binding = 0) uniform accelerationStructureEXT  Top_Level;
-  layout(binding = 1, rgba16f) uniform image2D            Storage_Image;
-  layout(binding = 2) uniform Camera_Uniform {
-    mat4  Inverse_View; mat4 Inverse_Projection;
-    uint  Frame; uint Weapon_Texture_Base; uint PBR_Stride; uint Active_SPP;
-    vec4  Env_Sun_Dir;      // xyz = direction, w = angular_radius
-    vec4  Env_Sun_Color;    // xyz = color, w = intensity
-    vec4  Env_Sky_Zenith;   // xyz = zenith color, w = sky_intensity
-    vec4  Env_Sky_Horizon;  // xyz = horizon color, w = cos(sun_disc_size)
-    vec4  Env_Ambient_Up;   // xyz = ambient up, w = sun_disc_intensity
-    vec4  Env_Ambient_Down; // xyz = ambient down, w = fog_density
-    vec4  Env_Fog_Color;    // xyz = fog color
-  };
-  layout(binding = 11, r32f) uniform image2D             Depth_Output;
-  
-  layout(location = 0) rayPayloadEXT vec4 Payload;  // rgb = color, a = hit distance
-  
-  // Stratified sub-pixel jitter for multi-sample anti-aliasing
-  // PCG integer hash replaces sin()-based hash.
-  //   sin() = MUFU.SIN on NVIDIA (4 cycles, 1/SM throughput) or v_sin_f32 on AMD (4 cycles, 1/4 rate)
-  //   Integer ops = IMAD/SHR/XOR on NVIDIA (1 cycle each, full-rate) or v_mul_lo_u32 on AMD (full-rate)
-  // Net savings: ~8 cycles/sample from eliminating the transcendental unit bottleneck.
-  // The PCG hash (O'Neill 2014) has superior statistical quality: passes TestU01 BigCrush.
-  uint PCG (uint V) {
-    uint S = V * 747796405u + 2891336453u;
-    uint W = ((S >> ((S >> 28u) + 4u)) ^ S) * 277803737u;
-    return (W >> 22u) ^ W;
-  }
-  
-  void main () {
-    int SPP = int (Active_SPP & 0xFFu);
-
-    // Checkerboard half-width dispatch: when gl_LaunchSizeEXT.x < image width,
-    // the CPU dispatched at half width.  Remap each thread to its checkerboard
-    // pixel: Px.x = LaunchID.x * 2 + ((LaunchID.y + Frame) & 1).
-    // UV uses the full image size for correct projection mapping.
-    ivec2 Img_Size = imageSize (Storage_Image);
-    ivec2 Px;
-    if (int(gl_LaunchSizeEXT.x) < Img_Size.x) {
-      Px.x = int(gl_LaunchIDEXT.x) * 2 + ((int(gl_LaunchIDEXT.y) + int(Frame)) & 1);
-      Px.y = int(gl_LaunchIDEXT.y);
-      if (Px.x >= Img_Size.x) return;
-    } else {
-      Px = ivec2 (gl_LaunchIDEXT.xy);
-    }
-
-    vec3  Origin     = (Inverse_View * vec4 (0, 0, 0, 1)).xyz;
-    vec3  Color_Sum  = vec3 (0.0);
-    float Depth_Sum  = 0.0;
-
-    // Ray direction from pixel position (use full image size for correct UV mapping)
-    vec2  Pixel  = vec2 (Px) + 0.5;
-    vec2  Uv     = Pixel / vec2 (Img_Size);
-    vec2  Ndc    = fma (Uv, vec2 (2.0), vec2 (-1.0));
-    vec4  Target    = Inverse_Projection * vec4 (Ndc.x, Ndc.y, 0.0, 1.0);
-    vec4  Direction = Inverse_View * vec4 (normalize (Target.xyz / Target.w), 0.0);
-  
-    // Accumulate color and depth across all samples
-    for (int S = 0; S < SPP; S++) {
-      Payload = vec4 (0.0, 0.0, 0.0, 10000.0);
-
-      // Mask 0xFD: primary rays see everything EXCEPT player body (bit 1 = 0x02).
-      traceRayEXT (Top_Level, gl_RayFlagsOpaqueEXT, 0xFD, 0, 0, 0,
-                   Origin, 0.001, Direction.xyz, 10000.0, 0);
-  
-      // Accumulate sample result
-      Color_Sum += Payload.rgb;
-      Depth_Sum += Payload.a;
-    }
-  
-    // Average samples — on NVIDIA, the compiler fuses this into a single FMA chain
-    vec3  Final_Color = Color_Sum * (1.0 / float (SPP));
-    float Final_Depth = Depth_Sum * (1.0 / float (SPP));
-  
-    // Write final color and depth to storage images (Px is remapped for checkerboard)
-    imageStore (Storage_Image, Px, vec4 (Final_Color, 1.0));
-    imageStore (Depth_Output,  Px, vec4 (Final_Depth, 0.0, 0.0, 0.0));
-  }
-}
-
-glsl shader closesthit rchit {
-  #version 460
-  #extension GL_EXT_ray_tracing : require
-  #extension GL_EXT_ray_query : require
-  #extension GL_EXT_nonuniform_qualifier : require
-  
-  layout(binding = 0) uniform accelerationStructureEXT Top_Level;
-  layout(binding = 2) uniform Camera_Uniform {
-    mat4  Inverse_View; mat4 Inverse_Projection;
-    uint  Frame; uint Weapon_Texture_Base; uint PBR_Stride; uint Active_SPP;
-    vec4  Env_Sun_Dir;      // xyz = direction, w = angular_radius
-    vec4  Env_Sun_Color;    // xyz = color, w = intensity
-    vec4  Env_Sky_Zenith;   // xyz = zenith color, w = sky_intensity
-    vec4  Env_Sky_Horizon;  // xyz = horizon color, w = cos(sun_disc_size)
-    vec4  Env_Ambient_Up;   // xyz = ambient up, w = sun_disc_intensity
-    vec4  Env_Ambient_Down; // xyz = ambient down, w = fog_density
-    vec4  Env_Fog_Color;    // xyz = fog color
-  };
-  
-  // Scene geometry
-  layout(binding = 3, std430) readonly buffer Vertex_Data   { vec4 Data[]; } Vertices;
-  layout(binding = 4, std430) readonly buffer Index_Data    { uint Data[]; } Indices;
-  layout(binding = 5, std430) readonly buffer Material_Data { vec4 Data[]; } Materials;
-  layout(binding = 6, std430) readonly buffer Tex_Id_Data   { uint Data[]; } Texture_Ids;
-  layout(binding = 7)         uniform sampler2D              Lightmap;
-  
-  // Weapon geometry
-  layout(binding = 8,  std430) readonly buffer Weapon_Vertex_Data { vec4 Data[]; } Weapon_Vertices;
-  layout(binding = 9,  std430) readonly buffer Weapon_Index_Data  { uint Data[]; } Weapon_Indices;
-  layout(binding = 10, std430) readonly buffer Weapon_Tex_Id_Data { uint Data[]; } Weapon_Tex_Ids;
-  
-  // Entity geometry
-  layout(binding = 12, std430) readonly buffer Entity_Vertex_Data { vec4 Data[]; } Entity_Vertices;
-  layout(binding = 13, std430) readonly buffer Entity_Index_Data  { uint Data[]; } Entity_Indices;
-  layout(binding = 14, std430) readonly buffer Entity_Tex_Id_Data { uint Data[]; } Entity_Tex_Ids;
-  
-  // Bindless texture array (binding 15: must be highest for variable descriptor count)
-  layout(binding = 15) uniform sampler2D Textures[];
-  
-  layout(location = 0) rayPayloadInEXT vec4 Payload;  // rgb = color, a = hit distance
-
-  // Shadow rays now use inline rayQueryEXT — no payload needed (saves continuation stack)
-  hitAttributeEXT vec2 Barycentrics;
-  
-  // PCG hash for stochastic effects (soft shadows, importance sampling)
-  uint PCG (uint V) {
-    uint S = V * 747796405u + 2891336453u;
-    uint W = ((S >> ((S >> 28u) + 4u)) ^ S) * 277803737u;
-    return (W >> 22u) ^ W;
-  }
-  
-  // Soft shadow ray direction (extracted to avoid code duplication)
-  // Computes a jittered direction on a disk around the light direction for soft shadows.
-  // Previously duplicated in entity + world shadow paths (~20 lines each).
-  // On NVIDIA: saves ~1 KB instruction cache from deduplicated code.
-  vec3 Soft_Shadow_Dir (vec3 Ld, uint Prim, uint Inst, uint Frame, float Disk_Radius) {
-    uint Seed  = PCG (Prim * 1973u + Inst * 9277u + Frame * 26699u);
-    float Ang  = float (Seed) * 2.3283064e-10 * 6.2831853;
-    float Rad  = sqrt (float (PCG (Seed)) * 2.3283064e-10) * Disk_Radius;
-    vec3 Lt    = (abs (Ld.y) < 0.99) ? normalize (cross (Ld, vec3 (0, 1, 0)))
-                                      : normalize (cross (Ld, vec3 (1, 0, 0)));
-    vec3 Lb    = cross (Ld, Lt);
-    return normalize (Ld + Lt * (cos (Ang) * Rad) + Lb * (sin (Ang) * Rad));
-  }
-  
-  // Extracted shadow trace (deduplicated from entity + world paths)
-  // Both paths used identical rayQueryEXT code: same mask (0xFE), offset (Normal*0.1),
-  // tmin (0.001), tmax (600.0), and shadow factor (1.0 : 0.05).
-  // Saves ~15 lines of duplicated code + instruction cache pressure.
-  float Trace_Shadow (vec3 Origin, vec3 Normal, vec3 Ld, uint Prim, uint Inst, uint Frame, float Disk_Radius) {
-    vec3 Shadow_Dir = Soft_Shadow_Dir (Ld, Prim, Inst, Frame, Disk_Radius);
-    rayQueryEXT Shadow_Query;
-    rayQueryInitializeEXT (Shadow_Query, Top_Level,
-      gl_RayFlagsTerminateOnFirstHitEXT | gl_RayFlagsOpaqueEXT,
-      0xFE, Origin + Normal * 0.1, 0.001, Shadow_Dir, 600.0);
-    rayQueryProceedEXT (Shadow_Query);
-    return (rayQueryGetIntersectionTypeEXT (Shadow_Query, true)
-      == gl_RayQueryCommittedIntersectionNoneEXT) ? 1.0 : 0.05;
-  }
-  
-  // Read a vertex attribute (48 bytes = 12 floats per vertex) from the appropriate buffer
-  // Dispatch: Instance 0 = world, 1 = weapon, 2 = entity
-  vec4 Read_Raw (uint I, uint Slot, uint Instance) {
-    if (Instance == 2u) return Entity_Vertices.Data[I * 3 + Slot];
-    if (Instance == 1u) return Weapon_Vertices.Data[I * 3 + Slot];
-    return Vertices.Data[I * 3 + Slot];
-  }
-  vec3 Read_Position   (uint I, uint Inst) { return Read_Raw (I, 0, Inst).xyz; }
-  vec2 Read_Tex_Uv     (uint I, uint Inst) { return Read_Raw (I, 1, Inst).xy;  }
-  vec2 Read_Lightmap_Uv(uint I, uint Inst) { return Read_Raw (I, 1, Inst).zw;  }
-  vec3 Read_Normal     (uint I, uint Inst) { return Read_Raw (I, 2, Inst).xyz; }
-  
-  void main () {
-    // Determine which instance we hit: 0 = world, 1 = weapon, 2 = entity
-    uint  Instance     = gl_InstanceCustomIndexEXT;
-    bool  Is_Weapon    = (Instance == 1u);
-    bool  Is_Entity     = (Instance == 2u);
-    uint  Primitive    = gl_PrimitiveID;
-  
-    // Adaptive quality budget: 0.0 = full quality (60fps+), 1.0 = minimal work (< 5fps)
-    // At low fps, skip expensive operations so frames are cheaper → higher fps → TAA fills detail.
-    float Budget = float ((Active_SPP >> 8u) & 0xFFu) / 255.0;
-  
-    // Fetch triangle vertex indices from the appropriate buffer
-    uint I0, I1, I2;
-    if (Is_Entity) {
-      I0 = Entity_Indices.Data[Primitive * 3 + 0];
-      I1 = Entity_Indices.Data[Primitive * 3 + 1];
-      I2 = Entity_Indices.Data[Primitive * 3 + 2];
-    } else if (Is_Weapon) {
-      I0 = Weapon_Indices.Data[Primitive * 3 + 0];
-      I1 = Weapon_Indices.Data[Primitive * 3 + 1];
-      I2 = Weapon_Indices.Data[Primitive * 3 + 2];
-    } else {
-      I0 = Indices.Data[Primitive * 3 + 0];
-      I1 = Indices.Data[Primitive * 3 + 1];
-      I2 = Indices.Data[Primitive * 3 + 2];
-    }
-  
-    // Batched vertex attribute reads
-    // Read all 3 vec4 slots per vertex in one go (9 buffer reads instead of 12).
-    // Each vertex = 3 vec4: [Position.xyz, _], [TexUV.xy, LmUV.xy], [Normal.xyz, _]
-    vec3 Bary   = vec3 (1.0 - Barycentrics.x - Barycentrics.y, Barycentrics.x, Barycentrics.y);
-    vec4 V0_S0  = Read_Raw (I0, 0, Instance), V0_S1 = Read_Raw (I0, 1, Instance), V0_S2 = Read_Raw (I0, 2, Instance);
-    vec4 V1_S0  = Read_Raw (I1, 0, Instance), V1_S1 = Read_Raw (I1, 1, Instance), V1_S2 = Read_Raw (I1, 2, Instance);
-    vec4 V2_S0  = Read_Raw (I2, 0, Instance), V2_S1 = Read_Raw (I2, 1, Instance), V2_S2 = Read_Raw (I2, 2, Instance);
-    vec3 Position  = V0_S0.xyz * Bary.x + V1_S0.xyz * Bary.y + V2_S0.xyz * Bary.z;
-    vec2 Tex_Coord = V0_S1.xy  * Bary.x + V1_S1.xy  * Bary.y + V2_S1.xy  * Bary.z;
-    vec2 Lm_Coord  = V0_S1.zw  * Bary.x + V1_S1.zw  * Bary.y + V2_S1.zw  * Bary.z;
-    vec3 Normal    = normalize (V0_S2.xyz * Bary.x + V1_S2.xyz * Bary.y + V2_S2.xyz * Bary.z);
-  
-    // Fetch the texture ID for this triangle and sample the albedo
-    uint Tex_Id;
-    if (Is_Entity)       Tex_Id = Entity_Tex_Ids.Data[Primitive];
-    else if (Is_Weapon) Tex_Id = Weapon_Tex_Ids.Data[Primitive] + Weapon_Texture_Base;
-    else                Tex_Id = Texture_Ids.Data[Primitive];
-  
-    // Build tangent frame (Frisvad method) for normal mapping + parallax
-    // Needed before texture sampling: parallax offsets UVs, which affects all map reads.
-    // Frisvad's construction produces analytically orthonormal vectors —
-    // the normalize() calls are mathematically redundant.  Removing them saves 2× (dot+rsq+3×mul)
-    // = 10 VALU instructions.  On NVIDIA, rsq is a 4-cycle MUFU op; eliminating 2 saves 8 cycles.
-    vec3 Geo_Normal = Normal;  // Preserve geometric normal for parallax
-    vec3 T_Axis, B_Axis;
-    if (Geo_Normal.z < -0.999) {
-      T_Axis = vec3 (0.0, -1.0, 0.0);
-      B_Axis = vec3 (-1.0, 0.0, 0.0);
-    } else {
-      float Inv = 1.0 / (1.0 + Geo_Normal.z);
-      T_Axis = vec3 (1.0 - Geo_Normal.x * Geo_Normal.x * Inv, -Geo_Normal.x * Geo_Normal.y * Inv, -Geo_Normal.x);
-      B_Axis = vec3 (-Geo_Normal.x * Geo_Normal.y * Inv, 1.0 - Geo_Normal.y * Geo_Normal.y * Inv, -Geo_Normal.y);
-    }
-  
-    // Parallax occlusion mapping from height map
-    // Offsets texture coordinates based on the height map to simulate surface depth,
-    // giving stone mortar joints, metal rivets, and wood grain real visual depth.
-    // Uses steep parallax with 8 steps — trades 8 extra texture fetches for convincing depth.
-    // Distance-cull parallax beyond 500 units
-    // Parallax is 10+ texture fetches per pixel.  At >500 units the depth offset is
-    // sub-pixel and invisible — skipping it eliminates the majority of PBR texture work
-    // for distant surfaces (which dominate pixel count in Q3 corridors).
-    vec3  V  = -gl_WorldRayDirectionEXT;
-    float Hit_Dist = gl_HitTEXT;
-
-    // Adaptive parallax: 300u at full quality, 0u at Budget=1 (pure lightmap fallback).
-    float Parallax_Dist = 300.0 * (1.0 - Budget);
-    if (not Is_Weapon and not Is_Entity and Tex_Id < PBR_Stride and Hit_Dist < Parallax_Dist) {
-      // Transform view to tangent space for parallax ray marching
-      vec3 V_Tangent = vec3 (dot (V, T_Axis), dot (V, B_Axis), dot (V, Geo_Normal));
-
-      // Scale parallax depth: 0.03 units — subtle but visible on close surfaces
-      vec2 Parallax_Dir = V_Tangent.xy / max (V_Tangent.z, 0.1) * 0.03;
-  
-      // Hybrid linear-binary parallax (4 coarse + 3 binary = 7 fetches)
-      // Classic steep parallax uses 8 linear steps + 1 refinement = 9 texture fetches.
-      // We do 4 coarse steps (find the crossing interval) then 3 binary search steps
-      // (bisect within that interval).  Same visual quality, 2 fewer texture fetches.
-      // On AMD RDNA: saves 2 texture pipe slots (~8 cycles at 1/4-rate TMU).
-      // On NVIDIA: saves 2 L1 texture cache probes per pixel.
-      uint Height_Tex = nonuniformEXT(Tex_Id + PBR_Stride * 5u);
-      float Layer_Depth = 1.0 / 4.0;  // 4 coarse steps
-      float Current_Depth = 0.0;
-      vec2  Current_Uv = Tex_Coord;
-      vec2  Uv_Step = -Parallax_Dir * Layer_Depth;
-      float H_Sample = textureLod (Textures[Height_Tex], Current_Uv, 0.0).r;
-  
-      // Phase 1: 4 coarse linear steps to find the crossing interval
-      // No early-exit: GPU wavefronts execute all iterations via masking — a conditional
-      // just adds a branch per iteration.  With only 4 steps, unconditional execution lets
-      // the compiler fully unroll and pipeline the texture fetches.
-      for (int Step = 0; Step < 4; Step++) {
-        Current_Uv += Uv_Step;
-        H_Sample = textureLod (Textures[Height_Tex], Current_Uv, 0.0).r;
-        Current_Depth += Layer_Depth;
-      }
-  
-      // Phase 2: 3 binary search steps to refine within the crossing interval
-      vec2 Lo_Uv = Current_Uv - Uv_Step;  float Lo_D = Current_Depth - Layer_Depth;
-      vec2 Hi_Uv = Current_Uv;             float Hi_D = Current_Depth;
-      for (int B = 0; B < 3; B++) {
-        vec2  Mid_Uv = (Lo_Uv + Hi_Uv) * 0.5;
-        float Mid_D  = (Lo_D + Hi_D) * 0.5;
-        float Mid_H  = textureLod (Textures[Height_Tex], Mid_Uv, 0.0).r;
-        if (Mid_D < Mid_H) { Lo_Uv = Mid_Uv; Lo_D = Mid_D; }
-        else                { Hi_Uv = Mid_Uv; Hi_D = Mid_D; }
-      }
-      Tex_Coord = Hi_Uv;
-    }
-  
-    // Sample PBR texture maps
-    // textureLod(0) bypasses gradient computation (undefined in closest-hit shaders),
-    // saving ~2 cycles/fetch on NVIDIA SM, ~1 on AMD RDNA texture pipe.
-    vec3  Albedo     = textureLod (Textures[nonuniformEXT(Tex_Id)], Tex_Coord, 0.0).rgb;
-    vec3  Normal_Map = vec3 (0.0, 0.0, 1.0);
-    float R = 0.5;
-    float M = 0.0;
-    vec3  Emissive  = vec3 (0.0);
-  
-    // Sample PBR maps for world geometry, entities, and weapon.
-    // Entity textures are registered in the scene material array and have valid PBR slots.
-    // Distance LOD: beyond 1000u, normal/roughness/metalness detail is sub-pixel.
-    // Budget adaptive: shrink PBR distance threshold as fps drops (1000u→200u).
-    // Emissive is always sampled — light panels and lava must glow regardless of distance.
-    float PBR_Dist = mix (1000.0, 200.0, Budget);
-    if (not Is_Weapon and Tex_Id < PBR_Stride) {
-      // World / Entity PBR: maps laid out at [diffuse_0..N, normal_0..N, roughness_0..N, ...]
-      if (Hit_Dist < PBR_Dist) {
-        Normal_Map = textureLod (Textures[nonuniformEXT(Tex_Id + PBR_Stride)],      Tex_Coord, 0.0).rgb * 2.0 - 1.0;
-        R          = textureLod (Textures[nonuniformEXT(Tex_Id + PBR_Stride * 2u)], Tex_Coord, 0.0).r;
-        M          = textureLod (Textures[nonuniformEXT(Tex_Id + PBR_Stride * 3u)], Tex_Coord, 0.0).r;
-      }
-      Emissive   = textureLod (Textures[nonuniformEXT(Tex_Id + PBR_Stride * 4u)], Tex_Coord, 0.0).rgb;
-
-    // Weapon PBR: 6 map types × 2 surfaces, stride = 2
-    // Weapon_Texture_Base + Stride*N + (Tex_Id - Weapon_Texture_Base) = Tex_Id + 2*N
-    // Eliminates 2 local variables and 4 subtractions per invocation.
-    } else if (Is_Weapon) {
-      Normal_Map = textureLod (Textures[nonuniformEXT(Tex_Id + 2u)],  Tex_Coord, 0.0).rgb * 2.0 - 1.0;
-      R          = textureLod (Textures[nonuniformEXT(Tex_Id + 4u)],  Tex_Coord, 0.0).r;
-      M          = textureLod (Textures[nonuniformEXT(Tex_Id + 6u)],  Tex_Coord, 0.0).r;
-      Emissive   = textureLod (Textures[nonuniformEXT(Tex_Id + 8u)],  Tex_Coord, 0.0).rgb;
-
-    // Fallback for textures outside the PBR material range: derive from albedo statistics
-    } else {
-      float Lu = dot (Albedo, vec3 (0.2126, 0.7152, 0.0722));
-      float Hi = max (Albedo.r, max (Albedo.g, Albedo.b));
-      float Sa = (Hi - min (Albedo.r, min (Albedo.g, Albedo.b))) / max (Hi, 1e-3);
-      R = mix (0.60, 0.90, 1.0 - Lu);   // Rougher default — less "wet" look on stone/brick
-      M = smoothstep (0.35, 0.15, Sa) * smoothstep (0.45, 0.2, Lu) * 0.4;
-    }
-  
-    // Normal mapping: always apply TBN transform
-    // No branch needed: when Normal_Map = (0,0,1), T*0 + B*0 + N*1 = N.
-    // Unconditional path avoids divergent branching across the wavefront.
-    Normal = normalize (T_Axis * Normal_Map.x + B_Axis * Normal_Map.y + Geo_Normal * Normal_Map.z);
-  
-    // PBR material parameters
-    vec3  F0 = mix (vec3 (0.04), Albedo, M);
-    float NV = max (dot (Normal, V), 1e-3);
-  
-    // Direct lighting: Cook-Torrance microfacet BRDF
-    vec3  Ld = normalize (Env_Sun_Dir.xyz);               // Per-scene sun direction
-    vec3  Lr = Env_Sun_Color.xyz * Env_Sun_Color.w;      // Per-scene sun radiance (color × intensity)
-    float NL  = max (dot (Normal, Ld), 0.0);
-  
-    // Skip full BRDF when surface faces away from sun
-    // When NL=0, Direct=(Df+Sp)*Lr*NL*Shadow=0 regardless of BRDF result.
-    // Skip H/NH/VH/D/Vis/F computation for back-facing surfaces (~30-40% of pixels
-    // in indoor Q3 maps).  Zero quality loss — mathematically identical output.
-    vec3  Sp  = vec3 (0.0);
-    vec3  Df  = vec3 (0.0);
-    if (NL > 0.0) {
-      vec3  H   = normalize (V + Ld);
-      float NH  = max (dot (Normal, H),  0.0);
-      float VH  = max (dot (V, H),       0.0);
-      float a   = R * R,  a2 = max (a * a, 1e-4);         // Clamp to avoid NaN at R=0
-      float k   = (R + 1.0) * (R + 1.0) * 0.125;
-  
-      // GGX/Trowbridge-Reitz normal distribution
-      float Denom = NH * NH * (a2 - 1.0) + 1.0;
-      float D     = a2 / (3.14159 * Denom * Denom);
-  
-      // Smith geometry (height-correlated visibility)
-      float G1_L = NL / (NL * (1.0 - k) + k);
-      float G1_V = NV / (NV * (1.0 - k) + k);
-      float Vis  = G1_L * G1_V / max (4.0 * NL * NV, 1e-4);
-  
-      // Schlick Fresnel
-      float FT  = 1.0 - VH;  float T5 = FT * FT; T5 *= T5 * FT;
-      vec3  F   = F0 + (1.0 - F0) * T5;
-  
-      // Final specular and diffuse terms (energy-conserving: kD = 1 - kS)
-      Sp  = D * Vis * F;
-      Df  = (1.0 - F) * (1.0 - M) * Albedo * 0.31831;  // 1/π
-    }
-  
-    // Indirect lighting (image-based lighting approximation)
-    // Since we don't have a cubemap, approximate ambient from a two-tone hemisphere:
-    //   Sky = cool blue overhead, Ground = warm bounce from below.
-    // This gives metallic surfaces visible reflections even in shadow.
-  
-    // Hemisphere ambient diffuse (sky-ground gradient based on normal)
-    // Warm indoor bounce lighting — Q3 arenas have amber-toned fill light from torches and lava.
-    vec3  Sky_Color    = Env_Ambient_Up.xyz;                 // Per-scene ambient from above (sky contribution)
-    vec3  Ground_Color = Env_Ambient_Down.xyz;               // Per-scene ambient from below (ground bounce)
-    float Hemisphere   = Normal.y * 0.5 + 0.5;              // 0=down, 1=up
-    vec3  Ambient_Irradiance = mix (Ground_Color, Sky_Color, Hemisphere);
-  
-    // Ambient specular: pre-integrated split-sum approximation (Karis 2013)
-    // Approximates ∫(BRDF * Li) with env BRDF LUT replaced by analytic fit
-    float Env_FT   = 1.0 - NV;  float Env_T5 = Env_FT * Env_FT; Env_T5 *= Env_T5 * Env_FT;
-    vec3  Env_F    = F0 + (max (vec3 (1.0 - R), F0) - F0) * Env_T5;     // Roughness-aware Fresnel
-    vec2  Env_BRDF = vec2 (1.0 - R * 0.5, R * 0.08);  // Analytic fit to DFG LUT
-    vec3  Ambient_Specular = Env_F * Env_BRDF.x + Env_BRDF.y;
-  
-    // Reflect the view vector off the surface to tint specular with sky direction
-    vec3  Reflect_Dir = reflect (-V, Normal);
-    float Refl_Up     = Reflect_Dir.y * 0.5 + 0.5;
-    vec3  Env_Color   = mix (Ground_Color, Sky_Color * 1.2, Refl_Up);  // Restrained spec env — real reflections do the heavy lifting
-    vec3  Indirect_Specular = Ambient_Specular * Env_Color;
-  
-    // Indirect diffuse: hemisphere ambient weighted by (1 - metallic) since metals have no diffuse
-    vec3  Indirect_Diffuse = Ambient_Irradiance * Albedo * (1.0 - M) * (1.0 - Env_F);
-  
-    // Ray-traced reflections (full PBR re-entry via traceRayEXT)
-    // Trace a single-bounce reflection ray for surfaces that are smooth or metallic enough
-    // to show visible reflections.  The reflection intensity is governed by the environment
-    // Fresnel term (Env_F) which increases at grazing angles (the Fresnel effect that makes
-    // even dielectrics mirror-like when viewed obliquely).
-    //
-    // Recursion guard: primary rays use tmin=0.001, reflection rays use tmin=0.01.
-    // Reflection-bounce hits detect this and skip tracing another reflection to limit
-    // recursion to exactly one bounce (primary → reflection → done).
-    // On NVIDIA Ada, traceRayEXT enables SER (Shader Execution Reordering)
-    // which re-sorts threads by material after traversal — 20-44% speedup for divergent
-    // secondary bounces.  rayQueryEXT cannot use SER.  Full re-entry also means the
-    // reflection bounce gets complete Cook-Torrance BRDF, parallax, normal mapping, etc.
-    bool  Is_Reflection_Bounce = (gl_RayTminEXT > 0.005);
-
-    // Reflection culling: skip on secondary bounces, very distant surfaces, or
-    // negligible Fresnel contribution (< 10% is invisible in the final composite).
-    // Importance-sampled stochastic reflection
-    // BRDF-importance: smooth metals (R < 0.2, M > 0.5) get reflections every
-    // frame because they're mirror-like.  Rough/dielectric surfaces get 67%
-    // frame-gated coverage.  This puts reflection rays on shiny gun barrels,
-    // metal trim, and wet floors while skipping rough stone/wood.
-    // Note: gl_LaunchIDEXT causes lavapipe crash near traceRayEXT (driver bug),
-    // so spatial importance uses material properties, not screen position.
-    // Reflections: adaptive tmax — at low fps, trace shorter distance (same quality, less work).
-    bool  Refl_Active = not Is_Reflection_Bounce and (R < 0.55);
-    float Refl_Dist = mix (800.0, 300.0, Budget);  // Adaptive reflection distance
-    float Reflection_Weight = (not Refl_Active or Hit_Dist > Refl_Dist) ? 0.0
-      : max (max (Env_F.r, Env_F.g), Env_F.b) * (1.0 - R * R);
-    vec3  Reflection_Color  = vec3 (0.0);
-  
-    // Trace reflection ray for smooth/metallic surfaces
-    if (Reflection_Weight > 0.10) {
-      vec3 Refl_Dir = reflect (-V, Normal);
-      Payload = vec4 (0.0, 0.0, 0.0, -1.0);
-
-      // gl_RayFlagsOpaqueEXT skips any-hit shader (all geometry is opaque) — saves
-      // ~1 cycle/leaf on NVIDIA RT cores.
-      traceRayEXT (Top_Level, gl_RayFlagsOpaqueEXT,
-                   0xFF,
-                   0, 1, 0,
-                   Position + Normal * 0.2,
-                   0.01,  // tmin=0.01 marks this as a reflection bounce
-                   Refl_Dir,
-                   mix (500.0, 200.0, Budget),  // Adaptive tmax — shorter trace at low fps
-                   0);
-      Reflection_Color = Payload.rgb;
-    }
-  
-    // Blend reflection into indirect specular: replace the hemisphere approximation
-    // with actual traced reflection, weighted by the Fresnel term.
-    vec3 Traced_Specular = Env_F * mix (Indirect_Specular / max (Env_F, vec3(0.01)),
-                                         Reflection_Color,
-                                         vec3 (Reflection_Weight));
-  
-    // Compute final shading based on instance type
-    vec3 Color;
-    float Shadow_Dist = mix (600.0, 200.0, Budget);  // Adaptive shadow ray cutoff distance
-  
-    // Apply per-instance lighting model
-    if (Is_Weapon) {
-      // Weapon: direct light + boosted ambient + traced reflections.
-      vec3 Direct = (Df + Sp) * Lr * NL;
-      vec3 Wpn_Full  = Direct * 0.9 + (Indirect_Diffuse + Traced_Specular) * 1.5;
-      vec3 Wpn_Cheap = Ambient_Irradiance * Albedo * 2.5 + Albedo * max(NL, 0.3);
-      Color = mix (Wpn_Full, Wpn_Cheap, Budget);
-
-    // Entity: direct sun + shadows + hemisphere ambient, no lightmap (MD3 models have no LM UVs)
-    } else if (Is_Entity) {
-      float Shadow_Factor = (NL > 0.0 and not Is_Reflection_Bounce and Hit_Dist < Shadow_Dist)
-        ? Trace_Shadow (Position, Normal, Ld, Primitive, Instance, Frame, Env_Sun_Dir.w) : 1.0;
-      vec3 Direct = (Df + Sp) * Lr * NL * Shadow_Factor;
-
-      // Entity color: balanced ambient — not too bright (avoids glow), not too dark (avoids silhouette)
-      vec3 Entity_Full  = Direct + Indirect_Diffuse * 0.8 + Traced_Specular;
-      vec3 Entity_Cheap = Ambient_Irradiance * Albedo * 0.9 + Albedo * max(NL, 0.2) * 0.4;
-      Color = mix (Entity_Full, Entity_Cheap, Budget);
-
-      // Subtle saturation boost for entities — counteracts ambient washout on character models
-      float Ent_Luma = dot (Color, vec3 (0.2126, 0.7152, 0.0722));
-      Color = mix (vec3 (Ent_Luma), Color, 1.15);  // 15% saturation increase
-    } else {
-      vec3 Lm = textureLod (Lightmap, Lm_Coord, 0.0).rgb * 4.0;  // Lightmap auto-linearized via SRGB format
-  
-      // Inline ray query for shadows
-      // rayQueryEXT runs entirely within this shader invocation — no recursion,
-      // no continuation stack, no SBT lookup for shadow_miss.  On NVIDIA this
-      // eliminates 1 warp scheduling slot per shadow test.  On AMD RDNA, ray
-      // queries bypass the shader export/import and run on the same SIMD.
-      // Bonus: shadows work on reflection bounces for free (no depth cost).
-      // Importance-sampled stochastic shadow
-      // SIGGRAPH-grade importance sampling (inspired by ReSTIR / RTXDI):
-      // Allocate shadow rays where they have the MOST visual impact:
-      //   - Close surfaces (< 150u): always trace — shadow detail is most visible
-      //   - Bright sun-facing surfaces: high NL × bright albedo → near-100% coverage
-      //   - Dark/grazing surfaces: shadow barely visible → 50% coverage
-      // IGN (Jimenez 2014) provides blue-noise spatial distribution.
-      // Golden-ratio temporal offset ensures each frame's pattern is maximally
-      // decorrelated — TAA converges in fewer frames.
-      // Soft shadow factor (0.15 floor) reduces stochastic noise amplitude:
-      // a lit→shadow transition is 1.0→0.15 instead of 1.0→0.0, making the
-      // per-pixel noise 85% as large → visually much less noticeable.
-      // Adaptive shadow distance: closer surfaces always get shadows, distant ones shed at low fps.
-      float Shadow_Factor = (NL > 0.0 and not Is_Reflection_Bounce and Hit_Dist < Shadow_Dist)
-        ? Trace_Shadow (Position, Normal, Ld, Primitive, Instance, Frame, Env_Sun_Dir.w) : 1.0;
-  
-      // Dual-path rendering with Budget blend
-      // CHEAP PATH: Albedo × Lightmap — zero rays, zero noise, perfectly stable.
-      //   This is what Q3 originally looked like. Always computed, always available.
-      // FULL PATH:  Cook-Torrance BRDF + traced shadows + traced reflections.
-      //   Beautiful but expensive. Noisy at 1 spp without denoising.
-      // Budget blends between them: at high fps, full path dominates (gorgeous).
-      // At low fps, cheap path stabilizes the image (no noise, no ghosting).
-      vec3 Direct = (Df + Sp) * Lr * NL * Shadow_Factor;
-      vec3 Baked_GI = Albedo * Lm * (1.0 - M);
-  
-      // Cheap path: just lightmap + emissive (minimal ambient to keep shadows dark)
-      vec3 Cheap = Baked_GI + Ambient_Irradiance * Albedo * 0.15 + Emissive * 5.0;
-  
-      // Full path: complete PBR lighting (direct at full strength for strong light/shadow contrast)
-      vec3 Full = Baked_GI + Direct + Indirect_Diffuse + Traced_Specular + Emissive * 5.0;
-  
-      // Blend: Budget is the knob. 0 = full raytraced, 1 = pure lightmap.
-      Color = mix (Full, Cheap, Budget);
-  
-      // Dynamic environment fog
-      // Skip fog on reflection bounces: primary ray applies fog to final color,
-      // applying it again on the reflected surface would double-fog reflections.
-      // Saves exp2 + dot + smoothstep + mix per reflected pixel.
-      if (not Is_Reflection_Bounce) {
-        float Fog_Distance  = gl_HitTEXT;
-
-        // Per-scene exponential fog — adds depth to corridors
-        float Fog_Amount    = 1.0 - exp (-Fog_Distance * Env_Ambient_Down.w);
-        vec3  Fog_Color     = Env_Fog_Color.xyz;  // Per-scene fog color
-        Color = mix (Color, Fog_Color, Fog_Amount);
-      }
-    }
-  
-    // Output shaded color and hit distance
-    Payload = vec4 (Color, gl_HitTEXT);
-  }
-  }
-  
-  glsl shader miss rmiss {
-  #version 460
-  #extension GL_EXT_ray_tracing : require
-  
-  layout(location = 0) rayPayloadInEXT vec4 Payload;
-  layout(binding = 2) uniform Camera_Uniform {
-    mat4  Inverse_View; mat4 Inverse_Projection;
-    uint  Frame; uint Weapon_Texture_Base; uint PBR_Stride; uint Active_SPP;
-    vec4  Env_Sun_Dir;      // xyz = direction, w = angular_radius
-    vec4  Env_Sun_Color;    // xyz = color, w = intensity
-    vec4  Env_Sky_Zenith;   // xyz = zenith color, w = sky_intensity
-    vec4  Env_Sky_Horizon;  // xyz = horizon color, w = cos(sun_disc_size)
-    vec4  Env_Ambient_Up;   // xyz = ambient up, w = sun_disc_intensity
-    vec4  Env_Ambient_Down; // xyz = ambient down, w = fog_density
-    vec4  Env_Fog_Color;    // xyz = fog color
-  };
-  
-  void main () {
-    // Per-scene procedural sky with sun disc (Q2RTX-inspired)
-    vec3  Dir       = gl_WorldRayDirectionEXT;
-    float Vertical  = max (Dir.y, 0.0);
-
-    // Sqrt() is a hardware instruction (1 cycle NVIDIA/AMD), pow(x,0.5) uses log+exp (~8 cycles)
-    vec3  Sky       = mix (Env_Sky_Horizon.xyz, Env_Sky_Zenith.xyz, sqrt (Vertical));
-    Sky *= Env_Sky_Zenith.w;  // Sky intensity multiplier
-  
-    // Sun disc: bright spot in the sky at sun direction (Q2RTX: physical_sky.comp)
-    // Dir is already normalized (ray direction), Env_Sun_Dir.xyz normalized on CPU
-    float Sun_Cos   = dot (Dir, Env_Sun_Dir.xyz);
-
-    // Cos(disc_size) pre-computed on CPU — eliminates per-pixel transcendental
-    float Disc_Edge = Env_Sky_Horizon.w;  // Already cos(sun_disc_size) from CPU
-    float Sun_Edge  = clamp ((Sun_Cos - Disc_Edge) / (1.0 - Disc_Edge), 0.0, 1.0);
-    float Sun_Glow  = Sun_Edge * Sun_Edge; Sun_Glow *= Sun_Glow;  // x^4
-    Sky += Env_Sun_Color.xyz * Sun_Glow * Env_Ambient_Up.w;  // sun_disc_intensity
-  
-    // Atmospheric haze near horizon (Mie-like forward scattering glow)
-    float Horizon_Glow = exp (-Vertical * 8.0);  // Concentrated near horizon
-
-    // Replace 2× length() + 2× division with single inversesqrt(D²·S²).
-    // dot(A/|A|, B/|B|) = dot(A,B) / (|A|·|B|) = dot(A,B) · inversesqrt(dot(A,A)·dot(B,B)).
-    // Saves 2 length + 2 div → 1 dot + 1 dot + 1 mul + 1 rsq + 1 mul (~4 MUFU cycles saved).
-    vec2  Dir_XZ = vec2 (Dir.x, Dir.z);
-    vec2  Sun_XZ = vec2 (Env_Sun_Dir.x, Env_Sun_Dir.z);
-    float Sun_Horizon = max (dot (Dir_XZ, Sun_XZ) * inversesqrt (
-      max (dot (Dir_XZ, Dir_XZ) * dot (Sun_XZ, Sun_XZ), 1e-12)), 0.0);
-
-    // Pow(x,8) → ((x²)²)² (3 muls vs transcendental)
-    float SH2 = Sun_Horizon * Sun_Horizon; float SH4 = SH2 * SH2; float SH8 = SH4 * SH4;
-    Sky += Env_Sun_Color.xyz * Horizon_Glow * SH8 * 0.3;
-  
-    // Output sky color at maximum distance
-    Payload = vec4 (Sky, 10000.0);  // Sky = max distance
-  }
-  }
-  
-  glsl shader shadow_miss rmiss {
-  #version 460
-  #extension GL_EXT_ray_tracing : require
-  
-  layout(location = 1) rayPayloadInEXT float Shadow_Factor;
-  
-  void main () {
-    // Shadow ray reached the light source without hitting anything — fully lit
-    Shadow_Factor = 1.0;
-  }
-}
-
-glsl shader physics comp {
-  #version 460
-  #extension GL_EXT_ray_tracing : require
-  #extension GL_EXT_ray_query : require
-  
-  // Descriptor bindings
-  layout(binding = 0) uniform accelerationStructureEXT Top_Level;
-  layout(binding = 1, std430) readonly buffer Vertex_Data { vec4 Data[]; } Vertices;
-  layout(binding = 2, std430) readonly buffer Index_Data  { uint Data[]; } Indices;
-  
-  layout(binding = 3, std430) buffer Player_Buffer {
-    vec3  Position;     float Pad_A;
-    vec3  Velocity;     float Pad_B;
-    float Yaw, Pitch;
-    int   On_Ground, Jump_Held;
-    vec3  Ground_Normal; float Pad_C;
-    int   Ground_Plane, Ducked;
-    float View_Height, Stuck_Time;
-    float Speed_Last;  int Shape;
-    vec3  Extents;     float Pad_D;
-    float Spine;       float Pad_E1, Pad_E2, Pad_E3;
-  } Player;
-  
-  layout(binding = 4, std430) readonly buffer Hull_Buffer {
-    vec4  Hull_Vertices [256];
-    int   Hull_Adjacency[256][16];
-    int   Hull_Count;
-    float Hull_Radius;
-    vec3  Hull_Centroid;
-    int   Hull_Pad;
-  };
-  
-  struct Gpu_Projectile {
-    vec3  Position;      float Pad_A;
-    vec3  Velocity;      float Lifetime;
-    int   Active;        int   Material_Hit;
-    float Radius;        float Damage;
-    float Hit_U, Hit_V;  // UV at impact point (for CPU-side damage map lookup)
-    int   Instance_Hit;  // TLAS instance index of the object hit (-1 = none)
-    int   Pad_B;
-  };
-  
-  layout(binding = 5, std430) buffer Projectile_Buffer {
-    Gpu_Projectile Projectiles[64];
-    int   Projectile_Count;
-    float Fire_Cooldown;
-    float Proj_Pad[2];
-  };
-  
-  layout(push_constant) uniform Push {
-    int   Forward, Back, Left, Right;
-    int   Jump, Fire, Crouch, Pad;
-    float Delta_X, Delta_Y, Dt, Pad2;
-  } Input;
-  
-  layout(local_size_x = 1) in;
-  
-  // Physics constants
-  const float GRAVITY              = 800.0;
-  const float GROUND_FRICTION      = 6.0;
-  const float STOP_SPEED           = 100.0;
-  const float GROUND_ACCELERATE    = 10.0;
-  const float AIR_ACCELERATE       = 1.0;
-  const float MAXIMUM_SPEED        = 320.0;
-  const float JUMP_VELOCITY        = 270.0;
-  const float STEP_SIZE            = 18.0;
-  const float MINIMUM_WALK_NORMAL  = 0.7;
-  const float OVERBOUNCE           = 1.001;
-  const int   MAXIMUM_CLIP_PLANES  = 5;
-  const float DEFAULT_VIEW_HEIGHT  = 26.0;
-  const float CROUCH_VIEW_HEIGHT   = 12.0;
-  const float MOUSE_SENSITIVITY    = 0.003;
-  
-  // Collider shape constants
-  const int SHAPE_SPHERE    = 0;
-  const int SHAPE_CAPSULE   = 1;
-  const int SHAPE_AABB      = 2;
-  const int SHAPE_CYLINDER  = 3;
-  const int SHAPE_ELLIPSOID = 4;
-  const int SHAPE_HULL      = 5;
-  
-  // Convex hull support functions
-  
-  // Brute-force support: O(n) linear scan over all hull vertices.  Best for small hulls (< 64 verts).
-  vec3 hull_support_brute (vec3 direction) {
-    float best_dot = -1e30;
-    int   best_idx = 0;
-    for (int i = 0; i < Hull_Count; i++) {
-      float d = dot (Hull_Vertices[i].xyz, direction);
-      if (d > best_dot) { best_dot = d; best_idx = i; }
-    }
-    return Hull_Vertices[best_idx].xyz;
-  }
-  
-  // Hill-climbing support: O(sqrt(n)) amortized using per-vertex adjacency table.
-  // Starts from vertex 0 and follows neighbors that increase dot(vertex, direction) until a
-  // local maximum is reached.  On a convex hull, the local maximum IS the global maximum.
-  vec3 hull_support_hill (vec3 direction) {
-    int current = 0;
-    float current_dot = dot (Hull_Vertices[0].xyz, direction);
-  
-    // Walk neighbors until no improvement is found
-    for (int iteration = 0; iteration < 256; iteration++) {
-      int best_neighbor = -1;
-      float best_dot    = current_dot;
-  
-      // Check all neighbors of the current vertex
-      for (int slot = 0; slot < 16; slot++) {
-        int neighbor = Hull_Adjacency[current][slot];
-        if (neighbor < 0) break;
-        float d = dot (Hull_Vertices[neighbor].xyz, direction);
-        if (d > best_dot) { best_dot = d; best_neighbor = neighbor; }
-      }
-  
-      // If no neighbor improves the dot product, we've found the support point
-      if (best_neighbor < 0) break;
-      current     = best_neighbor;
-      current_dot = best_dot;
-    }
-    return Hull_Vertices[current].xyz;
-  }
-  
-  // Adaptive dispatcher: brute-force for small hulls, hill-climbing for large ones
-  vec3 hull_support (vec3 direction) {
-    if (Hull_Count < 64) return hull_support_brute (direction);
-    return hull_support_hill (direction);
-  }
-  
-  // Shape support function
-  
-  // Map a unit direction to the shape's surface offset (Minkowski support mapping)
-  vec3 shape_offset (vec3 d) {
-    switch (Player.Shape) {
-      case SHAPE_SPHERE:
-        return d * Player.Extents.x;
-  
-      case SHAPE_CAPSULE:
-        return d * Player.Extents.x + vec3 (0.0, sign(d.y) * Player.Spine, 0.0);
-  
-      case SHAPE_AABB:
-        return sign(d) * Player.Extents;
-  
-      case SHAPE_CYLINDER: {
-        vec2  xz    = d.xz;
-        float len   = length (xz);
-        vec2  disc  = (len > 1e-6) ? xz / len * Player.Extents.x : vec2(0.0);
-        return vec3 (disc.x, sign(d.y) * Player.Extents.y, disc.y);
-      }
-  
-      case SHAPE_ELLIPSOID: {
-        vec3 scaled = d / Player.Extents;
-        float len   = length (scaled);
-        return (len > 1e-6) ? normalize(scaled) * Player.Extents : vec3(0.0);
-      }
-  
-      case SHAPE_HULL:
-        return hull_support (d);
-  
-      default:
-        return d * Player.Extents.x;
-    }
-  }
-  
-  // Ray trace helper
-  struct Trace_Result {
-    float Fraction;
-    vec3  Normal;
-    bool  Hit;
-  };
-  
-  // Cast a swept shape from Origin along Direction for up to Distance units.
-  // We approximate the expanded shape by casting multiple rays offset by the support function
-  // in cardinal + diagonal directions, taking the nearest hit.
-  Trace_Result trace_shape (vec3 Origin, vec3 Direction, float Distance) {
-    Trace_Result result;
-    result.Fraction = 1.0;
-    result.Normal   = vec3 (0.0, 1.0, 0.0);
-    result.Hit      = false;
-
-    // Skip zero-length traces
-    if (Distance < 1e-6) return result;
-    vec3 dir_norm = normalize (Direction);
-  
-    // 7 probe directions: 6 cardinal axes + movement direction (optimized from 28 for performance)
-    vec3 probes[7] = vec3[7](
-      vec3( 1, 0, 0), vec3(-1, 0, 0), vec3(0, 1, 0), vec3(0,-1, 0), vec3(0, 0, 1), vec3(0, 0,-1),
-      dir_norm
-    );
-
-    // Test each probe direction for collisions
-    for (int i = 0; i < 7; i++) {
-      vec3 offset = shape_offset (normalize(probes[i]));
-      vec3 ray_origin = Origin + offset;
-  
-      // Initialize and execute the ray query
-      rayQueryEXT rq;
-      rayQueryInitializeEXT (rq, Top_Level, gl_RayFlagsOpaqueEXT, 0xFF,
-                             ray_origin, 0.0, dir_norm, Distance);
-  
-      // Process all traversal steps
-      while (rayQueryProceedEXT (rq)) {}
-  
-      // Record hit if closer than previous best
-      if (rayQueryGetIntersectionTypeEXT (rq, true) == gl_RayQueryCommittedIntersectionTriangleEXT) {
-        float t = rayQueryGetIntersectionTEXT (rq, true);
-        if (t < result.Fraction * Distance) {
-          // Reconstruct the triangle normal from vertices
-          uint prim = rayQueryGetIntersectionPrimitiveIndexEXT (rq, true);
-          uint i0 = Indices.Data[prim * 3 + 0];
-          uint i1 = Indices.Data[prim * 3 + 1];
-          uint i2 = Indices.Data[prim * 3 + 2];
-          vec3 v0 = Vertices.Data[i0 * 3].xyz;
-          vec3 v1 = Vertices.Data[i1 * 3].xyz;
-          vec3 v2 = Vertices.Data[i2 * 3].xyz;
-          vec3 n  = normalize (cross (v1 - v0, v2 - v0));
-  
-          // Ensure the normal faces toward the ray origin
-          if (dot (n, dir_norm) > 0.0) n = -n;
-  
-          // Update result with this closer hit
-          result.Fraction = t / Distance;
-          result.Normal   = n;
-          result.Hit      = true;
-        }
-      }
-    }
-  
-    // Return result
-    return result;
-  }
-  
-  // Ground trace
-  
-  // Cast a short ray downward to detect ground contact
-  void ground_trace () {
-    vec3 down_offset = shape_offset (vec3 (0, -1, 0));
-    vec3 origin      = Player.Position + down_offset;
-    float dist       = 0.5;
-
-    // Cast a short downward ray query
-    rayQueryEXT rq;
-    rayQueryInitializeEXT (rq, Top_Level, gl_RayFlagsOpaqueEXT, 0xFF,
-                           origin, 0.0, vec3 (0, -1, 0), dist);
-    while (rayQueryProceedEXT (rq)) {}
-
-    // Classify surface as walkable ground or steep slope
-    if (rayQueryGetIntersectionTypeEXT (rq, true) == gl_RayQueryCommittedIntersectionTriangleEXT) {
-      uint prim = rayQueryGetIntersectionPrimitiveIndexEXT (rq, true);
-      uint i0 = Indices.Data[prim * 3 + 0];
-      uint i1 = Indices.Data[prim * 3 + 1];
-      uint i2 = Indices.Data[prim * 3 + 2];
-      vec3 v0 = Vertices.Data[i0 * 3].xyz;
-      vec3 v1 = Vertices.Data[i1 * 3].xyz;
-      vec3 v2 = Vertices.Data[i2 * 3].xyz;
-      vec3 n  = normalize (cross (v1 - v0, v2 - v0));
-      if (n.y < 0.0) n = -n;
-
-      // Set ground state based on surface steepness
-      if (n.y >= MINIMUM_WALK_NORMAL) {
-        Player.On_Ground    = 1;
-        Player.Ground_Normal = n;
-        Player.Ground_Plane  = 1;
-      } else {
-        Player.On_Ground    = 0;
-        Player.Ground_Plane  = 0;
-      }
-    } else {
-      Player.On_Ground    = 0;
-      Player.Ground_Plane  = 0;
-    }
-  }
-  
-  // Clip velocity
-  vec3 clip_velocity (vec3 vel, vec3 normal) {
-    float backoff = dot (vel, normal) * OVERBOUNCE;
-    return vel - normal * backoff;
-  }
-  
-  // Slide move
-  void slide_move () {
-    vec3  planes[5];
-    int   plane_count = 0;
-    vec3  vel         = Player.Velocity;
-    float time_left   = Input.Dt;
-  
-    // If on ground, add the ground plane as the first clip plane
-    if (Player.On_Ground == 1) {
-      planes[plane_count++] = Player.Ground_Normal;
-      vel = clip_velocity (vel, Player.Ground_Normal);
-    }
-  
-    // Iteratively trace and clip against contact planes
-    for (int bump = 0; bump < 4 and time_left > 0.001; bump++) {
-      vec3  move_dir  = vel * time_left;
-      float move_dist = length (move_dir);
-      if (move_dist < 0.001) break;
-
-      // Trace movement against world geometry
-      Trace_Result trace = trace_shape (Player.Position, move_dir, move_dist);
-
-      // Advance position by the free distance before collision
-      if (trace.Fraction > 0.0)
-        Player.Position += normalize(move_dir) * move_dist * trace.Fraction;
-
-      // Exit if no collision occurred
-      if (not trace.Hit) break;
-
-      // Reduce remaining time by the fraction traveled
-      time_left *= (1.0 - trace.Fraction);
-
-      // Avoid duplicating a plane we've already clipped against
-      bool duplicate = false;
-      for (int p = 0; p < plane_count; p++)
-        if (dot (trace.Normal, planes[p]) > 0.99) { duplicate = true; break; }
-      if (duplicate) continue;
-
-      // Add new plane to the clip set
-      if (plane_count < MAXIMUM_CLIP_PLANES)
-        planes[plane_count++] = trace.Normal;
-  
-      // Clip velocity against all accumulated planes
-      vel = clip_velocity (vel, trace.Normal);
-  
-      // If velocity points into a previously established plane, clip against both
-      for (int p = 0; p < plane_count; p++) {
-        if (dot (vel, planes[p]) >= 0.0) continue;
-        vel = clip_velocity (vel, planes[p]);
-  
-        // If still heading into another plane, slide along the crease
-        for (int q = 0; q < plane_count; q++) {
-          if (q == p or dot (vel, planes[q]) >= 0.0) continue;
-          vec3 crease = cross (planes[p], planes[q]);
-          float len   = length (crease);
-          if (len > 1e-6) {
-            crease /= len;
-            vel = crease * dot (vel, crease);
-          }
-        }
-        break;
-      }
-    }
-
-    // Store the final clipped velocity
-    Player.Velocity = vel;
-  }
-
-  // Step move
-  void step_move () {
-    // Save state before the step attempt
-    vec3 start_pos = Player.Position;
-    vec3 start_vel = Player.Velocity;
-  
-    // Try a normal slide move first
-    slide_move ();
-    vec3 flat_pos = Player.Position;
-  
-    // Reset and try stepping up
-    Player.Position = start_pos;
-    Player.Velocity = start_vel;
-  
-    // Step up
-    Trace_Result up = trace_shape (Player.Position, vec3(0, STEP_SIZE, 0), STEP_SIZE);
-    if (up.Fraction > 0.0)
-      Player.Position.y += STEP_SIZE * up.Fraction;
-  
-    // Slide forward from the raised position
-    slide_move ();
-  
-    // Step down to find the ground
-    Trace_Result down = trace_shape (Player.Position, vec3(0, -STEP_SIZE, 0), STEP_SIZE);
-    if (down.Hit and down.Normal.y >= MINIMUM_WALK_NORMAL) {
-      Player.Position.y -= STEP_SIZE * down.Fraction;
-  
-      // Keep the stepped result only if it moved us farther horizontally
-      vec2 step_delta = Player.Position.xz - start_pos.xz;
-      vec2 flat_delta = flat_pos.xz - start_pos.xz;
-      if (dot (step_delta, step_delta) <= dot (flat_delta, flat_delta)) {
-        Player.Position = flat_pos;
-        Player.Velocity = start_vel;
-        slide_move ();
-      }
-    } else {
-      Player.Position = flat_pos;
-    }
-  }
-  
-  // Stuck recovery
-  void recover () {
-    // Cast rays in 6 cardinal directions and nudge the player away from walls
-    vec3 dirs[6] = vec3[6](
-      vec3(1,0,0), vec3(-1,0,0), vec3(0,1,0), vec3(0,-1,0), vec3(0,0,1), vec3(0,0,-1));
-
-    // Probe each direction and push out of intersecting geometry
-    for (int i = 0; i < 6; i++) {
-      vec3 offset  = shape_offset (dirs[i]);
-      float expect = length (offset);
-
-      // Trace ray in this direction to detect overlap
-      rayQueryEXT rq;
-      rayQueryInitializeEXT (rq, Top_Level, gl_RayFlagsOpaqueEXT, 0xFF,
-                             Player.Position, 0.0, dirs[i], expect);
-      while (rayQueryProceedEXT (rq)) {}
-
-      // Nudge player away if inside geometry
-      if (rayQueryGetIntersectionTypeEXT (rq, true) == gl_RayQueryCommittedIntersectionTriangleEXT) {
-        float t = rayQueryGetIntersectionTEXT (rq, true);
-        if (t < expect) {
-          float penetration = expect - t;
-          Player.Position -= dirs[i] * (penetration + 0.125);
-        }
-      }
-    }
-  }
-  
-  // Main physics entry point
-  void main () {
-  
-    // Mouse look
-    Player.Yaw   -= Input.Delta_X * MOUSE_SENSITIVITY;
-    Player.Pitch -= Input.Delta_Y * MOUSE_SENSITIVITY;
-    Player.Pitch  = clamp (Player.Pitch, -1.5, 1.5);
-  
-    // Build a movement basis from yaw (must match camera: Forward = (sy, 0, -cy))
-    float cy = cos (Player.Yaw), sy = sin (Player.Yaw);
-    vec3 forward = vec3 ( sy, 0, -cy);
-    vec3 right   = vec3 ( cy, 0,  sy);
-  
-    // Compute the wish direction and speed from keyboard input
-    vec3 wish = vec3 (0.0);
-    if (Input.Forward == 1) wish += forward;
-    if (Input.Back    == 1) wish -= forward;
-    if (Input.Right   == 1) wish += right;
-    if (Input.Left    == 1) wish -= right;
-    float wish_speed = MAXIMUM_SPEED;
-    if (length (wish) > 0.001) wish = normalize (wish); else wish_speed = 0.0;
-  
-    // Crouch handling
-    float target_view = DEFAULT_VIEW_HEIGHT;
-    if (Input.Crouch == 1) {
-      Player.Ducked = 1;
-      target_view = CROUCH_VIEW_HEIGHT;
-    } else {
-      Player.Ducked = 0;
-    }
-  
-    // Ground trace
-    ground_trace ();
-  
-    // Apply ground or air movement
-    if (Player.On_Ground == 1) {
-  
-      // Friction
-      float speed = length (Player.Velocity);
-      if (speed > 0.1) {
-        float control = max (speed, STOP_SPEED);
-        float drop    = control * GROUND_FRICTION * Input.Dt;
-        float scale   = max (speed - drop, 0.0) / speed;
-        Player.Velocity *= scale;
-      }
-  
-      // Ground acceleration (Quake 3 style)
-      float current_speed = dot (Player.Velocity, wish);
-      float add_speed     = wish_speed - current_speed;
-      if (add_speed > 0.0) {
-        float accel_speed = GROUND_ACCELERATE * wish_speed * Input.Dt;
-        if (accel_speed > add_speed) accel_speed = add_speed;
-        Player.Velocity += wish * accel_speed;
-      }
-  
-      // Jump
-      if (Input.Jump == 1 and Player.Jump_Held == 0) {
-        Player.Velocity.y = JUMP_VELOCITY;
-        Player.On_Ground  = 0;
-      }
-
-    // Air acceleration (enables strafe-jumping)
-    } else {
-      float current_speed = dot (Player.Velocity, wish);
-      float add_speed     = wish_speed - current_speed;
-      if (add_speed > 0.0) {
-        float accel_speed = AIR_ACCELERATE * wish_speed * Input.Dt;
-        if (accel_speed > add_speed) accel_speed = add_speed;
-        Player.Velocity += wish * accel_speed;
-      }
-  
-      // Gravity
-      Player.Velocity.y -= GRAVITY * Input.Dt;
-    }
-  
-    // Track jump key state (prevent auto-bunny-hopping)
-    Player.Jump_Held = Input.Jump;
-  
-    // Move and collide
-    if (Player.On_Ground == 1)
-      step_move ();
-    else
-      slide_move ();
-  
-    // Stuck recovery
-    recover ();
-  
-    // Re-check ground after movement
-    ground_trace ();
-  
-    // Smoothly interpolate the view height toward the target
-    float delta = target_view - Player.View_Height;
-    if (abs(delta) < 0.1) Player.View_Height = target_view;
-    else Player.View_Height += delta * min (Input.Dt * 10.0, 1.0);
-
-    // Record horizontal speed for HUD/diagnostics
-    Player.Speed_Last = length (Player.Velocity.xz);
-  
-    // Projectile update
-    // Decrement fire cooldown
-    if (Fire_Cooldown > 0.0) Fire_Cooldown -= Input.Dt;
-  
-    // Spawn a new projectile on fire button press
-    if (Input.Fire == 1 and Fire_Cooldown <= 0.0 and Projectile_Count < 64) {
-      vec3 cam_forward = vec3 (sy, -sin(Player.Pitch), -cy * cos(Player.Pitch));
-      cam_forward = normalize (cam_forward);
-      vec3 eye = Player.Position + vec3 (0.0, Player.View_Height, 0.0);
-
-      // Initialize the new projectile
-      int idx = Projectile_Count;
-      Projectiles[idx].Position     = eye + cam_forward * 20.0;
-      Projectiles[idx].Velocity     = cam_forward * 900.0;
-      Projectiles[idx].Lifetime     = 10.0;
-      Projectiles[idx].Active       = 1;
-      Projectiles[idx].Material_Hit = 0;
-      Projectiles[idx].Radius       = 3.0;
-      Projectiles[idx].Damage       = 100.0;
-      Projectiles[idx].Hit_U        = 0.0;
-      Projectiles[idx].Hit_V        = 0.0;
-      Projectiles[idx].Instance_Hit = -1;
-      Projectile_Count = idx + 1;
-      Fire_Cooldown = 0.8;
-    }
-  
-    // Advance each active projectile: move, trace against TLAS, kill on impact or timeout
-    for (int i = 0; i < Projectile_Count; i++) {
-      if (Projectiles[i].Active == 0) continue;
-
-      // Decrement lifetime and kill expired projectiles
-      Projectiles[i].Lifetime -= Input.Dt;
-      if (Projectiles[i].Lifetime <= 0.0) { Projectiles[i].Active = 0; continue; }
-
-      // Compute movement direction and distance for this timestep
-      vec3 dir = normalize (Projectiles[i].Velocity);
-      float dist = length (Projectiles[i].Velocity) * Input.Dt;
-  
-      // Ray trace to check for collision
-      rayQueryEXT rq;
-      rayQueryInitializeEXT (rq, Top_Level, gl_RayFlagsOpaqueEXT, 0xFF,
-                             Projectiles[i].Position, 0.0, dir, dist);
-      while (rayQueryProceedEXT (rq)) {}
-
-      // Check if the projectile hit geometry
-      if (rayQueryGetIntersectionTypeEXT (rq, true) == gl_RayQueryCommittedIntersectionTriangleEXT) {
-        // Hit something — mark dead and record hit position + UV for damage map lookup
-        float t = rayQueryGetIntersectionTEXT (rq, true);
-        Projectiles[i].Position += dir * t;
-        Projectiles[i].Active = 0;
-  
-        // Extract the instance index to identify what was hit (world vs player model)
-        Projectiles[i].Instance_Hit = rayQueryGetIntersectionInstanceCustomIndexEXT (rq, true);
-  
-        // Extract barycentrics and primitive index to compute the hit UV
-        vec2 bary = rayQueryGetIntersectionBarycentricsEXT (rq, true);
-        uint prim = rayQueryGetIntersectionPrimitiveIndexEXT (rq, true);
-  
-        // Look up the three vertex indices for the hit triangle
-        uint i0 = Indices.Data[prim * 3 + 0];
-        uint i1 = Indices.Data[prim * 3 + 1];
-        uint i2 = Indices.Data[prim * 3 + 2];
-  
-        // Read texture UVs from vertex data (vec4[1].xy = texture UV)
-        vec2 uv0 = Vertices.Data[i0 * 3 + 1].xy;
-        vec2 uv1 = Vertices.Data[i1 * 3 + 1].xy;
-        vec2 uv2 = Vertices.Data[i2 * 3 + 1].xy;
-  
-        // Interpolate UV at hit point using barycentric coordinates
-        vec3 bary3 = vec3 (1.0 - bary.x - bary.y, bary.x, bary.y);
-        vec2 hit_uv = uv0 * bary3.x + uv1 * bary3.y + uv2 * bary3.z;
-        Projectiles[i].Hit_U = hit_uv.x;
-        Projectiles[i].Hit_V = hit_uv.y;
-
-      // No hit — advance position
-      } else {
-        Projectiles[i].Position += dir * dist;
-      }
-    }
-  }
-}
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// A-Trous Wavelet Spatial Denoiser (Q2RTX / SVGF-inspired)
-//
-// Core idea from Schied et al. "Spatiotemporal Variance-Guided Filtering" (HPG 2017):
-// Run a sparse 3×3 kernel at exponentially increasing step sizes (1, 2, 4).
-// 3 iterations × 9 taps = 27 taps total, but covers a 9×9 pixel area effectively.
-// Edge-stopping functions on depth and luminance prevent blurring across edges.
-//
-// This filter cleans up:
-//   - Shadow noise from stochastic shadow sampling
-//   - Reflection noise from single-bounce traces
-//   - General 1-spp ray tracing noise
-// without the temporal lag/ghosting that TAA introduces.
-// ═══════════════════════════════════════════════════════════════════════════════
-
-glsl shader denoise comp {
-  #version 460
-  
-  layout(binding = 0, rgba16f) uniform image2D Input_Image;    // Read: noisy color (linear HDR)
-  layout(binding = 1, rgba16f) uniform image2D Output_Image;   // Write: filtered color (linear HDR)
-  layout(binding = 2, r32f)  uniform image2D Depth_Image;    // Read: hit distance for edge stopping
-  
-  layout(push_constant) uniform Denoise_Push {
-    int Step_Size;   // A-trous step size: 1, 2, 4 for iterations
-    int Budget_256;  // Budget × 256 (0 = full quality, 256 = cheap path)
-  };
-  
-  layout(local_size_x = 8, local_size_y = 8) in;
-  
-  // 3×3 a-trous kernel weights (Gaussian-like, symmetric)
-  const float Kernel[3] = float[3](1.0, 2.0 / 3.0, 1.0 / 6.0);
-  
-  // Depth-based normal from 3 cached depth values
-  // Instead of calling Depth_Normal() per sample (3 imageLoads × 9 samples = 27 loads),
-  // load all depths once and compute normals from cached values.
-  // Savings: 27 imageLoad → 0 extra imageLoad (normals computed from already-fetched depths).
-  // On NVIDIA: imageLoad from L2 = 20-40 cycles; 27 eliminated = ~540-1080 cycles saved per pixel.
-  // On AMD RDNA: image_load = ~32 cycles from L2; 27 eliminated = ~864 cycles saved per pixel.
-  vec3 Normal_From_Depths (float D_C, float D_R, float D_U) {
-    return normalize (vec3 (D_C - D_R, D_C - D_U, 1.0));
-  }
-  
-  void main () {
-    ivec2 Pixel = ivec2 (gl_GlobalInvocationID.xy);
-    ivec2 Size  = imageSize (Input_Image);
-    if (Pixel.x >= Size.x or Pixel.y >= Size.y) return;
-
-    // Load center pixel color
-    vec3  Center_Color = imageLoad (Input_Image, Pixel).rgb;
-  
-    // Budget is informational — denoiser always runs when dispatched.
-    // The CPU controls whether to dispatch denoise via Active_Denoise_Passes.
-  
-    // Batch-load all depth values for the 3×3 kernel in one shot
-    // Preload 9 depth values — center normal uses Depths[5] (right) and Depths[7] (up).
-    // Combined with 9 color loads = 18 total, vs. original 45 = 60% fewer memory ops.
-    float Depths[9];
-    ivec2 Sample_Positions[9];
-    int Idx = 0;
-    for (int Dy = -1; Dy <= 1; Dy++) {
-      for (int Dx = -1; Dx <= 1; Dx++) {
-        Sample_Positions[Idx] = clamp (Pixel + ivec2 (Dx, Dy) * Step_Size, ivec2 (0), Size - 1);
-        Depths[Idx] = imageLoad (Depth_Image, Sample_Positions[Idx]).r;
-        Idx++;
-      }
-    }
-    float Center_Depth = Depths[4];  // Center of 3×3 = index 4
-  
-    // Center normal from preloaded batch: Depths[5] = right, Depths[7] = up (at Step_Size offset).
-    // At larger step sizes, kernel-spaced gradients are more appropriate for the a-trous edge stopping.
-    vec3  Center_Normal = Normal_From_Depths (Center_Depth, Depths[5], Depths[7]);
-
-    // Compute center pixel luminance for edge stopping
-    float Center_Lum = log2 (1.0 + dot (Center_Color, vec3 (0.2126, 0.7152, 0.0722)));
-
-    // Initialize accumulator for weighted filter output
-    vec3  Sum    = vec3 (0.0);
-    float Weight = 0.0;
-  
-    // 3×3 sparse kernel at current step size — depths already cached
-    for (int I = 0; I < 9; I++) {
-      vec3  S_Color = imageLoad (Input_Image, Sample_Positions[I]).rgb;
-      float S_Depth = Depths[I];
-      float S_Lum   = log2 (1.0 + dot (S_Color, vec3 (0.2126, 0.7152, 0.0722)));
-  
-      // Spatial weight: Gaussian kernel
-      int Dx = (I % 3) - 1, Dy = (I / 3) - 1;
-      float W_Spatial = Kernel[abs(Dx)] * Kernel[abs(Dy)];
-  
-      // Depth edge stopping (sharper threshold preserves geometric edges)
-      float Depth_Diff = abs (Center_Depth - S_Depth) / max (Center_Depth, 0.1);
-      float W_Depth = exp (-Depth_Diff * 100.0);
-  
-      // Normal edge stopping: compute sample normal from cached depths.
-      // Use right neighbor (I+1 if in same row) and below neighbor (I+3 if exists).
-      // Fallback: use center depth if neighbor is out of the 3×3 grid.
-      float S_D_Right = ((I % 3) < 2) ? Depths[I + 1] : S_Depth;
-      float S_D_Up    = (I < 6) ? Depths[I + 3] : S_Depth;
-      vec3  S_Normal  = Normal_From_Depths (S_Depth, S_D_Right, S_D_Up);
-
-      // Pow(x,32) → chained squaring (5 muls vs log+mul+exp transcendental)
-      // On NVIDIA: saves ~6 MUFU cycles; on AMD: saves ~8 SALU cycles per sample
-      float Ndot = max (dot (Center_Normal, S_Normal), 0.0);
-      Ndot *= Ndot; Ndot *= Ndot; Ndot *= Ndot; Ndot *= Ndot; Ndot *= Ndot;  // x^32
-      float W_Normal = Ndot;
-  
-      // Luminance edge stopping (tighter threshold preserves color edges)
-      float Lum_Diff = abs (Center_Lum - S_Lum);
-      float W_Lum = exp (-Lum_Diff * Lum_Diff * 500.0);
-
-      // Combine all edge-stopping weights and accumulate
-      float W = W_Spatial * W_Depth * W_Normal * W_Lum;
-      Sum += S_Color * W;
-      Weight += W;
-    }
-
-    // Compute weighted average and store filtered result
-    vec3 Result = Sum / max (Weight, 1e-6);
-    imageStore (Output_Image, Pixel, vec4 (Result, 1.0));
-  }
-  }
-  
-  glsl shader postprocess comp {
-  #version 460
-  
-  layout(binding = 0, rgba16f) uniform image2D Color_Image;    // RT output (linear HDR, read-write in-place)
-  layout(binding = 1, r32f)   uniform image2D Depth_Image;    // Ray hit distance from closest-hit shader
-  layout(binding = 2, rgba16f) uniform image2D History_Image;  // Previous frame for temporal accumulation (linear HDR)
-  layout(binding = 3, rgba16f) uniform image2D Display_Image;  // Final tonemapped output (written instead of Color_Image)
-  
-  // fp16 RLE-packed push constants (56 bytes)
-  // Each uint holds two half-floats via packHalf2x16 encoding.  unpackHalf2x16
-  // is 1 ALU op on all modern GPUs — same cycle cost as reading a float.
-  layout(push_constant) uniform Push {
-    float Time;             // Full-precision seconds since start
-    uint  Dt_Frame;         // [15:0] = half(Delta_Time), [31:16] = Frame_Count
-    uint  Velocity;         // packHalf2x16(Velocity_X, Velocity_Z)
-    uint  Speed_Exposure;   // packHalf2x16(Speed, Exposure)
-    uint  Bloom_Vignette;   // packHalf2x16(Bloom_Strength, Vignette_Strength)
-    uint  Reproject[8];     // packHalf2x16-compressed 4×4 reprojection matrix (Proj * Prev_View * Inv_View)
-    uint  Inv_Proj_Diag;    // [15:0] = half(InvProj[0][0]), [31:16] = half(InvProj[1][1])
-    uint  Sun_Screen_Pos;   // packHalf2x16(Sun_Screen_U, Sun_Screen_V)
-    uint  Sun_Params;       // packHalf2x16(God_Ray_Intensity, Sun_On_Screen)
-  } Params;
-  
-  layout(local_size_x = 8, local_size_y = 8) in;
-  
-  // Shared memory focus depth broadcast
-  // Without shared memory, all 64 threads in the workgroup independently issue an imageLoad for
-  // the same center pixel — 64 redundant L2 cache probes.  By electing a single thread to load
-  // and broadcasting via shared memory, we reduce this to 1 load + 1 broadcast (which hits the
-  // LDS/shared memory bank, ~4 cycles on NVIDIA, ~2 cycles on AMD RDNA).
-  shared float Focus_Depth_Shared;
-  
-  // Spatiotemporal hash for film grain
-  float hash (vec2 p) {
-    vec3 p3 = fract (vec3 (p.xyx) * 0.1031);
-    p3 += dot (p3, p3.yzx + 33.33);
-    return fract ((p3.x + p3.y) * p3.z);
-  }
-  
-  // Decode compressed reprojection matrix from push constants
-  mat4 Decode_Reproject () {
-    mat4 M;
-    for (int I = 0; I < 8; I++) {
-      vec2 Pair = unpackHalf2x16 (Params.Reproject[I]);
-      M[I / 2][I % 2 * 2]     = Pair.x;
-      M[I / 2][I % 2 * 2 + 1] = Pair.y;
-    }
-    return M;
-  }
-  
-  void main () {
-    ivec2 Pixel = ivec2 (gl_GlobalInvocationID.xy);
-    ivec2 Size  = imageSize (Color_Image);
-  
-    // Unpack fp16 RLE push constants (1 ALU op each via unpackHalf2x16)
-    float Delta_Time     = unpackHalf2x16 (Params.Dt_Frame).x;
-    uint  Frame_Count    = (Params.Dt_Frame >> 16) & 0xFFFFu;
-    vec2  Vel            = unpackHalf2x16 (Params.Velocity);
-    vec2  SE             = unpackHalf2x16 (Params.Speed_Exposure);
-    float Speed          = SE.x;
-    float Exposure       = SE.y;
-    vec2  BV             = unpackHalf2x16 (Params.Bloom_Vignette);
-    float Bloom_Strength = BV.x;
-    float Vignette       = BV.y;
-  
-    // Elect lane 0 to load focus depth, broadcast to workgroup via LDS
-    if (gl_LocalInvocationIndex == 0u)
-      Focus_Depth_Shared = imageLoad (Depth_Image, Size / 2).r;
-    barrier ();
-
-    // Early-out for pixels outside the image bounds
-    if (Pixel.x >= Size.x or Pixel.y >= Size.y) return;
-
-    // Load current pixel color and depth
-    vec2 UV = (vec2 (Pixel) + 0.5) / vec2 (Size);
-    vec3 Color = imageLoad (Color_Image, Pixel).rgb;
-    float Depth = imageLoad (Depth_Image, Pixel).r;
-
-    // Contrast Adaptive Sharpening (CAS) — FidelityFX-style pre-TAA sharpening.
-    // Applied here in raw linear HDR space so center + neighbors are in the same
-    // domain.  Reinhard-compresses min/max to [0,1] for adaptive weight calculation,
-    // then sharpens in linear space.  Counteracts bilinear upscale softness and
-    // checkerboard stale-pixel blur without introducing space-mismatch artifacts.
-    {
-      vec3 N = imageLoad (Color_Image, ivec2 (Pixel.x, max (Pixel.y - 1, 0))).rgb;
-      vec3 S = imageLoad (Color_Image, ivec2 (Pixel.x, min (Pixel.y + 1, Size.y - 1))).rgb;
-      vec3 W = imageLoad (Color_Image, ivec2 (max (Pixel.x - 1, 0), Pixel.y)).rgb;
-      vec3 E = imageLoad (Color_Image, ivec2 (min (Pixel.x + 1, Size.x - 1), Pixel.y)).rgb;
-      vec3 Mn = min (min (N, S), min (W, E));
-      vec3 Mx = max (max (N, S), max (W, E));
-      // Reinhard-compress to [0,1] for adaptive weight (handles HDR > 1.0 gracefully)
-      vec3 Mn_T = Mn / (1.0 + Mn);
-      vec3 Mx_T = Mx / (1.0 + Mx);
-      vec3 Rcp_Range = 1.0 / (Mx_T - Mn_T + 0.04);
-      vec3 Sharpness = clamp (min (Mn_T, 1.0 - Mx_T) * Rcp_Range, 0.0, 1.0) * 0.5;
-      vec3 Avg = (N + S + W + E) * 0.25;
-      Color = max (mix (Avg, Color, 1.0 + Sharpness * 2.0), vec3 (0.0));
-    }
-
-    // 0. Temporal accumulation (TAA) with motion-vector reprojection
-    // Previous TAA blended History[Pixel] with Color[Pixel] — same screen
-    // coordinate.  When the camera translates, world geometry shifts on screen
-    // (parallax), causing the old frame's content to ghost into the new frame.
-    // Surfaces at glancing angles (like a wall beside the player) have the
-    // worst parallax and the most visible ghosting.
-    //
-    // Fix: reconstruct each pixel's view-space position from depth + inverse
-    // projection, then reproject through Prev_View * Inverse_View to find where
-    // that world point appeared last frame.  Sample history from *that* location
-    // instead of the current pixel.  Neighborhood clamping prevents stale data
-    // from bleeding in when the reprojected sample is disoccluded.
-    if (Frame_Count > 0u) {
-      // Reconstruct view-space position from NDC + linear hit distance
-      vec2  Inv_P       = unpackHalf2x16 (Params.Inv_Proj_Diag);
-      vec2  NDC         = UV * 2.0 - 1.0;
-      vec3  View_Dir    = normalize (vec3 (NDC.x * Inv_P.x, NDC.y * Inv_P.y, -1.0));
-      vec3  View_Pos    = View_Dir * Depth;
-  
-      // Reproject: Proj * Prev_View * Inverse_View * View_Pos → previous clip-space
-      mat4  R           = Decode_Reproject ();
-      vec4  Prev_Clip   = R * vec4 (View_Pos, 1.0);
-      vec2  Prev_UV     = Prev_Clip.xy / Prev_Clip.w * 0.5 + 0.5;
-  
-      // Fetch history from reprojected location (nearest-neighbor — imageLoad requires integer coords)
-      ivec2 Prev_Pixel  = ivec2 (Prev_UV * vec2 (Size));
-      bool  On_Screen   = all (greaterThanEqual (Prev_Pixel, ivec2 (0))) and
-                          all (lessThan (Prev_Pixel, Size));
-  
-      // Blend current frame with reprojected history
-      if (On_Screen) {
-        vec3 History = imageLoad (History_Image, Prev_Pixel).rgb;
-  
-        // Q2RTX-inspired variance-based neighborhood clamping
-        // Instead of simple min/max (too wide in HDR), compute mean ± k*sigma.
-        // This creates a tight, statistically-motivated clamp that rejects ghost
-        // colors aggressively while allowing natural temporal blending.
-        vec3 M1 = Color, M2 = Color * Color;  // Moments for variance computation
-        const ivec2 Offsets[4] = ivec2[4](ivec2(-1,0), ivec2(1,0), ivec2(0,-1), ivec2(0,1));
-        for (int I = 0; I < 4; I++) {
-          vec3 NS = imageLoad (Color_Image, clamp (Pixel + Offsets[I], ivec2(0), Size - 1)).rgb;
-          M1 += NS; M2 += NS * NS;
-        }
-        M1 /= 5.0; M2 /= 5.0;
-        vec3 Sigma = sqrt (max (M2 - M1 * M1, vec3 (0.0)));
-
-        // Tight clamp: mean ± 0.5 sigma rejects stale history aggressively
-        History = clamp (History, M1 - Sigma * 0.5, M1 + Sigma * 0.5);
-  
-        // Q2RTX-inspired anti-lag: luminance-based history rejection
-        // If the clamped history still differs significantly from the current frame,
-        // the surface has changed (new geometry, lighting change, disocclusion).
-        // Boost alpha toward 1.0 to reject stale history aggressively.
-        float Cur_Lum  = dot (Color, vec3 (0.2126, 0.7152, 0.0722));
-        float Hist_Lum = dot (History, vec3 (0.2126, 0.7152, 0.0722));
-        float Lum_Diff = abs (Cur_Lum - Hist_Lum) / max (Cur_Lum, 0.01);
-        float Anti_Lag = clamp (Lum_Diff * 3.0, 0.0, 1.0);  // >33% luminance change → full reject
-  
-        // Disocclusion detection
-        vec2 Screen_Disp = vec2 (Prev_Pixel - Pixel) / vec2 (Size);
-        float Disp_Len = length (Screen_Disp);
-        float Disocclusion = clamp (Disp_Len * 20.0, 0.0, 1.0);  // >5% screen = fully rejected
-  
-        // Temporal blend (Q2RTX-inspired two-mode system)
-        float Is_Static = step (Speed, 5.0);
-  
-        // Static: 1/N convergence floored high — always keep 30% fresh frame
-        float Static_Alpha = max (1.0 / max (float (Frame_Count), 1.0), 0.30);
-  
-        // Moving: very aggressive current-frame dominance.
-        // Q2RTX philosophy: spatial denoiser handles noise, TAA should NOT ghost.
-        float Motion      = clamp (Speed * 0.02, 0.0, 1.0);  // ISA: reciprocal multiply vs division
-        float Base        = mix (0.50, 0.95, Motion);  // Even slow motion → 50% current frame
-        float Fps_Adapt   = clamp ((Delta_Time - 0.016) * 20.0, 0.0, 1.0);
-        float Moving_Alpha = max (max (max (Base, Fps_Adapt), Disocclusion), Anti_Lag);
-
-        // Blend between static and moving alpha based on camera speed
-        float Alpha = mix (Moving_Alpha, Static_Alpha, Is_Static);
-
-        Color = mix (History, Color, Alpha);
-      }
-
-      // Off-screen → keep current frame as-is (no history to blend)
-    }
-
-    // Write blended result to history for next frame (pre-tonemap, linear HDR)
-    imageStore (History_Image, Pixel, vec4 (Color, 1.0));
-  
-    // DOF and motion blur disabled — at low internal resolution (384×216 → 1080p)
-    // the bilinear upscale already softens the image.  Adding blur on top of that
-    // makes the output unacceptably blurry and hard to read.  These effects should
-    // be re-enabled when GPU_RT runs at native resolution.
-  
-    // 1. Bloom: 4-tap cross bright extraction + sun rays
-    // Horizontal + vertical taps create a cross-shaped bloom pattern (fake god rays)
-    // Bloom threshold in linear space (0.4 linear ≈ 0.66 sRGB — bright highlights only)
-    vec3 Bl = max (imageLoad (Color_Image, clamp (Pixel + ivec2 ( 3, 0), ivec2 (0), Size - 1)).rgb - 0.4, vec3 (0.0))
-             + max (imageLoad (Color_Image, clamp (Pixel + ivec2 (-3, 0), ivec2 (0), Size - 1)).rgb - 0.4, vec3 (0.0))
-             + max (imageLoad (Color_Image, clamp (Pixel + ivec2 (0,  3), ivec2 (0), Size - 1)).rgb - 0.4, vec3 (0.0))
-             + max (imageLoad (Color_Image, clamp (Pixel + ivec2 (0, -3), ivec2 (0), Size - 1)).rgb - 0.4, vec3 (0.0));
-    Color += Bl * Bloom_Strength;
-  
-    // 1b. Screen-space god rays (Q2RTX-inspired radial light shafts)
-    // When the sun is on screen, march radially from each pixel toward the sun
-    // position, accumulating bright sky samples.  This creates volumetric-looking
-    // light shafts streaming from the sun through gaps in geometry.
-    vec2  Sun_UV  = unpackHalf2x16 (Params.Sun_Screen_Pos);
-    vec2  Sun_P   = unpackHalf2x16 (Params.Sun_Params);
-    float GR_Intensity = Sun_P.x;
-    float Sun_Visible  = Sun_P.y;
-
-    // Apply god rays when sun is visible on screen
-    if (Sun_Visible > 0.5 and GR_Intensity > 0.0) {
-      vec2 Delta = Sun_UV - UV;
-      float Dist = length (Delta);
-      if (Dist > 0.001) {
-        vec2  Dir    = Delta / Dist;
-
-        // Incremental stepping replaces multiply-per-iteration
-        // Saves 8 float casts + 8 vec2 multiplies (replaced with 8 vec2 additions)
-        vec2  Step_Vec = Dir * (min (Dist, 0.3) / 8.0);
-        vec3  Accum  = vec3 (0.0);
-        float Falloff = 1.0;
-        vec2  Sample_UV = UV;
-        for (int S = 1; S <= 8; S++) {
-          Sample_UV += Step_Vec;
-          ivec2 Sample_Px = ivec2 (Sample_UV * vec2 (Size));
-          if (all (greaterThanEqual (Sample_Px, ivec2 (0))) and all (lessThan (Sample_Px, Size))) {
-            vec3  Sample_C = imageLoad (Color_Image, Sample_Px).rgb;
-            float Sample_D = imageLoad (Depth_Image, Sample_Px).r;
-
-            // Only accumulate sky/bright pixels (depth > 5000 = sky, or very bright)
-            float Is_Sky = step (5000.0, Sample_D);
-            float Bright = max (dot (Sample_C, vec3 (0.333)) - 0.3, 0.0);
-            Accum += Sample_C * max (Is_Sky, Bright * 0.5) * Falloff;
-          }
-          Falloff *= 0.85;  // Exponential decay away from sun
-        }
-
-        // Fade god rays based on distance from sun center (stronger near sun)
-        float Sun_Fade = 1.0 - clamp (Dist * 2.0, 0.0, 1.0);
-        Color += Accum * GR_Intensity * Sun_Fade / 8.0;
-      }
-    }
-  
-    // 2. Vignette + saturation + tonemap (all in linear space)
-    vec2  FC = UV - 0.5;
-    float D2 = dot (FC, FC);
-    Color  = Color * (1.0 - D2 * Vignette);
-    Color *= Exposure;
-  
-    // Saturation boost before tonemapping: push colors away from grey
-    float Luma = dot (Color, vec3 (0.2126, 0.7152, 0.0722));
-    Color = mix (vec3 (Luma), Color, 1.35);  // 35% saturation increase — punchy colors
-
-    // Warm color grading
-    Color *= vec3 (1.05, 1.01, 0.92);  // Warm grade: boost reds, cut blues slightly
-  
-    // ACES filmic tone mapping (operates on linear HDR values)
-    Color  = clamp (Color * (2.51 * Color + 0.03) / (Color * (2.43 * Color + 0.59) + 0.14), 0.0, 1.0);
-  
-    // Post-tonemap contrast: shadow deepening for rich, cinematic look.
-    // pow(1.16) darkens midtones/shadows while keeping highlights readable.
-    Color = pow (max (Color, vec3 (0.0)), vec3 (1.16));
-  
-    // 3. Blue-noise dithering (Q2RTX-inspired)
-    // Dither by ±0.5/255 in the output before sRGB conversion to prevent banding
-    // in dark gradients. The blit to B8G8R8A8_SRGB swapchain handles sRGB encoding.
-    float Dither = hash (vec2 (Pixel) + Params.Time * 1.618) - 0.5;  // [-0.5, 0.5]
-    Color += Dither / 255.0;
-
-    // Write final color to the display output image (NOT Color_Image, which must
-    // stay in raw RT space so checkerboard stale pixels remain consistent)
-    imageStore (Display_Image, Pixel, vec4 (clamp (Color, 0.0, 1.0), 1.0));
-  }
-}
+} // main
