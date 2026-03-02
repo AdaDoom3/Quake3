@@ -9227,38 +9227,70 @@ int main (int Argc, char **Argv) {
   // Create R32F depth image for postprocessing
   {
     Depth_Image.Format = VK_FORMAT_R32_SFLOAT;
-    VK_CHECK (vkCreateImage (Device, &(VkImageCreateInfo){
-      .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .imageType = VK_IMAGE_TYPE_2D,
-      .format = VK_FORMAT_R32_SFLOAT, .extent = {Render_Width, Render_Height, 1},
-      .mipLevels = 1, .arrayLayers = 1, .samples = VK_SAMPLE_COUNT_1_BIT,
-      .tiling = VK_IMAGE_TILING_OPTIMAL, .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
-      .usage = VK_IMAGE_USAGE_STORAGE_BIT}, NULL, &Depth_Image.Image));
+    VK_CHECK (vkCreateImage (/*device      =>*/ Device,
+                             /*pCreateInfo =>*/ &(VkImageCreateInfo){
+                               .sType         = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+                               .imageType     = VK_IMAGE_TYPE_2D,
+                               .format        = VK_FORMAT_R32_SFLOAT,
+                               .extent        = {Render_Width, Render_Height, 1},
+                               .mipLevels     = 1,
+                               .arrayLayers   = 1,
+                               .samples       = VK_SAMPLE_COUNT_1_BIT,
+                               .tiling        = VK_IMAGE_TILING_OPTIMAL,
+                               .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+                               .usage         = VK_IMAGE_USAGE_STORAGE_BIT},
+                             /*pAllocator  =>*/ NULL,
+                             /*pImage      =>*/ &Depth_Image.Image));
     VkMemoryRequirements Mem_Req;
     vkGetImageMemoryRequirements (Device, Depth_Image.Image, &Mem_Req);
-    VK_CHECK (vkAllocateMemory (Device, &(VkMemoryAllocateInfo){
-      .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .allocationSize = Mem_Req.size,
-      .memoryTypeIndex = Find_Memory_Type (Mem_Req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)},
-      NULL, &Depth_Image.Memory));
+    VK_CHECK (vkAllocateMemory (/*device       =>*/ Device,
+                                /*pAllocateInfo =>*/ &(VkMemoryAllocateInfo){
+                                  .sType           = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+                                  .allocationSize  = Mem_Req.size,
+                                  .memoryTypeIndex = Find_Memory_Type (Mem_Req.memoryTypeBits,
+                                                                       VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)},
+                                /*pAllocator    =>*/ NULL,
+                                /*pMemory       =>*/ &Depth_Image.Memory));
     VK_CHECK (vkBindImageMemory (Device, Depth_Image.Image, Depth_Image.Memory, 0));
-    VK_CHECK (vkCreateImageView (Device, &(VkImageViewCreateInfo){
-      .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO, .image = Depth_Image.Image,
-      .viewType = VK_IMAGE_VIEW_TYPE_2D, .format = VK_FORMAT_R32_SFLOAT,
-      .subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1}}, NULL, &Depth_Image.View));
+    VK_CHECK (vkCreateImageView (/*device      =>*/ Device,
+                                 /*pCreateInfo =>*/ &(VkImageViewCreateInfo){
+                                   .sType            = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+                                   .image            = Depth_Image.Image,
+                                   .viewType         = VK_IMAGE_VIEW_TYPE_2D,
+                                   .format           = VK_FORMAT_R32_SFLOAT,
+                                   .subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1}},
+                                 /*pAllocator  =>*/ NULL,
+                                 /*pView       =>*/ &Depth_Image.View));
 
     // Transition depth image to general layout
     VkCommandBuffer Cmd;
-    VK_CHECK (vkAllocateCommandBuffers (Device, &(VkCommandBufferAllocateInfo){
-      .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
-      .commandPool = Command_Pool, .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY, .commandBufferCount = 1}, &Cmd));
-    VK_CHECK (vkBeginCommandBuffer (Cmd, &(VkCommandBufferBeginInfo){
-      .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO, .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT}));
-    Image_Layout_Barrier (Cmd, Depth_Image.Image,
-      VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL,
-      0, VK_ACCESS_SHADER_WRITE_BIT,
-      VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR);
+    VK_CHECK (vkAllocateCommandBuffers (/*device        =>*/ Device,
+                                        /*pAllocateInfo =>*/ &(VkCommandBufferAllocateInfo){
+                                          .sType              = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+                                          .commandPool        = Command_Pool,
+                                          .level              = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+                                          .commandBufferCount = 1},
+                                        /*pCommandBuffers =>*/ &Cmd));
+    VK_CHECK (vkBeginCommandBuffer (/*commandBuffer =>*/ Cmd,
+                                    /*pBeginInfo    =>*/ &(VkCommandBufferBeginInfo){
+                                      .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+                                      .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT}));
+    Image_Layout_Barrier (/*Command_Buffer     =>*/ Cmd,
+                          /*Image              =>*/ Depth_Image.Image,
+                          /*Old_Layout         =>*/ VK_IMAGE_LAYOUT_UNDEFINED,
+                          /*New_Layout         =>*/ VK_IMAGE_LAYOUT_GENERAL,
+                          /*Source_Access      =>*/ 0,
+                          /*Destination_Access =>*/ VK_ACCESS_SHADER_WRITE_BIT,
+                          /*Source_Stage       =>*/ VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                          /*Destination_Stage  =>*/ VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR);
     VK_CHECK (vkEndCommandBuffer (Cmd));
-    VK_CHECK (vkQueueSubmit (Queue, 1, &(VkSubmitInfo){
-      .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO, .commandBufferCount = 1, .pCommandBuffers = &Cmd}, VK_NULL_HANDLE));
+    VK_CHECK (vkQueueSubmit (/*queue       =>*/ Queue,
+                             /*submitCount =>*/ 1,
+                             /*pSubmits    =>*/ &(VkSubmitInfo){
+                               .sType              = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+                               .commandBufferCount = 1,
+                               .pCommandBuffers    = &Cmd},
+                             /*fence       =>*/ VK_NULL_HANDLE));
     vkQueueWaitIdle (Queue);
     vkFreeCommandBuffers (Device, Command_Pool, 1, &Cmd);
   }
@@ -9267,18 +9299,33 @@ int main (int Argc, char **Argv) {
   History_Image = Image_Storage_Create (Render_Width, Render_Height);
   {
     VkCommandBuffer Cmd;
-    VK_CHECK (vkAllocateCommandBuffers (Device, &(VkCommandBufferAllocateInfo){
-      .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
-      .commandPool = Command_Pool, .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY, .commandBufferCount = 1}, &Cmd));
-    VK_CHECK (vkBeginCommandBuffer (Cmd, &(VkCommandBufferBeginInfo){
-      .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO, .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT}));
-    Image_Layout_Barrier (Cmd, History_Image.Image,
-      VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL,
-      0, VK_ACCESS_SHADER_WRITE_BIT,
-      VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+    VK_CHECK (vkAllocateCommandBuffers (/*device        =>*/ Device,
+                                        /*pAllocateInfo =>*/ &(VkCommandBufferAllocateInfo){
+                                          .sType              = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+                                          .commandPool        = Command_Pool,
+                                          .level              = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+                                          .commandBufferCount = 1},
+                                        /*pCommandBuffers =>*/ &Cmd));
+    VK_CHECK (vkBeginCommandBuffer (/*commandBuffer =>*/ Cmd,
+                                    /*pBeginInfo    =>*/ &(VkCommandBufferBeginInfo){
+                                      .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+                                      .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT}));
+    Image_Layout_Barrier (/*Command_Buffer     =>*/ Cmd,
+                          /*Image              =>*/ History_Image.Image,
+                          /*Old_Layout         =>*/ VK_IMAGE_LAYOUT_UNDEFINED,
+                          /*New_Layout         =>*/ VK_IMAGE_LAYOUT_GENERAL,
+                          /*Source_Access      =>*/ 0,
+                          /*Destination_Access =>*/ VK_ACCESS_SHADER_WRITE_BIT,
+                          /*Source_Stage       =>*/ VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                          /*Destination_Stage  =>*/ VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
     VK_CHECK (vkEndCommandBuffer (Cmd));
-    VK_CHECK (vkQueueSubmit (Queue, 1, &(VkSubmitInfo){
-      .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO, .commandBufferCount = 1, .pCommandBuffers = &Cmd}, VK_NULL_HANDLE));
+    VK_CHECK (vkQueueSubmit (/*queue       =>*/ Queue,
+                             /*submitCount =>*/ 1,
+                             /*pSubmits    =>*/ &(VkSubmitInfo){
+                               .sType              = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+                               .commandBufferCount = 1,
+                               .pCommandBuffers    = &Cmd},
+                             /*fence       =>*/ VK_NULL_HANDLE));
     vkQueueWaitIdle (Queue);
     vkFreeCommandBuffers (Device, Command_Pool, 1, &Cmd);
   }
@@ -9289,26 +9336,42 @@ int main (int Argc, char **Argv) {
   Postprocess_Output_Image = Image_Storage_Create (Render_Width, Render_Height);
   {
     VkCommandBuffer Cmd;
-    VK_CHECK (vkAllocateCommandBuffers (Device, &(VkCommandBufferAllocateInfo){
-      .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
-      .commandPool = Command_Pool, .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY, .commandBufferCount = 1}, &Cmd));
-    VK_CHECK (vkBeginCommandBuffer (Cmd, &(VkCommandBufferBeginInfo){
-      .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO, .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT}));
-    Image_Layout_Barrier (Cmd, Postprocess_Output_Image.Image,
-      VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL,
-      0, VK_ACCESS_SHADER_WRITE_BIT,
-      VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+    VK_CHECK (vkAllocateCommandBuffers (/*device        =>*/ Device,
+                                        /*pAllocateInfo =>*/ &(VkCommandBufferAllocateInfo){
+                                          .sType              = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+                                          .commandPool        = Command_Pool,
+                                          .level              = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+                                          .commandBufferCount = 1},
+                                        /*pCommandBuffers =>*/ &Cmd));
+    VK_CHECK (vkBeginCommandBuffer (/*commandBuffer =>*/ Cmd,
+                                    /*pBeginInfo    =>*/ &(VkCommandBufferBeginInfo){
+                                      .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+                                      .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT}));
+    Image_Layout_Barrier (/*Command_Buffer     =>*/ Cmd,
+                          /*Image              =>*/ Postprocess_Output_Image.Image,
+                          /*Old_Layout         =>*/ VK_IMAGE_LAYOUT_UNDEFINED,
+                          /*New_Layout         =>*/ VK_IMAGE_LAYOUT_GENERAL,
+                          /*Source_Access      =>*/ 0,
+                          /*Destination_Access =>*/ VK_ACCESS_SHADER_WRITE_BIT,
+                          /*Source_Stage       =>*/ VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                          /*Destination_Stage  =>*/ VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
     VK_CHECK (vkEndCommandBuffer (Cmd));
-    VK_CHECK (vkQueueSubmit (Queue, 1, &(VkSubmitInfo){
-      .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO, .commandBufferCount = 1, .pCommandBuffers = &Cmd}, VK_NULL_HANDLE));
+    VK_CHECK (vkQueueSubmit (/*queue       =>*/ Queue,
+                             /*submitCount =>*/ 1,
+                             /*pSubmits    =>*/ &(VkSubmitInfo){
+                               .sType              = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+                               .commandBufferCount = 1,
+                               .pCommandBuffers    = &Cmd},
+                             /*fence       =>*/ VK_NULL_HANDLE));
     vkQueueWaitIdle (Queue);
     vkFreeCommandBuffers (Device, Command_Pool, 1, &Cmd);
   }
 
   // Allocate the camera uniform buffer sizeof(mat4)*2 + 16 (base) + 7*16 (environment vec4s) = 256 bytes
-  Camera_Uniform_Buffer = Buffer_Allocate (256,
-    VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
-    VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+  Camera_Uniform_Buffer = Buffer_Allocate (/*Size         =>*/ 256,
+                                           /*Usage        =>*/ VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
+                                           /*Memory_Flags =>*/ VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT
+                                                             | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
 
   // Load the BSP scene and spawn point (no CPU collision map - GPU handles physics via TLAS)
   Spawn Spawn_Point;
@@ -9356,18 +9419,33 @@ int main (int Argc, char **Argv) {
   Denoise_Ping_Image = Image_Storage_Create (Render_Width, Render_Height);
   {
     VkCommandBuffer Cmd;
-    VK_CHECK (vkAllocateCommandBuffers (Device, &(VkCommandBufferAllocateInfo){
-      .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
-      .commandPool = Command_Pool, .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY, .commandBufferCount = 1}, &Cmd));
-    VK_CHECK (vkBeginCommandBuffer (Cmd, &(VkCommandBufferBeginInfo){
-      .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO, .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT}));
-    Image_Layout_Barrier (Cmd, Denoise_Ping_Image.Image,
-      VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL,
-      0, VK_ACCESS_SHADER_WRITE_BIT,
-      VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+    VK_CHECK (vkAllocateCommandBuffers (/*device        =>*/ Device,
+                                        /*pAllocateInfo =>*/ &(VkCommandBufferAllocateInfo){
+                                          .sType              = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+                                          .commandPool        = Command_Pool,
+                                          .level              = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+                                          .commandBufferCount = 1},
+                                        /*pCommandBuffers =>*/ &Cmd));
+    VK_CHECK (vkBeginCommandBuffer (/*commandBuffer =>*/ Cmd,
+                                    /*pBeginInfo    =>*/ &(VkCommandBufferBeginInfo){
+                                      .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+                                      .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT}));
+    Image_Layout_Barrier (/*Command_Buffer     =>*/ Cmd,
+                          /*Image              =>*/ Denoise_Ping_Image.Image,
+                          /*Old_Layout         =>*/ VK_IMAGE_LAYOUT_UNDEFINED,
+                          /*New_Layout         =>*/ VK_IMAGE_LAYOUT_GENERAL,
+                          /*Source_Access      =>*/ 0,
+                          /*Destination_Access =>*/ VK_ACCESS_SHADER_WRITE_BIT,
+                          /*Source_Stage       =>*/ VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                          /*Destination_Stage  =>*/ VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
     VK_CHECK (vkEndCommandBuffer (Cmd));
-    VK_CHECK (vkQueueSubmit (Queue, 1, &(VkSubmitInfo){
-      .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO, .commandBufferCount = 1, .pCommandBuffers = &Cmd}, VK_NULL_HANDLE));
+    VK_CHECK (vkQueueSubmit (/*queue       =>*/ Queue,
+                             /*submitCount =>*/ 1,
+                             /*pSubmits    =>*/ &(VkSubmitInfo){
+                               .sType              = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+                               .commandBufferCount = 1,
+                               .pCommandBuffers    = &Cmd},
+                             /*fence       =>*/ VK_NULL_HANDLE));
     vkQueueWaitIdle (Queue);
     vkFreeCommandBuffers (Device, Command_Pool, 1, &Cmd);
   }
