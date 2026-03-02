@@ -6565,9 +6565,11 @@ void Hull_Upload (const Convex_Hull *Hull) {
 
   // Allocate the hull storage buffer on first use, then upload the packed data
   if (not Hull_Storage_Buffer.Buffer)
-    Hull_Storage_Buffer = Buffer_Allocate (sizeof (Gpu_Hull),
-      VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
-      VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+    Hull_Storage_Buffer = Buffer_Allocate (/*Size         =>*/ sizeof (Gpu_Hull),
+                                           /*Usage        =>*/ VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
+                                                             | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
+                                           /*Memory_Flags =>*/ VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT
+                                                             | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
   Buffer_Upload (Hull_Storage_Buffer, &Packed, sizeof Packed);
 }
 
@@ -6588,32 +6590,38 @@ void Physics_Pipeline_Create () {
   };
 
   // Create the descriptor set layout with all 6 physics bindings
-  VK_CHECK (vkCreateDescriptorSetLayout (Device,
-    &(VkDescriptorSetLayoutCreateInfo){
-      .sType        = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
-      .bindingCount = 6,
-      .pBindings    = Bindings},
-    NULL, &Physics_Descriptor_Layout));
+  VK_CHECK (vkCreateDescriptorSetLayout (/*device      =>*/ Device,
+                                         /*pCreateInfo =>*/ &(VkDescriptorSetLayoutCreateInfo){
+                                           .sType        = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+                                           .bindingCount = 6,
+                                           .pBindings    = Bindings},
+                                         /*pAllocator  =>*/ NULL,
+                                         /*pSetLayout  =>*/ &Physics_Descriptor_Layout));
 
   // Create the pipeline layout with push constants for per-frame Gpu_Input delivery
   VkPushConstantRange Push_Range = {VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof (Gpu_Input)};
-  VK_CHECK (vkCreatePipelineLayout (Device,
-    &(VkPipelineLayoutCreateInfo){
-      .sType                  = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
-      .setLayoutCount         = 1,
-      .pSetLayouts            = &Physics_Descriptor_Layout,
-      .pushConstantRangeCount = 1,
-      .pPushConstantRanges    = &Push_Range},
-    NULL, &Physics_Pipeline_Layout));
+  VK_CHECK (vkCreatePipelineLayout (/*device          =>*/ Device,
+                                    /*pCreateInfo     =>*/ &(VkPipelineLayoutCreateInfo){
+                                      .sType                  = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+                                      .setLayoutCount         = 1,
+                                      .pSetLayouts            = &Physics_Descriptor_Layout,
+                                      .pushConstantRangeCount = 1,
+                                      .pPushConstantRanges    = &Push_Range},
+                                    /*pAllocator      =>*/ NULL,
+                                    /*pPipelineLayout =>*/ &Physics_Pipeline_Layout));
 
   // Load the pre-compiled physics compute shader and create the compute pipeline
   VkShaderModule Physics_Module = Shader_Module_Load (Shader_Path(Physics));
-  VK_CHECK (vkCreateComputePipelines (Device, Pipeline_Cache, 1,
-    &(VkComputePipelineCreateInfo){
-      .sType  = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
-      .stage  = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, NULL, 0, VK_SHADER_STAGE_COMPUTE_BIT, Physics_Module, "main", NULL},
-      .layout = Physics_Pipeline_Layout},
-    NULL, &Physics_Pipeline));
+  VK_CHECK (vkCreateComputePipelines (/*device          =>*/ Device,
+                                      /*pipelineCache   =>*/ Pipeline_Cache,
+                                      /*createInfoCount =>*/ 1,
+                                      /*pCreateInfos    =>*/ &(VkComputePipelineCreateInfo){
+                                        .sType  = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
+                                        .stage  = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, NULL, 0,
+                                                   VK_SHADER_STAGE_COMPUTE_BIT, Physics_Module, "main", NULL},
+                                        .layout = Physics_Pipeline_Layout},
+                                      /*pAllocator      =>*/ NULL,
+                                      /*pPipelines      =>*/ &Physics_Pipeline));
   vkDestroyShaderModule (Device, Physics_Module, NULL);
 }
 
@@ -6624,9 +6632,11 @@ void Physics_Pipeline_Create () {
 void Physics_Resources_Create (const Player *Initial_State) {
 
   // Allocate the host-visible player state buffer for GPU read-write access each frame
-  Player_State_Buffer = Buffer_Allocate (sizeof (Gpu_Player),
-    VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
-    VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+  Player_State_Buffer = Buffer_Allocate (/*Size         =>*/ sizeof (Gpu_Player),
+                                         /*Usage        =>*/ VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
+                                                           | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
+                                         /*Memory_Flags =>*/ VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT
+                                                           | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
 
   // Initialize the GPU player state from the spawn point with a capsule collider
   Gpu_Player Initial_GPU_State = {
@@ -6641,18 +6651,22 @@ void Physics_Resources_Create (const Player *Initial_State) {
 
   // Initialize the hull storage buffer with a 1-vertex dummy (replaced when a real hull is loaded)
   if (not Hull_Storage_Buffer.Buffer) {
-    Hull_Storage_Buffer = Buffer_Allocate (sizeof (Gpu_Hull),
-      VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
-      VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+    Hull_Storage_Buffer = Buffer_Allocate (/*Size         =>*/ sizeof (Gpu_Hull),
+                                           /*Usage        =>*/ VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
+                                                             | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
+                                           /*Memory_Flags =>*/ VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT
+                                                             | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
     Gpu_Hull Empty = {0};
     Empty.Count = 1;
     Buffer_Upload (Hull_Storage_Buffer, &Empty, sizeof Empty);
   }
 
   // Allocate the projectile pool buffer (binding 5)
-  Projectile_Buffer = Buffer_Allocate (sizeof (Gpu_Projectile_Pool),
-    VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
-    VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+  Projectile_Buffer = Buffer_Allocate (/*Size         =>*/ sizeof (Gpu_Projectile_Pool),
+                                       /*Usage        =>*/ VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
+                                                         | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
+                                       /*Memory_Flags =>*/ VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT
+                                                         | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
   Gpu_Projectile_Pool Empty_Pool = {0};
   Buffer_Upload (Projectile_Buffer, &Empty_Pool, sizeof Empty_Pool);
 
@@ -6660,22 +6674,22 @@ void Physics_Resources_Create (const Player *Initial_State) {
   VkDescriptorPoolSize Pool_Sizes[] = {
     {VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, 1},
     {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,             5}}; // 5 storage buffers: vertex, index, player, hull, projectiles
-  VK_CHECK (vkCreateDescriptorPool (Device,
-    &(VkDescriptorPoolCreateInfo){
-      .sType         = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
-      .maxSets       = 1,
-      .poolSizeCount = 2,
-      .pPoolSizes    = Pool_Sizes},
-    NULL, &Physics_Descriptor_Pool));
+  VK_CHECK (vkCreateDescriptorPool (/*device          =>*/ Device,
+                                    /*pCreateInfo     =>*/ &(VkDescriptorPoolCreateInfo){
+                                      .sType         = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
+                                      .maxSets       = 1,
+                                      .poolSizeCount = 2,
+                                      .pPoolSizes    = Pool_Sizes},
+                                    /*pAllocator      =>*/ NULL,
+                                    /*pDescriptorPool =>*/ &Physics_Descriptor_Pool));
 
-  // Submit Vulkan command
-  VK_CHECK (vkAllocateDescriptorSets (Device,
-    &(VkDescriptorSetAllocateInfo){
-      .sType              = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
-      .descriptorPool     = Physics_Descriptor_Pool,
-      .descriptorSetCount = 1,
-      .pSetLayouts        = &Physics_Descriptor_Layout},
-    &Physics_Descriptor_Set));
+  VK_CHECK (vkAllocateDescriptorSets (/*device          =>*/ Device,
+                                      /*pAllocateInfo   =>*/ &(VkDescriptorSetAllocateInfo){
+                                        .sType              = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+                                        .descriptorPool     = Physics_Descriptor_Pool,
+                                        .descriptorSetCount = 1,
+                                        .pSetLayouts        = &Physics_Descriptor_Layout},
+                                      /*pDescriptorSets =>*/ &Physics_Descriptor_Set));
 
   // Write all 5 descriptor bindings: TLAS, vertex buffer, index buffer, player state, hull data
   VkWriteDescriptorSetAccelerationStructureKHR Acceleration_Write = {
@@ -6715,36 +6729,53 @@ Player Physics_Dispatch (Input In, float Dt) {
 
   // Record a one-shot command buffer for the physics compute dispatch
   VK_CHECK (vkResetCommandBuffer (Command_Buffer, 0));
-  VK_CHECK (vkBeginCommandBuffer (Command_Buffer,
-    &(VkCommandBufferBeginInfo){
-      .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
-      .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT}));
+  VK_CHECK (vkBeginCommandBuffer (/*commandBuffer =>*/ Command_Buffer,
+                                  /*pBeginInfo    =>*/ &(VkCommandBufferBeginInfo){
+                                    .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+                                    .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT}));
 
   // Bind the physics pipeline and descriptors, push the input, dispatch a single workgroup
   vkCmdBindPipeline       (Command_Buffer, VK_PIPELINE_BIND_POINT_COMPUTE, Physics_Pipeline);
-  vkCmdBindDescriptorSets (Command_Buffer, VK_PIPELINE_BIND_POINT_COMPUTE, Physics_Pipeline_Layout,
-                           0, 1, &Physics_Descriptor_Set, 0, NULL);
-  vkCmdPushConstants      (Command_Buffer, Physics_Pipeline_Layout, VK_SHADER_STAGE_COMPUTE_BIT,
-                           0, sizeof GPU_Input, &GPU_Input);
+  vkCmdBindDescriptorSets (/*commandBuffer      =>*/ Command_Buffer,
+                           /*pipelineBindPoint   =>*/ VK_PIPELINE_BIND_POINT_COMPUTE,
+                           /*layout              =>*/ Physics_Pipeline_Layout,
+                           /*firstSet            =>*/ 0,
+                           /*descriptorSetCount  =>*/ 1,
+                           /*pDescriptorSets     =>*/ &Physics_Descriptor_Set,
+                           /*dynamicOffsetCount  =>*/ 0,
+                           /*pDynamicOffsets     =>*/ NULL);
+  vkCmdPushConstants      (/*commandBuffer =>*/ Command_Buffer,
+                           /*layout        =>*/ Physics_Pipeline_Layout,
+                           /*stageFlags    =>*/ VK_SHADER_STAGE_COMPUTE_BIT,
+                           /*offset        =>*/ 0,
+                           /*size          =>*/ sizeof GPU_Input,
+                           /*pValues       =>*/ &GPU_Input);
   vkCmdDispatch           (Command_Buffer, 1, 1, 1);
 
   // Memory barrier: ensure compute shader writes are visible to the host before readback
-  vkCmdPipelineBarrier (Command_Buffer,
-    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_HOST_BIT, 0,
-    1, &(VkMemoryBarrier){
-      .sType         = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
-      .srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT,
-      .dstAccessMask = VK_ACCESS_HOST_READ_BIT},
-    0, NULL, 0, NULL);
+  vkCmdPipelineBarrier (/*commandBuffer            =>*/ Command_Buffer,
+                        /*srcStageMask             =>*/ VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                        /*dstStageMask             =>*/ VK_PIPELINE_STAGE_HOST_BIT,
+                        /*dependencyFlags          =>*/ 0,
+                        /*memoryBarrierCount       =>*/ 1,
+                        /*pMemoryBarriers          =>*/ &(VkMemoryBarrier){
+                          .sType         = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
+                          .srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT,
+                          .dstAccessMask = VK_ACCESS_HOST_READ_BIT},
+                        /*bufferMemoryBarrierCount =>*/ 0,
+                        /*pBufferMemoryBarriers    =>*/ NULL,
+                        /*imageMemoryBarrierCount  =>*/ 0,
+                        /*pImageMemoryBarriers     =>*/ NULL);
 
   // Submit the command buffer and wait for the GPU to finish
   VK_CHECK (vkEndCommandBuffer (Command_Buffer));
-  VK_CHECK (vkQueueSubmit (Queue, 1,
-    &(VkSubmitInfo){
-      .sType              = VK_STRUCTURE_TYPE_SUBMIT_INFO,
-      .commandBufferCount = 1,
-      .pCommandBuffers    = &Command_Buffer},
-    VK_NULL_HANDLE));
+  VK_CHECK (vkQueueSubmit (/*queue       =>*/ Queue,
+                           /*submitCount =>*/ 1,
+                           /*pSubmits    =>*/ &(VkSubmitInfo){
+                             .sType              = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+                             .commandBufferCount = 1,
+                             .pCommandBuffers    = &Command_Buffer},
+                           /*fence       =>*/ VK_NULL_HANDLE));
   VK_CHECK (vkQueueWaitIdle (Queue));
 
   // Read back the updated player state from the GPU buffer
@@ -7301,12 +7332,13 @@ VkShaderModule Shader_Module_Load (const char *Path) {
 
   // Wrap the raw SPIR-V code in a Vulkan shader module
   VkShaderModule Module;
-  VK_CHECK (vkCreateShaderModule (Device,
-                                  &(VkShaderModuleCreateInfo){
+  VK_CHECK (vkCreateShaderModule (/*device      =>*/ Device,
+                                  /*pCreateInfo =>*/ &(VkShaderModuleCreateInfo){
                                     .sType    = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
                                     .codeSize = (size_t)Size,
                                     .pCode    = Code},
-                                  NULL, &Module));
+                                  /*pAllocator  =>*/ NULL,
+                                  /*pShaderModule =>*/ &Module));
 
   // Release allocated memory
   free (Code);
