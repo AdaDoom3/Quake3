@@ -6044,8 +6044,12 @@ void Raytracing_Frame (Gpu_Postprocess_Push PP) {
 
   // Acquire the next swapchain image (handle OUT_OF_DATE from window resize)
   uint Image_Index;
-  { VkResult R = vkAcquireNextImageKHR (Device, Swapchain, UINT64_MAX,
-                                        Semaphore_Image_Available, VK_NULL_HANDLE, &Image_Index);
+  { VkResult R = vkAcquireNextImageKHR (/*device      =>*/ Device,
+                                        /*swapchain   =>*/ Swapchain,
+                                        /*timeout     =>*/ UINT64_MAX,
+                                        /*semaphore   =>*/ Semaphore_Image_Available,
+                                        /*fence       =>*/ VK_NULL_HANDLE,
+                                        /*pImageIndex =>*/ &Image_Index);
     if (R == VK_ERROR_OUT_OF_DATE_KHR) { Swapchain_Dirty = 1; return; }
     if (R != VK_SUCCESS and R != VK_SUBOPTIMAL_KHR) {
       fprintf (stderr, "[vulkan] acquire error %d at %s:%d\n", R, __FILE__, __LINE__); exit (1);
@@ -6055,23 +6059,34 @@ void Raytracing_Frame (Gpu_Postprocess_Push PP) {
   // Reset the fence and begin recording the frame's command buffer
   VK_CHECK (vkResetFences (Device, 1, &Fence));
   VK_CHECK (vkResetCommandBuffer (Command_Buffer, 0));
-  VK_CHECK (vkBeginCommandBuffer (Command_Buffer,
-                                  &(VkCommandBufferBeginInfo){.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO}));
+  VK_CHECK (vkBeginCommandBuffer (/*commandBuffer =>*/ Command_Buffer,
+                                  /*pBeginInfo    =>*/ &(VkCommandBufferBeginInfo){
+                                    .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO}));
 
   // Bind the ray tracing pipeline and descriptor set
   vkCmdBindPipeline       (Command_Buffer, VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR, Pipeline);
-  vkCmdBindDescriptorSets (Command_Buffer, VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR,
-                           Pipeline_Layout, 0, 1, &Descriptor_Set, 0, NULL);
+  vkCmdBindDescriptorSets (/*commandBuffer      =>*/ Command_Buffer,
+                           /*pipelineBindPoint   =>*/ VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR,
+                           /*layout              =>*/ Pipeline_Layout,
+                           /*firstSet            =>*/ 0,
+                           /*descriptorSetCount  =>*/ 1,
+                           /*pDescriptorSets     =>*/ &Descriptor_Set,
+                           /*dynamicOffsetCount  =>*/ 0,
+                           /*pDynamicOffsets     =>*/ NULL);
 
   // Checkerboard: dispatch at half width, each thread remaps to a
   // checkerboard pixel. Untouched pixels keep their previous value; the postprocess
   // reconstructs them from traced neighbors before TAA. On lavapipe (CPU) this
   // halves actual thread count, saving ~35% frame time.
   int RT_Dispatch_W = Active_Checkerboard ? (Render_Width + 1) / 2 : Render_Width;
-  vkCmdTraceRays (Command_Buffer,
-                  &Shader_Binding_Ray_Generation, &Shader_Binding_Miss,
-                  &Shader_Binding_Hit, &Shader_Binding_Callable,
-                  RT_Dispatch_W, Render_Height, 1);
+  vkCmdTraceRays (/*commandBuffer                  =>*/ Command_Buffer,
+                  /*pRaygenShaderBindingTable      =>*/ &Shader_Binding_Ray_Generation,
+                  /*pMissShaderBindingTable        =>*/ &Shader_Binding_Miss,
+                  /*pHitShaderBindingTable         =>*/ &Shader_Binding_Hit,
+                  /*pCallableShaderBindingTable    =>*/ &Shader_Binding_Callable,
+                  /*width                          =>*/ RT_Dispatch_W,
+                  /*height                         =>*/ Render_Height,
+                  /*depth                          =>*/ 1);
 
   // Dispatch postprocess compute shader (unless bypassed for raw PBR output)
   if (not Skip_Postprocess) {
@@ -6087,9 +6102,16 @@ void Raytracing_Frame (Gpu_Postprocess_Push PP) {
        .oldLayout = VK_IMAGE_LAYOUT_GENERAL, .newLayout = VK_IMAGE_LAYOUT_GENERAL,
        .image = Depth_Image.Image,
        .subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1}}};
-    vkCmdPipelineBarrier (Command_Buffer,
-      VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-      0, 0, NULL, 0, NULL, 2, RT_To_Compute_Barriers);
+    vkCmdPipelineBarrier (/*commandBuffer            =>*/ Command_Buffer,
+                          /*srcStageMask             =>*/ VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR,
+                          /*dstStageMask             =>*/ VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                          /*dependencyFlags          =>*/ 0,
+                          /*memoryBarrierCount       =>*/ 0,
+                          /*pMemoryBarriers          =>*/ NULL,
+                          /*bufferMemoryBarrierCount =>*/ 0,
+                          /*pBufferMemoryBarriers    =>*/ NULL,
+                          /*imageMemoryBarrierCount  =>*/ 2,
+                          /*pImageMemoryBarriers     =>*/ RT_To_Compute_Barriers);
 
     // Iteration count controlled by quality preset (Potato=0, Low=1, Medium+=2).
     // Passes Budget to the shader - at high budget (cheap path), denoiser is a passthrough.
@@ -6098,19 +6120,36 @@ void Raytracing_Frame (Gpu_Postprocess_Push PP) {
     if (Denoise_Passes > 0) {
       vkCmdBindPipeline (Command_Buffer, VK_PIPELINE_BIND_POINT_COMPUTE, Denoise_Pipeline);
       for (int I = 0; I < Denoise_Passes; I++) {
-        vkCmdBindDescriptorSets (Command_Buffer, VK_PIPELINE_BIND_POINT_COMPUTE,
-                                 Denoise_Pipeline_Layout, 0, 1, &Denoise_Descriptor_Sets[I], 0, NULL);
+        vkCmdBindDescriptorSets (/*commandBuffer      =>*/ Command_Buffer,
+                                 /*pipelineBindPoint   =>*/ VK_PIPELINE_BIND_POINT_COMPUTE,
+                                 /*layout              =>*/ Denoise_Pipeline_Layout,
+                                 /*firstSet            =>*/ 0,
+                                 /*descriptorSetCount  =>*/ 1,
+                                 /*pDescriptorSets     =>*/ &Denoise_Descriptor_Sets[I],
+                                 /*dynamicOffsetCount  =>*/ 0,
+                                 /*pDynamicOffsets     =>*/ NULL);
         int Push[2] = {Steps[I], Current_Budget_Byte};
-        vkCmdPushConstants (Command_Buffer, Denoise_Pipeline_Layout, VK_SHADER_STAGE_COMPUTE_BIT,
-                            0, sizeof (Push), Push);
+        vkCmdPushConstants (/*commandBuffer =>*/ Command_Buffer,
+                            /*layout        =>*/ Denoise_Pipeline_Layout,
+                            /*stageFlags    =>*/ VK_SHADER_STAGE_COMPUTE_BIT,
+                            /*offset        =>*/ 0,
+                            /*size          =>*/ sizeof (Push),
+                            /*pValues       =>*/ Push);
         vkCmdDispatch (Command_Buffer, (Render_Width + 7) / 8, (Render_Height + 7) / 8, 1);
 
         // Barrier between iterations
         VkMemoryBarrier Iter_Barrier = {VK_STRUCTURE_TYPE_MEMORY_BARRIER, NULL,
           VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT};
-        vkCmdPipelineBarrier (Command_Buffer,
-          VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-          0, 1, &Iter_Barrier, 0, NULL, 0, NULL);
+        vkCmdPipelineBarrier (/*commandBuffer            =>*/ Command_Buffer,
+                              /*srcStageMask             =>*/ VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                              /*dstStageMask             =>*/ VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                              /*dependencyFlags          =>*/ 0,
+                              /*memoryBarrierCount       =>*/ 1,
+                              /*pMemoryBarriers          =>*/ &Iter_Barrier,
+                              /*bufferMemoryBarrierCount =>*/ 0,
+                              /*pBufferMemoryBarriers    =>*/ NULL,
+                              /*imageMemoryBarrierCount  =>*/ 0,
+                              /*pImageMemoryBarriers     =>*/ NULL);
       }
     }
 
@@ -6118,10 +6157,20 @@ void Raytracing_Frame (Gpu_Postprocess_Push PP) {
 
     // Postprocess: TAA + bloom + tonemapping
     vkCmdBindPipeline       (Command_Buffer, VK_PIPELINE_BIND_POINT_COMPUTE, Postprocess_Pipeline);
-    vkCmdBindDescriptorSets (Command_Buffer, VK_PIPELINE_BIND_POINT_COMPUTE,
-                             Postprocess_Pipeline_Layout, 0, 1, &Postprocess_Descriptor_Set, 0, NULL);
-    vkCmdPushConstants      (Command_Buffer, Postprocess_Pipeline_Layout, VK_SHADER_STAGE_COMPUTE_BIT,
-                             0, sizeof PP, &PP);
+    vkCmdBindDescriptorSets (/*commandBuffer      =>*/ Command_Buffer,
+                             /*pipelineBindPoint   =>*/ VK_PIPELINE_BIND_POINT_COMPUTE,
+                             /*layout              =>*/ Postprocess_Pipeline_Layout,
+                             /*firstSet            =>*/ 0,
+                             /*descriptorSetCount  =>*/ 1,
+                             /*pDescriptorSets     =>*/ &Postprocess_Descriptor_Set,
+                             /*dynamicOffsetCount  =>*/ 0,
+                             /*pDynamicOffsets     =>*/ NULL);
+    vkCmdPushConstants      (/*commandBuffer =>*/ Command_Buffer,
+                             /*layout        =>*/ Postprocess_Pipeline_Layout,
+                             /*stageFlags    =>*/ VK_SHADER_STAGE_COMPUTE_BIT,
+                             /*offset        =>*/ 0,
+                             /*size          =>*/ sizeof PP,
+                             /*pValues       =>*/ &PP);
     vkCmdDispatch (Command_Buffer, (Render_Width + 7) / 8, (Render_Height + 7) / 8, 1);
   }
 
@@ -6131,54 +6180,82 @@ void Raytracing_Frame (Gpu_Postprocess_Push PP) {
     ? VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR : VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
 
   // Barrier: writes complete before blit reads
-  vkCmdPipelineBarrier (Command_Buffer,
-    Pre_Blit, VK_PIPELINE_STAGE_TRANSFER_BIT,
-    0, 1, &(VkMemoryBarrier){VK_STRUCTURE_TYPE_MEMORY_BARRIER, NULL,
-      VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT},
-    0, NULL, 0, NULL);
+  vkCmdPipelineBarrier (/*commandBuffer            =>*/ Command_Buffer,
+                        /*srcStageMask             =>*/ Pre_Blit,
+                        /*dstStageMask             =>*/ VK_PIPELINE_STAGE_TRANSFER_BIT,
+                        /*dependencyFlags          =>*/ 0,
+                        /*memoryBarrierCount       =>*/ 1,
+                        /*pMemoryBarriers          =>*/ &(VkMemoryBarrier){
+                          VK_STRUCTURE_TYPE_MEMORY_BARRIER, NULL,
+                          VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT},
+                        /*bufferMemoryBarrierCount =>*/ 0,
+                        /*pBufferMemoryBarriers    =>*/ NULL,
+                        /*imageMemoryBarrierCount  =>*/ 0,
+                        /*pImageMemoryBarriers     =>*/ NULL);
 
   // Transition blit source from general to transfer-source
-  Image_Layout_Barrier (Command_Buffer, Blit_Source,
-                        VK_IMAGE_LAYOUT_GENERAL,              VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                        VK_ACCESS_SHADER_WRITE_BIT,           VK_ACCESS_TRANSFER_READ_BIT,
-                        Pre_Blit,                             VK_PIPELINE_STAGE_TRANSFER_BIT);
+  Image_Layout_Barrier (/*Command_Buffer     =>*/ Command_Buffer,
+                        /*Image              =>*/ Blit_Source,
+                        /*Old_Layout         =>*/ VK_IMAGE_LAYOUT_GENERAL,
+                        /*New_Layout         =>*/ VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                        /*Source_Access      =>*/ VK_ACCESS_SHADER_WRITE_BIT,
+                        /*Destination_Access =>*/ VK_ACCESS_TRANSFER_READ_BIT,
+                        /*Source_Stage       =>*/ Pre_Blit,
+                        /*Destination_Stage  =>*/ VK_PIPELINE_STAGE_TRANSFER_BIT);
 
   // Transition the swapchain image from undefined to transfer-destination
-  Image_Layout_Barrier (Command_Buffer, Swapchain_Images[Image_Index],
-                        VK_IMAGE_LAYOUT_UNDEFINED,            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                        0,                                    VK_ACCESS_TRANSFER_WRITE_BIT,
-                        VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,    VK_PIPELINE_STAGE_TRANSFER_BIT);
+  Image_Layout_Barrier (/*Command_Buffer     =>*/ Command_Buffer,
+                        /*Image              =>*/ Swapchain_Images[Image_Index],
+                        /*Old_Layout         =>*/ VK_IMAGE_LAYOUT_UNDEFINED,
+                        /*New_Layout         =>*/ VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                        /*Source_Access      =>*/ 0,
+                        /*Destination_Access =>*/ VK_ACCESS_TRANSFER_WRITE_BIT,
+                        /*Source_Stage       =>*/ VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                        /*Destination_Stage  =>*/ VK_PIPELINE_STAGE_TRANSFER_BIT);
 
   // Blit result to swapchain (bilinear upscale from internal to window resolution)
-  vkCmdBlitImage (Command_Buffer,
-                  Blit_Source,                         VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                  Swapchain_Images[Image_Index],       VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                  1, &(VkImageBlit){
+  vkCmdBlitImage (/*commandBuffer  =>*/ Command_Buffer,
+                  /*srcImage       =>*/ Blit_Source,
+                  /*srcImageLayout =>*/ VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                  /*dstImage       =>*/ Swapchain_Images[Image_Index],
+                  /*dstImageLayout =>*/ VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                  /*regionCount    =>*/ 1,
+                  /*pRegions       =>*/ &(VkImageBlit){
                     .srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
                     .srcOffsets[1]  = {Render_Width, Render_Height, 1},
                     .dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
                     .dstOffsets[1]  = {(int)Swapchain_Extent.width, (int)Swapchain_Extent.height, 1}},
-                  VK_FILTER_LINEAR);
+                  /*filter         =>*/ VK_FILTER_LINEAR);
 
   // Transition blit source back to general for next frame
-  Image_Layout_Barrier (Command_Buffer, Blit_Source,
-                        VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL,
-                        VK_ACCESS_TRANSFER_READ_BIT,          VK_ACCESS_SHADER_WRITE_BIT,
-                        VK_PIPELINE_STAGE_TRANSFER_BIT,       VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+  Image_Layout_Barrier (/*Command_Buffer     =>*/ Command_Buffer,
+                        /*Image              =>*/ Blit_Source,
+                        /*Old_Layout         =>*/ VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                        /*New_Layout         =>*/ VK_IMAGE_LAYOUT_GENERAL,
+                        /*Source_Access      =>*/ VK_ACCESS_TRANSFER_READ_BIT,
+                        /*Destination_Access =>*/ VK_ACCESS_SHADER_WRITE_BIT,
+                        /*Source_Stage       =>*/ VK_PIPELINE_STAGE_TRANSFER_BIT,
+                        /*Destination_Stage  =>*/ VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR
+                                                | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
 
   // Transition the swapchain image to present-source for display
-  Image_Layout_Barrier (Command_Buffer, Swapchain_Images[Image_Index],
-                        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
-                        VK_ACCESS_TRANSFER_WRITE_BIT,         0,
-                        VK_PIPELINE_STAGE_TRANSFER_BIT,       VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
+  Image_Layout_Barrier (/*Command_Buffer     =>*/ Command_Buffer,
+                        /*Image              =>*/ Swapchain_Images[Image_Index],
+                        /*Old_Layout         =>*/ VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                        /*New_Layout         =>*/ VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+                        /*Source_Access      =>*/ VK_ACCESS_TRANSFER_WRITE_BIT,
+                        /*Destination_Access =>*/ 0,
+                        /*Source_Stage       =>*/ VK_PIPELINE_STAGE_TRANSFER_BIT,
+                        /*Destination_Stage  =>*/ VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
 
   // Finalize the command buffer recording
   VK_CHECK (vkEndCommandBuffer (Command_Buffer));
 
   // Submit the command buffer, waiting on image-available and signaling render-finished
   VkPipelineStageFlags Wait_Stage = VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR;
-  VK_CHECK (vkQueueSubmit (Queue, 1,
-                           &(VkSubmitInfo){
+  VK_CHECK (vkQueueSubmit (/*queue       =>*/ Queue,
+                           /*submitCount =>*/ 1,
+                           /*pSubmits    =>*/ &(VkSubmitInfo){
                              .sType                = VK_STRUCTURE_TYPE_SUBMIT_INFO,
                              .waitSemaphoreCount   = 1,
                              .pWaitSemaphores      = &Semaphore_Image_Available,
@@ -6187,11 +6264,11 @@ void Raytracing_Frame (Gpu_Postprocess_Push PP) {
                              .pCommandBuffers      = &Command_Buffer,
                              .signalSemaphoreCount = 1,
                              .pSignalSemaphores    = &Semaphore_Render_Finished},
-                           Fence));
+                           /*fence       =>*/ Fence));
 
   // Present the rendered image to the display (handle OUT_OF_DATE from resize)
-  { VkResult R = vkQueuePresentKHR (Queue,
-                                    &(VkPresentInfoKHR){
+  { VkResult R = vkQueuePresentKHR (/*queue        =>*/ Queue,
+                                    /*pPresentInfo =>*/ &(VkPresentInfoKHR){
                                       .sType              = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
                                       .waitSemaphoreCount = 1,
                                       .pWaitSemaphores    = &Semaphore_Render_Finished,
