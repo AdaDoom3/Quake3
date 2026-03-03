@@ -68,7 +68,11 @@ const char *ENGINE_VERSION = "0.1.0";
 #define MINIMUM_WINDOW_SIZE 256
 
 // Windowing and viewport settings
-#define FIELD_OF_VIEW  90.f    // Vertical field-of-view in degrees
+#define FIELD_OF_VIEW  90.f    // Horizontal field-of-view in degrees (Quake 3 default)
+// Convert horizontal FOV to vertical given aspect ratio (width/height)
+static inline float Hfov_To_Vfov (float Hfov_Degrees, float Aspect) {
+  return 2.f * atanf (tanf (Hfov_Degrees * (float)M_PI / 360.f) / Aspect) * 180.f / (float)M_PI;
+}
 #define NEAR_CLIP      0.1f    // Near clip plane distance
 #define FAR_CLIP       10000.f // Far clip plane distance
 #define MAX_DELTA_TIME 0.05f   // Clamp to 20 fps minimum (prevents physics tunneling)
@@ -86,11 +90,11 @@ const char *ENGINE_VERSION = "0.1.0";
 #define MINIMUM_WALK_NORMAL 0.7f   // Minimum Y-component of a surface normal to count as walkable floor
 #define OVERBOUNCE          1.001f // Slight overshoot factor when clipping velocity off surfaces
 #define MAXIMUM_CLIP_PLANES 5      // Maximum simultaneous contact planes during slide-move resolution
-#define DEFAULT_VIEW_HEIGHT 26.f   // Camera height offset from player origin when standing
-#define CROUCH_VIEW_HEIGHT  12.f   // Camera height offset from player origin when crouching
+#define DEFAULT_VIEW_HEIGHT 22.f   // Camera height offset from capsule center (ground+28+22 = ground+50, matches Q3)
+#define CROUCH_VIEW_HEIGHT   8.f   // Camera height offset when crouching  (ground+28+8  = ground+36, matches Q3)
 
 // Weapon Animation Parameters
-#define WEAPON_MODEL_SCALE  0.7f // Viewmodel scale factor for first-person perspective
+#define WEAPON_MODEL_SCALE  0.50f // Viewmodel scale factor (world-space shrink, no depth hack)
 #define WEAPON_FIRE_SPEED   10.f // Fire animation playback rate (frames per second)
 #define WEAPON_FIRE_FRAMES  6.f  // Total fire animation duration in frames
 #define WEAPON_BOB_RATE_V   3.5f // Vertical idle bob frequency (radians/second)
@@ -101,7 +105,7 @@ const char *ENGINE_VERSION = "0.1.0";
 #define WEAPON_RECOIL_DECAY 5.f  // Recoil exponential decay rate  
 
 // Capsule spine half-length: half height minus radius
-#define PLAYER_CAPSULE_SPINE 17.f // For a 32-unit tall, 15-unit radius capsule: 32 - 15 = 17 units.
+#define PLAYER_CAPSULE_SPINE 13.f // For a 28-unit tall, 15-unit radius capsule: 28 - 15 = 13 units.
 
 // Projectile constants
 #define MAX_PROJECTILES 64    // Maximum simultaneous projectiles in flight
@@ -170,17 +174,73 @@ typedef struct {
   float       Render_Scale;   // Internal RT render resolution multiplier
   int         SPP;            // Ray count samples per pixel
   int         Parallax;       // Enable parallax occlusion mapping
-  bool        Denoise_Passes; // A-trous wavelet denoise iterations
+  int         Denoise_Passes; // A-trous wavelet denoise iterations (was bool — bug!)
   bool        Checkerboard;   // Temporal checkerboard optimization for ray reduction
 } Quality_Preset;
 const Quality_Preset QUALITY_PRESETS [QUALITY_COUNT] = {
   //                            Res        Scale  SPP  POM  DN   CB
-  [QUALITY_ULTRA]  = {"Crysis", 3840,2160, 1.00f,  4,  1,   2,   1}, 
-  [QUALITY_HIGH]   = {"High",   2560,1440, 1.00f,  2,  1,   2,   1}, 
-  [QUALITY_MEDIUM] = {"Medium", 1920,1080, 1.00f,  1,  1,   2,   1},
-  [QUALITY_LOW]    = {"Low",    1600, 900, 1.00f,  1,  1,   1,   1},
-  [QUALITY_POTATO] = {"Potato", 1280, 720, 0.667f, 1,  0,   1,   1}, 
+  [QUALITY_ULTRA]  = {"Crysis", 1920,1080, 1.00f,  2,  1,   3,   1},
+  [QUALITY_HIGH]   = {"High",   1600, 900, 1.00f,  2,  1,   2,   1}, 
+  [QUALITY_MEDIUM] = {"Medium", 1280, 720, 0.75f,  1,  1,   3,   1},
+  [QUALITY_LOW]    = {"Low",    1024, 576, 0.55f,  1,  1,   2,   1},
+  [QUALITY_POTATO] = {"Potato",  854, 480, 0.75f,  1,  0,   3,   1},
 };
+
+// ── Shader Tuning ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+// Raytracing constants injected into GLSL shaders at build time by sdk.c.
+// Override any value from the command line:  ./sdk -DVNDF_ALPHA_FLOOR=0.02
+// SHADER_TUNING_BEGIN
+
+// Importance sampling — controls reflection ray quality and specular firefly suppression
+#define VNDF_ALPHA_FLOOR    0.01   // Min roughness² for VNDF reflection ray spread
+#define SPECULAR_D_BIAS     0.01   // Min roughness² for GGX D term (prevents firefly peak)
+
+// Reflection control — Budget-adaptive (LO = full quality at Budget=0, HI = constrained at Budget=1)
+#define REFL_CLAMP_LO       5.0    // Reflection luminance clamp × surface luminance (was 2.0)
+#define REFL_CLAMP_HI       1.5    // Reflection luminance clamp × surface luminance
+#define REFL_GATE_LO        0.80   // Max roughness for tracing reflection rays (was 0.55)
+#define REFL_GATE_HI        0.35   // Max roughness for tracing reflection rays
+#define REFL_THRESH_LO      0.02   // Reflection Fresnel weight skip threshold (was 0.10)
+#define REFL_THRESH_HI      0.30   // Reflection Fresnel weight skip threshold
+#define REFL_DAMPING        0.3    // Budget-proportional reflection strength reduction (was 0.5)
+#define REFL_SOFT_EDGE      12.0   // Threshold-to-full-weight transition sharpness (was 8.0)
+
+// Reflection trace distance — Budget-adaptive ray length
+#define REFL_TRACE_LO       2000.0 // Reflection trace max distance at Budget=0 (was 500)
+#define REFL_TRACE_HI       150.0  // Reflection trace max distance at Budget=1
+
+// Shadow rays — Budget-adaptive cutoff distances
+#define SHADOW_DIST_LO      2000.0 // Shadow ray max distance at Budget=0 (was 600)
+#define SHADOW_DIST_HI      200.0  // Shadow ray max distance at Budget=1
+
+// A-trous denoiser edge-stopping (LO = still camera, HI = fast motion)
+#define DENOISE_DEPTH_LO    100.0  // Depth sensitivity when still (sharp edges)
+#define DENOISE_DEPTH_HI    10.0   // Depth sensitivity during motion (much smoother)
+#define DENOISE_LUM_LO      200.0  // Luminance sensitivity when still
+#define DENOISE_LUM_HI      15.0   // Luminance sensitivity during motion (aggressive smooth)
+
+// Firefly rejection — 3x3 neighborhood percentile clamp
+#define FIREFLY_HEADROOM    1.05   // Headroom multiplier above 2nd-brightest neighbor
+#define FIREFLY_BIAS        0.01   // Additive floor preventing zero clamp
+
+// CAS (Contrast Adaptive Sharpening)
+#define CAS_AMOUNT          0.55   // Sharpening kernel strength
+#define CAS_MIX             1.5    // Edge enhancement multiplier
+
+// TAA (Temporal Anti-Aliasing) — ghosting vs noise tradeoff
+#define TAA_SIGMA           0.15   // Variance clamp sigma (lower = tighter = less ghosting)
+#define TAA_STATIC_FLOOR    0.25   // Min blend alpha when camera is still (history retention)
+#define TAA_MOVE_LO         0.95   // Moving blend base at low motion (5% current frame)
+#define TAA_MOVE_HI         0.99   // Moving blend base at high motion (1% current frame)
+
+// SHADER_TUNING_END
+
+// Adaptive quality budget (C-side only — not injected into shaders)
+#define POTATO_BUDGET_FLOOR 0.35f  // Minimum budget for potato quality tier
+#define POTATO_TARGET_MS    0.033f // Target frame time for potato (~30 fps)
+#define MEDIUM_TARGET_MS    0.100f // Target frame time for medium/low (~10 fps)
+#define ULTRA_TARGET_MS     0.333f // Target frame time for Crysis/ultra (~3 fps)
+#define DEFAULT_TARGET_MS   0.016f // Target frame time for high (~60 fps)
 
 // Convex Hull Limits
 #define HULL_MAX_VERTS    256 // Per-hull vertex cap (matches GPU array size in Gpu_Hull)
@@ -189,7 +249,7 @@ const Quality_Preset QUALITY_PRESETS [QUALITY_COUNT] = {
 #define HULL_MAX_ENTITIES 32  // Maximum simultaneous hull collider instances
 
 // Player bounding box half-extents (x, y, z) used by the capsule collider
-const float PLAYER_HALF_EXTENTS[3] = {15.f, 32.f, 15.f};
+const float PLAYER_HALF_EXTENTS[3] = {15.f, 28.f, 15.f}; // Q3 standing bbox: height 56 (mins -24, maxs 32)
 
 // ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 //
@@ -540,6 +600,7 @@ float Delta_Time; // Time elapsed since the previous frame in seconds
 
 // Runtime mode flags
 int Skip_Postprocess; // Non-zero to bypass the post-processing compute pass
+int Use_Validation;   // Non-zero to enable Vulkan validation layers (--validation)
 
 // Windowing state and settings
 Quality_Level    Active_Quality      = QUALITY_POTATO;
@@ -3037,10 +3098,12 @@ void Vulkan_Create_Instance () {
   vkEnumerateInstanceLayerProperties (&Layer_Count, Layers);
 
   bool Have_Validation = false;
-  for (uint L = 0; L < Layer_Count; L++) {
-    if (strcmp (Layers[L].layerName, VALIDATION_LAYERS[0]) == 0) {
-      Have_Validation = true;
-      break;
+  if (Use_Validation) {
+    for (uint L = 0; L < Layer_Count; L++) {
+      if (strcmp (Layers[L].layerName, VALIDATION_LAYERS[0]) == 0) {
+        Have_Validation = true;
+        break;
+      }
     }
   }
   free (Layers);
@@ -3063,7 +3126,8 @@ void Vulkan_Create_Instance () {
                               /*pAllocator  =>*/ NULL,
                               /*pInstance   =>*/ &Instance));
 
-  if (not Have_Validation) printf ("[vulkan] validation layer not found - running without validation\n");
+  if (Use_Validation and not Have_Validation) printf ("[vulkan] validation layer not found - running without validation\n");
+  else if (Have_Validation) printf ("[vulkan] validation layers enabled\n");
 
   // Release the temporary extensions array now that the instance owns the data
   free (Extensions);
@@ -5945,9 +6009,9 @@ void Weapon_Update (Weapon_Instance *Weapon, const Camera *Camera_Data, float De
   // Place weapon grip near camera (almost behind it) so only the barrel extends forward.
   // Low forward offset keeps grip at the camera; barrel naturally extends into the scene.
   vec3 Offset = Add (Camera_Data->Position,
-                     Add (Scale (Forward, 2.f + Recoil),
-                          Add (Scale (Right, 3.5f + Bob_Horizontal),
-                               Scale (Up,   -3.f + Bob_Vertical))));
+                     Add (Scale (Forward, 5.f + Recoil),
+                          Add (Scale (Right, 4.f + Bob_Horizontal),
+                               Scale (Up,   -3.5f + Bob_Vertical))));
 
   // Select the current animation frame from the hand model's tag_weapon data
   uint Frame_Index = 0;
@@ -5986,7 +6050,7 @@ void Weapon_Update (Weapon_Instance *Weapon, const Camera *Camera_Data, float De
                                  + Camera_Basis[Row * 3 + 2] * Tag_Y_Up[2 * 3 + Column];
 
   // Scale the viewmodel down - no depth hack, so we shrink the model in world space
-  float Model_Scale = 0.45f;
+  float Model_Scale = WEAPON_MODEL_SCALE;
 
   // Transform each vertex from model space (Q3 Z-up) to world space (Y-up).
   // Swizzle Q3 coords (X,Y,Z) > Y-up (X,Z,-Y) so barrel>Forward, up>Up, right>Right.
@@ -6095,7 +6159,7 @@ void Raytracing_Frame (Gpu_Postprocess_Push Postprocess) {
 
     // Iteration count controlled by quality preset (Potato=0, Low=1, Medium+=2).
     // Passes Budget to the shader - at high budget (cheap path), denoiser is a passthrough.
-    int Steps[] = {1, 2};
+    int Steps[] = {1, 3, 8, 16}; // Progressive A-trous: 3x3, 7x7, 17x17, 33x33
     int Denoise_Passes = Active_Denoise_Passes;
     if (Denoise_Passes > 0) {
       vkCmdBindPipeline (Command_Buffer, VK_PIPELINE_BIND_POINT_COMPUTE, Denoise_Pipeline);
@@ -6105,7 +6169,7 @@ void Raytracing_Frame (Gpu_Postprocess_Push Postprocess) {
                                  /*layout              =>*/ Denoise_Pipeline_Layout,
                                  /*firstSet            =>*/ 0,
                                  /*descriptorSetCount  =>*/ 1,
-                                 /*pDescriptorSets     =>*/ &Denoise_Descriptor_Sets[I],
+                                 /*pDescriptorSets     =>*/ &Denoise_Descriptor_Sets[I % 2],
                                  /*dynamicOffsetCount  =>*/ 0,
                                  /*pDynamicOffsets     =>*/ NULL);
         int Push[2] = {Steps[I], Current_Budget_Byte};
@@ -7459,16 +7523,46 @@ glsl rchit Closest_Hit {
     uint W = ((S >> ((S >> 28u) + 4u)) ^ S) * 277803737u;
     return (W >> 22u) ^ W;
   }
+
+  // Interleaved Gradient Noise (Jimenez 2014, SIGGRAPH) — produces a
+  // blue-noise-like spatial distribution.  Neighboring pixels get well-separated
+  // values, making error high-frequency and easy for the denoiser to smooth.
+  float IGN (vec2 Pos) {
+    return fract (52.9829189 * fract (0.06711056 * Pos.x + 0.00583715 * Pos.y));
+  }
+
+  // Sampling Visible GGX Normals with Spherical Caps (Dupuy & Benyoub 2023).
+  // Simpler and more numerically stable than Heitz 2018.  Samples the visible
+  // normal distribution by projecting onto a spherical cap centered on the
+  // stretched view direction — no tangent-frame construction needed.
+  vec3 Sample_GGX_VNDF (vec3 Ve, float Alpha, float U1, float U2) {
+    vec3  Vh        = normalize (vec3 (Alpha * Ve.x, Alpha * Ve.y, Ve.z));
+    float Phi       = 6.28318530 * U1;
+    float Z         = (1.0 - U2) * (1.0 + Vh.z) - Vh.z;
+    float Sin_Theta = sqrt (clamp (1.0 - Z * Z, 0.0, 1.0));
+    vec3  C         = vec3 (Sin_Theta * cos (Phi), Sin_Theta * sin (Phi), Z);
+    vec3  Nh        = C + Vh;
+    return normalize (vec3 (Alpha * Nh.x, Alpha * Nh.y, max (0.0, Nh.z)));
+  }
   
-  // Soft shadow ray direction (extracted to avoid code duplication)
+  // Soft shadow ray direction — blue-noise spatial + golden-ratio temporal.
+  // IGN gives blue-noise-like spatial distribution (denoiser-friendly),
+  // concentric disk mapping (Shirley & Chiu 1997) gives better disk
+  // stratification than polar sqrt(u)*cos/sin.
   vec3 Soft_Shadow_Dir (vec3 Ld, uint Prim, uint Inst, uint Frame, float Disk_Radius) {
-    uint Seed  = PCG (Prim * 1973u + Inst * 9277u + Frame * 26699u);
-    float Ang  = float (Seed) * 2.3283064e-10 * 6.2831853;
-    float Rad  = sqrt (float (PCG (Seed)) * 2.3283064e-10) * Disk_Radius;
+    vec2  Px = vec2 (gl_LaunchIDEXT.xy);
+    float N1 = fract (IGN (Px) + float (Frame) * 0.7548776662);
+    float N2 = fract (IGN (Px + 17.0) + float (Frame) * 0.5698402910);
+    // Concentric disk mapping (Shirley & Chiu 1997, SIGGRAPH)
+    float A = 2.0 * N1 - 1.0, B = 2.0 * N2 - 1.0;
+    float Rad, Phi;
+    if (A * A > B * B) { Rad = A; Phi = 0.785398 * (B / max (abs (A), 1e-6)); }
+    else               { Rad = B; Phi = 1.5708  - 0.785398 * (A / max (abs (B), 1e-6)); }
+    Rad *= Disk_Radius;
     vec3 Light_Tangent   = (abs (Ld.y) < 0.99) ? normalize (cross (Ld, vec3 (0, 1, 0)))
                                                : normalize (cross (Ld, vec3 (1, 0, 0)));
     vec3 Light_Bitangent = cross (Ld, Light_Tangent);
-    return normalize (Ld + Light_Tangent * (cos (Ang) * Rad) + Light_Bitangent * (sin (Ang) * Rad));
+    return normalize (Ld + Light_Tangent * (cos (Phi) * Rad) + Light_Bitangent * (sin (Phi) * Rad));
   }
   
   // Extracted shadow trace (deduplicated from entity and world paths)
@@ -7661,8 +7755,13 @@ glsl rchit Closest_Hit {
       float FT  = 1.0 - VH;  float T5 = FT * FT; T5 *= T5 * FT;
       vec3  F   = F0 + (1.0 - F0) * T5;
   
-      // Final specular and diffuse terms
-      Specular = D * Vis * F;
+      // Final specular — roughness-biased D prevents the razor-sharp GGX peak
+      // that causes fireflies at 1 SPP.  The bias widens the highlight on very
+      // smooth metals without affecting rough surfaces.
+      float D_Bias  = max (a2, SPECULAR_D_BIAS);  // Floor: R≈0.32 minimum for D evaluation
+      float D_Denom = NH * NH * (D_Bias - 1.0) + 1.0;
+      float D_Safe  = D_Bias / (3.14159 * D_Denom * D_Denom);
+      Specular = D_Safe * Vis * F;
       Diffuse  = (1.0 - F) * (1.0 - M) * Albedo * 0.31831;  // 1/π
     }
   
@@ -7691,38 +7790,72 @@ glsl rchit Closest_Hit {
     // Reflection-bounce hits detect this and skip tracing another reflection to limit recursion to exactly one bounce
     bool Is_Reflection_Bounce = (gl_RayTminEXT > 0.005);
 
-    // Reflection culling
-    bool  Refl_Active = not Is_Reflection_Bounce and (R < 0.55);
-    float Refl_Dist = mix (800.0, 300.0, Budget);  // Adaptive reflection distance
+    // Dynamic reflection culling — Budget-aware: save rays on barely-reflective
+    // surfaces, focus them on metals/smooth where reflections are clearly visible.
+    float Refl_Roughness_Gate = mix (REFL_GATE_LO, REFL_GATE_HI, Budget);
+    bool  Refl_Active = not Is_Reflection_Bounce and (R < Refl_Roughness_Gate);
+    float Refl_Dist = mix (800.0, SHADOW_DIST_HI, Budget);
     float Reflection_Weight = (not Refl_Active or Hit_Dist > Refl_Dist)
                                 ? 0.0
                                 : max (max (Env_F.r, Env_F.g), Env_F.b) * (1.0 - R * R);
     vec3  Reflection_Color  = vec3 (0.0);
-  
-    // Trace reflection ray for smooth/metallic surfaces
-    if (Reflection_Weight > 0.10) {
-      vec3 Refl_Dir = reflect (-V, Normal);
+
+    // Dynamic threshold: skip marginal reflections at high Budget
+    float Refl_Threshold = mix (REFL_THRESH_LO, REFL_THRESH_HI, Budget);
+    if (Reflection_Weight > Refl_Threshold) {
+      // VNDF importance-sampled reflection (Dupuy & Benyoub 2023) with
+      // IGN blue noise spatial base + golden ratio temporal rotation.
+      // IGN provides denoiser-friendly high-frequency spatial error
+      // distribution; golden ratio ensures optimal [0,1]^2 coverage
+      // across frames for smooth TAA convergence.
+      vec2  Px = vec2 (gl_LaunchIDEXT.xy);
+      float U1 = fract (IGN (Px) + float (Frame) * 0.7548776662);
+      float U2 = fract (IGN (Px + 17.0) + float (Frame) * 0.5698402910);
+      float Alpha   = max (R * R, VNDF_ALPHA_FLOOR);
+      // Build tangent frame around surface normal
+      vec3 T = (abs (Normal.y) < 0.99) ? normalize (cross (Normal, vec3 (0, 1, 0)))
+                                        : normalize (cross (Normal, vec3 (1, 0, 0)));
+      vec3 B = cross (Normal, T);
+      // Transform view to tangent space, sample VNDF, transform back
+      vec3 V_Tangent  = vec3 (dot (V, T), dot (V, B), dot (V, Normal));
+      vec3 H_Tangent  = Sample_GGX_VNDF (V_Tangent, Alpha, U1, U2);
+      vec3 H          = T * H_Tangent.x + B * H_Tangent.y + Normal * H_Tangent.z;
+      vec3 Refl_Dir   = reflect (-V, H);
+      // Ensure reflection doesn't go into the surface
+      if (dot (Refl_Dir, Normal) <= 0.0) Refl_Dir = reflect (-V, Normal);
+
       Payload = vec4 (0.0, 0.0, 0.0, -1.0);
       traceRayEXT (Top_Level, gl_RayFlagsOpaqueEXT,
                    0xFF,
                    0, 1, 0,
                    Position + Normal * 0.2,
-                   0.01,  // tmin=0.01 marks this as a reflection bounce
+                   0.01,
                    Refl_Dir,
-                   mix (500.0, 200.0, Budget),  // Adaptive tmax - shorter trace at low fps
+                   mix (REFL_TRACE_LO, REFL_TRACE_HI, Budget),
                    0);
-      Reflection_Color = Payload.rgb;
+      // Scene-relative luminance clamp: soft proportional limit
+      vec3  Rc      = Payload.rgb;
+      float Rc_Lum  = dot (Rc, vec3 (0.2126, 0.7152, 0.0722));
+      float Srf_Lum = dot (Ambient_Irradiance * Albedo, vec3 (0.2126, 0.7152, 0.0722));
+      float Max_Lum = max (Srf_Lum, 0.05) * mix (REFL_CLAMP_LO, REFL_CLAMP_HI, Budget);
+      Reflection_Color = Rc_Lum > Max_Lum ? Rc * (Max_Lum / Rc_Lum) : Rc;
     }
-  
+
+    // Gentle reflection damping at high Budget (frame-time pressure).
+    // Soft fade near threshold prevents binary on/off flicker on metals.
+    float Refl_Strength = 1.0 - Budget * REFL_DAMPING;
+    float Soft_Weight = Reflection_Weight * Refl_Strength;
+    Soft_Weight *= clamp ((Reflection_Weight - Refl_Threshold) * REFL_SOFT_EDGE, 0.0, 1.0);
+
     // Blend reflection into indirect specular: replace the hemisphere approximation
     // with actual traced reflection, weighted by the Fresnel term.
     vec3 Traced_Specular = Env_F * mix (Indirect_Specular / max (Env_F, vec3(0.01)),
                                          Reflection_Color,
-                                         vec3 (Reflection_Weight));
+                                         vec3 (Soft_Weight));
   
     // Compute final shading based on instance type
     vec3 Color;
-    float Shadow_Dist = mix (600.0, 200.0, Budget); // Adaptive shadow ray cutoff distance
+    float Shadow_Dist = mix (SHADOW_DIST_LO, SHADOW_DIST_HI, Budget); // Adaptive shadow ray cutoff distance
   
     // Apply per-instance lighting model
     if (Is_Weapon) {
@@ -7928,8 +8061,8 @@ glsl comp Physics {
   const float MINIMUM_WALK_NORMAL  = 0.7;
   const float OVERBOUNCE           = 1.001;
   const int   MAXIMUM_CLIP_PLANES  = 5;
-  const float DEFAULT_VIEW_HEIGHT  = 26.0;
-  const float CROUCH_VIEW_HEIGHT   = 12.0;
+  const float DEFAULT_VIEW_HEIGHT  = 22.0;
+  const float CROUCH_VIEW_HEIGHT   = 8.0;
   const float MOUSE_SENSITIVITY    = 0.003;
   
   // Collider shape constants
@@ -8482,8 +8615,10 @@ glsl comp Denoise {
     // Load center pixel color
     vec3  Center_Color = imageLoad (Input_Image, Pixel).rgb;
   
-    // Budget is informational - denoiser always runs when dispatched.
-    // The CPU controls whether to dispatch denoise via Active_Denoise_Passes.
+    // Motion-adaptive denoiser: Budget correlates with frame-time pressure
+    // and motion.  During motion, relax edge-stopping for smoother frames
+    // (trades sharpness for noise reduction — the right call during motion).
+    float Motion = clamp (float (Budget_256) / 256.0, 0.0, 1.0);
   
     // Batch-load all depth values for the 3×3 kernel in one shot
     // Preload 9 depth values - center normal uses Depths[5] (right) and Depths[7] (up).
@@ -8521,23 +8656,28 @@ glsl comp Denoise {
       int Dx = (I % 3) - 1, Dy = (I / 3) - 1;
       float W_Spatial = Kernel[abs(Dx)] * Kernel[abs(Dy)];
   
-      // Depth edge stopping (sharper threshold preserves geometric edges)
+      // Depth edge stopping — relaxed during motion for smoother frames
       float Depth_Diff = abs (Center_Depth - S_Depth) / max (Center_Depth, 0.1);
-      float W_Depth = exp (-Depth_Diff * 100.0);
+      float Depth_Sensitivity = mix (DENOISE_DEPTH_LO, DENOISE_DEPTH_HI, Motion);
+      float W_Depth = exp (-Depth_Diff * Depth_Sensitivity);
   
       // Normal edge stopping: compute sample normal from cached depths
       float S_D_Right = ((I % 3) < 2) ? Depths[I + 1] : S_Depth;
       float S_D_Up    = (I < 6) ? Depths[I + 3] : S_Depth;
       vec3  S_Normal  = Normal_From_Depths (S_Depth, S_D_Right, S_D_Up);
 
-      // Pow(x,32) > chained squaring (5 muls vs log+mul+exp transcendental)
+      // Normal edge stopping — motion-adaptive power: x^16 when still,
+      // x^4 during motion (lets filter smooth across surface creases).
       float Ndot = max (dot (Center_Normal, S_Normal), 0.0);
-      Ndot *= Ndot; Ndot *= Ndot; Ndot *= Ndot; Ndot *= Ndot; Ndot *= Ndot;  // x^32
-      float W_Normal = Ndot;
+      Ndot *= Ndot;  // x^2
+      float Ndot4 = Ndot * Ndot;  // x^4
+      float Ndot16 = Ndot4 * Ndot4 * Ndot4 * Ndot4;  // x^16
+      float W_Normal = mix (Ndot16, Ndot4, Motion);
   
-      // Luminance edge stopping (tighter threshold preserves color edges)
+      // Luminance edge stopping — aggressive during motion to smooth noise
       float Luminance_Difference = abs (Center_Luminance - Sample_Luminance);
-      float Weight_Luminance = exp (-Luminance_Difference * Luminance_Difference * 500.0);
+      float Lum_Sensitivity = mix (DENOISE_LUM_LO, DENOISE_LUM_HI, Motion);
+      float Weight_Luminance = exp (-Luminance_Difference * Luminance_Difference * Lum_Sensitivity);
 
       // Combine all edge-stopping weights and accumulate
       float W = W_Spatial * W_Depth * W_Normal * Weight_Luminance;
@@ -8628,22 +8768,69 @@ glsl comp Post_Process {
     vec3 Color = imageLoad (Color_Image, Pixel).rgb;
     float Depth = imageLoad (Depth_Image, Pixel).r;
 
-    // Contrast Adaptive Sharpening (CAS)
-    {
-      vec3 N = imageLoad (Color_Image, ivec2 (Pixel.x, max (Pixel.y - 1, 0))).rgb;
-      vec3 S = imageLoad (Color_Image, ivec2 (Pixel.x, min (Pixel.y + 1, Size.y - 1))).rgb;
-      vec3 W = imageLoad (Color_Image, ivec2 (max (Pixel.x - 1, 0), Pixel.y)).rgb;
-      vec3 E = imageLoad (Color_Image, ivec2 (min (Pixel.x + 1, Size.x - 1), Pixel.y)).rgb;
-      vec3 Minimum = min (min (N, S), min (W, E));
-      vec3 Maximum = max (max (N, S), max (W, E));
+    // Checkerboard spatial reconstruction: pixels not traced this frame
+    // hold stale values from the wrong screen position.  Replace them with
+    // a depth-aware weighted average of all 4 cardinal neighbors (which
+    // WERE traced this frame in checkerboard pattern).
+    uint Frame = Frame_Count & 0xFFFFu;
+    bool Was_Traced = ((Pixel.x + Pixel.y + int(Frame)) & 1) == 0;
+    if (!Was_Traced) {
+      ivec2 Offsets[4] = ivec2[4](ivec2(-1,0), ivec2(1,0), ivec2(0,-1), ivec2(0,1));
+      vec3  Sum = vec3 (0.0);
+      float W_Sum = 0.0;
+      for (int i = 0; i < 4; i++) {
+        ivec2 P = clamp (Pixel + Offsets[i], ivec2 (0), Size - 1);
+        vec3  C = imageLoad (Color_Image, P).rgb;
+        float D = imageLoad (Depth_Image, P).r;
+        float W = 1.0 / (1.0 + abs (D - Depth) * 20.0);
+        Sum += C * W;
+        W_Sum += W;
+      }
+      Color = Sum / max (W_Sum, 1e-6);
+    }
 
-      // Reinhard-compress to [0,1] for adaptive weight (handles HDR > 1.0 gracefully)
-      vec3 Minimum_Tonemapped = Minimum / (1.0 + Minimum);
-      vec3 Maximum_Tonemapped = Maximum / (1.0 + Maximum);
-      vec3 Rcp_Range = 1.0 / (Maximum_Tonemapped - Minimum_Tonemapped + 0.04);
-      vec3 Sharpness = clamp (min (Minimum_Tonemapped, 1.0 - Maximum_Tonemapped) * Rcp_Range, 0.0, 1.0) * 0.5;
-      vec3 Avg = (N + S + W + E) * 0.25;
-      Color = max (mix (Avg, Color, 1.0 + Sharpness * 2.0), vec3 (0.0));
+    // Combined firefly rejection + motion-adaptive spatial filter.
+    // Reads 3x3 neighborhood once; uses it for both firefly clamping
+    // and a depth-aware bilateral smooth that activates during motion.
+    // When still, adds gentle CAS sharpening instead of blur.
+    {
+      vec3  Nb[8];
+      float Nd[8];
+      const ivec2 Offs[8] = ivec2[8](
+        ivec2(-1,-1), ivec2(0,-1), ivec2(1,-1),
+        ivec2(-1, 0),              ivec2(1, 0),
+        ivec2(-1, 1), ivec2(0, 1), ivec2(1, 1));
+      for (int i = 0; i < 8; i++) {
+        ivec2 P = clamp (Pixel + Offs[i], ivec2 (0), Size - 1);
+        Nb[i] = imageLoad (Color_Image, P).rgb;
+        Nd[i] = imageLoad (Depth_Image, P).r;
+      }
+
+      // Firefly rejection: clamp center luminance to second-brightest neighbor
+      float Lum_C = dot (Color, vec3 (0.2126, 0.7152, 0.0722));
+      float Max1 = 0.0, Max2 = 0.0;
+      for (int i = 0; i < 8; i++) {
+        float L = dot (Nb[i], vec3 (0.2126, 0.7152, 0.0722));
+        if (L > Max1) { Max2 = Max1; Max1 = L; }
+        else if (L > Max2) { Max2 = L; }
+      }
+      float Firefly_Limit = Max2 * FIREFLY_HEADROOM + FIREFLY_BIAS;
+      if (Lum_C > Firefly_Limit) Color *= Firefly_Limit / Lum_C;
+
+      // Motion-adaptive CAS sharpening — restores edge definition when still,
+      // fades out during fast motion to avoid amplifying 1-SPP noise.
+      // Motion signal from player speed (available early in push constants).
+      {
+        float Motion_CAS = clamp (Speed * 0.04, 0.0, 1.0);
+        float Cas_Scale  = CAS_AMOUNT * (1.0 - Motion_CAS);
+        vec3 Avg = (Nb[1] + Nb[3] + Nb[4] + Nb[6]) * 0.25;
+        vec3 Minimum = min (min (Nb[1], Nb[6]), min (Nb[3], Nb[4]));
+        vec3 Maximum = max (max (Nb[1], Nb[6]), max (Nb[3], Nb[4]));
+        vec3 Mn = Minimum / (1.0 + Minimum);
+        vec3 Mx = Maximum / (1.0 + Maximum);
+        vec3 Sh = clamp (min (Mn, 1.0 - Mx) / (Mx - Mn + 0.04), 0.0, 1.0) * Cas_Scale;
+        Color = max (mix (Avg, Color, 1.0 + Sh * CAS_MIX), vec3 (0.0));
+      }
     }
 
     // Temporal accumulation (TAA) with motion-vector reprojection - reconstruct view-space position from NDC
@@ -8674,7 +8861,7 @@ glsl comp Post_Process {
         }
         M1 /= 5.0; M2 /= 5.0;
         vec3 Sigma = sqrt (max (M2 - M1 * M1, vec3 (0.0)));
-        History = clamp (History, M1 - Sigma * 0.3, M1 + Sigma * 0.3);
+        History = clamp (History, M1 - Sigma * TAA_SIGMA, M1 + Sigma * TAA_SIGMA);
   
         // Luminance-based history rejection
         //
@@ -8692,19 +8879,27 @@ glsl comp Post_Process {
         float Displacement_Length = length (Screen_Displacement);
         float Disocclusion = clamp (Displacement_Length * 30.0, 0.0, 1.0); // Rejected
   
-        // Temporal blend
-        float Is_Static = step (Speed, 2.0);
-  
-        // Static: 1/N convergence floored high
-        float Static_Alpha = max (1.0 / max (float (Frame_Count), 1.0), 0.25);
-  
-        // Moving: very aggressive current-frame dominance
-        float Motion      = clamp (Speed * 0.04, 0.0, 1.0);  // ISA: reciprocal multiply vs division
-        float Base        = mix (0.65, 0.98, Motion);  // Even slow motion > 65% current frame
-        float Framerate_Adaptation   = clamp ((Delta_Time - 0.016) * 20.0, 0.0, 1.0);
+        // Temporal blend — per-pixel reprojection displacement as motion
+        // signal (Q2RTX-style).  Camera rotation moves every pixel even
+        // when player velocity is zero — use displacement, not Speed.
+        float Pixel_Motion = clamp (Displacement_Length * 50.0, 0.0, 1.0);
+        float Any_Motion   = max (Pixel_Motion, clamp (Speed * 0.04, 0.0, 1.0));
+
+        // Static only if BOTH player and pixel are truly still
+        float Is_Static = step (Any_Motion, 0.01);
+
+        // Static: 1/N convergence floored at 0.25 — more temporal samples
+        // accumulated for smoother, noise-free image when camera is still.
+        float Static_Alpha = max (1.0 / max (float (Frame_Count), 1.0), TAA_STATIC_FLOOR);
+
+        // Moving: almost entirely current-frame to kill ghosting.
+        // At Any_Motion=0.02 (threshold), Base=0.95 → 5% history.
+        // At Any_Motion=1.0 (fast), Base=0.99 → 1% history.
+        float Base        = mix (TAA_MOVE_LO, TAA_MOVE_HI, Any_Motion);
+        float Framerate_Adaptation   = clamp ((Delta_Time - 0.016) * 30.0, 0.0, 1.0);
         float Moving_Alpha = max (max (max (Base, Framerate_Adaptation), Disocclusion), Anti_Lag);
 
-        // Blend between and moving alpha based on camera speed
+        // Blend: pixels that moved use aggressive current-frame dominance
         float Alpha = mix (Moving_Alpha, Static_Alpha, Is_Static);
         Color = mix (History, Color, Alpha);
       }
@@ -9103,6 +9298,7 @@ int main (int Argc, char **Argv) {
   //   --no-pbr          Disable PBR maps (diffuse + lightmap only, for A/B comparison)
   //   --no-parallax     Disable parallax occlusion mapping
   //   --dump-frames D   Save each benchmark frame as D/frame_NNNN.tga
+  //   --validation      Enable Vulkan validation layers (off by default)
   //   mapname.bsp       Load specified BSP map instead of default
 
   // Local variables
@@ -9128,6 +9324,7 @@ int main (int Argc, char **Argv) {
     else if (strcmp (Argv[I], "--no-pbr")         == 0) No_PBR = 1;
     else if (strcmp (Argv[I], "--no-parallax")    == 0) No_Parallax = 1;
     else if (strcmp (Argv[I], "--cheap")          == 0) Force_Cheap = 1;
+    else if (strcmp (Argv[I], "--validation")     == 0) Use_Validation = 1;
     else if (strcmp (Argv[I], "--spp")            == 0 and I + 1 < Argc) Override_SPP = atoi (Argv[++I]);
     else if (strcmp (Argv[I], "--res")            == 0 and I + 1 < Argc) {
       sscanf (Argv[++I], "%dx%d", &Width, &Height);
@@ -9192,8 +9389,10 @@ int main (int Argc, char **Argv) {
   Render_Height = (int)(Height * Active_Render_Scale);
   Render_Width  = (Render_Width  + 7) & ~7;  // Round up to multiple of 8 (postprocess workgroup size)
   Render_Height = (Render_Height + 7) & ~7;
-  printf ("[render] internal %dx%d > window %dx%d (scale %.0f%%)\n",
-          Render_Width, Render_Height, Width, Height, Active_Render_Scale * 100.f);
+  // Convert horizontal FOV (Q3-style) to vertical for the Perspective matrix
+  float Vertical_FOV = Hfov_To_Vfov (FIELD_OF_VIEW, (float)Width / Height);
+  printf ("[render] internal %dx%d > window %dx%d (scale %.0f%%, vFOV %.1f°)\n",
+          Render_Width, Render_Height, Width, Height, Active_Render_Scale * 100.f, Vertical_FOV);
 
   // Create the ray tracing storage image (render target) and depth image (R32F for postprocess DOF). Storage images use internal render
   // resolution - bilinear blit upscales to window/swapchain
@@ -9517,7 +9716,7 @@ int main (int Argc, char **Argv) {
       Weapon_Bottom_Level_Rebuild (&Weapon);
       Top_Level_Rebuild (&World_Bottom_Level, &Weapon.Bottom_Level, &Enemy.Bottom_Level, NULL);
       mat4 Bench_View = View (Bench_Cam.Position, Bench_Cam.Yaw, Bench_Cam.Pitch);
-      mat4 Bench_Proj = Perspective (FIELD_OF_VIEW, (float)Width / Height, 0.1f, 10000.f);
+      mat4 Bench_Proj = Perspective (Vertical_FOV, (float)Width / Height, 0.1f, 10000.f);
       mat4 Bench_Inv_Proj = Inverse_Projection (Bench_Proj);
       mat4 Bench_Reproj = Mat4_Mul (Bench_Proj, Mat4_Mul (Bench_View, Inverse_Orthogonal (Bench_View)));
       Prev_View_Matrix = Bench_View;
@@ -9525,7 +9724,7 @@ int main (int Argc, char **Argv) {
       // Alternate frame parity so checkerboard traces both pixel halves during warmup
       for (int I = 0; I < 5; I++) {
         Bench_Cam.Frame = (uint)I;
-        Camera_Upload (&Bench_Cam, FIELD_OF_VIEW, Weapon.Texture_Base_Index, PBR_Stride, Active_SPP);
+        Camera_Upload (&Bench_Cam, Vertical_FOV, Weapon.Texture_Base_Index, PBR_Stride, Active_SPP);
         Gpu_Postprocess_Push Warmup_Postprocess = {.Time = 0,
           .Dt_Frame       = (uint32_t)Float_To_Half (Fixed_Dt) | ((uint32_t)(Frame_Count & 0xFFFF) << 16),
           .Velocity       = 0,
@@ -9559,8 +9758,15 @@ int main (int Argc, char **Argv) {
 
       // Slowly rotate the camera for visual coverage (full 360 over 600 frames = 10s at 60fps)
       if (not Screenshot_Path) {
-        Bench_Cam.Yaw += 6.28318f / 600.f;
-        Input In = {.Forward = (F % 120 < 60) ? 1 : 0, .Right = (F % 120 >= 60) ? 1 : 0};
+        // Aggressive movement for ghosting/TAA stress test:
+        //   - Always run forward
+        //   - Smooth sinusoidal yaw sweep (~90° over 2s period)
+        //   - Slight pitch bob
+        float T = F * Fixed_Dt;
+        float Yaw_Speed   = cosf (T * 3.14159f) * 120.f;  // ±120 px/frame mouse sweep
+        float Pitch_Speed = sinf (T * 6.28f) * 5.f;       // Gentle pitch oscillation
+        Input In = {.Forward = 1, .Right = (F % 180 >= 90) ? 1 : 0,
+                    .Delta_X = Yaw_Speed, .Delta_Y = Pitch_Speed};
         Player P = Physics_Dispatch (In, Fixed_Dt);
         Bench_Cam.Position = P.Position;
         Bench_Cam.Position.y += P.View_Height;
@@ -9579,11 +9785,11 @@ int main (int Argc, char **Argv) {
       Enemy.Current_Vertices = Enemy.Frame_Vertices[(int)(Enemy.Animation_Time * Enemy.Frame_FPS) % (int)Enemy.Frame_Count];
       Entity_Bottom_Level_Rebuild (&Enemy);
       Top_Level_Rebuild (&World_Bottom_Level, &Weapon.Bottom_Level, &Enemy.Bottom_Level, NULL);
-      Camera_Upload (&Bench_Cam, FIELD_OF_VIEW, Weapon.Texture_Base_Index, PBR_Stride, Active_SPP);
+      Camera_Upload (&Bench_Cam, Vertical_FOV, Weapon.Texture_Base_Index, PBR_Stride, Active_SPP);
 
       // Build view and projection matrices
       mat4 Bench_View = View (Bench_Cam.Position, Bench_Cam.Yaw, Bench_Cam.Pitch);
-      mat4 Bench_Projection = Perspective (FIELD_OF_VIEW, (float)Width / Height, 0.1f, 10000.f);
+      mat4 Bench_Projection = Perspective (Vertical_FOV, (float)Width / Height, 0.1f, 10000.f);
       mat4 Bench_Inverse_Projection = Inverse_Projection (Bench_Projection);
       mat4 Bench_Reproject = Mat4_Mul (Bench_Projection, Mat4_Mul (Prev_View_Matrix, Inverse_Orthogonal (Bench_View)));
 
@@ -9968,27 +10174,41 @@ int main (int Argc, char **Argv) {
     // Rebuild the top-level acceleration structure
     Top_Level_Rebuild (&World_Bottom_Level, &Weapon.Bottom_Level, &Enemy.Bottom_Level, Player_Body_Transform);
 
-    // Adaptive quality budget
+    // Adaptive quality budget — target frame time depends on quality tier
+    float Target_Frame_Time;
+    if      (Active_Quality == QUALITY_POTATO) Target_Frame_Time = POTATO_TARGET_MS;
+    else if (Active_Quality == QUALITY_MEDIUM
+          || Active_Quality == QUALITY_LOW)     Target_Frame_Time = MEDIUM_TARGET_MS;
+    else if (Active_Quality == QUALITY_ULTRA)  Target_Frame_Time = ULTRA_TARGET_MS;
+    else                                       Target_Frame_Time = DEFAULT_TARGET_MS;
     float Budget = 0.0f;
     if (Force_Cheap) {
-      Budget = 1.0f; 
-    } else if (Delta_Time > 0.016f) {
-      Budget = (Delta_Time - 0.016f) / (0.15f - 0.016f); 
+      Budget = 1.0f;
+    } else if (Delta_Time > Target_Frame_Time) {
+      float Budget_Max = fmaxf (Target_Frame_Time * 2.0f, 0.15f);
+      Budget = (Delta_Time - Target_Frame_Time) / (Budget_Max - Target_Frame_Time);
       if (Budget > 1.0f) Budget = 1.0f;
     }
+    // Potato budget floor: keeps adaptive savings engaged — reflection
+    // damping, shorter shadow rays, slight cheap-path blend.
+    if (Active_Quality == QUALITY_POTATO && Budget < POTATO_BUDGET_FLOOR) Budget = POTATO_BUDGET_FLOOR;
     uint Budget_Byte = (uint)(Budget * 255.0f);
-    Current_Budget_Byte = (int)Budget_Byte;
+    // Denoise needs more smoothing at 1 SPP — give it a higher floor so the
+    // motion-adaptive edge-stopping relaxes slightly, reducing 1-SPP grain.
+    float Denoise_Budget = Budget;
+    if (Active_SPP <= 1) Denoise_Budget = fmaxf (Denoise_Budget, 0.10f);
+    Current_Budget_Byte = (int)(uint)(fminf (Denoise_Budget, 1.0f) * 255.0f);
     uint Packed_SPP = (Active_SPP & 0xFF) | (Budget_Byte << 8);
 
     // Upload the camera and dispatch ray tracing + postprocess
-    Camera_Upload (&Cam, FIELD_OF_VIEW, Weapon.Texture_Base_Index, PBR_Stride, Packed_SPP);
+    Camera_Upload (&Cam, Vertical_FOV, Weapon.Texture_Base_Index, PBR_Stride, Packed_SPP);
     float Horizontal_Speed = sqrtf (Physics.Velocity.x * Physics.Velocity.x +
                            Physics.Velocity.z * Physics.Velocity.z);
 
     // Build reprojection matrix: Proj * Prev_View * Inverse_View (maps current view-space > previous clip-space)
     mat4 Cur_View = View (Cam.Position, Cam.Yaw, Cam.Pitch);
     mat4 Cur_Inv_View = Inverse_Orthogonal (Cur_View);
-    mat4 Proj = Perspective (FIELD_OF_VIEW, (float)Width / Height, 0.1f, 10000.f);
+    mat4 Proj = Perspective (Vertical_FOV, (float)Width / Height, 0.1f, 10000.f);
     mat4 Reproject = Mat4_Mul (Proj, Mat4_Mul (Prev_View_Matrix, Cur_Inv_View));
     mat4 Inv_Proj = Inverse_Projection (Proj);
 

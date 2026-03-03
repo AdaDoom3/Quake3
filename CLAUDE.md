@@ -22,6 +22,12 @@ cc -o sdk sdk.c
 ./build/q3
 ```
 
+**Run with software Vulkan (lavapipe, 16 threads):**
+```sh
+LP_NUM_THREADS=16 VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.json ./build/q3
+```
+Always set `LP_NUM_THREADS=16` when using lavapipe — the default single-threaded mode is far too slow for the ray tracing pipeline.
+
 ## Architecture
 
 - `sdk.c` — Build script. Extracts inline GLSL shaders from `q3.c`, compiles them to SPIR-V, then compiles the C source.
