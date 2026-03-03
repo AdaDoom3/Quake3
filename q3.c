@@ -182,6 +182,60 @@ const Quality_Preset QUALITY_PRESETS [QUALITY_COUNT] = {
   [QUALITY_POTATO] = {"Potato",  854, 480, 0.55f,  1,  0,   2,   1},
 };
 
+// ── Shader Tuning ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+// Raytracing constants injected into GLSL shaders at build time by sdk.c.
+// Override any value from the command line:  ./sdk -DVNDF_ALPHA_FLOOR=0.02
+// SHADER_TUNING_BEGIN
+
+// Importance sampling — controls reflection ray quality and specular firefly suppression
+#define VNDF_ALPHA_FLOOR    0.01   // Min roughness² for VNDF reflection ray spread
+#define SPECULAR_D_BIAS     0.01   // Min roughness² for GGX D term (prevents firefly peak)
+
+// Reflection control — Budget-adaptive (LO = full quality at Budget=0, HI = constrained at Budget=1)
+#define REFL_CLAMP_LO       3.0    // Reflection luminance clamp × surface luminance
+#define REFL_CLAMP_HI       1.5    // Reflection luminance clamp × surface luminance
+#define REFL_GATE_LO        0.55   // Max roughness for tracing reflection rays
+#define REFL_GATE_HI        0.35   // Max roughness for tracing reflection rays
+#define REFL_THRESH_LO      0.10   // Reflection Fresnel weight skip threshold
+#define REFL_THRESH_HI      0.30   // Reflection Fresnel weight skip threshold
+#define REFL_DAMPING        0.5    // Budget-proportional reflection strength reduction
+#define REFL_SOFT_EDGE      8.0    // Threshold-to-full-weight transition sharpness
+
+// Reflection trace distance — Budget-adaptive ray length
+#define REFL_TRACE_LO       500.0  // Reflection trace max distance at Budget=0
+#define REFL_TRACE_HI       150.0  // Reflection trace max distance at Budget=1
+
+// Shadow rays — Budget-adaptive cutoff distances
+#define SHADOW_DIST_LO      600.0  // Shadow ray max distance at Budget=0
+#define SHADOW_DIST_HI      200.0  // Shadow ray max distance at Budget=1
+
+// A-trous denoiser edge-stopping (LO = still camera, HI = fast motion)
+#define DENOISE_DEPTH_LO    100.0  // Depth sensitivity when still (sharp edges)
+#define DENOISE_DEPTH_HI    30.0   // Depth sensitivity during motion (smoother)
+#define DENOISE_LUM_LO      200.0  // Luminance sensitivity when still
+#define DENOISE_LUM_HI      50.0   // Luminance sensitivity during motion
+
+// Firefly rejection — 3x3 neighborhood percentile clamp
+#define FIREFLY_HEADROOM    1.15   // Headroom multiplier above 2nd-brightest neighbor
+#define FIREFLY_BIAS        0.01   // Additive floor preventing zero clamp
+
+// CAS (Contrast Adaptive Sharpening)
+#define CAS_AMOUNT          0.35   // Sharpening kernel strength
+#define CAS_MIX             1.5    // Edge enhancement multiplier
+
+// TAA (Temporal Anti-Aliasing) — ghosting vs noise tradeoff
+#define TAA_SIGMA           0.15   // Variance clamp sigma (lower = tighter = less ghosting)
+#define TAA_STATIC_FLOOR    0.25   // Min blend alpha when camera is still (history retention)
+#define TAA_MOVE_LO         0.95   // Moving blend base at low motion (5% current frame)
+#define TAA_MOVE_HI         0.99   // Moving blend base at high motion (1% current frame)
+
+// SHADER_TUNING_END
+
+// Adaptive quality budget (C-side only — not injected into shaders)
+#define POTATO_BUDGET_FLOOR 0.35f  // Minimum budget for potato quality tier
+#define POTATO_TARGET_MS    0.033f // Target frame time for potato (~30 fps)
+#define DEFAULT_TARGET_MS   0.016f // Target frame time for other tiers (~60 fps)
+
 // Convex Hull Limits
 #define HULL_MAX_VERTS    256 // Per-hull vertex cap (matches GPU array size in Gpu_Hull)
 #define HULL_MAX_ADJ      16  // Maximum adjacency entries per vertex (for hill-climb support)
@@ -7685,7 +7739,7 @@ glsl rchit Closest_Hit {
       // Final specular — roughness-biased D prevents the razor-sharp GGX peak
       // that causes fireflies at 1 SPP.  The bias widens the highlight on very
       // smooth metals without affecting rough surfaces.
-      float D_Bias  = max (a2, 0.01);  // Floor: R≈0.32 minimum for D evaluation
+      float D_Bias  = max (a2, SPECULAR_D_BIAS);  // Floor: R≈0.32 minimum for D evaluation
       float D_Denom = NH * NH * (D_Bias - 1.0) + 1.0;
       float D_Safe  = D_Bias / (3.14159 * D_Denom * D_Denom);
       Specular = D_Safe * Vis * F;
@@ -7719,16 +7773,16 @@ glsl rchit Closest_Hit {
 
     // Dynamic reflection culling — Budget-aware: save rays on barely-reflective
     // surfaces, focus them on metals/smooth where reflections are clearly visible.
-    float Refl_Roughness_Gate = mix (0.55, 0.35, Budget);
+    float Refl_Roughness_Gate = mix (REFL_GATE_LO, REFL_GATE_HI, Budget);
     bool  Refl_Active = not Is_Reflection_Bounce and (R < Refl_Roughness_Gate);
-    float Refl_Dist = mix (800.0, 200.0, Budget);
+    float Refl_Dist = mix (800.0, SHADOW_DIST_HI, Budget);
     float Reflection_Weight = (not Refl_Active or Hit_Dist > Refl_Dist)
                                 ? 0.0
                                 : max (max (Env_F.r, Env_F.g), Env_F.b) * (1.0 - R * R);
     vec3  Reflection_Color  = vec3 (0.0);
 
     // Dynamic threshold: skip marginal reflections at high Budget
-    float Refl_Threshold = mix (0.10, 0.30, Budget);
+    float Refl_Threshold = mix (REFL_THRESH_LO, REFL_THRESH_HI, Budget);
     if (Reflection_Weight > Refl_Threshold) {
       // VNDF importance-sampled reflection (Heitz 2018) with R2 low-
       // discrepancy temporal sequence.  R2 (generalized golden ratio)
@@ -7739,7 +7793,7 @@ glsl rchit Closest_Hit {
       float R2_Base2 = float (PCG (Px_Seed + 1117u)) * 2.3283064e-10;
       float U1 = fract (R2_Base1 + float (Frame) * 0.7548776662);
       float U2 = fract (R2_Base2 + float (Frame) * 0.5698402910);
-      float Alpha   = max (R * R, 0.01);
+      float Alpha   = max (R * R, VNDF_ALPHA_FLOOR);
       // Build tangent frame around surface normal
       vec3 T = (abs (Normal.y) < 0.99) ? normalize (cross (Normal, vec3 (0, 1, 0)))
                                         : normalize (cross (Normal, vec3 (1, 0, 0)));
@@ -7759,21 +7813,21 @@ glsl rchit Closest_Hit {
                    Position + Normal * 0.2,
                    0.01,
                    Refl_Dir,
-                   mix (500.0, 150.0, Budget),
+                   mix (REFL_TRACE_LO, REFL_TRACE_HI, Budget),
                    0);
       // Scene-relative luminance clamp: soft proportional limit
       vec3  Rc      = Payload.rgb;
       float Rc_Lum  = dot (Rc, vec3 (0.2126, 0.7152, 0.0722));
       float Srf_Lum = dot (Ambient_Irradiance * Albedo, vec3 (0.2126, 0.7152, 0.0722));
-      float Max_Lum = max (Srf_Lum, 0.05) * mix (3.0, 1.5, Budget);
+      float Max_Lum = max (Srf_Lum, 0.05) * mix (REFL_CLAMP_LO, REFL_CLAMP_HI, Budget);
       Reflection_Color = Rc_Lum > Max_Lum ? Rc * (Max_Lum / Rc_Lum) : Rc;
     }
 
     // Gentle reflection damping at high Budget (frame-time pressure).
     // Soft fade near threshold prevents binary on/off flicker on metals.
-    float Refl_Strength = 1.0 - Budget * 0.5;
+    float Refl_Strength = 1.0 - Budget * REFL_DAMPING;
     float Soft_Weight = Reflection_Weight * Refl_Strength;
-    Soft_Weight *= clamp ((Reflection_Weight - Refl_Threshold) * 8.0, 0.0, 1.0);
+    Soft_Weight *= clamp ((Reflection_Weight - Refl_Threshold) * REFL_SOFT_EDGE, 0.0, 1.0);
 
     // Blend reflection into indirect specular: replace the hemisphere approximation
     // with actual traced reflection, weighted by the Fresnel term.
@@ -7783,7 +7837,7 @@ glsl rchit Closest_Hit {
   
     // Compute final shading based on instance type
     vec3 Color;
-    float Shadow_Dist = mix (600.0, 200.0, Budget); // Adaptive shadow ray cutoff distance
+    float Shadow_Dist = mix (SHADOW_DIST_LO, SHADOW_DIST_HI, Budget); // Adaptive shadow ray cutoff distance
   
     // Apply per-instance lighting model
     if (Is_Weapon) {
@@ -8586,7 +8640,7 @@ glsl comp Denoise {
   
       // Depth edge stopping — relaxed during motion for smoother frames
       float Depth_Diff = abs (Center_Depth - S_Depth) / max (Center_Depth, 0.1);
-      float Depth_Sensitivity = mix (100.0, 30.0, Motion);
+      float Depth_Sensitivity = mix (DENOISE_DEPTH_LO, DENOISE_DEPTH_HI, Motion);
       float W_Depth = exp (-Depth_Diff * Depth_Sensitivity);
   
       // Normal edge stopping: compute sample normal from cached depths
@@ -8604,7 +8658,7 @@ glsl comp Denoise {
   
       // Luminance edge stopping — aggressive during motion to smooth noise
       float Luminance_Difference = abs (Center_Luminance - Sample_Luminance);
-      float Lum_Sensitivity = mix (200.0, 50.0, Motion);
+      float Lum_Sensitivity = mix (DENOISE_LUM_LO, DENOISE_LUM_HI, Motion);
       float Weight_Luminance = exp (-Luminance_Difference * Luminance_Difference * Lum_Sensitivity);
 
       // Combine all edge-stopping weights and accumulate
@@ -8742,44 +8796,21 @@ glsl comp Post_Process {
         if (L > Max1) { Max2 = Max1; Max1 = L; }
         else if (L > Max2) { Max2 = L; }
       }
-      float Firefly_Limit = Max2 * 1.15 + 0.01;
+      float Firefly_Limit = Max2 * FIREFLY_HEADROOM + FIREFLY_BIAS;
       if (Lum_C > Firefly_Limit) Color *= Firefly_Limit / Lum_C;
 
-      // Per-pixel motion detection via reprojection (computed early for
-      // the motion-adaptive filter; reused later by TAA).
-      vec2  Inv_Proj = unpackHalf2x16 (Params.Inv_Proj_Diag);
-      vec2  NDC_Pre  = UV * 2.0 - 1.0;
-      vec3  View_Dir = normalize (vec3 (NDC_Pre.x * Inv_Proj.x, NDC_Pre.y * Inv_Proj.y, -1.0));
-      vec3  View_Pos = View_Dir * Depth;
-      mat4  R_Pre    = Decode_Reproject ();
-      vec4  PC       = R_Pre * vec4 (View_Pos, 1.0);
-      vec2  PUV      = PC.xy / PC.w * 0.5 + 0.5;
-      float Px_Disp  = length (UV - PUV);
-      float Px_Motion = clamp (Px_Disp * 50.0, 0.0, 1.0);
-
-      // Per-pixel adaptive filter: moving pixels get bilateral smooth
-      // (noise reduction), static pixels get CAS sharpen.
-      if (Px_Motion > 0.15) {
-        // Bilateral smooth for moving pixels — averages out 1-SPP noise
-        // using CURRENT-frame spatial neighbors only (no ghosting risk).
-        vec3  Smooth = vec3 (0.0);
-        float W_Total = 0.0;
-        for (int i = 0; i < 8; i++) {
-          float Dw = 1.0 / (1.0 + abs (Nd[i] - Depth) * 15.0);
-          Smooth += Nb[i] * Dw;
-          W_Total += Dw;
-        }
-        Smooth /= max (W_Total, 1e-6);
-        Color = mix (Color, Smooth, clamp (Px_Motion * 0.6, 0.0, 0.5));
-      } else {
-        // CAS sharpening for static/slow pixels
-        vec3 Avg = (Nb[1] + Nb[3] + Nb[4] + Nb[6]) * 0.25;  // N,W,E,S
+      // CAS sharpening — restores edge definition from denoise + upscale.
+      // No bilateral blur during motion: it caused ghosting from stale
+      // checkerboard neighbor data.  VNDF + R2 + motion-adaptive denoiser
+      // handle motion quality instead.
+      {
+        vec3 Avg = (Nb[1] + Nb[3] + Nb[4] + Nb[6]) * 0.25;
         vec3 Minimum = min (min (Nb[1], Nb[6]), min (Nb[3], Nb[4]));
         vec3 Maximum = max (max (Nb[1], Nb[6]), max (Nb[3], Nb[4]));
         vec3 Mn = Minimum / (1.0 + Minimum);
         vec3 Mx = Maximum / (1.0 + Maximum);
-        vec3 Sh = clamp (min (Mn, 1.0 - Mx) / (Mx - Mn + 0.04), 0.0, 1.0) * 0.35;
-        Color = max (mix (Avg, Color, 1.0 + Sh * 1.5), vec3 (0.0));
+        vec3 Sh = clamp (min (Mn, 1.0 - Mx) / (Mx - Mn + 0.04), 0.0, 1.0) * CAS_AMOUNT;
+        Color = max (mix (Avg, Color, 1.0 + Sh * CAS_MIX), vec3 (0.0));
       }
     }
 
@@ -8811,7 +8842,7 @@ glsl comp Post_Process {
         }
         M1 /= 5.0; M2 /= 5.0;
         vec3 Sigma = sqrt (max (M2 - M1 * M1, vec3 (0.0)));
-        History = clamp (History, M1 - Sigma * 0.15, M1 + Sigma * 0.15);
+        History = clamp (History, M1 - Sigma * TAA_SIGMA, M1 + Sigma * TAA_SIGMA);
   
         // Luminance-based history rejection
         //
@@ -8836,15 +8867,16 @@ glsl comp Post_Process {
         float Any_Motion   = max (Pixel_Motion, clamp (Speed * 0.04, 0.0, 1.0));
 
         // Static only if BOTH player and pixel are truly still
-        float Is_Static = step (Any_Motion, 0.02);
+        float Is_Static = step (Any_Motion, 0.01);
 
         // Static: 1/N convergence floored at 0.25 — more temporal samples
         // accumulated for smoother, noise-free image when camera is still.
-        float Static_Alpha = max (1.0 / max (float (Frame_Count), 1.0), 0.25);
+        float Static_Alpha = max (1.0 / max (float (Frame_Count), 1.0), TAA_STATIC_FLOOR);
 
-        // Moving: current-frame dominant — high base (0.90) aggressively
-        // rejects history to prevent ghosting on camera rotation.
-        float Base        = mix (0.90, 0.99, Any_Motion);
+        // Moving: almost entirely current-frame to kill ghosting.
+        // At Any_Motion=0.02 (threshold), Base=0.95 → 5% history.
+        // At Any_Motion=1.0 (fast), Base=0.99 → 1% history.
+        float Base        = mix (TAA_MOVE_LO, TAA_MOVE_HI, Any_Motion);
         float Framerate_Adaptation   = clamp ((Delta_Time - 0.016) * 30.0, 0.0, 1.0);
         float Moving_Alpha = max (max (max (Base, Framerate_Adaptation), Disocclusion), Anti_Lag);
 
@@ -10113,7 +10145,7 @@ int main (int Argc, char **Argv) {
     Top_Level_Rebuild (&World_Bottom_Level, &Weapon.Bottom_Level, &Enemy.Bottom_Level, Player_Body_Transform);
 
     // Adaptive quality budget — target frame time depends on quality tier
-    float Target_Frame_Time = (Active_Quality == QUALITY_POTATO) ? 0.033f : 0.016f;
+    float Target_Frame_Time = (Active_Quality == QUALITY_POTATO) ? POTATO_TARGET_MS : DEFAULT_TARGET_MS;
     float Budget = 0.0f;
     if (Force_Cheap) {
       Budget = 1.0f;
@@ -10123,7 +10155,7 @@ int main (int Argc, char **Argv) {
     }
     // Potato budget floor: keeps adaptive savings engaged — reflection
     // damping, shorter shadow rays, slight cheap-path blend.
-    if (Active_Quality == QUALITY_POTATO && Budget < 0.35f) Budget = 0.35f;
+    if (Active_Quality == QUALITY_POTATO && Budget < POTATO_BUDGET_FLOOR) Budget = POTATO_BUDGET_FLOOR;
     uint Budget_Byte = (uint)(Budget * 255.0f);
     Current_Budget_Byte = (int)Budget_Byte;
     uint Packed_SPP = (Active_SPP & 0xFF) | (Budget_Byte << 8);

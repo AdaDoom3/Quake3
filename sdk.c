@@ -662,6 +662,80 @@ static void platform_compile(Nob_Cmd *cmd, Platform plat, bool production) {
     }
 }
 
+// ── shader tuning defines ─────────────────────────────────────────
+//
+// q3.c contains a block between SHADER_TUNING_BEGIN / SHADER_TUNING_END
+// with `#define NAME VALUE` lines.  These are extracted and passed as
+// `-DNAME=VALUE` flags to glslangValidator so shaders can reference them.
+//
+// Command-line overrides: ./sdk -DVNDF_ALPHA_FLOOR=0.02 -DCAS_AMOUNT=0.5
+
+#define MAX_DEFINES 64
+
+typedef struct {
+    char name[64];
+    char value[64];
+} Define_Entry;
+
+// Extract #define lines from the SHADER_TUNING_BEGIN..END region of q3.c
+static int extract_tuning_defines(const char *src, Define_Entry *out, int max) {
+    int count = 0;
+    const char *begin = strstr(src, "SHADER_TUNING_BEGIN");
+    const char *end   = strstr(src, "SHADER_TUNING_END");
+    if (not begin or not end or end <= begin) return 0;
+
+    const char *p = begin;
+    while (p < end and count < max) {
+        const char *def = strstr(p, "#define ");
+        if (not def or def >= end) break;
+        def += 8;
+        while (*def == ' ') def++;
+
+        // Parse name
+        const char *name_start = def;
+        while (*def and *def != ' ' and *def != '\t' and *def != '\n') def++;
+        size_t name_len = (size_t)(def - name_start);
+        if (name_len == 0 or name_len >= 64) { p = def; continue; }
+
+        // Skip whitespace
+        while (*def == ' ' or *def == '\t') def++;
+
+        // Parse value (up to whitespace or comment)
+        const char *val_start = def;
+        while (*def and *def != ' ' and *def != '\t' and *def != '\n'
+               and not (def[0] == '/' and def[1] == '/')) def++;
+        size_t val_len = (size_t)(def - val_start);
+        if (val_len == 0 or val_len >= 64) { p = def; continue; }
+
+        memcpy(out[count].name,  name_start, name_len);
+        out[count].name[name_len] = '\0';
+        memcpy(out[count].value, val_start,  val_len);
+        out[count].value[val_len] = '\0';
+        count++;
+        p = def;
+    }
+    return count;
+}
+
+// Apply a -DNAME=VALUE override: update existing entry or append new one
+static int apply_define_override(Define_Entry *defs, int count, int max,
+                                 const char *name, size_t nlen,
+                                 const char *value) {
+    for (int i = 0; i < count; i++) {
+        if (strlen(defs[i].name) == nlen and memcmp(defs[i].name, name, nlen) == 0) {
+            snprintf(defs[i].value, sizeof defs[i].value, "%s", value);
+            return count;
+        }
+    }
+    if (count < max) {
+        memcpy(defs[count].name, name, nlen);
+        defs[count].name[nlen] = '\0';
+        snprintf(defs[count].value, sizeof defs[count].value, "%s", value);
+        return count + 1;
+    }
+    return count;
+}
+
 // ── main ─────────────────────────────────────────────────────────
 
 int main(int argc, char **argv) {
@@ -674,6 +748,9 @@ int main(int argc, char **argv) {
     bool production = false;
     Platform target = PLATFORM_NATIVE;
     bool build_all  = false;
+    int  cli_overrides = 0;              // Count of -D overrides for logging
+    Define_Entry cli_defs[MAX_DEFINES];  // Temporary storage for -D args
+    int cli_def_count = 0;
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--production") == 0 or strcmp(argv[i], "--prod") == 0)
             production = true;
@@ -682,12 +759,41 @@ int main(int argc, char **argv) {
         else if (strcmp(argv[i], "--debian") == 0)   target = PLATFORM_DEBIAN;
         else if (strcmp(argv[i], "--arch") == 0)     target = PLATFORM_ARCH;
         else if (strcmp(argv[i], "--all") == 0)      build_all = true;
+        else if (strncmp(argv[i], "-D", 2) == 0 and cli_def_count < MAX_DEFINES) {
+            const char *d = argv[i] + 2;
+            const char *eq = strchr(d, '=');
+            if (eq and (size_t)(eq - d) < 64) {
+                memcpy(cli_defs[cli_def_count].name, d, (size_t)(eq - d));
+                cli_defs[cli_def_count].name[eq - d] = '\0';
+                snprintf(cli_defs[cli_def_count].value, 64, "%s", eq + 1);
+                cli_def_count++;
+                cli_overrides++;
+            }
+        }
     }
 
     // Read the single-source file
     Nob_String_Builder sb = {0};
     if (not nob_read_entire_file(MAIN, &sb)) return 1;
     nob_sb_append_null(&sb);
+
+    // Extract shader tuning defines from SHADER_TUNING_BEGIN..END region
+    Define_Entry shader_defs[MAX_DEFINES];
+    int shader_def_count = extract_tuning_defines(sb.items, shader_defs, MAX_DEFINES);
+
+    // Apply command-line -D overrides (last write wins)
+    for (int i = 0; i < cli_def_count; i++)
+        shader_def_count = apply_define_override(shader_defs, shader_def_count, MAX_DEFINES,
+                                                  cli_defs[i].name, strlen(cli_defs[i].name),
+                                                  cli_defs[i].value);
+
+    // Pre-build -DNAME=VALUE argument strings for glslangValidator
+    char *define_args[MAX_DEFINES];
+    for (int i = 0; i < shader_def_count; i++) {
+        define_args[i] = malloc(140);
+        snprintf(define_args[i], 140, "-D%s=%s", shader_defs[i].name, shader_defs[i].value);
+    }
+    nob_log(NOB_INFO, "shader tuning: %d defines (%d overridden from cli)", shader_def_count, cli_overrides);
 
     // Extract top-level shader blocks and forward declarations
     Shader_Block shaders[MAX_SHADERS];
@@ -711,14 +817,18 @@ int main(int argc, char **argv) {
         if (not write_shader_glsl(glsl_paths[i], shaders[i].code, shaders[i].code_len)) return 1;
     }
 
-    // Compile each shader to SPIR-V
+    // Compile each shader to SPIR-V (injecting tuning defines as -D flags)
+    bool force_recompile = (cli_overrides > 0);  // -D overrides bypass staleness check
     Nob_Cmd cmd = {0};
     for (int i = 0; i < n; i++) {
-        if (not spv_stale(spv_paths[i], MAIN)) continue;
+        if (not force_recompile and not spv_stale(spv_paths[i], MAIN)) continue;
         nob_cmd_append(&cmd, "glslangValidator",
             "-V", "--target-env", "vulkan1.3",
             "-S", shaders[i].stage,
-            "-o", spv_paths[i], glsl_paths[i]);
+            "-o", spv_paths[i]);
+        for (int d = 0; d < shader_def_count; d++)
+            nob_cmd_append(&cmd, define_args[d]);
+        nob_cmd_append(&cmd, glsl_paths[i]);
         if (not nob_cmd_run(&cmd)) return 1;
     }
 
