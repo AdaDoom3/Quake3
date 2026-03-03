@@ -179,7 +179,7 @@ const Quality_Preset QUALITY_PRESETS [QUALITY_COUNT] = {
   [QUALITY_HIGH]   = {"High",   2560,1440, 1.00f,  2,  1,   2,   1}, 
   [QUALITY_MEDIUM] = {"Medium", 1920,1080, 1.00f,  1,  1,   2,   1},
   [QUALITY_LOW]    = {"Low",    1600, 900, 1.00f,  1,  1,   1,   1},
-  [QUALITY_POTATO] = {"Potato",  854, 480, 0.50f,  1,  0,   0,   1},
+  [QUALITY_POTATO] = {"Potato",  854, 480, 0.667f, 1,  0,   1,   1},
 };
 
 // Convex Hull Limits
@@ -7701,7 +7701,7 @@ glsl rchit Closest_Hit {
                                 : max (max (Env_F.r, Env_F.g), Env_F.b) * (1.0 - R * R);
     vec3  Reflection_Color  = vec3 (0.0);
 
-    // Dynamic threshold: at high budget, only trace strong reflections (kills sparkle)
+    // Dynamic threshold: tighter at high Budget to skip marginal reflections
     float Refl_Threshold = mix (0.10, 0.30, Budget);
     if (Reflection_Weight > Refl_Threshold) {
       vec3 Refl_Dir = reflect (-V, Normal);
@@ -7714,13 +7714,21 @@ glsl rchit Closest_Hit {
                    Refl_Dir,
                    mix (500.0, 150.0, Budget),
                    0);
-      // Clamp reflection luminance to prevent firefly sparkle at low res
-      vec3 Rc = Payload.rgb;
-      float Rc_Lum = dot (Rc, vec3 (0.2126, 0.7152, 0.0722));
-      float Max_Lum = mix (2.0, 0.5, Budget);  // Aggressive firefly kill
+      // Scene-relative luminance clamp: reflection can't exceed Nx the
+      // surface diffuse lighting.  Prevents fireflies while keeping
+      // reflections proportional to the scene.
+      vec3  Rc      = Payload.rgb;
+      float Rc_Lum  = dot (Rc, vec3 (0.2126, 0.7152, 0.0722));
+      float Srf_Lum = dot (Ambient_Irradiance * Albedo, vec3 (0.2126, 0.7152, 0.0722));
+      float Max_Lum = max (Srf_Lum, 0.05) * mix (4.0, 1.5, Budget);
       Reflection_Color = Rc_Lum > Max_Lum ? Rc * (Max_Lum / Rc_Lum) : Rc;
     }
-  
+
+    // Dampen reflection contribution at high Budget — keeps reflections
+    // present but subdued, preventing temporal sparkle at low res/fps.
+    float Refl_Strength = 1.0 - Budget * 0.6;  // 1.0 at Budget=0, 0.64 at 0.6
+    Reflection_Weight *= Refl_Strength;
+
     // Blend reflection into indirect specular: replace the hemisphere approximation
     // with actual traced reflection, weighted by the Fresnel term.
     vec3 Traced_Specular = Env_F * mix (Indirect_Specular / max (Env_F, vec3(0.01)),
@@ -9984,7 +9992,8 @@ int main (int Argc, char **Argv) {
       Budget = (Delta_Time - Target_Frame_Time) / (0.15f - Target_Frame_Time);
       if (Budget > 1.0f) Budget = 1.0f;
     }
-    // Potato budget floor: always keep adaptive savings slightly engaged
+    // Potato budget floor: keeps adaptive savings engaged — reflection
+    // damping, shorter shadow rays, slight cheap-path blend.
     if (Active_Quality == QUALITY_POTATO && Budget < 0.15f) Budget = 0.15f;
     uint Budget_Byte = (uint)(Budget * 255.0f);
     Current_Budget_Byte = (int)Budget_Byte;
