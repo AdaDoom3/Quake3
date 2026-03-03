@@ -1311,12 +1311,10 @@ uint BSP_Tessellate_Patch (const BSP_Vertex *Control_Grid, int Patch_Width, int 
                            Vertex **Inout_Vertices, uint *Inout_Vertex_Count,
                            uint **Inout_Indices, uint *Inout_Index_Count);
 
-// Parse the BSP entity lump to find the first info_player_deathmatch spawn point.
-// Returns the origin (swizzled to Y-up) and facing angle.
+// Parse the BSP entity lump to find the first info_player_deathmatch spawn point. Returns the origin (swizzled to Y-up) and facing angle.
 Spawn BSP_Find_Spawn (const uint8_t *File_Data, const BSP_Header *Header);
 
-// Parse all entities from the BSP entity lump into an array of discriminated records.
-// Stores results in Out_Entities and returns the count.
+// Parse all entities from the BSP entity lump into an array of discriminated records. Stores results in Out_Entities and returns the count.
 uint BSP_Parse_Entities (const uint8_t *File_Data, const BSP_Header *Header,
                          BSP_Entity *Out_Entities, uint Max_Entities);
 
@@ -1327,8 +1325,7 @@ Scene_Environment Environment_Infer_From_Scene (const Scene *S);
 Scene Scene_Load_From_BSP (const char *Path, Spawn *Out_Spawn);
 
 // Load textures for every material in the scene. Attempts to load TGA files from the assets
-// directory; materials without a texture file fall back to a 1×1 solid-color pixel derived
-// from the hashed shader name.
+// directory; materials without a texture file fall back to a 1×1 solid-color pixel derived from the hashed shader name.
 void Scene_Load_Textures (const Scene *Scene_Data);
 
 // Load the weapon model's TGA textures and append them to the global texture array.
@@ -1383,8 +1380,7 @@ void Top_Level_Rebuild (Acceleration_Structure *World, Acceleration_Structure *W
 // Collider Shape Enumeration
 //
 // Six collider shapes, each defining a support function s(d̂) : S² > ℝ³ from unit directions to
-// surface offsets. The GPU physics compute shader switches on this enum to select the appropriate
-// Minkowski support mapping.
+// surface offsets. The GPU physics compute shader switches on this enum to select the appropriate Minkowski support mapping.
 //
 enum Collider_Shape {SHAPE_SPHERE,    // Projectiles:       s(d̂) = d̂ · r                                   
                      SHAPE_CAPSULE,   // Player, NPCs:      s(d̂) = d̂ · r + (0, sign(d̂.y) · spine, 0)      
@@ -1487,8 +1483,7 @@ void Physics_Pipeline_Create ();
 void Denoise_Pipeline_Create (void);
 
 // Initialize the Gpu_Player state buffer from a CPU-side Player, allocate the hull storage
-// buffer (with a 1-vertex dummy if no hull has been uploaded yet), create the descriptor pool
-// and set, and bind all physics resources.
+// buffer (with a 1-vertex dummy if no hull has been uploaded yet), create the descriptor pool and set, and bind all physics resources.
 void Physics_Resources_Create (const Player *Initial_State);
 
 // Dispatch the physics compute shader for one frame: push the current input, execute a single
@@ -1544,8 +1539,8 @@ typedef struct {
 void Mode_Init (Mode_Resonator *M, float Freq_Hz, float T60, float Gain);
 float Mode_Tick (Mode_Resonator *M, float X);
 
-// Material mode tables: {frequency_Hz, T60_seconds, gain}
-// Derived from measured rigid-body resonances (SIGGRAPH modal synthesis literature)
+// Material mode tables: {frequency_Hz, T60_seconds, gain}. Derived from measured rigid-body resonances (SIGGRAPH modal synthesis
+// literature)
 typedef struct {float Freq; float T60; float Gain;} Mode_Spec;
 
 // Stone: dense, high frequencies, medium-long decay
@@ -1588,8 +1583,7 @@ const Mode_Spec *Material_Modes[] = {Modes_Stone,  // MATERIAL_DEFAULT = stone-l
 ALuint Audio_Generate_Modal_Impact (int Material, float Impulse_Strength,
                                     float Duration, float Volume);
 
-// Load a WAV file from disk into an OpenAL buffer. Supports 8/16-bit mono/stereo PCM.
-// Returns 0 on failure.
+// Load a WAV file from disk into an OpenAL buffer. Supports 8/16-bit mono/stereo PCM. Returns 0 on failure.
 ALuint Audio_Load_WAV (const char *Path);
 
 // Weapon fire = sharp metallic transient (bolt mechanism) + propellant gas expansion.
@@ -1601,8 +1595,7 @@ ALuint Audio_Generate_Weapon_Fire (float Volume);
 ALuint Audio_Generate_Explosion_Modal (float Duration, float Volume);
 
 // Try to load a WAV from disk; if missing, fall back to modal synthesis.
-// This layering lets us use real recordings when available and physically-based
-// synthesis as a fallback - the best of both worlds.
+// This layering lets us use real recordings when available and physically-based synthesis as a fallback - the best of both worlds.
 ALuint Audio_Load_WAV_Or_Modal (const char *Path, int Material, float Impulse,
                                         float Duration, float Volume);
 
@@ -1656,7 +1649,7 @@ void Weapon_Update (Weapon_Instance *Weapon, const Camera *Camera_Data, float De
 Input Poll_Input ();
 
 // Record and submit one frame of ray tracing: bind the pipeline and descriptors
-void Raytracing_Frame (Gpu_Postprocess_Push PP);
+void Raytracing_Frame (Gpu_Postprocess_Push Postprocess);
 
 // Ensures window aspect ratio stays between our constraints
 void Constrain_Aspect_Ratio (int *W, int *H);
@@ -3769,8 +3762,7 @@ Scene_Environment Environment_Infer_From_Scene (const Scene *S) {
     uint W = 0, H = 0;
     uint8_t *Pixels = TGA_Load (Sky_Path, &W, &H);
     if (Pixels and W > 0 and H > 0) {
-      // Sample sky texture: top quarter = zenith, middle band = horizon
-      // Compute average color for each region (sRGB > linear)
+      // Sample sky texture: top quarter = zenith, middle band = horizon. Compute average color for each region (sRGB > linear)
       double Zenith_R = 0, Zenith_G = 0, Zenith_B = 0;
       double Horiz_R = 0, Horiz_G = 0, Horiz_B = 0;
       int Zenith_Count = 0, Horiz_Count = 0;
@@ -3826,8 +3818,7 @@ Scene_Environment Environment_Infer_From_Scene (const Scene *S) {
       Env.Ambient_Down.y = Env.Ambient_Up.y * 0.6f + 0.03f;
       Env.Ambient_Down.z = Env.Ambient_Up.z * 0.5f + 0.02f;
 
-      // Infer sun color from the brightest region of the sky texture
-      // (the bright area near the sun is typically warm/white)
+      // Infer sun color from the brightest region of the sky texture (the bright area near the sun is typically warm/white)
       float Max_Bright = 0;
       float Sun_R = 0, Sun_G = 0, Sun_B = 0;
       for (uint Y = 0; Y < H; Y++) {
@@ -3861,8 +3852,7 @@ Scene_Environment Environment_Infer_From_Scene (const Scene *S) {
   // 3. Check worldspawn entity for any explicit overrides
   for (uint I = 0; I < S->Entity_Count; I++) {
     if (S->Entities[I].Kind == ENTITY_WORLD) {
-      // Q3 worldspawn can have _sun_angle, _sun_color, etc. in custom maps
-      // For now, just log the worldspawn presence
+      // Q3 worldspawn can have _sun_angle, _sun_color, etc. in custom maps. For now, just log the worldspawn presence
       printf ("[environment] worldspawn entity found\n");
       break;
     }
@@ -4255,10 +4245,8 @@ void Scene_Load_Textures (const Scene *Scene_Data) {
   uint8_t Fallback_Height[4]    = {127, 127, 127, 255};  // mid-height
   uint8_t *PBR_Fallbacks[]      = {NULL, Fallback_Normal, Fallback_Roughness, Fallback_Metalness, Fallback_Emissive, Fallback_Height};
 
-  // Per-material PBR classification
-  // Hand-tuned roughness and metalness for each BSP texture based on real-world
-  // material properties. These override the uniform fallback when no explicit
-  // PBR map exists. Values are [roughness_byte, metalness_byte] (0-255 > 0.0-1.0).
+  // Per-material PBR classification: hand-tuned roughness and metalness for each BSP texture based on real-world material properties.
+  // These override the uniform fallback when no explicit PBR map exists. Values are [roughness_byte, metalness_byte] (0-255 > 0.0-1.0).
   // Stored as a parallel array: Material_PBR[material_index] = {R, M}.
   uint8_t (*Material_PBR)[2] = calloc (Material_Count, sizeof (uint8_t[2]));
   for (uint I = 0; I < Material_Count; I++) {
@@ -4422,9 +4410,8 @@ void Scene_Load_Textures (const Scene *Scene_Data) {
           uint8_t *Gen = malloc (Pixel_Count * 4);
 
           if (Map_Type == 1) {
-            // Normal map: Sobel filter on diffuse luminance
-            // Produces tangent-space normals: cracks and mortar joints in stone
-            // become visible geometric detail under directional lighting.
+            // Normal map: Sobel filter on diffuse luminance. Produces tangent-space normals: cracks and mortar joints in stone become
+            // visible geometric detail under directional lighting.
             for (uint Y = 0; Y < DH; Y++) {
               for (uint X = 0; X < DW; X++) {
                 // Wrap-safe sampling (textures tile)
@@ -4457,9 +4444,8 @@ void Scene_Load_Textures (const Scene *Scene_Data) {
               }
             }
 
-          // Roughness map: base ~ luminance variation
-          // Darker cracks in stone = rougher; bright polished areas = smoother.
-          // Metal: dark oxidation = rougher; bright highlights = smoother.
+          // Roughness map: base ~ luminance variation. Darker cracks in stone = rougher; bright polished areas = smoother. Metal: dark
+          // oxidation = rougher; bright highlights = smoother.
           } else if (Map_Type == 2) {
             for (uint I = 0; I < Pixel_Count; I++) {
               uint8_t *P = &Diff[I * 4];
@@ -4474,8 +4460,7 @@ void Scene_Load_Textures (const Scene *Scene_Data) {
               Gen[I*4+0] = V; Gen[I*4+1] = V; Gen[I*4+2] = V; Gen[I*4+3] = 255;
             }
 
-          // Metalness map: base ~ saturation/brightness detection
-          // For metallic materials: desaturated bright pixels > more metallic.
+          // Metalness map: base ~ saturation/brightness detection. For metallic materials: desaturated bright pixels > more metallic.
           // For non-metallic: stay near zero with slight variation.
           } else if (Map_Type == 3) {
             for (uint I = 0; I < Pixel_Count; I++) {
@@ -4522,9 +4507,8 @@ void Scene_Load_Textures (const Scene *Scene_Data) {
               Gen[I*4+3] = 255;
             }
 
-          // Height map: luminance-based
-          // Stone/brick: inverted luminance (dark cracks = deeper)
-          // Metal: direct luminance (bright highlights = raised)
+          // Height map: luminance-based. Stone/brick: inverted luminance (dark cracks = deeper). Metal: direct luminance (bright
+          // highlights = raised)
           } else {
             bool Invert = (Base_M < 80);  // non-metallic > invert
             for (uint I = 0; I < Pixel_Count; I++) {
@@ -5012,10 +4996,8 @@ void Weapon_Bottom_Level_Rebuild (Weapon_Instance *Weapon) {
       .indexType                = VK_INDEX_TYPE_UINT32,
       .indexData.deviceAddress  = Weapon->Index_Buffer.Address}};
 
-  // BLAS refit (MODE_UPDATE) instead of full rebuild
-  // The weapon mesh topology never changes - only vertex positions move.
-  // MODE_UPDATE re-computes AABBs in-place without rebuilding the BVH tree,
-  // which is 5-10× faster than a full build on NVIDIA RT cores.
+  // BLAS refit (MODE_UPDATE) instead of full rebuild. The weapon mesh topology never changes - only vertex positions move.
+  // MODE_UPDATE re-computes AABBs in-place without rebuilding the BVH tree, which is 5-10× faster than a full build on NVIDIA RT cores.
   // srcAccelerationStructure = dst for in-place update.
   VkAccelerationStructureBuildGeometryInfoKHR Build_Info = {
     .sType                     = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR,
@@ -5256,14 +5238,10 @@ void Top_Level_Initialize (uint Maximum_Instances) {
       .arrayOfPointers    = VK_FALSE,
       .data.deviceAddress = Top_Level_Instance_Buffer.Address}};
 
-  // Query TLAS build sizes from the driver
-  // ALLOW_UPDATE_BIT
-  // Requesting update capability at creation time tells the driver to build the
-  // BVH in a format amenable to in-place refitting. On NVIDIA, this selects a
-  // "refit-friendly" BVH2 layout; on AMD, it avoids the compact PLOC builder.
-  // Per-frame, we then use MODE_UPDATE (refit) instead of full MODE_BUILD,
-  // which only touches BVH nodes whose child AABBs changed - typically O(log N)
-  // instead of O(N log N) for a full SAH rebuild.
+  // Query TLAS build sizes from the driver. ALLOW_UPDATE_BIT: requesting update capability at creation time tells the driver to build
+  // the BVH in a format amenable to in-place refitting. On NVIDIA, this selects a "refit-friendly" BVH2 layout; on AMD, it avoids the
+  // compact PLOC builder. Per-frame, we then use MODE_UPDATE (refit) instead of full MODE_BUILD, which only touches BVH nodes whose
+  // child AABBs changed - typically O(log N) instead of O(N log N) for a full SAH rebuild.
   VkAccelerationStructureBuildGeometryInfoKHR Build_Info = {
     .sType         = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR,
     .type          = VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR,
@@ -5629,7 +5607,8 @@ void Raytracing_Pipeline_Create () {
     {12, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,             1, VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR, NULL}, // Entity vertices
     {13, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,             1, VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR, NULL}, // Entity indices
     {14, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,             1, VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR, NULL}, // Entity texture IDs
-    {15, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, DESCRIPTOR_TEXTURE_SLOTS, VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR, NULL}, // Textures (must be last for variable count)
+    {15, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, DESCRIPTOR_TEXTURE_SLOTS, VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR, NULL},
+    // Textures: must be last binding for variable descriptor count
   };
 
   // The texture array binding uses partially-bound and variable-count flags
@@ -6039,7 +6018,7 @@ void Weapon_Update (Weapon_Instance *Weapon, const Camera *Camera_Data, float De
 //   Raytracing_Frame
 // ════════════════════
 
-void Raytracing_Frame (Gpu_Postprocess_Push PP) {
+void Raytracing_Frame (Gpu_Postprocess_Push Postprocess) {
 
   // Wait for the previous frame's GPU work to complete
   VK_CHECK (vkWaitForFences (Device, 1, &Fence, VK_TRUE, UINT64_MAX));
@@ -6078,8 +6057,7 @@ void Raytracing_Frame (Gpu_Postprocess_Push PP) {
 
   // Checkerboard: dispatch at half width, each thread remaps to a
   // checkerboard pixel. Untouched pixels keep their previous value; the postprocess
-  // reconstructs them from traced neighbors before TAA. On lavapipe (CPU) this
-  // halves actual thread count, saving ~35% frame time.
+  // reconstructs them from traced neighbors before TAA. On lavapipe (CPU) this halves actual thread count, saving ~35% frame time.
   int RT_Dispatch_W = Active_Checkerboard ? (Render_Width + 1) / 2 : Render_Width;
   vkCmdTraceRays (/*commandBuffer                  =>*/ Command_Buffer,
                   /*pRaygenShaderBindingTable      =>*/ &Shader_Binding_Ray_Generation,
@@ -6171,8 +6149,8 @@ void Raytracing_Frame (Gpu_Postprocess_Push PP) {
                              /*layout        =>*/ Postprocess_Pipeline_Layout,
                              /*stageFlags    =>*/ VK_SHADER_STAGE_COMPUTE_BIT,
                              /*offset        =>*/ 0,
-                             /*size          =>*/ sizeof PP,
-                             /*pValues       =>*/ &PP);
+                             /*size          =>*/ sizeof Postprocess,
+                             /*pValues       =>*/ &Postprocess);
     vkCmdDispatch (Command_Buffer, (Render_Width + 7) / 8, (Render_Height + 7) / 8, 1);
   }
 
@@ -6943,8 +6921,7 @@ ALuint Audio_Generate_Modal_Impact (int Material, float Impulse_Strength, float 
       Excitation = 0.5f * (1.f - cosf (Phase)) * Impulse_Strength;
     }
 
-    // Acceleration noise: band-limited noise that decays, fills in high-frequency content
-    // the modal bank misses (per Cornell SIGGRAPH 2012)
+    // Acceleration noise: band-limited noise that decays, fills in high-frequency content the modal bank misses (per Cornell SIGGRAPH 2012)
     float T = (float)I / MODAL_SAMPLE_RATE;
     float Noise_Env = expf (-T * 20.f) * 0.15f * Impulse_Strength;
     Seed = Seed * 1103515245 + 12345;
@@ -7488,10 +7465,10 @@ glsl rchit Closest_Hit {
     uint Seed  = PCG (Prim * 1973u + Inst * 9277u + Frame * 26699u);
     float Ang  = float (Seed) * 2.3283064e-10 * 6.2831853;
     float Rad  = sqrt (float (PCG (Seed)) * 2.3283064e-10) * Disk_Radius;
-    vec3 Lt    = (abs (Ld.y) < 0.99) ? normalize (cross (Ld, vec3 (0, 1, 0)))
-                                      : normalize (cross (Ld, vec3 (1, 0, 0)));
-    vec3 Lb    = cross (Ld, Lt);
-    return normalize (Ld + Lt * (cos (Ang) * Rad) + Lb * (sin (Ang) * Rad));
+    vec3 Light_Tangent   = (abs (Ld.y) < 0.99) ? normalize (cross (Ld, vec3 (0, 1, 0)))
+                                               : normalize (cross (Ld, vec3 (1, 0, 0)));
+    vec3 Light_Bitangent = cross (Ld, Light_Tangent);
+    return normalize (Ld + Light_Tangent * (cos (Ang) * Rad) + Light_Bitangent * (sin (Ang) * Rad));
   }
   
   // Extracted shadow trace (deduplicated from entity and world paths)
@@ -7550,7 +7527,7 @@ glsl rchit Closest_Hit {
     vec4 V2_S0  = Read_Raw (I2, 0, Instance), V2_S1 = Read_Raw (I2, 1, Instance), V2_S2 = Read_Raw (I2, 2, Instance);
     vec3 Position  = V0_S0.xyz * Bary.x + V1_S0.xyz * Bary.y + V2_S0.xyz * Bary.z;
     vec2 Tex_Coord = V0_S1.xy  * Bary.x + V1_S1.xy  * Bary.y + V2_S1.xy  * Bary.z;
-    vec2 Lm_Coord  = V0_S1.zw  * Bary.x + V1_S1.zw  * Bary.y + V2_S1.zw  * Bary.z;
+    vec2 Lightmap_Coordinate  = V0_S1.zw  * Bary.x + V1_S1.zw  * Bary.y + V2_S1.zw  * Bary.z;
     vec3 Normal    = normalize (V0_S2.xyz * Bary.x + V1_S2.xyz * Bary.y + V2_S2.xyz * Bary.z);
   
     // Fetch the texture ID for this triangle and sample the albedo
@@ -7662,8 +7639,8 @@ glsl rchit Closest_Hit {
     float NL  = max (dot (Normal, Ld), 0.0);
   
     // Skip full BRDF when surface faces away from sun
-    vec3  Sp  = vec3 (0.0);
-    vec3  Df  = vec3 (0.0);
+    vec3  Specular = vec3 (0.0);
+    vec3  Diffuse  = vec3 (0.0);
     if (NL > 0.0) {
       vec3  H   = normalize (V + Ld);
       float NH  = max (dot (Normal, H),  0.0);
@@ -7685,8 +7662,8 @@ glsl rchit Closest_Hit {
       vec3  F   = F0 + (1.0 - F0) * T5;
   
       // Final specular and diffuse terms
-      Sp  = D * Vis * F;
-      Df  = (1.0 - F) * (1.0 - M) * Albedo * 0.31831;  // 1/π
+      Specular = D * Vis * F;
+      Diffuse  = (1.0 - F) * (1.0 - M) * Albedo * 0.31831;  // 1/π
     }
   
     // Hemisphere ambient diffuse 
@@ -7711,8 +7688,7 @@ glsl rchit Closest_Hit {
     // Indirect diffuse: hemisphere ambient weighted by (1 - metallic) since metals have no diffuse
     vec3 Indirect_Diffuse = Ambient_Irradiance * Albedo * (1.0 - M) * (1.0 - Env_F);
     
-    // Reflection-bounce hits detect this and skip tracing another reflection to limit
-    // recursion to exactly one bounce
+    // Reflection-bounce hits detect this and skip tracing another reflection to limit recursion to exactly one bounce
     bool Is_Reflection_Bounce = (gl_RayTminEXT > 0.005);
 
     // Reflection culling
@@ -7750,17 +7726,17 @@ glsl rchit Closest_Hit {
   
     // Apply per-instance lighting model
     if (Is_Weapon) {
-      vec3 Direct    = (Df + Sp) * Lr * NL;
-      vec3 Wpn_Full  = Direct * 0.9 + (Indirect_Diffuse + Traced_Specular) * 1.5;
-      vec3 Wpn_Cheap = Ambient_Irradiance * Albedo * 2.5 + Albedo * max(NL, 0.3);
-      Color = mix (Wpn_Full, Wpn_Cheap, Budget);
+      vec3 Direct    = (Diffuse + Specular) * Lr * NL;
+      vec3 Weapon_Full  = Direct * 0.9 + (Indirect_Diffuse + Traced_Specular) * 1.5;
+      vec3 Weapon_Cheap = Ambient_Irradiance * Albedo * 2.5 + Albedo * max(NL, 0.3);
+      Color = mix (Weapon_Full, Weapon_Cheap, Budget);
 
     // Entity: direct sun + shadows + hemisphere ambient, no lightmap (MD3 models have no LM UVs)
     } else if (Is_Entity) {
       float Shadow_Factor = (NL > 0.0 and not Is_Reflection_Bounce and Hit_Dist < Shadow_Dist)
                               ? Trace_Shadow (Position, Normal, Ld, Primitive, Instance, Frame, Env_Sun_Dir.w)
                               : 1.0;
-      vec3 Direct = (Df + Sp) * Lr * NL * Shadow_Factor;
+      vec3 Direct = (Diffuse + Specular) * Lr * NL * Shadow_Factor;
 
       // Entity color: balanced ambient - not too bright (avoids glow), not too dark (avoids silhouette)
       vec3 Entity_Full  = Direct + Indirect_Diffuse * 0.8 + Traced_Specular;
@@ -7768,18 +7744,18 @@ glsl rchit Closest_Hit {
       Color = mix (Entity_Full, Entity_Cheap, Budget);
 
       // Subtle saturation boost for entities - counteracts ambient washout on character models
-      float Ent_Luma = dot (Color, vec3 (0.2126, 0.7152, 0.0722));
-      Color = mix (vec3 (Ent_Luma), Color, 1.15);  // 15% saturation increase
+      float Entity_Luminance = dot (Color, vec3 (0.2126, 0.7152, 0.0722));
+      Color = mix (vec3 (Entity_Luminance), Color, 1.15);  // 15% saturation increase
     } else {
-      vec3 Lm = textureLod (Lightmap, Lm_Coord, 0.0).rgb * 4.0;  // Lightmap auto-linearized via SRGB format
+      vec3 Lightmap_Color = textureLod (Lightmap, Lightmap_Coordinate, 0.0).rgb * 4.0;  // Lightmap auto-linearized via SRGB format
   
       // Inline ray query for shadows
       float Shadow_Factor = (NL > 0.0 and not Is_Reflection_Bounce and Hit_Dist < Shadow_Dist)
         ? Trace_Shadow (Position, Normal, Ld, Primitive, Instance, Frame, Env_Sun_Dir.w) : 1.0;
   
       // Dual-path rendering with Budget blend
-      vec3 Direct = (Df + Sp) * Lr * NL * Shadow_Factor;
-      vec3 Baked_GI = Albedo * Lm * (1.0 - M);
+      vec3 Direct = (Diffuse + Specular) * Lr * NL * Shadow_Factor;
+      vec3 Baked_GI = Albedo * Lightmap_Color * (1.0 - M);
   
       // Cheap path: just lightmap + emissive (minimal ambient to keep shadows dark)
       vec3 Cheap = Baked_GI + Ambient_Irradiance * Albedo * 0.15 + Emissive * 5.0;
@@ -8389,8 +8365,7 @@ glsl comp Physics {
     // Record horizontal speed for HUD/diagnostics
     Player.Speed_Last = length (Player.Velocity.xz);
   
-    // Projectile update
-    // Decrement fire cooldown
+    // Projectile update: decrement fire cooldown
     if (Fire_Cooldown > 0.0) Fire_Cooldown -= Input.Dt;
   
     // Spawn a new projectile on fire button press
@@ -8530,7 +8505,7 @@ glsl comp Denoise {
     vec3  Center_Normal = Normal_From_Depths (Center_Depth, Depths[5], Depths[7]);
 
     // Compute center pixel luminance for edge stopping
-    float Center_Lum = log2 (1.0 + dot (Center_Color, vec3 (0.2126, 0.7152, 0.0722)));
+    float Center_Luminance = log2 (1.0 + dot (Center_Color, vec3 (0.2126, 0.7152, 0.0722)));
 
     // Initialize accumulator for weighted filter output
     vec3  Sum    = vec3 (0.0);
@@ -8540,7 +8515,7 @@ glsl comp Denoise {
     for (int I = 0; I < 9; I++) {
       vec3  S_Color = imageLoad (Input_Image, Sample_Positions[I]).rgb;
       float S_Depth = Depths[I];
-      float S_Lum   = log2 (1.0 + dot (S_Color, vec3 (0.2126, 0.7152, 0.0722)));
+      float Sample_Luminance   = log2 (1.0 + dot (S_Color, vec3 (0.2126, 0.7152, 0.0722)));
   
       // Spatial weight: Gaussian kernel
       int Dx = (I % 3) - 1, Dy = (I / 3) - 1;
@@ -8561,11 +8536,11 @@ glsl comp Denoise {
       float W_Normal = Ndot;
   
       // Luminance edge stopping (tighter threshold preserves color edges)
-      float Lum_Diff = abs (Center_Lum - S_Lum);
-      float W_Lum = exp (-Lum_Diff * Lum_Diff * 500.0);
+      float Luminance_Difference = abs (Center_Luminance - Sample_Luminance);
+      float Weight_Luminance = exp (-Luminance_Difference * Luminance_Difference * 500.0);
 
       // Combine all edge-stopping weights and accumulate
-      float W = W_Spatial * W_Depth * W_Normal * W_Lum;
+      float W = W_Spatial * W_Depth * W_Normal * Weight_Luminance;
       Sum += S_Color * W;
       Weight += W;
     }
@@ -8632,13 +8607,13 @@ glsl comp Post_Process {
     // Unpack fp16 RLE push constants (1 ALU op each via unpackHalf2x16)
     float Delta_Time     = unpackHalf2x16 (Params.Dt_Frame).x;
     uint  Frame_Count    = (Params.Dt_Frame >> 16) & 0xFFFFu;
-    vec2  Vel            = unpackHalf2x16 (Params.Velocity);
-    vec2  SE             = unpackHalf2x16 (Params.Speed_Exposure);
-    float Speed          = SE.x;
-    float Exposure       = SE.y;
-    vec2  BV             = unpackHalf2x16 (Params.Bloom_Vignette);
-    float Bloom_Strength = BV.x;
-    float Vignette       = BV.y;
+    vec2  Velocity       = unpackHalf2x16 (Params.Velocity);
+    vec2  Speed_Exposure = unpackHalf2x16 (Params.Speed_Exposure);
+    float Speed          = Speed_Exposure.x;
+    float Exposure       = Speed_Exposure.y;
+    vec2  Bloom_Vignette = unpackHalf2x16 (Params.Bloom_Vignette);
+    float Bloom_Strength = Bloom_Vignette.x;
+    float Vignette       = Bloom_Vignette.y;
   
     // Elect lane 0 to load focus depth, broadcast to workgroup via LDS
     if (gl_LocalInvocationIndex == 0u)
@@ -8659,23 +8634,23 @@ glsl comp Post_Process {
       vec3 S = imageLoad (Color_Image, ivec2 (Pixel.x, min (Pixel.y + 1, Size.y - 1))).rgb;
       vec3 W = imageLoad (Color_Image, ivec2 (max (Pixel.x - 1, 0), Pixel.y)).rgb;
       vec3 E = imageLoad (Color_Image, ivec2 (min (Pixel.x + 1, Size.x - 1), Pixel.y)).rgb;
-      vec3 Mn = min (min (N, S), min (W, E));
-      vec3 Mx = max (max (N, S), max (W, E));
+      vec3 Minimum = min (min (N, S), min (W, E));
+      vec3 Maximum = max (max (N, S), max (W, E));
 
       // Reinhard-compress to [0,1] for adaptive weight (handles HDR > 1.0 gracefully)
-      vec3 Mn_T = Mn / (1.0 + Mn);
-      vec3 Mx_T = Mx / (1.0 + Mx);
-      vec3 Rcp_Range = 1.0 / (Mx_T - Mn_T + 0.04);
-      vec3 Sharpness = clamp (min (Mn_T, 1.0 - Mx_T) * Rcp_Range, 0.0, 1.0) * 0.5;
+      vec3 Minimum_Tonemapped = Minimum / (1.0 + Minimum);
+      vec3 Maximum_Tonemapped = Maximum / (1.0 + Maximum);
+      vec3 Rcp_Range = 1.0 / (Maximum_Tonemapped - Minimum_Tonemapped + 0.04);
+      vec3 Sharpness = clamp (min (Minimum_Tonemapped, 1.0 - Maximum_Tonemapped) * Rcp_Range, 0.0, 1.0) * 0.5;
       vec3 Avg = (N + S + W + E) * 0.25;
       Color = max (mix (Avg, Color, 1.0 + Sharpness * 2.0), vec3 (0.0));
     }
 
     // Temporal accumulation (TAA) with motion-vector reprojection - reconstruct view-space position from NDC
     if (Frame_Count > 0u) {
-      vec2  Inv_P       = unpackHalf2x16 (Params.Inv_Proj_Diag);
+      vec2  Inverse_Proj = unpackHalf2x16 (Params.Inv_Proj_Diag);
       vec2  NDC         = UV * 2.0 - 1.0;
-      vec3  View_Dir    = normalize (vec3 (NDC.x * Inv_P.x, NDC.y * Inv_P.y, -1.0));
+      vec3  View_Dir    = normalize (vec3 (NDC.x * Inverse_Proj.x, NDC.y * Inverse_Proj.y, -1.0));
       vec3  View_Pos    = View_Dir * Depth;
   
       // Reproject: Proj * Prev_View * Inverse_View * View_Pos > previous clip-space
@@ -8694,8 +8669,8 @@ glsl comp Post_Process {
         vec3 M1 = Color, M2 = Color * Color;  // Moments for variance computation
         const ivec2 Offsets[4] = ivec2[4](ivec2(-1,0), ivec2(1,0), ivec2(0,-1), ivec2(0,1));
         for (int I = 0; I < 4; I++) {
-          vec3 NS = imageLoad (Color_Image, clamp (Pixel + Offsets[I], ivec2(0), Size - 1)).rgb;
-          M1 += NS; M2 += NS * NS;
+          vec3 Neighbor = imageLoad (Color_Image, clamp (Pixel + Offsets[I], ivec2(0), Size - 1)).rgb;
+          M1 += Neighbor; M2 += Neighbor * Neighbor;
         }
         M1 /= 5.0; M2 /= 5.0;
         vec3 Sigma = sqrt (max (M2 - M1 * M1, vec3 (0.0)));
@@ -8707,15 +8682,15 @@ glsl comp Post_Process {
         // the surface has changed (new geometry, lighting change, disocclusion).
         // Boost alpha toward 1.0 to reject stale history aggressively.
         //
-        float Cur_Lum  = dot (Color,   vec3 (0.2126, 0.7152, 0.0722));
-        float Hist_Lum = dot (History, vec3 (0.2126, 0.7152, 0.0722));
-        float Lum_Diff = abs (Cur_Lum - Hist_Lum) / max (Cur_Lum, 0.01);
-        float Anti_Lag = clamp (Lum_Diff * 5.0, 0.0, 1.0); // Reject
+        float Current_Luminance  = dot (Color,   vec3 (0.2126, 0.7152, 0.0722));
+        float History_Luminance = dot (History, vec3 (0.2126, 0.7152, 0.0722));
+        float Luminance_Difference = abs (Current_Luminance - History_Luminance) / max (Current_Luminance, 0.01);
+        float Anti_Lag = clamp (Luminance_Difference * 5.0, 0.0, 1.0); // Reject
   
         // Disocclusion detection
-        vec2 Screen_Disp = vec2 (Prev_Pixel - Pixel) / vec2 (Size);
-        float Disp_Len = length (Screen_Disp);
-        float Disocclusion = clamp (Disp_Len * 30.0, 0.0, 1.0); // Rejected
+        vec2 Screen_Displacement = vec2 (Prev_Pixel - Pixel) / vec2 (Size);
+        float Displacement_Length = length (Screen_Displacement);
+        float Disocclusion = clamp (Displacement_Length * 30.0, 0.0, 1.0); // Rejected
   
         // Temporal blend
         float Is_Static = step (Speed, 2.0);
@@ -8726,8 +8701,8 @@ glsl comp Post_Process {
         // Moving: very aggressive current-frame dominance
         float Motion      = clamp (Speed * 0.04, 0.0, 1.0);  // ISA: reciprocal multiply vs division
         float Base        = mix (0.65, 0.98, Motion);  // Even slow motion > 65% current frame
-        float Fps_Adapt   = clamp ((Delta_Time - 0.016) * 20.0, 0.0, 1.0);
-        float Moving_Alpha = max (max (max (Base, Fps_Adapt), Disocclusion), Anti_Lag);
+        float Framerate_Adaptation   = clamp ((Delta_Time - 0.016) * 20.0, 0.0, 1.0);
+        float Moving_Alpha = max (max (max (Base, Framerate_Adaptation), Disocclusion), Anti_Lag);
 
         // Blend between and moving alpha based on camera speed
         float Alpha = mix (Moving_Alpha, Static_Alpha, Is_Static);
@@ -8745,11 +8720,11 @@ glsl comp Post_Process {
     // Horizontal + vertical taps create a cross-shaped bloom pattern (fake god rays)
     // Bloom threshold in linear space (0.4 linear ≈ 0.66 sRGB - bright highlights only)
     //
-    vec3 Bl = max (imageLoad (Color_Image, clamp (Pixel + ivec2 ( 3, 0), ivec2 (0), Size - 1)).rgb - 0.4, vec3 (0.0))
+    vec3 Bloom = max (imageLoad (Color_Image, clamp (Pixel + ivec2 ( 3, 0), ivec2 (0), Size - 1)).rgb - 0.4, vec3 (0.0))
              + max (imageLoad (Color_Image, clamp (Pixel + ivec2 (-3, 0), ivec2 (0), Size - 1)).rgb - 0.4, vec3 (0.0))
              + max (imageLoad (Color_Image, clamp (Pixel + ivec2 (0,  3), ivec2 (0), Size - 1)).rgb - 0.4, vec3 (0.0))
              + max (imageLoad (Color_Image, clamp (Pixel + ivec2 (0, -3), ivec2 (0), Size - 1)).rgb - 0.4, vec3 (0.0));
-    Color += Bl * Bloom_Strength;
+    Color += Bloom * Bloom_Strength;
   
     // God rays
     //
@@ -8758,19 +8733,18 @@ glsl comp Post_Process {
     // light shafts streaming from the sun through gaps in geometry.
     //
     vec2  Sun_UV  = unpackHalf2x16 (Params.Sun_Screen_Pos);
-    vec2  Sun_P   = unpackHalf2x16 (Params.Sun_Params);
-    float GR_Intensity = Sun_P.x;
-    float Sun_Visible  = Sun_P.y;
+    vec2  Sun_Parameters = unpackHalf2x16 (Params.Sun_Params);
+    float God_Ray_Intensity = Sun_Parameters.x;
+    float Sun_Visible       = Sun_Parameters.y;
 
     // Apply god rays when sun is visible on screen
-    if (Sun_Visible > 0.5 and GR_Intensity > 0.0) {
+    if (Sun_Visible > 0.5 and God_Ray_Intensity > 0.0) {
       vec2 Delta = Sun_UV - UV;
       float Dist = length (Delta);
       if (Dist > 0.001) {
         vec2  Dir    = Delta / Dist;
 
-        // Incremental stepping replaces multiply-per-iteration
-        // Saves 8 float casts + 8 vec2 multiplies (replaced with 8 vec2 additions)
+        // Incremental stepping replaces multiply-per-iteration. Saves 8 float casts + 8 vec2 multiplies (replaced with 8 vec2 additions)
         vec2  Step_Vec = Dir * (min (Dist, 0.3) / 8.0);
         vec3  Accum  = vec3 (0.0);
         float Falloff = 1.0;
@@ -8792,14 +8766,14 @@ glsl comp Post_Process {
 
         // Fade god rays based on distance from sun center (stronger near sun)
         float Sun_Fade = 1.0 - clamp (Dist * 2.0, 0.0, 1.0);
-        Color += Accum * GR_Intensity * Sun_Fade / 8.0;
+        Color += Accum * God_Ray_Intensity * Sun_Fade / 8.0;
       }
     }
   
     // Vignette + saturation + tonemap
-    vec2  FC = UV - 0.5;
-    float D2 = dot (FC, FC);
-    Color  = Color * (1.0 - D2 * Vignette);
+    vec2  From_Center = UV - 0.5;
+    float Distance_Sq = dot (From_Center, From_Center);
+    Color  = Color * (1.0 - Distance_Sq * Vignette);
     Color *= Exposure;
   
     // Saturation boost before tonemapping: push colors away from grey
@@ -9172,14 +9146,14 @@ int main (int Argc, char **Argv) {
   }
 
   // Apply quality presets
-  const Quality_Preset *QP = &QUALITY_PRESETS[Active_Quality];
-  if (not Override_Res) { Width = QP->Width; Height = QP->Height; }
-  Active_Render_Scale  = QP->Render_Scale;
-  Active_Denoise_Passes = QP->Denoise_Passes;
-  Active_Checkerboard   = QP->Checkerboard;
-  if (not No_Parallax) No_Parallax = not QP->Parallax;
+  const Quality_Preset *Preset = &QUALITY_PRESETS[Active_Quality];
+  if (not Override_Res) { Width = Preset->Width; Height = Preset->Height; }
+  Active_Render_Scale  = Preset->Render_Scale;
+  Active_Denoise_Passes = Preset->Denoise_Passes;
+  Active_Checkerboard   = Preset->Checkerboard;
+  if (not No_Parallax) No_Parallax = not Preset->Parallax;
   printf ("[quality] preset: %s (%dx%d @ %.0f%% scale, %d SPP)\n",
-          QP->Name, Width, Height, Active_Render_Scale * 100.f, Override_SPP ? Override_SPP : QP->SPP);
+          Preset->Name, Width, Height, Active_Render_Scale * 100.f, Override_SPP ? Override_SPP : Preset->SPP);
 
   // ...
   (void)No_PBR;      // Used after texture loading to zero PBR_Stride
@@ -9221,8 +9195,8 @@ int main (int Argc, char **Argv) {
   printf ("[render] internal %dx%d > window %dx%d (scale %.0f%%)\n",
           Render_Width, Render_Height, Width, Height, Active_Render_Scale * 100.f);
 
-  // Create the ray tracing storage image (render target) and depth image (R32F for postprocess DOF)
-  // Storage images use internal render resolution - bilinear blit upscales to window/swapchain
+  // Create the ray tracing storage image (render target) and depth image (R32F for postprocess DOF). Storage images use internal render
+  // resolution - bilinear blit upscales to window/swapchain
   Raytracing_Storage_Image = Image_Storage_Create (Render_Width, Render_Height);
   Vulkan_Transition_Storage_Image ();
 
@@ -9332,9 +9306,8 @@ int main (int Argc, char **Argv) {
     vkFreeCommandBuffers (Device, Command_Pool, 1, &Cmd);
   }
 
-  // Create postprocess output image - postprocess writes here instead of back to
-  // Color_Image, so that Color_Image (raw RT) stays in a consistent space across
-  // frames. Critical for checkerboard: stale pixels remain raw RT, not tonemapped.
+  // Create postprocess output image - postprocess writes here instead of back to Color_Image, so that Color_Image (raw RT) stays in a
+  // consistent space across frames. Critical for checkerboard: stale pixels remain raw RT, not tonemapped.
   Postprocess_Output_Image = Image_Storage_Create (Render_Width, Render_Height);
   {
     VkCommandBuffer Cmd;
@@ -9456,8 +9429,8 @@ int main (int Argc, char **Argv) {
   // Create the GPU physics pipeline and resources (with hull binding)
   Physics_Pipeline_Create ();
 
-  // Spawn origin is at Q3 player origin (24 units above feet). Our capsule half-height is 32,
-  // so raise by 8 to align capsule bottom with Q3 bounding box bottom.
+  // Spawn origin is at Q3 player origin (24 units above feet). Our capsule half-height is 32, so raise by 8 to align capsule bottom
+  // with Q3 bounding box bottom.
   Player Initial_Player = {
     .Position = {Spawn_Point.Origin.x, Spawn_Point.Origin.y + 8.f, Spawn_Point.Origin.z},
     .Yaw      = 1.5707963f - Spawn_Point.Angle * 3.14159f / 180.f}; // π/2 - angle: Q3 angle 0 = +X = our yaw π/2
@@ -9475,8 +9448,7 @@ int main (int Argc, char **Argv) {
   // Log diagnostic output
   printf ("[init] ready - entering game loop\n");
 
-  // Physics-only test mode
-  // Run with --physics-test to skip rendering and simulate movement at fixed 60fps.
+  // Physics-only test mode: run with --physics-test to skip rendering and simulate movement at fixed 60fps.
   // Exits after ~3 seconds of simulated time with full diagnostic output.
   if (Physics_Test) {
     fprintf (stderr, "[physics-test] starting physics-only test (3s simulated, fixed dt=0.016)\n");
@@ -9535,10 +9507,9 @@ int main (int Argc, char **Argv) {
     int Total_Frames = Screenshot_Path ? 1 : Benchmark_Frames;
     float Fixed_Dt = 1.f / 60.f;
 
-    // Warm up: render 3 frames to trigger LLVM JIT compilation and fill CPU caches.
-    // On lavapipe, the first Raytracing_Frame() invocation triggers shader compilation
-    // (SPIR-V > NIR > LLVM IR > x86 machine code), costing 500-700ms. Running warmup
-    // frames before the timer ensures benchmark numbers reflect steady-state performance.
+    // Warm up: render 3 frames to trigger LLVM JIT compilation and fill CPU caches. On lavapipe, the first Raytracing_Frame()
+    // invocation triggers shader compilation (SPIR-V > NIR > LLVM IR > x86 machine code), costing 500-700ms. Running warmup frames
+    // before the timer ensures benchmark numbers reflect steady-state performance.
     printf ("[benchmark] warming up (5 frames)...\n");
     {
       VK_CHECK (vkWaitForFences (Device, 1, &Fence, VK_TRUE, UINT64_MAX));
@@ -9555,7 +9526,7 @@ int main (int Argc, char **Argv) {
       for (int I = 0; I < 5; I++) {
         Bench_Cam.Frame = (uint)I;
         Camera_Upload (&Bench_Cam, FIELD_OF_VIEW, Weapon.Texture_Base_Index, PBR_Stride, Active_SPP);
-        Gpu_Postprocess_Push Warmup_PP = {.Time = 0,
+        Gpu_Postprocess_Push Warmup_Postprocess = {.Time = 0,
           .Dt_Frame       = (uint32_t)Float_To_Half (Fixed_Dt) | ((uint32_t)(Frame_Count & 0xFFFF) << 16),
           .Velocity       = 0,
           .Speed_Exposure = Pack_Half2x16 (0.f, STYLE.Exposure),
@@ -9563,8 +9534,8 @@ int main (int Argc, char **Argv) {
           .Inv_Proj_Diag  = Pack_Half2x16 (Bench_Inv_Proj.E[0], Bench_Inv_Proj.E[5]),
           .Sun_Screen_Pos = Pack_Half2x16 (0.5f, 0.5f),
           .Sun_Params     = Pack_Half2x16 (0.f, 0.f)};
-        Pack_Mat4_Half (&Bench_Reproj, Warmup_PP.Reproject);
-        Raytracing_Frame (Warmup_PP);
+        Pack_Mat4_Half (&Bench_Reproj, Warmup_Postprocess.Reproject);
+        Raytracing_Frame (Warmup_Postprocess);
         VK_CHECK (vkWaitForFences (Device, 1, &Fence, VK_TRUE, UINT64_MAX));
         Frame_Count++;
       }
@@ -9611,10 +9582,10 @@ int main (int Argc, char **Argv) {
       Camera_Upload (&Bench_Cam, FIELD_OF_VIEW, Weapon.Texture_Base_Index, PBR_Stride, Active_SPP);
 
       // Build view and projection matrices
-      mat4 BV = View (Bench_Cam.Position, Bench_Cam.Yaw, Bench_Cam.Pitch);
-      mat4 BP = Perspective (FIELD_OF_VIEW, (float)Width / Height, 0.1f, 10000.f);
-      mat4 BIP = Inverse_Projection (BP);
-      mat4 BR = Mat4_Mul (BP, Mat4_Mul (Prev_View_Matrix, Inverse_Orthogonal (BV)));
+      mat4 Bench_View = View (Bench_Cam.Position, Bench_Cam.Yaw, Bench_Cam.Pitch);
+      mat4 Bench_Projection = Perspective (FIELD_OF_VIEW, (float)Width / Height, 0.1f, 10000.f);
+      mat4 Bench_Inverse_Projection = Inverse_Projection (Bench_Projection);
+      mat4 Bench_Reproject = Mat4_Mul (Bench_Projection, Mat4_Mul (Prev_View_Matrix, Inverse_Orthogonal (Bench_View)));
 
       // Compute actual camera speed from position delta for TAA motion detection
       float Bench_Speed = 0.f;
@@ -9627,17 +9598,17 @@ int main (int Argc, char **Argv) {
       Prev_Bench_Pos = Bench_Cam.Position;
 
       // Configure post-processing push constants
-      Gpu_Postprocess_Push PP = {.Time = F * Fixed_Dt,
+      Gpu_Postprocess_Push Postprocess = {.Time = F * Fixed_Dt,
         .Dt_Frame       = (uint32_t)Float_To_Half (Fixed_Dt) | ((uint32_t)(Frame_Count & 0xFFFF) << 16),
         .Velocity       = 0,
         .Speed_Exposure = Pack_Half2x16 (Bench_Speed, STYLE.Exposure),
         .Bloom_Vignette = Pack_Half2x16 (STYLE.Bloom_Strength, STYLE.Vignette),
-        .Inv_Proj_Diag  = Pack_Half2x16 (BIP.E[0], BIP.E[5]),
+        .Inv_Proj_Diag  = Pack_Half2x16 (Bench_Inverse_Projection.E[0], Bench_Inverse_Projection.E[5]),
         .Sun_Screen_Pos = Pack_Half2x16 (0.5f, 0.5f),
         .Sun_Params     = Pack_Half2x16 (0.15f, 0.f)};
-      Pack_Mat4_Half (&BR, PP.Reproject);
-      Raytracing_Frame (PP);
-      Prev_View_Matrix = BV;
+      Pack_Mat4_Half (&Bench_Reproject, Postprocess.Reproject);
+      Raytracing_Frame (Postprocess);
+      Prev_View_Matrix = Bench_View;
       Frame_Count++;
 
       // Record frame timing statistics
@@ -9652,51 +9623,83 @@ int main (int Argc, char **Argv) {
       if (F % 50 == 0)
         printf ("  [frame %4d/%d] %.2f ms (%.1f fps)\n", F, Total_Frames, Frame_Ms, 1000.f / Frame_Ms);
 
-      // Dump frame to disk if --dump-frames was specified
+      // Dump_Frame_To_Disk:
       if (Dump_Frames_Dir) {
         VK_CHECK (vkWaitForFences (Device, 1, &Fence, VK_TRUE, UINT64_MAX));
-        uint64_t Px_Size = (uint64_t)Render_Width * Render_Height * 8;  // R16G16B16A16_SFLOAT = 8 bytes/pixel
-        Gpu_Buffer Rb = Buffer_Allocate (Px_Size, VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-                                          VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
-        VkCommandBuffer Dc;
-        VK_CHECK (vkAllocateCommandBuffers (Device, &(VkCommandBufferAllocateInfo){
-          .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
-          .commandPool = Command_Pool, .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY, .commandBufferCount = 1}, &Dc));
-        VK_CHECK (vkBeginCommandBuffer (Dc, &(VkCommandBufferBeginInfo){
-          .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO, .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT}));
-        Image_Layout_Barrier (Dc, Postprocess_Output_Image.Image,
-          VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-          VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT,
-          VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
-        vkCmdCopyImageToBuffer (Dc, Postprocess_Output_Image.Image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-          Rb.Buffer, 1, &(VkBufferImageCopy){
+        uint64_t Pixel_Buffer_Size = (uint64_t)Render_Width * Render_Height * 8;  // R16G16B16A16_SFLOAT = 8 bytes/pixel
+
+        // Allocate_Readback_Buffer:
+        Gpu_Buffer Readback = Buffer_Allocate (Pixel_Buffer_Size, VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                                                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+
+        // Record_Download_Command:
+        VkCommandBuffer Download_Command;
+        VK_CHECK (vkAllocateCommandBuffers (/*device        =>*/ Device,
+                                            /*pAllocateInfo =>*/ &(VkCommandBufferAllocateInfo){
+                                              .sType              = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+                                              .commandPool        = Command_Pool,
+                                              .level              = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+                                              .commandBufferCount = 1},
+                                            /*pCommandBuffers =>*/ &Download_Command));
+        VK_CHECK (vkBeginCommandBuffer (/*commandBuffer =>*/ Download_Command,
+                                        /*pBeginInfo    =>*/ &(VkCommandBufferBeginInfo){
+                                          .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+                                          .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT}));
+
+        // Transition_To_Transfer_Source:
+        Image_Layout_Barrier (/*Command_Buffer     =>*/ Download_Command,
+                              /*Image              =>*/ Postprocess_Output_Image.Image,
+                              /*Old_Layout         =>*/ VK_IMAGE_LAYOUT_GENERAL,
+                              /*New_Layout         =>*/ VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                              /*Source_Access      =>*/ VK_ACCESS_SHADER_WRITE_BIT,
+                              /*Destination_Access =>*/ VK_ACCESS_TRANSFER_READ_BIT,
+                              /*Source_Stage       =>*/ VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                              /*Destination_Stage  =>*/ VK_PIPELINE_STAGE_TRANSFER_BIT);
+
+        // Copy_Image_To_Buffer:
+        vkCmdCopyImageToBuffer (Download_Command, Postprocess_Output_Image.Image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+          Readback.Buffer, 1, &(VkBufferImageCopy){
             .imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
-            .imageExtent = {(uint32_t)Render_Width, (uint32_t)Render_Height, 1}});
-        Image_Layout_Barrier (Dc, Postprocess_Output_Image.Image,
-          VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL,
-          VK_ACCESS_TRANSFER_READ_BIT, VK_ACCESS_SHADER_WRITE_BIT,
-          VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
-        VK_CHECK (vkEndCommandBuffer (Dc));
-        VK_CHECK (vkQueueSubmit (Queue, 1, &(VkSubmitInfo){
-          .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO, .commandBufferCount = 1, .pCommandBuffers = &Dc}, VK_NULL_HANDLE));
+            .imageExtent      = {(uint32_t)Render_Width, (uint32_t)Render_Height, 1}});
+
+        // Transition_Back_To_General:
+        Image_Layout_Barrier (/*Command_Buffer     =>*/ Download_Command,
+                              /*Image              =>*/ Postprocess_Output_Image.Image,
+                              /*Old_Layout         =>*/ VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                              /*New_Layout         =>*/ VK_IMAGE_LAYOUT_GENERAL,
+                              /*Source_Access      =>*/ VK_ACCESS_TRANSFER_READ_BIT,
+                              /*Destination_Access =>*/ VK_ACCESS_SHADER_WRITE_BIT,
+                              /*Source_Stage       =>*/ VK_PIPELINE_STAGE_TRANSFER_BIT,
+                              /*Destination_Stage  =>*/ VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+
+        // Submit_And_Wait:
+        VK_CHECK (vkEndCommandBuffer (Download_Command));
+        VK_CHECK (vkQueueSubmit (/*queue       =>*/ Queue,
+                                 /*submitCount =>*/ 1,
+                                 /*pSubmits    =>*/ &(VkSubmitInfo){
+                                   .sType              = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+                                   .commandBufferCount = 1,
+                                   .pCommandBuffers    = &Download_Command},
+                                 /*fence       =>*/ VK_NULL_HANDLE));
         vkQueueWaitIdle (Queue);
 
-        // Map readback buffer and write TGA frame
-        uint16_t *Px;
-        vkMapMemory (Device, Rb.Memory, 0, Px_Size, 0, (void **)&Px);
+        // Map_And_Write_TGA:
+        uint16_t *Pixels;
+        vkMapMemory (Device, Readback.Memory, 0, Pixel_Buffer_Size, 0, (void **)&Pixels);
         char Path[512];
         snprintf (Path, sizeof (Path), "%s/frame_%04d.tga", Dump_Frames_Dir, F);
-        FILE *Tf = fopen (Path, "wb");
-        if (Tf) {
-          uint8_t Hdr[18] = {0};
-          Hdr[2] = 2; Hdr[12] = Render_Width & 0xFF; Hdr[13] = (Render_Width >> 8) & 0xFF;
-          Hdr[14] = Render_Height & 0xFF; Hdr[15] = (Render_Height >> 8) & 0xFF;
-          Hdr[16] = 32; Hdr[17] = 0x20;
-          fwrite (Hdr, 1, 18, Tf);
+        FILE *Tga_File = fopen (Path, "wb");
+        if (Tga_File) {
+          uint8_t Header[18] = {0};
+          Header[2]  = 2;
+          Header[12] = Render_Width & 0xFF;  Header[13] = (Render_Width >> 8) & 0xFF;
+          Header[14] = Render_Height & 0xFF; Header[15] = (Render_Height >> 8) & 0xFF;
+          Header[16] = 32; Header[17] = 0x20;
+          fwrite (Header, 1, 18, Tga_File);
           for (int Y = 0; Y < Render_Height; Y++)
             for (int X = 0; X < Render_Width; X++) {
-              uint16_t *P = Px + (Y * Render_Width + X) * 4;
-              uint8_t B[4];
+              uint16_t *P = Pixels + (Y * Render_Width + X) * 4;
+              uint8_t BGRA[4];
               for (int C = 0; C < 3; C++) {
                 uint16_t H = P[C]; uint32_t Exp = (H >> 10) & 0x1F; uint32_t Man = H & 0x3FF;
                 float V; if (Exp == 0) V = (float)Man / 1024.0f * (1.0f / 16384.0f);
@@ -9705,17 +9708,17 @@ int main (int Argc, char **Argv) {
                 if (V < 0.0f) V = 0.0f;
                 if (V > 1.0f) V = 1.0f;
                 float S = (V <= 0.0031308f) ? V * 12.92f : 1.055f * powf (V, 1.0f / 2.4f) - 0.055f;
-                B[2 - C] = (uint8_t)(S * 255.0f + 0.5f);
+                BGRA[2 - C] = (uint8_t)(S * 255.0f + 0.5f);
               }
-              B[3] = 255;
-              fwrite (B, 1, 4, Tf);
+              BGRA[3] = 255;
+              fwrite (BGRA, 1, 4, Tga_File);
             }
-          fclose (Tf);
+          fclose (Tga_File);
         }
-        vkUnmapMemory (Device, Rb.Memory);
-        vkDestroyBuffer (Device, Rb.Buffer, NULL);
-        vkFreeMemory (Device, Rb.Memory, NULL);
-        vkFreeCommandBuffers (Device, Command_Pool, 1, &Dc);
+        vkUnmapMemory (Device, Readback.Memory);
+        vkDestroyBuffer (Device, Readback.Buffer, NULL);
+        vkFreeMemory (Device, Readback.Memory, NULL);
+        vkFreeCommandBuffers (Device, Command_Pool, 1, &Download_Command);
       }
     }
 
@@ -9753,41 +9756,65 @@ int main (int Argc, char **Argv) {
     if (Screenshot_Path) {
       printf ("[screenshot] saving to %s...\n", Screenshot_Path);
 
-      // Read pixels back from the display output image (R16G16B16A16_SFLOAT = 8 bytes/pixel)
+      // Allocate_Readback_Buffer: R16G16B16A16_SFLOAT = 8 bytes/pixel
       uint64_t Pixel_Size = (uint64_t)Render_Width * Render_Height * 8;
-      Gpu_Buffer Readback = Buffer_Allocate (Pixel_Size, VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-                                              VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+      Gpu_Buffer Readback = Buffer_Allocate (/*Size         =>*/ Pixel_Size,
+                                             /*Usage        =>*/ VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                                             /*Memory_Flags =>*/ VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT
+                                                               | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
 
+      // Record_Download_Command:
       VkCommandBuffer Cmd;
-      VK_CHECK (vkAllocateCommandBuffers (Device, &(VkCommandBufferAllocateInfo){
-        .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
-        .commandPool = Command_Pool, .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY, .commandBufferCount = 1}, &Cmd));
-      VK_CHECK (vkBeginCommandBuffer (Cmd, &(VkCommandBufferBeginInfo){
-        .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO, .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT}));
+      VK_CHECK (vkAllocateCommandBuffers (/*device        =>*/ Device,
+                                          /*pAllocateInfo =>*/ &(VkCommandBufferAllocateInfo){
+                                            .sType              = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+                                            .commandPool        = Command_Pool,
+                                            .level              = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+                                            .commandBufferCount = 1},
+                                          /*pCommandBuffers =>*/ &Cmd));
+      VK_CHECK (vkBeginCommandBuffer (/*commandBuffer =>*/ Cmd,
+                                      /*pBeginInfo    =>*/ &(VkCommandBufferBeginInfo){
+                                        .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+                                        .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT}));
 
-      Image_Layout_Barrier (Cmd, Postprocess_Output_Image.Image,
-        VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-        VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT,
-        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
+      // Transition_To_Transfer_Source:
+      Image_Layout_Barrier (/*Command_Buffer     =>*/ Cmd,
+                            /*Image              =>*/ Postprocess_Output_Image.Image,
+                            /*Old_Layout         =>*/ VK_IMAGE_LAYOUT_GENERAL,
+                            /*New_Layout         =>*/ VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                            /*Source_Access      =>*/ VK_ACCESS_SHADER_WRITE_BIT,
+                            /*Destination_Access =>*/ VK_ACCESS_TRANSFER_READ_BIT,
+                            /*Source_Stage       =>*/ VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                            /*Destination_Stage  =>*/ VK_PIPELINE_STAGE_TRANSFER_BIT);
 
+      // Copy_Image_To_Buffer:
       vkCmdCopyImageToBuffer (Cmd, Postprocess_Output_Image.Image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
         Readback.Buffer, 1, &(VkBufferImageCopy){
           .imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
-          .imageExtent = {(uint32_t)Render_Width, (uint32_t)Render_Height, 1}});
+          .imageExtent      = {(uint32_t)Render_Width, (uint32_t)Render_Height, 1}});
 
-      Image_Layout_Barrier (Cmd, Postprocess_Output_Image.Image,
-        VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL,
-        VK_ACCESS_TRANSFER_READ_BIT, VK_ACCESS_SHADER_WRITE_BIT,
-        VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+      // Transition_Back_To_General:
+      Image_Layout_Barrier (/*Command_Buffer     =>*/ Cmd,
+                            /*Image              =>*/ Postprocess_Output_Image.Image,
+                            /*Old_Layout         =>*/ VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                            /*New_Layout         =>*/ VK_IMAGE_LAYOUT_GENERAL,
+                            /*Source_Access      =>*/ VK_ACCESS_TRANSFER_READ_BIT,
+                            /*Destination_Access =>*/ VK_ACCESS_SHADER_WRITE_BIT,
+                            /*Source_Stage       =>*/ VK_PIPELINE_STAGE_TRANSFER_BIT,
+                            /*Destination_Stage  =>*/ VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
 
-      // Submit Vulkan command
+      // Submit_And_Wait:
       VK_CHECK (vkEndCommandBuffer (Cmd));
-      VK_CHECK (vkQueueSubmit (Queue, 1, &(VkSubmitInfo){
-        .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO, .commandBufferCount = 1, .pCommandBuffers = &Cmd}, VK_NULL_HANDLE));
+      VK_CHECK (vkQueueSubmit (/*queue       =>*/ Queue,
+                               /*submitCount =>*/ 1,
+                               /*pSubmits    =>*/ &(VkSubmitInfo){
+                                 .sType              = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+                                 .commandBufferCount = 1,
+                                 .pCommandBuffers    = &Cmd},
+                               /*fence       =>*/ VK_NULL_HANDLE));
       vkQueueWaitIdle (Queue);
 
-      // Map the readback buffer and write a TGA file
-      // Storage is R16G16B16A16_SFLOAT - convert fp16 to 8-bit sRGB for TGA output
+      // Map the readback buffer and write a TGA file. Storage is R16G16B16A16_SFLOAT - convert fp16 to 8-bit sRGB for TGA output
       uint16_t *Pixels_F16;
       vkMapMemory (Device, Readback.Memory, 0, Pixel_Size, 0, (void **)&Pixels_F16);
 
@@ -9865,10 +9892,10 @@ int main (int Argc, char **Argv) {
 
     // Compute delta time from the high-resolution performance counter
     uint64_t Now = SDL_GetPerformanceCounter ();
-    float    Dt  = (float)(Now - Last) / (float)Freq;
-    if (Dt > MAX_DELTA_TIME) Dt = MAX_DELTA_TIME;
+    float    Delta_Time = (float)(Now - Last) / (float)Freq;
+    if (Delta_Time > MAX_DELTA_TIME) Delta_Time = MAX_DELTA_TIME;
     Last = Now;
-    Total_Time += Dt;
+    Total_Time += Delta_Time;
 
     // Poll input (handles windowing events, mode transitions, resize)
     Input In = Poll_Input ();
@@ -9893,18 +9920,18 @@ int main (int Argc, char **Argv) {
       vec3 Forward = {sy * cp, -sp, -cy * cp};
       Projectile_Spawn (Cam.Position, Forward);
     }
-    Projectiles.Fire_Cooldown -= Dt;
+    Projectiles.Fire_Cooldown -= Delta_Time;
     if (Projectiles.Fire_Cooldown < 0) Projectiles.Fire_Cooldown = 0;
     Projectile_Pool_Upload ();
 
     // Dispatch GPU physics simulation
-    Player Physics   = Physics_Dispatch (In, Dt);
+    Player Physics   = Physics_Dispatch (In, Delta_Time);
 
     // Read back projectile state after GPU physics step
     Projectile_Pool_Readback ();
 
     // Update audio: footsteps, landing sounds
-    Audio_Update_Footsteps (&Physics, Dt);
+    Audio_Update_Footsteps (&Physics, Delta_Time);
 
     // Update the camera from the physics result - add View_Height to get eye position
     Cam.Position    = Physics.Position;
@@ -9914,11 +9941,11 @@ int main (int Argc, char **Argv) {
     Cam.Frame       = Frame;
 
     // Animate and rebuild the weapon viewmodel
-    Weapon_Update (&Weapon, &Cam, Dt, In.Fire);
+    Weapon_Update (&Weapon, &Cam, Delta_Time, In.Fire);
     Weapon_Bottom_Level_Rebuild (&Weapon);
 
     // Advance enemy idle animation and rebuild BLAS
-    Enemy.Animation_Time += Dt;
+    Enemy.Animation_Time += Delta_Time;
     {
       int Frame_Index = (int)(Enemy.Animation_Time * Enemy.Frame_FPS) % (int)Enemy.Frame_Count;
       Enemy.Current_Vertices = Enemy.Frame_Vertices[Frame_Index];
@@ -9928,15 +9955,15 @@ int main (int Argc, char **Argv) {
     // Compute player body TLAS transform
     float Body_Yaw = -Physics.Yaw;  // GL entity yaw = -Player.Yaw (facing convention)
     float D_Yaw = Body_Yaw - Enemy.GL_Yaw;
-    float CD = cosf (D_Yaw), SD = sinf (D_Yaw);
-    vec3  EP = Enemy.GL_Origin;
-    float Tx = Physics.Position.x - (CD * EP.x + SD * EP.z);
-    float Ty = Physics.Position.y - EP.y;
-    float Tz = Physics.Position.z - (-SD * EP.x + CD * EP.z);
+    float Cosine_Yaw = cosf (D_Yaw), Sine_Yaw = sinf (D_Yaw);
+    vec3  Entity_Origin = Enemy.GL_Origin;
+    float Translation_X = Physics.Position.x - (Cosine_Yaw * Entity_Origin.x + Sine_Yaw * Entity_Origin.z);
+    float Translation_Y = Physics.Position.y - Entity_Origin.y;
+    float Translation_Z = Physics.Position.z - (-Sine_Yaw * Entity_Origin.x + Cosine_Yaw * Entity_Origin.z);
     float Player_Body_Transform[12] = {
-      CD,  0.f, SD,  Tx,
-      0.f, 1.f, 0.f, Ty,
-      -SD, 0.f, CD,  Tz};
+      Cosine_Yaw,  0.f, Sine_Yaw,  Translation_X,
+      0.f,         1.f, 0.f,       Translation_Y,
+      -Sine_Yaw,   0.f, Cosine_Yaw, Translation_Z};
 
     // Rebuild the top-level acceleration structure
     Top_Level_Rebuild (&World_Bottom_Level, &Weapon.Bottom_Level, &Enemy.Bottom_Level, Player_Body_Transform);
@@ -9945,8 +9972,8 @@ int main (int Argc, char **Argv) {
     float Budget = 0.0f;
     if (Force_Cheap) {
       Budget = 1.0f; 
-    } else if (Dt > 0.016f) {
-      Budget = (Dt - 0.016f) / (0.15f - 0.016f); 
+    } else if (Delta_Time > 0.016f) {
+      Budget = (Delta_Time - 0.016f) / (0.15f - 0.016f); 
       if (Budget > 1.0f) Budget = 1.0f;
     }
     uint Budget_Byte = (uint)(Budget * 255.0f);
@@ -9955,7 +9982,7 @@ int main (int Argc, char **Argv) {
 
     // Upload the camera and dispatch ray tracing + postprocess
     Camera_Upload (&Cam, FIELD_OF_VIEW, Weapon.Texture_Base_Index, PBR_Stride, Packed_SPP);
-    float H_Speed = sqrtf (Physics.Velocity.x * Physics.Velocity.x +
+    float Horizontal_Speed = sqrtf (Physics.Velocity.x * Physics.Velocity.x +
                            Physics.Velocity.z * Physics.Velocity.z);
 
     // Build reprojection matrix: Proj * Prev_View * Inverse_View (maps current view-space > previous clip-space)
@@ -9970,15 +9997,15 @@ int main (int Argc, char **Argv) {
     vec3 Sun_World = Add (Cam.Position, Scale (Sun_D, 1000.f));  // Far point in sun direction
 
     // Transform through View * Proj to get clip space
-    mat4 VP = Mat4_Mul (Proj, Cur_View);
-    float Cx = VP.E[0]*Sun_World.x + VP.E[4]*Sun_World.y + VP.E[8]*Sun_World.z  + VP.E[12];
-    float Cy = VP.E[1]*Sun_World.x + VP.E[5]*Sun_World.y + VP.E[9]*Sun_World.z  + VP.E[13];
-    float Cw = VP.E[3]*Sun_World.x + VP.E[7]*Sun_World.y + VP.E[11]*Sun_World.z + VP.E[15];
+    mat4 View_Projection = Mat4_Mul (Proj, Cur_View);
+    float Clip_X = View_Projection.E[0]*Sun_World.x + View_Projection.E[4]*Sun_World.y + View_Projection.E[8]*Sun_World.z  + View_Projection.E[12];
+    float Clip_Y = View_Projection.E[1]*Sun_World.x + View_Projection.E[5]*Sun_World.y + View_Projection.E[9]*Sun_World.z  + View_Projection.E[13];
+    float Clip_W = View_Projection.E[3]*Sun_World.x + View_Projection.E[7]*Sun_World.y + View_Projection.E[11]*Sun_World.z + View_Projection.E[15];
     float Sun_U = 0.5f, Sun_V = 0.5f;
     float Sun_Visible = 0.f;
-    if (Cw > 0.01f) {  // Sun is in front of camera
-      Sun_U = (Cx / Cw) * 0.5f + 0.5f;
-      Sun_V = (Cy / Cw) * 0.5f + 0.5f;
+    if (Clip_W > 0.01f) {  // Sun is in front of camera
+      Sun_U = (Clip_X / Clip_W) * 0.5f + 0.5f;
+      Sun_V = (Clip_Y / Clip_W) * 0.5f + 0.5f;
 
       // Check if sun is roughly on screen (with margin for off-screen glow)
       if (Sun_U > -0.5f and Sun_U < 1.5f and Sun_V > -0.5f and Sun_V < 1.5f)
@@ -9986,17 +10013,17 @@ int main (int Argc, char **Argv) {
     }
 
     // Build post-processing push constants and render frame
-    Gpu_Postprocess_Push PP = {
+    Gpu_Postprocess_Push Postprocess = {
       .Time           = Total_Time,
-      .Dt_Frame       = (uint32_t)Float_To_Half (Dt) | ((uint32_t)(Frame_Count & 0xFFFF) << 16),
+      .Dt_Frame       = (uint32_t)Float_To_Half (Delta_Time) | ((uint32_t)(Frame_Count & 0xFFFF) << 16),
       .Velocity       = Pack_Half2x16 (Physics.Velocity.x, Physics.Velocity.z),
-      .Speed_Exposure = Pack_Half2x16 (H_Speed, STYLE.Exposure),
+      .Speed_Exposure = Pack_Half2x16 (Horizontal_Speed, STYLE.Exposure),
       .Bloom_Vignette = Pack_Half2x16 (STYLE.Bloom_Strength, STYLE.Vignette),
       .Inv_Proj_Diag  = Pack_Half2x16 (Inv_Proj.E[0], Inv_Proj.E[5]),
       .Sun_Screen_Pos = Pack_Half2x16 (Sun_U, Sun_V),
       .Sun_Params     = Pack_Half2x16 (0.15f, Sun_Visible)};  // God ray intensity
-    Pack_Mat4_Half (&Reproject, PP.Reproject);
-    Raytracing_Frame (PP);
+    Pack_Mat4_Half (&Reproject, Postprocess.Reproject);
+    Raytracing_Frame (Postprocess);
     Prev_View_Matrix = Cur_View;
     Frame++;
     Frame_Count++;
