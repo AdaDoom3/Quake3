@@ -179,7 +179,7 @@ const Quality_Preset QUALITY_PRESETS [QUALITY_COUNT] = {
   [QUALITY_HIGH]   = {"High",   2560,1440, 1.00f,  2,  1,   2,   1}, 
   [QUALITY_MEDIUM] = {"Medium", 1920,1080, 1.00f,  1,  1,   2,   1},
   [QUALITY_LOW]    = {"Low",    1600, 900, 1.00f,  1,  1,   1,   1},
-  [QUALITY_POTATO] = {"Potato",  854, 480, 0.35f,  1,  0,   0,   1},
+  [QUALITY_POTATO] = {"Potato",  854, 480, 0.50f,  1,  0,   0,   1},
 };
 
 // Convex Hull Limits
@@ -7691,27 +7691,34 @@ glsl rchit Closest_Hit {
     // Reflection-bounce hits detect this and skip tracing another reflection to limit recursion to exactly one bounce
     bool Is_Reflection_Bounce = (gl_RayTminEXT > 0.005);
 
-    // Reflection culling
-    bool  Refl_Active = not Is_Reflection_Bounce and (R < 0.55);
-    float Refl_Dist = mix (800.0, 300.0, Budget);  // Adaptive reflection distance
+    // Dynamic reflection culling — Budget-aware: save rays on barely-reflective
+    // surfaces, focus them on metals/smooth where reflections are clearly visible.
+    float Refl_Roughness_Gate = mix (0.55, 0.35, Budget);
+    bool  Refl_Active = not Is_Reflection_Bounce and (R < Refl_Roughness_Gate);
+    float Refl_Dist = mix (800.0, 200.0, Budget);
     float Reflection_Weight = (not Refl_Active or Hit_Dist > Refl_Dist)
                                 ? 0.0
                                 : max (max (Env_F.r, Env_F.g), Env_F.b) * (1.0 - R * R);
     vec3  Reflection_Color  = vec3 (0.0);
-  
-    // Trace reflection ray for smooth/metallic surfaces
-    if (Reflection_Weight > 0.10) {
+
+    // Dynamic threshold: at high budget, only trace strong reflections (kills sparkle)
+    float Refl_Threshold = mix (0.10, 0.30, Budget);
+    if (Reflection_Weight > Refl_Threshold) {
       vec3 Refl_Dir = reflect (-V, Normal);
       Payload = vec4 (0.0, 0.0, 0.0, -1.0);
       traceRayEXT (Top_Level, gl_RayFlagsOpaqueEXT,
                    0xFF,
                    0, 1, 0,
                    Position + Normal * 0.2,
-                   0.01,  // tmin=0.01 marks this as a reflection bounce
+                   0.01,
                    Refl_Dir,
-                   mix (500.0, 200.0, Budget),  // Adaptive tmax - shorter trace at low fps
+                   mix (500.0, 150.0, Budget),
                    0);
-      Reflection_Color = Payload.rgb;
+      // Clamp reflection luminance to prevent firefly sparkle at low res
+      vec3 Rc = Payload.rgb;
+      float Rc_Lum = dot (Rc, vec3 (0.2126, 0.7152, 0.0722));
+      float Max_Lum = mix (10.0, 2.0, Budget);
+      Reflection_Color = Rc_Lum > Max_Lum ? Rc * (Max_Lum / Rc_Lum) : Rc;
     }
   
     // Blend reflection into indirect specular: replace the hemisphere approximation
@@ -9977,6 +9984,8 @@ int main (int Argc, char **Argv) {
       Budget = (Delta_Time - Target_Frame_Time) / (0.15f - Target_Frame_Time);
       if (Budget > 1.0f) Budget = 1.0f;
     }
+    // Potato budget floor: always keep adaptive savings slightly engaged
+    if (Active_Quality == QUALITY_POTATO && Budget < 0.15f) Budget = 0.15f;
     uint Budget_Byte = (uint)(Budget * 255.0f);
     Current_Budget_Byte = (int)Budget_Byte;
     uint Packed_SPP = (Active_SPP & 0xFF) | (Budget_Byte << 8);
