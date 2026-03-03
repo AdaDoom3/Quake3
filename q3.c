@@ -179,7 +179,7 @@ const Quality_Preset QUALITY_PRESETS [QUALITY_COUNT] = {
   [QUALITY_HIGH]   = {"High",   2560,1440, 1.00f,  2,  1,   2,   1}, 
   [QUALITY_MEDIUM] = {"Medium", 1920,1080, 1.00f,  1,  1,   2,   1},
   [QUALITY_LOW]    = {"Low",    1600, 900, 1.00f,  1,  1,   1,   1},
-  [QUALITY_POTATO] = {"Potato",  854, 480, 0.667f, 1,  0,   1,   1},
+  [QUALITY_POTATO] = {"Potato",  854, 480, 0.533f, 1,  0,   1,   0},
 };
 
 // Convex Hull Limits
@@ -8707,19 +8707,24 @@ glsl comp Post_Process {
         float Displacement_Length = length (Screen_Displacement);
         float Disocclusion = clamp (Displacement_Length * 30.0, 0.0, 1.0); // Rejected
   
-        // Temporal blend
-        float Is_Static = step (Speed, 2.0);
-  
-        // Static: 1/N convergence floored high
+        // Temporal blend — per-pixel reprojection displacement as motion
+        // signal (Q2RTX-style).  Camera rotation moves every pixel even
+        // when player velocity is zero — use displacement, not Speed.
+        float Pixel_Motion = clamp (Displacement_Length * 50.0, 0.0, 1.0);
+        float Any_Motion   = max (Pixel_Motion, clamp (Speed * 0.04, 0.0, 1.0));
+
+        // Static only if BOTH player and pixel are truly still
+        float Is_Static = step (Any_Motion, 0.02);
+
+        // Static: 1/N convergence floored at 0.50
         float Static_Alpha = max (1.0 / max (float (Frame_Count), 1.0), 0.50);
-  
-        // Moving: very aggressive current-frame dominance
-        float Motion      = clamp (Speed * 0.04, 0.0, 1.0);  // ISA: reciprocal multiply vs division
-        float Base        = mix (0.75, 0.98, Motion);  // Even slow motion > 75% current frame
+
+        // Moving: current-frame dominant, scales with per-pixel motion
+        float Base        = mix (0.75, 0.98, Any_Motion);
         float Framerate_Adaptation   = clamp ((Delta_Time - 0.016) * 30.0, 0.0, 1.0);
         float Moving_Alpha = max (max (max (Base, Framerate_Adaptation), Disocclusion), Anti_Lag);
 
-        // Blend between and moving alpha based on camera speed
+        // Blend: pixels that moved use aggressive current-frame dominance
         float Alpha = mix (Moving_Alpha, Static_Alpha, Is_Static);
         Color = mix (History, Color, Alpha);
       }
