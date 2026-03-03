@@ -68,7 +68,11 @@ const char *ENGINE_VERSION = "0.1.0";
 #define MINIMUM_WINDOW_SIZE 256
 
 // Windowing and viewport settings
-#define FIELD_OF_VIEW  90.f    // Vertical field-of-view in degrees
+#define FIELD_OF_VIEW  90.f    // Horizontal field-of-view in degrees (Quake 3 default)
+// Convert horizontal FOV to vertical given aspect ratio (width/height)
+static inline float Hfov_To_Vfov (float Hfov_Degrees, float Aspect) {
+  return 2.f * atanf (tanf (Hfov_Degrees * (float)M_PI / 360.f) / Aspect) * 180.f / (float)M_PI;
+}
 #define NEAR_CLIP      0.1f    // Near clip plane distance
 #define FAR_CLIP       10000.f // Far clip plane distance
 #define MAX_DELTA_TIME 0.05f   // Clamp to 20 fps minimum (prevents physics tunneling)
@@ -90,7 +94,7 @@ const char *ENGINE_VERSION = "0.1.0";
 #define CROUCH_VIEW_HEIGHT   8.f   // Camera height offset when crouching  (ground+28+8  = ground+36, matches Q3)
 
 // Weapon Animation Parameters
-#define WEAPON_MODEL_SCALE  0.7f // Viewmodel scale factor for first-person perspective
+#define WEAPON_MODEL_SCALE  0.50f // Viewmodel scale factor (world-space shrink, no depth hack)
 #define WEAPON_FIRE_SPEED   10.f // Fire animation playback rate (frames per second)
 #define WEAPON_FIRE_FRAMES  6.f  // Total fire animation duration in frames
 #define WEAPON_BOB_RATE_V   3.5f // Vertical idle bob frequency (radians/second)
@@ -177,7 +181,7 @@ const Quality_Preset QUALITY_PRESETS [QUALITY_COUNT] = {
   //                            Res        Scale  SPP  POM  DN   CB
   [QUALITY_ULTRA]  = {"Crysis", 3840,2160, 1.00f,  4,  1,   2,   1}, 
   [QUALITY_HIGH]   = {"High",   2560,1440, 1.00f,  2,  1,   2,   1}, 
-  [QUALITY_MEDIUM] = {"Medium", 1280, 720, 0.65f,  1,  1,   3,   1},
+  [QUALITY_MEDIUM] = {"Medium", 1280, 720, 0.75f,  1,  1,   3,   1},
   [QUALITY_LOW]    = {"Low",    1024, 576, 0.55f,  1,  1,   2,   1},
   [QUALITY_POTATO] = {"Potato",  854, 480, 0.75f,  1,  0,   3,   1},
 };
@@ -192,7 +196,7 @@ const Quality_Preset QUALITY_PRESETS [QUALITY_COUNT] = {
 #define SPECULAR_D_BIAS     0.01   // Min roughness² for GGX D term (prevents firefly peak)
 
 // Reflection control — Budget-adaptive (LO = full quality at Budget=0, HI = constrained at Budget=1)
-#define REFL_CLAMP_LO       3.0    // Reflection luminance clamp × surface luminance
+#define REFL_CLAMP_LO       2.0    // Reflection luminance clamp × surface luminance
 #define REFL_CLAMP_HI       1.5    // Reflection luminance clamp × surface luminance
 #define REFL_GATE_LO        0.55   // Max roughness for tracing reflection rays
 #define REFL_GATE_HI        0.35   // Max roughness for tracing reflection rays
@@ -216,11 +220,11 @@ const Quality_Preset QUALITY_PRESETS [QUALITY_COUNT] = {
 #define DENOISE_LUM_HI      15.0   // Luminance sensitivity during motion (aggressive smooth)
 
 // Firefly rejection — 3x3 neighborhood percentile clamp
-#define FIREFLY_HEADROOM    1.15   // Headroom multiplier above 2nd-brightest neighbor
+#define FIREFLY_HEADROOM    1.05   // Headroom multiplier above 2nd-brightest neighbor
 #define FIREFLY_BIAS        0.01   // Additive floor preventing zero clamp
 
 // CAS (Contrast Adaptive Sharpening)
-#define CAS_AMOUNT          0.45   // Sharpening kernel strength
+#define CAS_AMOUNT          0.55   // Sharpening kernel strength
 #define CAS_MIX             1.5    // Edge enhancement multiplier
 
 // TAA (Temporal Anti-Aliasing) — ghosting vs noise tradeoff
@@ -6004,9 +6008,9 @@ void Weapon_Update (Weapon_Instance *Weapon, const Camera *Camera_Data, float De
   // Place weapon grip near camera (almost behind it) so only the barrel extends forward.
   // Low forward offset keeps grip at the camera; barrel naturally extends into the scene.
   vec3 Offset = Add (Camera_Data->Position,
-                     Add (Scale (Forward, 2.f + Recoil),
-                          Add (Scale (Right, 3.5f + Bob_Horizontal),
-                               Scale (Up,   -3.f + Bob_Vertical))));
+                     Add (Scale (Forward, 5.f + Recoil),
+                          Add (Scale (Right, 4.f + Bob_Horizontal),
+                               Scale (Up,   -3.5f + Bob_Vertical))));
 
   // Select the current animation frame from the hand model's tag_weapon data
   uint Frame_Index = 0;
@@ -6045,7 +6049,7 @@ void Weapon_Update (Weapon_Instance *Weapon, const Camera *Camera_Data, float De
                                  + Camera_Basis[Row * 3 + 2] * Tag_Y_Up[2 * 3 + Column];
 
   // Scale the viewmodel down - no depth hack, so we shrink the model in world space
-  float Model_Scale = 0.45f;
+  float Model_Scale = WEAPON_MODEL_SCALE;
 
   // Transform each vertex from model space (Q3 Z-up) to world space (Y-up).
   // Swizzle Q3 coords (X,Y,Z) > Y-up (X,Z,-Y) so barrel>Forward, up>Up, right>Right.
@@ -9384,8 +9388,10 @@ int main (int Argc, char **Argv) {
   Render_Height = (int)(Height * Active_Render_Scale);
   Render_Width  = (Render_Width  + 7) & ~7;  // Round up to multiple of 8 (postprocess workgroup size)
   Render_Height = (Render_Height + 7) & ~7;
-  printf ("[render] internal %dx%d > window %dx%d (scale %.0f%%)\n",
-          Render_Width, Render_Height, Width, Height, Active_Render_Scale * 100.f);
+  // Convert horizontal FOV (Q3-style) to vertical for the Perspective matrix
+  float Vertical_FOV = Hfov_To_Vfov (FIELD_OF_VIEW, (float)Width / Height);
+  printf ("[render] internal %dx%d > window %dx%d (scale %.0f%%, vFOV %.1f°)\n",
+          Render_Width, Render_Height, Width, Height, Active_Render_Scale * 100.f, Vertical_FOV);
 
   // Create the ray tracing storage image (render target) and depth image (R32F for postprocess DOF). Storage images use internal render
   // resolution - bilinear blit upscales to window/swapchain
@@ -9709,7 +9715,7 @@ int main (int Argc, char **Argv) {
       Weapon_Bottom_Level_Rebuild (&Weapon);
       Top_Level_Rebuild (&World_Bottom_Level, &Weapon.Bottom_Level, &Enemy.Bottom_Level, NULL);
       mat4 Bench_View = View (Bench_Cam.Position, Bench_Cam.Yaw, Bench_Cam.Pitch);
-      mat4 Bench_Proj = Perspective (FIELD_OF_VIEW, (float)Width / Height, 0.1f, 10000.f);
+      mat4 Bench_Proj = Perspective (Vertical_FOV, (float)Width / Height, 0.1f, 10000.f);
       mat4 Bench_Inv_Proj = Inverse_Projection (Bench_Proj);
       mat4 Bench_Reproj = Mat4_Mul (Bench_Proj, Mat4_Mul (Bench_View, Inverse_Orthogonal (Bench_View)));
       Prev_View_Matrix = Bench_View;
@@ -9717,7 +9723,7 @@ int main (int Argc, char **Argv) {
       // Alternate frame parity so checkerboard traces both pixel halves during warmup
       for (int I = 0; I < 5; I++) {
         Bench_Cam.Frame = (uint)I;
-        Camera_Upload (&Bench_Cam, FIELD_OF_VIEW, Weapon.Texture_Base_Index, PBR_Stride, Active_SPP);
+        Camera_Upload (&Bench_Cam, Vertical_FOV, Weapon.Texture_Base_Index, PBR_Stride, Active_SPP);
         Gpu_Postprocess_Push Warmup_Postprocess = {.Time = 0,
           .Dt_Frame       = (uint32_t)Float_To_Half (Fixed_Dt) | ((uint32_t)(Frame_Count & 0xFFFF) << 16),
           .Velocity       = 0,
@@ -9778,11 +9784,11 @@ int main (int Argc, char **Argv) {
       Enemy.Current_Vertices = Enemy.Frame_Vertices[(int)(Enemy.Animation_Time * Enemy.Frame_FPS) % (int)Enemy.Frame_Count];
       Entity_Bottom_Level_Rebuild (&Enemy);
       Top_Level_Rebuild (&World_Bottom_Level, &Weapon.Bottom_Level, &Enemy.Bottom_Level, NULL);
-      Camera_Upload (&Bench_Cam, FIELD_OF_VIEW, Weapon.Texture_Base_Index, PBR_Stride, Active_SPP);
+      Camera_Upload (&Bench_Cam, Vertical_FOV, Weapon.Texture_Base_Index, PBR_Stride, Active_SPP);
 
       // Build view and projection matrices
       mat4 Bench_View = View (Bench_Cam.Position, Bench_Cam.Yaw, Bench_Cam.Pitch);
-      mat4 Bench_Projection = Perspective (FIELD_OF_VIEW, (float)Width / Height, 0.1f, 10000.f);
+      mat4 Bench_Projection = Perspective (Vertical_FOV, (float)Width / Height, 0.1f, 10000.f);
       mat4 Bench_Inverse_Projection = Inverse_Projection (Bench_Projection);
       mat4 Bench_Reproject = Mat4_Mul (Bench_Projection, Mat4_Mul (Prev_View_Matrix, Inverse_Orthogonal (Bench_View)));
 
@@ -10187,19 +10193,19 @@ int main (int Argc, char **Argv) {
     // Denoise needs more smoothing at 1 SPP — give it a higher floor so the
     // motion-adaptive edge-stopping relaxes slightly, reducing 1-SPP grain.
     float Denoise_Budget = Budget;
-    if (Active_SPP <= 1) Denoise_Budget = fmaxf (Denoise_Budget, 0.20f);
+    if (Active_SPP <= 1) Denoise_Budget = fmaxf (Denoise_Budget, 0.10f);
     Current_Budget_Byte = (int)(uint)(fminf (Denoise_Budget, 1.0f) * 255.0f);
     uint Packed_SPP = (Active_SPP & 0xFF) | (Budget_Byte << 8);
 
     // Upload the camera and dispatch ray tracing + postprocess
-    Camera_Upload (&Cam, FIELD_OF_VIEW, Weapon.Texture_Base_Index, PBR_Stride, Packed_SPP);
+    Camera_Upload (&Cam, Vertical_FOV, Weapon.Texture_Base_Index, PBR_Stride, Packed_SPP);
     float Horizontal_Speed = sqrtf (Physics.Velocity.x * Physics.Velocity.x +
                            Physics.Velocity.z * Physics.Velocity.z);
 
     // Build reprojection matrix: Proj * Prev_View * Inverse_View (maps current view-space > previous clip-space)
     mat4 Cur_View = View (Cam.Position, Cam.Yaw, Cam.Pitch);
     mat4 Cur_Inv_View = Inverse_Orthogonal (Cur_View);
-    mat4 Proj = Perspective (FIELD_OF_VIEW, (float)Width / Height, 0.1f, 10000.f);
+    mat4 Proj = Perspective (Vertical_FOV, (float)Width / Height, 0.1f, 10000.f);
     mat4 Reproject = Mat4_Mul (Proj, Mat4_Mul (Prev_View_Matrix, Cur_Inv_View));
     mat4 Inv_Proj = Inverse_Projection (Proj);
 
