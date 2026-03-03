@@ -86,8 +86,8 @@ const char *ENGINE_VERSION = "0.1.0";
 #define MINIMUM_WALK_NORMAL 0.7f   // Minimum Y-component of a surface normal to count as walkable floor
 #define OVERBOUNCE          1.001f // Slight overshoot factor when clipping velocity off surfaces
 #define MAXIMUM_CLIP_PLANES 5      // Maximum simultaneous contact planes during slide-move resolution
-#define DEFAULT_VIEW_HEIGHT 26.f   // Camera height offset from player origin when standing
-#define CROUCH_VIEW_HEIGHT  12.f   // Camera height offset from player origin when crouching
+#define DEFAULT_VIEW_HEIGHT 22.f   // Camera height offset from capsule center (ground+28+22 = ground+50, matches Q3)
+#define CROUCH_VIEW_HEIGHT   8.f   // Camera height offset when crouching  (ground+28+8  = ground+36, matches Q3)
 
 // Weapon Animation Parameters
 #define WEAPON_MODEL_SCALE  0.7f // Viewmodel scale factor for first-person perspective
@@ -101,7 +101,7 @@ const char *ENGINE_VERSION = "0.1.0";
 #define WEAPON_RECOIL_DECAY 5.f  // Recoil exponential decay rate  
 
 // Capsule spine half-length: half height minus radius
-#define PLAYER_CAPSULE_SPINE 17.f // For a 32-unit tall, 15-unit radius capsule: 32 - 15 = 17 units.
+#define PLAYER_CAPSULE_SPINE 13.f // For a 28-unit tall, 15-unit radius capsule: 28 - 15 = 13 units.
 
 // Projectile constants
 #define MAX_PROJECTILES 64    // Maximum simultaneous projectiles in flight
@@ -177,7 +177,7 @@ const Quality_Preset QUALITY_PRESETS [QUALITY_COUNT] = {
   //                            Res        Scale  SPP  POM  DN   CB
   [QUALITY_ULTRA]  = {"Crysis", 3840,2160, 1.00f,  4,  1,   2,   1}, 
   [QUALITY_HIGH]   = {"High",   2560,1440, 1.00f,  2,  1,   2,   1}, 
-  [QUALITY_MEDIUM] = {"Medium", 1280, 720, 0.60f,  1,  1,   3,   1},
+  [QUALITY_MEDIUM] = {"Medium", 1280, 720, 0.65f,  1,  1,   3,   1},
   [QUALITY_LOW]    = {"Low",    1024, 576, 0.55f,  1,  1,   2,   1},
   [QUALITY_POTATO] = {"Potato",  854, 480, 0.75f,  1,  0,   3,   1},
 };
@@ -220,7 +220,7 @@ const Quality_Preset QUALITY_PRESETS [QUALITY_COUNT] = {
 #define FIREFLY_BIAS        0.01   // Additive floor preventing zero clamp
 
 // CAS (Contrast Adaptive Sharpening)
-#define CAS_AMOUNT          0.35   // Sharpening kernel strength
+#define CAS_AMOUNT          0.45   // Sharpening kernel strength
 #define CAS_MIX             1.5    // Edge enhancement multiplier
 
 // TAA (Temporal Anti-Aliasing) — ghosting vs noise tradeoff
@@ -244,7 +244,7 @@ const Quality_Preset QUALITY_PRESETS [QUALITY_COUNT] = {
 #define HULL_MAX_ENTITIES 32  // Maximum simultaneous hull collider instances
 
 // Player bounding box half-extents (x, y, z) used by the capsule collider
-const float PLAYER_HALF_EXTENTS[3] = {15.f, 32.f, 15.f};
+const float PLAYER_HALF_EXTENTS[3] = {15.f, 28.f, 15.f}; // Q3 standing bbox: height 56 (mins -24, maxs 32)
 
 // ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 //
@@ -595,6 +595,7 @@ float Delta_Time; // Time elapsed since the previous frame in seconds
 
 // Runtime mode flags
 int Skip_Postprocess; // Non-zero to bypass the post-processing compute pass
+int Use_Validation;   // Non-zero to enable Vulkan validation layers (--validation)
 
 // Windowing state and settings
 Quality_Level    Active_Quality      = QUALITY_POTATO;
@@ -3092,10 +3093,12 @@ void Vulkan_Create_Instance () {
   vkEnumerateInstanceLayerProperties (&Layer_Count, Layers);
 
   bool Have_Validation = false;
-  for (uint L = 0; L < Layer_Count; L++) {
-    if (strcmp (Layers[L].layerName, VALIDATION_LAYERS[0]) == 0) {
-      Have_Validation = true;
-      break;
+  if (Use_Validation) {
+    for (uint L = 0; L < Layer_Count; L++) {
+      if (strcmp (Layers[L].layerName, VALIDATION_LAYERS[0]) == 0) {
+        Have_Validation = true;
+        break;
+      }
     }
   }
   free (Layers);
@@ -3118,7 +3121,8 @@ void Vulkan_Create_Instance () {
                               /*pAllocator  =>*/ NULL,
                               /*pInstance   =>*/ &Instance));
 
-  if (not Have_Validation) printf ("[vulkan] validation layer not found - running without validation\n");
+  if (Use_Validation and not Have_Validation) printf ("[vulkan] validation layer not found - running without validation\n");
+  else if (Have_Validation) printf ("[vulkan] validation layers enabled\n");
 
   // Release the temporary extensions array now that the instance owns the data
   free (Extensions);
@@ -8052,8 +8056,8 @@ glsl comp Physics {
   const float MINIMUM_WALK_NORMAL  = 0.7;
   const float OVERBOUNCE           = 1.001;
   const int   MAXIMUM_CLIP_PLANES  = 5;
-  const float DEFAULT_VIEW_HEIGHT  = 26.0;
-  const float CROUCH_VIEW_HEIGHT   = 12.0;
+  const float DEFAULT_VIEW_HEIGHT  = 22.0;
+  const float CROUCH_VIEW_HEIGHT   = 8.0;
   const float MOUSE_SENSITIVITY    = 0.003;
   
   // Collider shape constants
@@ -9289,6 +9293,7 @@ int main (int Argc, char **Argv) {
   //   --no-pbr          Disable PBR maps (diffuse + lightmap only, for A/B comparison)
   //   --no-parallax     Disable parallax occlusion mapping
   //   --dump-frames D   Save each benchmark frame as D/frame_NNNN.tga
+  //   --validation      Enable Vulkan validation layers (off by default)
   //   mapname.bsp       Load specified BSP map instead of default
 
   // Local variables
@@ -9314,6 +9319,7 @@ int main (int Argc, char **Argv) {
     else if (strcmp (Argv[I], "--no-pbr")         == 0) No_PBR = 1;
     else if (strcmp (Argv[I], "--no-parallax")    == 0) No_Parallax = 1;
     else if (strcmp (Argv[I], "--cheap")          == 0) Force_Cheap = 1;
+    else if (strcmp (Argv[I], "--validation")     == 0) Use_Validation = 1;
     else if (strcmp (Argv[I], "--spp")            == 0 and I + 1 < Argc) Override_SPP = atoi (Argv[++I]);
     else if (strcmp (Argv[I], "--res")            == 0 and I + 1 < Argc) {
       sscanf (Argv[++I], "%dx%d", &Width, &Height);
@@ -9745,8 +9751,15 @@ int main (int Argc, char **Argv) {
 
       // Slowly rotate the camera for visual coverage (full 360 over 600 frames = 10s at 60fps)
       if (not Screenshot_Path) {
-        Bench_Cam.Yaw += 6.28318f / 600.f;
-        Input In = {.Forward = (F % 120 < 60) ? 1 : 0, .Right = (F % 120 >= 60) ? 1 : 0};
+        // Aggressive movement for ghosting/TAA stress test:
+        //   - Always run forward
+        //   - Smooth sinusoidal yaw sweep (~90° over 2s period)
+        //   - Slight pitch bob
+        float T = F * Fixed_Dt;
+        float Yaw_Speed   = cosf (T * 3.14159f) * 120.f;  // ±120 px/frame mouse sweep
+        float Pitch_Speed = sinf (T * 6.28f) * 5.f;       // Gentle pitch oscillation
+        Input In = {.Forward = 1, .Right = (F % 180 >= 90) ? 1 : 0,
+                    .Delta_X = Yaw_Speed, .Delta_Y = Pitch_Speed};
         Player P = Physics_Dispatch (In, Fixed_Dt);
         Bench_Cam.Position = P.Position;
         Bench_Cam.Position.y += P.View_Height;
@@ -10171,7 +10184,11 @@ int main (int Argc, char **Argv) {
     // damping, shorter shadow rays, slight cheap-path blend.
     if (Active_Quality == QUALITY_POTATO && Budget < POTATO_BUDGET_FLOOR) Budget = POTATO_BUDGET_FLOOR;
     uint Budget_Byte = (uint)(Budget * 255.0f);
-    Current_Budget_Byte = (int)Budget_Byte;
+    // Denoise needs more smoothing at 1 SPP — give it a higher floor so the
+    // motion-adaptive edge-stopping relaxes slightly, reducing 1-SPP grain.
+    float Denoise_Budget = Budget;
+    if (Active_SPP <= 1) Denoise_Budget = fmaxf (Denoise_Budget, 0.20f);
+    Current_Budget_Byte = (int)(uint)(fminf (Denoise_Budget, 1.0f) * 255.0f);
     uint Packed_SPP = (Active_SPP & 0xFF) | (Budget_Byte << 8);
 
     // Upload the camera and dispatch ray tracing + postprocess
