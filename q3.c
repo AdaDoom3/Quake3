@@ -179,8 +179,8 @@ typedef struct {
 } Quality_Preset;
 const Quality_Preset QUALITY_PRESETS [QUALITY_COUNT] = {
   //                            Res        Scale  SPP  POM  DN   CB
-  [QUALITY_ULTRA]  = {"Crysis", 3840,2160, 1.00f,  4,  1,   2,   1}, 
-  [QUALITY_HIGH]   = {"High",   2560,1440, 1.00f,  2,  1,   2,   1}, 
+  [QUALITY_ULTRA]  = {"Crysis", 1920,1080, 1.00f,  2,  1,   3,   1},
+  [QUALITY_HIGH]   = {"High",   1600, 900, 1.00f,  2,  1,   2,   1}, 
   [QUALITY_MEDIUM] = {"Medium", 1280, 720, 0.75f,  1,  1,   3,   1},
   [QUALITY_LOW]    = {"Low",    1024, 576, 0.55f,  1,  1,   2,   1},
   [QUALITY_POTATO] = {"Potato",  854, 480, 0.75f,  1,  0,   3,   1},
@@ -196,21 +196,21 @@ const Quality_Preset QUALITY_PRESETS [QUALITY_COUNT] = {
 #define SPECULAR_D_BIAS     0.01   // Min roughness² for GGX D term (prevents firefly peak)
 
 // Reflection control — Budget-adaptive (LO = full quality at Budget=0, HI = constrained at Budget=1)
-#define REFL_CLAMP_LO       2.0    // Reflection luminance clamp × surface luminance
+#define REFL_CLAMP_LO       5.0    // Reflection luminance clamp × surface luminance (was 2.0)
 #define REFL_CLAMP_HI       1.5    // Reflection luminance clamp × surface luminance
-#define REFL_GATE_LO        0.55   // Max roughness for tracing reflection rays
+#define REFL_GATE_LO        0.80   // Max roughness for tracing reflection rays (was 0.55)
 #define REFL_GATE_HI        0.35   // Max roughness for tracing reflection rays
-#define REFL_THRESH_LO      0.10   // Reflection Fresnel weight skip threshold
+#define REFL_THRESH_LO      0.02   // Reflection Fresnel weight skip threshold (was 0.10)
 #define REFL_THRESH_HI      0.30   // Reflection Fresnel weight skip threshold
-#define REFL_DAMPING        0.5    // Budget-proportional reflection strength reduction
-#define REFL_SOFT_EDGE      8.0    // Threshold-to-full-weight transition sharpness
+#define REFL_DAMPING        0.3    // Budget-proportional reflection strength reduction (was 0.5)
+#define REFL_SOFT_EDGE      12.0   // Threshold-to-full-weight transition sharpness (was 8.0)
 
 // Reflection trace distance — Budget-adaptive ray length
-#define REFL_TRACE_LO       500.0  // Reflection trace max distance at Budget=0
+#define REFL_TRACE_LO       2000.0 // Reflection trace max distance at Budget=0 (was 500)
 #define REFL_TRACE_HI       150.0  // Reflection trace max distance at Budget=1
 
 // Shadow rays — Budget-adaptive cutoff distances
-#define SHADOW_DIST_LO      600.0  // Shadow ray max distance at Budget=0
+#define SHADOW_DIST_LO      2000.0 // Shadow ray max distance at Budget=0 (was 600)
 #define SHADOW_DIST_HI      200.0  // Shadow ray max distance at Budget=1
 
 // A-trous denoiser edge-stopping (LO = still camera, HI = fast motion)
@@ -239,7 +239,8 @@ const Quality_Preset QUALITY_PRESETS [QUALITY_COUNT] = {
 #define POTATO_BUDGET_FLOOR 0.35f  // Minimum budget for potato quality tier
 #define POTATO_TARGET_MS    0.033f // Target frame time for potato (~30 fps)
 #define MEDIUM_TARGET_MS    0.100f // Target frame time for medium/low (~10 fps)
-#define DEFAULT_TARGET_MS   0.016f // Target frame time for ultra/high (~60 fps)
+#define ULTRA_TARGET_MS     0.333f // Target frame time for Crysis/ultra (~3 fps)
+#define DEFAULT_TARGET_MS   0.016f // Target frame time for high (~60 fps)
 
 // Convex Hull Limits
 #define HULL_MAX_VERTS    256 // Per-hull vertex cap (matches GPU array size in Gpu_Hull)
@@ -10178,12 +10179,14 @@ int main (int Argc, char **Argv) {
     if      (Active_Quality == QUALITY_POTATO) Target_Frame_Time = POTATO_TARGET_MS;
     else if (Active_Quality == QUALITY_MEDIUM
           || Active_Quality == QUALITY_LOW)     Target_Frame_Time = MEDIUM_TARGET_MS;
+    else if (Active_Quality == QUALITY_ULTRA)  Target_Frame_Time = ULTRA_TARGET_MS;
     else                                       Target_Frame_Time = DEFAULT_TARGET_MS;
     float Budget = 0.0f;
     if (Force_Cheap) {
       Budget = 1.0f;
     } else if (Delta_Time > Target_Frame_Time) {
-      Budget = (Delta_Time - Target_Frame_Time) / (0.15f - Target_Frame_Time);
+      float Budget_Max = fmaxf (Target_Frame_Time * 2.0f, 0.15f);
+      Budget = (Delta_Time - Target_Frame_Time) / (Budget_Max - Target_Frame_Time);
       if (Budget > 1.0f) Budget = 1.0f;
     }
     // Potato budget floor: keeps adaptive savings engaged — reflection
