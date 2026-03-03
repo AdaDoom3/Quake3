@@ -179,7 +179,7 @@ const Quality_Preset QUALITY_PRESETS [QUALITY_COUNT] = {
   [QUALITY_HIGH]   = {"High",   2560,1440, 1.00f,  2,  1,   2,   1}, 
   [QUALITY_MEDIUM] = {"Medium", 1920,1080, 1.00f,  1,  1,   2,   1},
   [QUALITY_LOW]    = {"Low",    1600, 900, 1.00f,  1,  1,   1,   1},
-  [QUALITY_POTATO] = {"Potato", 1280, 720, 0.667f, 1,  0,   1,   1}, 
+  [QUALITY_POTATO] = {"Potato",  854, 480, 0.35f,  1,  0,   0,   1},
 };
 
 // Convex Hull Limits
@@ -8674,7 +8674,7 @@ glsl comp Post_Process {
         }
         M1 /= 5.0; M2 /= 5.0;
         vec3 Sigma = sqrt (max (M2 - M1 * M1, vec3 (0.0)));
-        History = clamp (History, M1 - Sigma * 0.3, M1 + Sigma * 0.3);
+        History = clamp (History, M1 - Sigma * 0.25, M1 + Sigma * 0.25);
   
         // Luminance-based history rejection
         //
@@ -8696,12 +8696,12 @@ glsl comp Post_Process {
         float Is_Static = step (Speed, 2.0);
   
         // Static: 1/N convergence floored high
-        float Static_Alpha = max (1.0 / max (float (Frame_Count), 1.0), 0.25);
+        float Static_Alpha = max (1.0 / max (float (Frame_Count), 1.0), 0.35);
   
         // Moving: very aggressive current-frame dominance
         float Motion      = clamp (Speed * 0.04, 0.0, 1.0);  // ISA: reciprocal multiply vs division
         float Base        = mix (0.65, 0.98, Motion);  // Even slow motion > 65% current frame
-        float Framerate_Adaptation   = clamp ((Delta_Time - 0.016) * 20.0, 0.0, 1.0);
+        float Framerate_Adaptation   = clamp ((Delta_Time - 0.016) * 30.0, 0.0, 1.0);
         float Moving_Alpha = max (max (max (Base, Framerate_Adaptation), Disocclusion), Anti_Lag);
 
         // Blend between and moving alpha based on camera speed
@@ -9968,12 +9968,13 @@ int main (int Argc, char **Argv) {
     // Rebuild the top-level acceleration structure
     Top_Level_Rebuild (&World_Bottom_Level, &Weapon.Bottom_Level, &Enemy.Bottom_Level, Player_Body_Transform);
 
-    // Adaptive quality budget
+    // Adaptive quality budget — target frame time depends on quality tier
+    float Target_Frame_Time = (Active_Quality == QUALITY_POTATO) ? 0.033f : 0.016f;
     float Budget = 0.0f;
     if (Force_Cheap) {
-      Budget = 1.0f; 
-    } else if (Delta_Time > 0.016f) {
-      Budget = (Delta_Time - 0.016f) / (0.15f - 0.016f); 
+      Budget = 1.0f;
+    } else if (Delta_Time > Target_Frame_Time) {
+      Budget = (Delta_Time - Target_Frame_Time) / (0.15f - Target_Frame_Time);
       if (Budget > 1.0f) Budget = 1.0f;
     }
     uint Budget_Byte = (uint)(Budget * 255.0f);
