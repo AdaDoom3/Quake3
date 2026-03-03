@@ -2,7 +2,7 @@
 
 A from-scratch Vulkan ray tracing engine inspired by Quake 3 / Id Tech 3, written as a single C file with inline GLSL shaders.
 
-![Screenshot](screenshots/q3_raytraced.png)
+![Screenshot](screenshots/q3_4k_raytraced.png)
 
 ## Quick Start
 

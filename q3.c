@@ -179,7 +179,7 @@ typedef struct {
 } Quality_Preset;
 const Quality_Preset QUALITY_PRESETS [QUALITY_COUNT] = {
   //                            Res        Scale  SPP  POM  DN   CB
-  [QUALITY_ULTRA]  = {"Crysis", 1920,1080, 1.00f,  2,  1,   3,   1},
+  [QUALITY_ULTRA]  = {"Crysis", 3840,2160, 1.00f,  2,  1,   3,   1},
   [QUALITY_HIGH]   = {"High",   1600, 900, 1.00f,  2,  1,   2,   1}, 
   [QUALITY_MEDIUM] = {"Medium", 1280, 720, 0.75f,  1,  1,   3,   1},
   [QUALITY_LOW]    = {"Low",    1024, 576, 0.55f,  1,  1,   2,   1},
@@ -603,7 +603,7 @@ int Skip_Postprocess; // Non-zero to bypass the post-processing compute pass
 int Use_Validation;   // Non-zero to enable Vulkan validation layers (--validation)
 
 // Windowing state and settings
-Quality_Level    Active_Quality      = QUALITY_POTATO;
+Quality_Level    Active_Quality      = QUALITY_MEDIUM;
 Cursor_Kind      Current_Cursor_Kind = CURSOR_SYSTEM;
 Activated_Kind   Current_Activated   = OTHER_ACTIVATED;
 Game_Mode_Kind   Current_Game_Mode   = GAME_PLAYING;
