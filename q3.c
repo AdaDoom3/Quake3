@@ -7717,7 +7717,7 @@ glsl rchit Closest_Hit {
       // Clamp reflection luminance to prevent firefly sparkle at low res
       vec3 Rc = Payload.rgb;
       float Rc_Lum = dot (Rc, vec3 (0.2126, 0.7152, 0.0722));
-      float Max_Lum = mix (10.0, 2.0, Budget);
+      float Max_Lum = mix (2.0, 0.5, Budget);  // Aggressive firefly kill
       Reflection_Color = Rc_Lum > Max_Lum ? Rc * (Max_Lum / Rc_Lum) : Rc;
     }
   
@@ -8681,7 +8681,7 @@ glsl comp Post_Process {
         }
         M1 /= 5.0; M2 /= 5.0;
         vec3 Sigma = sqrt (max (M2 - M1 * M1, vec3 (0.0)));
-        History = clamp (History, M1 - Sigma * 0.25, M1 + Sigma * 0.25);
+        History = clamp (History, M1 - Sigma * 0.15, M1 + Sigma * 0.15);
   
         // Luminance-based history rejection
         //
@@ -8703,11 +8703,11 @@ glsl comp Post_Process {
         float Is_Static = step (Speed, 2.0);
   
         // Static: 1/N convergence floored high
-        float Static_Alpha = max (1.0 / max (float (Frame_Count), 1.0), 0.35);
+        float Static_Alpha = max (1.0 / max (float (Frame_Count), 1.0), 0.50);
   
         // Moving: very aggressive current-frame dominance
         float Motion      = clamp (Speed * 0.04, 0.0, 1.0);  // ISA: reciprocal multiply vs division
-        float Base        = mix (0.65, 0.98, Motion);  // Even slow motion > 65% current frame
+        float Base        = mix (0.75, 0.98, Motion);  // Even slow motion > 75% current frame
         float Framerate_Adaptation   = clamp ((Delta_Time - 0.016) * 30.0, 0.0, 1.0);
         float Moving_Alpha = max (max (max (Base, Framerate_Adaptation), Disocclusion), Anti_Lag);
 
