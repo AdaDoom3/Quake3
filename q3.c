@@ -177,8 +177,8 @@ const Quality_Preset QUALITY_PRESETS [QUALITY_COUNT] = {
   //                            Res        Scale  SPP  POM  DN   CB
   [QUALITY_ULTRA]  = {"Crysis", 3840,2160, 1.00f,  4,  1,   2,   1}, 
   [QUALITY_HIGH]   = {"High",   2560,1440, 1.00f,  2,  1,   2,   1}, 
-  [QUALITY_MEDIUM] = {"Medium", 1920,1080, 1.00f,  1,  1,   2,   1},
-  [QUALITY_LOW]    = {"Low",    1600, 900, 1.00f,  1,  1,   1,   1},
+  [QUALITY_MEDIUM] = {"Medium", 1280, 720, 0.60f,  1,  1,   3,   1},
+  [QUALITY_LOW]    = {"Low",    1024, 576, 0.55f,  1,  1,   2,   1},
   [QUALITY_POTATO] = {"Potato",  854, 480, 0.75f,  1,  0,   3,   1},
 };
 
@@ -234,7 +234,8 @@ const Quality_Preset QUALITY_PRESETS [QUALITY_COUNT] = {
 // Adaptive quality budget (C-side only — not injected into shaders)
 #define POTATO_BUDGET_FLOOR 0.35f  // Minimum budget for potato quality tier
 #define POTATO_TARGET_MS    0.033f // Target frame time for potato (~30 fps)
-#define DEFAULT_TARGET_MS   0.016f // Target frame time for other tiers (~60 fps)
+#define MEDIUM_TARGET_MS    0.100f // Target frame time for medium/low (~10 fps)
+#define DEFAULT_TARGET_MS   0.016f // Target frame time for ultra/high (~60 fps)
 
 // Convex Hull Limits
 #define HULL_MAX_VERTS    256 // Per-hull vertex cap (matches GPU array size in Gpu_Hull)
@@ -10154,7 +10155,11 @@ int main (int Argc, char **Argv) {
     Top_Level_Rebuild (&World_Bottom_Level, &Weapon.Bottom_Level, &Enemy.Bottom_Level, Player_Body_Transform);
 
     // Adaptive quality budget — target frame time depends on quality tier
-    float Target_Frame_Time = (Active_Quality == QUALITY_POTATO) ? POTATO_TARGET_MS : DEFAULT_TARGET_MS;
+    float Target_Frame_Time;
+    if      (Active_Quality == QUALITY_POTATO) Target_Frame_Time = POTATO_TARGET_MS;
+    else if (Active_Quality == QUALITY_MEDIUM
+          || Active_Quality == QUALITY_LOW)     Target_Frame_Time = MEDIUM_TARGET_MS;
+    else                                       Target_Frame_Time = DEFAULT_TARGET_MS;
     float Budget = 0.0f;
     if (Force_Cheap) {
       Budget = 1.0f;
