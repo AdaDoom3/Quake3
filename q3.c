@@ -179,7 +179,7 @@ const Quality_Preset QUALITY_PRESETS [QUALITY_COUNT] = {
   [QUALITY_HIGH]   = {"High",   2560,1440, 1.00f,  2,  1,   2,   1}, 
   [QUALITY_MEDIUM] = {"Medium", 1920,1080, 1.00f,  1,  1,   2,   1},
   [QUALITY_LOW]    = {"Low",    1600, 900, 1.00f,  1,  1,   1,   1},
-  [QUALITY_POTATO] = {"Potato",  854, 480, 0.55f,  1,  0,   2,   1},
+  [QUALITY_POTATO] = {"Potato",  854, 480, 0.75f,  1,  0,   3,   1},
 };
 
 // ── Shader Tuning ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
@@ -211,9 +211,9 @@ const Quality_Preset QUALITY_PRESETS [QUALITY_COUNT] = {
 
 // A-trous denoiser edge-stopping (LO = still camera, HI = fast motion)
 #define DENOISE_DEPTH_LO    100.0  // Depth sensitivity when still (sharp edges)
-#define DENOISE_DEPTH_HI    30.0   // Depth sensitivity during motion (smoother)
+#define DENOISE_DEPTH_HI    10.0   // Depth sensitivity during motion (much smoother)
 #define DENOISE_LUM_LO      200.0  // Luminance sensitivity when still
-#define DENOISE_LUM_HI      50.0   // Luminance sensitivity during motion
+#define DENOISE_LUM_HI      15.0   // Luminance sensitivity during motion (aggressive smooth)
 
 // Firefly rejection — 3x3 neighborhood percentile clamp
 #define FIREFLY_HEADROOM    1.15   // Headroom multiplier above 2nd-brightest neighbor
@@ -6149,7 +6149,7 @@ void Raytracing_Frame (Gpu_Postprocess_Push Postprocess) {
 
     // Iteration count controlled by quality preset (Potato=0, Low=1, Medium+=2).
     // Passes Budget to the shader - at high budget (cheap path), denoiser is a passthrough.
-    int Steps[] = {1, 3, 2, 8};  // Dense for low-res (1→3x3, 3→7x7); wider for hi-res
+    int Steps[] = {1, 3, 8, 16}; // Progressive A-trous: 3x3, 7x7, 17x17, 33x33
     int Denoise_Passes = Active_Denoise_Passes;
     if (Denoise_Passes > 0) {
       vkCmdBindPipeline (Command_Buffer, VK_PIPELINE_BIND_POINT_COMPUTE, Denoise_Pipeline);
@@ -7514,36 +7514,45 @@ glsl rchit Closest_Hit {
     return (W >> 22u) ^ W;
   }
 
-  // GGX Visible Normal Distribution Function sampling (Heitz 2018).
-  // Importance-samples the specular lobe visible from direction V,
-  // eliminating back-facing samples and dramatically reducing variance.
-  // Returns a sampled half-vector in tangent space.
+  // Interleaved Gradient Noise (Jimenez 2014, SIGGRAPH) — produces a
+  // blue-noise-like spatial distribution.  Neighboring pixels get well-separated
+  // values, making error high-frequency and easy for the denoiser to smooth.
+  float IGN (vec2 Pos) {
+    return fract (52.9829189 * fract (0.06711056 * Pos.x + 0.00583715 * Pos.y));
+  }
+
+  // Sampling Visible GGX Normals with Spherical Caps (Dupuy & Benyoub 2023).
+  // Simpler and more numerically stable than Heitz 2018.  Samples the visible
+  // normal distribution by projecting onto a spherical cap centered on the
+  // stretched view direction — no tangent-frame construction needed.
   vec3 Sample_GGX_VNDF (vec3 Ve, float Alpha, float U1, float U2) {
-    vec3 Vh = normalize (vec3 (Alpha * Ve.x, Alpha * Ve.y, Ve.z));
-    float Len2 = Vh.x * Vh.x + Vh.y * Vh.y;
-    vec3 T1 = Len2 > 0.0 ? vec3 (-Vh.y, Vh.x, 0.0) * inversesqrt (Len2) : vec3 (1, 0, 0);
-    vec3 T2 = cross (Vh, T1);
-    float R = sqrt (U1);
-    float Phi = 6.28318530 * U2;
-    float T1c = R * cos (Phi);
-    float T2c = R * sin (Phi);
-    float S = 0.5 * (1.0 + Vh.z);
-    T2c = (1.0 - S) * sqrt (1.0 - T1c * T1c) + S * T2c;
-    vec3 Nh = T1c * T1 + T2c * T2 + sqrt (max (0.0, 1.0 - T1c * T1c - T2c * T2c)) * Vh;
+    vec3  Vh        = normalize (vec3 (Alpha * Ve.x, Alpha * Ve.y, Ve.z));
+    float Phi       = 6.28318530 * U1;
+    float Z         = (1.0 - U2) * (1.0 + Vh.z) - Vh.z;
+    float Sin_Theta = sqrt (clamp (1.0 - Z * Z, 0.0, 1.0));
+    vec3  C         = vec3 (Sin_Theta * cos (Phi), Sin_Theta * sin (Phi), Z);
+    vec3  Nh        = C + Vh;
     return normalize (vec3 (Alpha * Nh.x, Alpha * Nh.y, max (0.0, Nh.z)));
   }
   
-  // Soft shadow ray direction — per-pixel variation ensures the denoiser
-  // can average between neighboring pixels' different shadow samples.
+  // Soft shadow ray direction — blue-noise spatial + golden-ratio temporal.
+  // IGN gives blue-noise-like spatial distribution (denoiser-friendly),
+  // concentric disk mapping (Shirley & Chiu 1997) gives better disk
+  // stratification than polar sqrt(u)*cos/sin.
   vec3 Soft_Shadow_Dir (vec3 Ld, uint Prim, uint Inst, uint Frame, float Disk_Radius) {
-    uint Seed  = PCG (Prim * 1973u + Inst * 9277u + Frame * 26699u
-                     + gl_LaunchIDEXT.x * 37u + gl_LaunchIDEXT.y * 53u);
-    float Ang  = float (Seed) * 2.3283064e-10 * 6.2831853;
-    float Rad  = sqrt (float (PCG (Seed)) * 2.3283064e-10) * Disk_Radius;
+    vec2  Px = vec2 (gl_LaunchIDEXT.xy);
+    float N1 = fract (IGN (Px) + float (Frame) * 0.7548776662);
+    float N2 = fract (IGN (Px + 17.0) + float (Frame) * 0.5698402910);
+    // Concentric disk mapping (Shirley & Chiu 1997, SIGGRAPH)
+    float A = 2.0 * N1 - 1.0, B = 2.0 * N2 - 1.0;
+    float Rad, Phi;
+    if (A * A > B * B) { Rad = A; Phi = 0.785398 * (B / max (abs (A), 1e-6)); }
+    else               { Rad = B; Phi = 1.5708  - 0.785398 * (A / max (abs (B), 1e-6)); }
+    Rad *= Disk_Radius;
     vec3 Light_Tangent   = (abs (Ld.y) < 0.99) ? normalize (cross (Ld, vec3 (0, 1, 0)))
                                                : normalize (cross (Ld, vec3 (1, 0, 0)));
     vec3 Light_Bitangent = cross (Ld, Light_Tangent);
-    return normalize (Ld + Light_Tangent * (cos (Ang) * Rad) + Light_Bitangent * (sin (Ang) * Rad));
+    return normalize (Ld + Light_Tangent * (cos (Phi) * Rad) + Light_Bitangent * (sin (Phi) * Rad));
   }
   
   // Extracted shadow trace (deduplicated from entity and world paths)
@@ -7784,15 +7793,14 @@ glsl rchit Closest_Hit {
     // Dynamic threshold: skip marginal reflections at high Budget
     float Refl_Threshold = mix (REFL_THRESH_LO, REFL_THRESH_HI, Budget);
     if (Reflection_Weight > Refl_Threshold) {
-      // VNDF importance-sampled reflection (Heitz 2018) with R2 low-
-      // discrepancy temporal sequence.  R2 (generalized golden ratio)
-      // provides optimal coverage of [0,1]^2 over multiple frames,
-      // giving smooth TAA convergence instead of random flickering.
-      uint  Px_Seed = gl_LaunchIDEXT.x * 1973u + gl_LaunchIDEXT.y * 9277u;
-      float R2_Base1 = float (PCG (Px_Seed)) * 2.3283064e-10;
-      float R2_Base2 = float (PCG (Px_Seed + 1117u)) * 2.3283064e-10;
-      float U1 = fract (R2_Base1 + float (Frame) * 0.7548776662);
-      float U2 = fract (R2_Base2 + float (Frame) * 0.5698402910);
+      // VNDF importance-sampled reflection (Dupuy & Benyoub 2023) with
+      // IGN blue noise spatial base + golden ratio temporal rotation.
+      // IGN provides denoiser-friendly high-frequency spatial error
+      // distribution; golden ratio ensures optimal [0,1]^2 coverage
+      // across frames for smooth TAA convergence.
+      vec2  Px = vec2 (gl_LaunchIDEXT.xy);
+      float U1 = fract (IGN (Px) + float (Frame) * 0.7548776662);
+      float U2 = fract (IGN (Px + 17.0) + float (Frame) * 0.5698402910);
       float Alpha   = max (R * R, VNDF_ALPHA_FLOOR);
       // Build tangent frame around surface normal
       vec3 T = (abs (Normal.y) < 0.99) ? normalize (cross (Normal, vec3 (0, 1, 0)))
@@ -8799,17 +8807,18 @@ glsl comp Post_Process {
       float Firefly_Limit = Max2 * FIREFLY_HEADROOM + FIREFLY_BIAS;
       if (Lum_C > Firefly_Limit) Color *= Firefly_Limit / Lum_C;
 
-      // CAS sharpening — restores edge definition from denoise + upscale.
-      // No bilateral blur during motion: it caused ghosting from stale
-      // checkerboard neighbor data.  VNDF + R2 + motion-adaptive denoiser
-      // handle motion quality instead.
+      // Motion-adaptive CAS sharpening — restores edge definition when still,
+      // fades out during fast motion to avoid amplifying 1-SPP noise.
+      // Motion signal from player speed (available early in push constants).
       {
+        float Motion_CAS = clamp (Speed * 0.04, 0.0, 1.0);
+        float Cas_Scale  = CAS_AMOUNT * (1.0 - Motion_CAS);
         vec3 Avg = (Nb[1] + Nb[3] + Nb[4] + Nb[6]) * 0.25;
         vec3 Minimum = min (min (Nb[1], Nb[6]), min (Nb[3], Nb[4]));
         vec3 Maximum = max (max (Nb[1], Nb[6]), max (Nb[3], Nb[4]));
         vec3 Mn = Minimum / (1.0 + Minimum);
         vec3 Mx = Maximum / (1.0 + Maximum);
-        vec3 Sh = clamp (min (Mn, 1.0 - Mx) / (Mx - Mn + 0.04), 0.0, 1.0) * CAS_AMOUNT;
+        vec3 Sh = clamp (min (Mn, 1.0 - Mx) / (Mx - Mn + 0.04), 0.0, 1.0) * Cas_Scale;
         Color = max (mix (Avg, Color, 1.0 + Sh * CAS_MIX), vec3 (0.0));
       }
     }
