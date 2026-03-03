@@ -179,7 +179,7 @@ const Quality_Preset QUALITY_PRESETS [QUALITY_COUNT] = {
   [QUALITY_HIGH]   = {"High",   2560,1440, 1.00f,  2,  1,   2,   1}, 
   [QUALITY_MEDIUM] = {"Medium", 1920,1080, 1.00f,  1,  1,   2,   1},
   [QUALITY_LOW]    = {"Low",    1600, 900, 1.00f,  1,  1,   1,   1},
-  [QUALITY_POTATO] = {"Potato",  854, 480, 0.533f, 1,  0,   1,   0},
+  [QUALITY_POTATO] = {"Potato",  854, 480, 0.667f, 1,  0,   2,   1},
 };
 
 // Convex Hull Limits
@@ -7701,8 +7701,9 @@ glsl rchit Closest_Hit {
                                 : max (max (Env_F.r, Env_F.g), Env_F.b) * (1.0 - R * R);
     vec3  Reflection_Color  = vec3 (0.0);
 
-    // Dynamic threshold: tighter at high Budget to skip marginal reflections
-    float Refl_Threshold = mix (0.10, 0.30, Budget);
+    // Dynamic threshold: tighter at high Budget to skip marginal reflections.
+    // Higher threshold means fewer reflections traced, fewer firefly sources.
+    float Refl_Threshold = mix (0.20, 0.45, Budget);
     if (Reflection_Weight > Refl_Threshold) {
       vec3 Refl_Dir = reflect (-V, Normal);
       Payload = vec4 (0.0, 0.0, 0.0, -1.0);
@@ -7714,19 +7715,21 @@ glsl rchit Closest_Hit {
                    Refl_Dir,
                    mix (500.0, 150.0, Budget),
                    0);
-      // Scene-relative luminance clamp: reflection can't exceed Nx the
-      // surface diffuse lighting.  Prevents fireflies while keeping
-      // reflections proportional to the scene.
+      // Scene-relative luminance clamp + hard cap to prevent sparkle.
+      // The hard cap prevents any reflection from being brighter than
+      // the scene can plausibly support at this quality level.
       vec3  Rc      = Payload.rgb;
       float Rc_Lum  = dot (Rc, vec3 (0.2126, 0.7152, 0.0722));
       float Srf_Lum = dot (Ambient_Irradiance * Albedo, vec3 (0.2126, 0.7152, 0.0722));
-      float Max_Lum = max (Srf_Lum, 0.05) * mix (4.0, 1.5, Budget);
+      float Rel_Lum = max (Srf_Lum, 0.02) * mix (1.8, 0.8, Budget);
+      float Hard_Cap = 0.15;
+      float Max_Lum = min (Rel_Lum, Hard_Cap);
       Reflection_Color = Rc_Lum > Max_Lum ? Rc * (Max_Lum / Rc_Lum) : Rc;
     }
 
-    // Dampen reflection contribution at high Budget — keeps reflections
-    // present but subdued, preventing temporal sparkle at low res/fps.
-    float Refl_Strength = 1.0 - Budget * 0.6;  // 1.0 at Budget=0, 0.64 at 0.6
+    // Dampen reflection contribution: reduces variance between frames,
+    // which directly reduces sparkle from checkerboard alternation.
+    float Refl_Strength = 1.0 - Budget * 0.8;
     Reflection_Weight *= Refl_Strength;
 
     // Blend reflection into indirect specular: replace the hemisphere approximation
@@ -8550,9 +8553,10 @@ glsl comp Denoise {
       Ndot *= Ndot; Ndot *= Ndot; Ndot *= Ndot; Ndot *= Ndot; Ndot *= Ndot;  // x^32
       float W_Normal = Ndot;
   
-      // Luminance edge stopping (tighter threshold preserves color edges)
+      // Luminance edge stopping — relaxed to smooth out stochastic fireflies
+      // while still preserving strong color edges (e.g. shadow boundaries).
       float Luminance_Difference = abs (Center_Luminance - Sample_Luminance);
-      float Weight_Luminance = exp (-Luminance_Difference * Luminance_Difference * 500.0);
+      float Weight_Luminance = exp (-Luminance_Difference * Luminance_Difference * 200.0);
 
       // Combine all edge-stopping weights and accumulate
       float W = W_Spatial * W_Depth * W_Normal * Weight_Luminance;
@@ -8643,7 +8647,56 @@ glsl comp Post_Process {
     vec3 Color = imageLoad (Color_Image, Pixel).rgb;
     float Depth = imageLoad (Depth_Image, Pixel).r;
 
-    // Contrast Adaptive Sharpening (CAS)
+    // Checkerboard spatial reconstruction: pixels not traced this frame
+    // hold stale values from last frame at the wrong screen position.
+    // Replace them with the average of their horizontal neighbors (which
+    // WERE traced this frame).  This is how PS4 Pro / Q2RTX-style
+    // checkerboard rendering reconstructs the missing half.
+    uint Frame = Frame_Count & 0xFFFFu;
+    bool Was_Traced = ((Pixel.x + Pixel.y + int(Frame)) & 1) == 0;
+    if (!Was_Traced) {
+      vec3 Left   = imageLoad (Color_Image, ivec2 (max (Pixel.x - 1, 0),         Pixel.y)).rgb;
+      vec3 Right  = imageLoad (Color_Image, ivec2 (min (Pixel.x + 1, Size.x - 1), Pixel.y)).rgb;
+      float D_L   = imageLoad (Depth_Image, ivec2 (max (Pixel.x - 1, 0),         Pixel.y)).r;
+      float D_R   = imageLoad (Depth_Image, ivec2 (min (Pixel.x + 1, Size.x - 1), Pixel.y)).r;
+      // Depth-aware blend: prefer the neighbor at a similar depth to avoid
+      // bleeding across edges (e.g. wall edge next to sky)
+      float W_L   = 1.0 / (1.0 + abs (D_L - Depth) * 10.0);
+      float W_R   = 1.0 / (1.0 + abs (D_R - Depth) * 10.0);
+      Color = (Left * W_L + Right * W_R) / (W_L + W_R);
+    }
+
+    // Spatial firefly rejection (3x3 neighborhood): clamp outlier pixels
+    // against the median of their neighbors.  Kills stochastic fireflies
+    // and checkerboard temporal oscillation.
+    {
+      vec3 Nb[8];
+      Nb[0] = imageLoad (Color_Image, clamp (Pixel + ivec2(-1,-1), ivec2(0), Size - 1)).rgb;
+      Nb[1] = imageLoad (Color_Image, clamp (Pixel + ivec2( 0,-1), ivec2(0), Size - 1)).rgb;
+      Nb[2] = imageLoad (Color_Image, clamp (Pixel + ivec2( 1,-1), ivec2(0), Size - 1)).rgb;
+      Nb[3] = imageLoad (Color_Image, clamp (Pixel + ivec2(-1, 0), ivec2(0), Size - 1)).rgb;
+      Nb[4] = imageLoad (Color_Image, clamp (Pixel + ivec2( 1, 0), ivec2(0), Size - 1)).rgb;
+      Nb[5] = imageLoad (Color_Image, clamp (Pixel + ivec2(-1, 1), ivec2(0), Size - 1)).rgb;
+      Nb[6] = imageLoad (Color_Image, clamp (Pixel + ivec2( 0, 1), ivec2(0), Size - 1)).rgb;
+      Nb[7] = imageLoad (Color_Image, clamp (Pixel + ivec2( 1, 1), ivec2(0), Size - 1)).rgb;
+      float Lum_C = dot (Color, vec3 (0.2126, 0.7152, 0.0722));
+      // Compute neighbor luminance percentile (second-highest)
+      float Lums[8];
+      for (int i = 0; i < 8; i++) Lums[i] = dot (Nb[i], vec3 (0.2126, 0.7152, 0.0722));
+      // Sort first two passes to find second-highest (P87)
+      float Max1 = 0.0, Max2 = 0.0;
+      for (int i = 0; i < 8; i++) {
+        if (Lums[i] > Max1) { Max2 = Max1; Max1 = Lums[i]; }
+        else if (Lums[i] > Max2) { Max2 = Lums[i]; }
+      }
+      float Firefly_Limit = Max2 * 1.15 + 0.01;
+      if (Lum_C > Firefly_Limit) {
+        Color *= Firefly_Limit / Lum_C;
+      }
+    }
+
+    // Contrast Adaptive Sharpening (CAS) — gentle sharpening to offset
+    // upscale blur without amplifying noise or fireflies.
     {
       vec3 N = imageLoad (Color_Image, ivec2 (Pixel.x, max (Pixel.y - 1, 0))).rgb;
       vec3 S = imageLoad (Color_Image, ivec2 (Pixel.x, min (Pixel.y + 1, Size.y - 1))).rgb;
@@ -8656,9 +8709,9 @@ glsl comp Post_Process {
       vec3 Minimum_Tonemapped = Minimum / (1.0 + Minimum);
       vec3 Maximum_Tonemapped = Maximum / (1.0 + Maximum);
       vec3 Rcp_Range = 1.0 / (Maximum_Tonemapped - Minimum_Tonemapped + 0.04);
-      vec3 Sharpness = clamp (min (Minimum_Tonemapped, 1.0 - Maximum_Tonemapped) * Rcp_Range, 0.0, 1.0) * 0.5;
+      vec3 Sharpness = clamp (min (Minimum_Tonemapped, 1.0 - Maximum_Tonemapped) * Rcp_Range, 0.0, 1.0) * 0.35;
       vec3 Avg = (N + S + W + E) * 0.25;
-      Color = max (mix (Avg, Color, 1.0 + Sharpness * 2.0), vec3 (0.0));
+      Color = max (mix (Avg, Color, 1.0 + Sharpness * 1.5), vec3 (0.0));
     }
 
     // Temporal accumulation (TAA) with motion-vector reprojection - reconstruct view-space position from NDC
@@ -8689,7 +8742,7 @@ glsl comp Post_Process {
         }
         M1 /= 5.0; M2 /= 5.0;
         vec3 Sigma = sqrt (max (M2 - M1 * M1, vec3 (0.0)));
-        History = clamp (History, M1 - Sigma * 0.15, M1 + Sigma * 0.15);
+        History = clamp (History, M1 - Sigma * 0.12, M1 + Sigma * 0.12);
   
         // Luminance-based history rejection
         //
@@ -8716,11 +8769,13 @@ glsl comp Post_Process {
         // Static only if BOTH player and pixel are truly still
         float Is_Static = step (Any_Motion, 0.02);
 
-        // Static: 1/N convergence floored at 0.50
-        float Static_Alpha = max (1.0 / max (float (Frame_Count), 1.0), 0.50);
+        // Static: 1/N convergence floored at 0.35 — lower = more temporal
+        // samples accumulated, smoother noise-free image when camera is still.
+        float Static_Alpha = max (1.0 / max (float (Frame_Count), 1.0), 0.35);
 
-        // Moving: current-frame dominant, scales with per-pixel motion
-        float Base        = mix (0.75, 0.98, Any_Motion);
+        // Moving: current-frame dominant, scales with per-pixel motion.
+        // 0.80 floor ensures rapid history rejection on any movement.
+        float Base        = mix (0.80, 0.98, Any_Motion);
         float Framerate_Adaptation   = clamp ((Delta_Time - 0.016) * 30.0, 0.0, 1.0);
         float Moving_Alpha = max (max (max (Base, Framerate_Adaptation), Disocclusion), Anti_Lag);
 
