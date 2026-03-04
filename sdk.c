@@ -390,9 +390,101 @@ static const char *find_shader_path(const char *p, const char **name_out, size_t
     return NULL;
 }
 
+// Find all `glsl <stage> <name>;` forward declarations in the source and collect them
+typedef struct { char name[64]; char stage[16]; int line; } Shader_Fwd_Decl;
+
+static int collect_forward_decls(const char *src, Shader_Fwd_Decl *out, int max) {
+    int count = 0;
+    const char *p = src;
+    int line = 1;
+    while (*p and count < max) {
+        if (*p == '\n') { line++; p++; continue; }
+        if (strncmp(p, "glsl ", 5) == 0) {
+            // Verify line start (only whitespace before)
+            const char *ls = p;
+            while (ls > src and ls[-1] != '\n') ls--;
+            bool ok = true;
+            for (const char *c = ls; c < p; c++)
+                if (*c != ' ' and *c != '\t') { ok = false; break; }
+            if (ok) {
+                const char *q = p + 5;
+                // Stage
+                const char *ss = q;
+                while (*q and *q != ' ' and *q != ';' and *q != '\n') q++;
+                size_t sl = (size_t)(q - ss);
+                while (*q == ' ') q++;
+                // Name
+                const char *ns = q;
+                while (*q and *q != ' ' and *q != '{' and *q != ';' and *q != '\n') q++;
+                size_t nl = (size_t)(q - ns);
+                while (*q == ' ') q++;
+                if (*q == ';') {
+                    // This is a forward declaration
+                    if (sl < sizeof out[0].stage) { memcpy(out[count].stage, ss, sl); out[count].stage[sl] = '\0'; }
+                    if (nl < sizeof out[0].name)  { memcpy(out[count].name, ns, nl);  out[count].name[nl] = '\0'; }
+                    out[count].line = line;
+                    count++;
+                    p = q + 1;
+                    continue;
+                }
+            }
+        }
+        p++;
+    }
+    return count;
+}
+
 static bool validate_shader_declarations(const char *src, const Shader_Block *sh, int n) {
     bool ok = true;
 
+    // ── Forward declaration ↔ body consistency ──────────────────
+    // Every `glsl <stage> <name>;` forward declaration must have a matching `glsl <stage> <name> { ... }` body,
+    // and vice versa. Mismatched names (like Primary_Miss vs Ray_Miss) are caught here.
+    Shader_Fwd_Decl fwd[64];
+    int fwd_count = collect_forward_decls(src, fwd, 64);
+
+    // Check: every forward declaration must have a matching body
+    for (int f = 0; f < fwd_count; f++) {
+        bool found = false;
+        for (int i = 0; i < n; i++) {
+            if (strcmp(sh[i].name, fwd[f].name) == 0) {
+                // Also verify the stage matches
+                if (strcmp(sh[i].stage, fwd[f].stage) != 0) {
+                    nob_log(NOB_ERROR,
+                        "q3.c:%d: forward declaration 'glsl %s %s;' has stage mismatch — "
+                        "body is 'glsl %s %s'",
+                        fwd[f].line, fwd[f].stage, fwd[f].name, sh[i].stage, sh[i].name);
+                    ok = false;
+                }
+                found = true;
+                break;
+            }
+        }
+        if (not found) {
+            nob_log(NOB_ERROR,
+                "q3.c:%d: forward declaration 'glsl %s %s;' has no matching body — "
+                "add a 'glsl %s %s { ... }' block",
+                fwd[f].line, fwd[f].stage, fwd[f].name, fwd[f].stage, fwd[f].name);
+            ok = false;
+        }
+    }
+
+    // Check: every body must have a matching forward declaration
+    for (int i = 0; i < n; i++) {
+        bool found = false;
+        for (int f = 0; f < fwd_count; f++) {
+            if (strcmp(sh[i].name, fwd[f].name) == 0) { found = true; break; }
+        }
+        if (not found) {
+            nob_log(NOB_ERROR,
+                "q3.c: shader body 'glsl %s %s { ... }' has no forward declaration — "
+                "add 'glsl %s %s;' in the §12 Shaders section",
+                sh[i].stage, sh[i].name, sh[i].stage, sh[i].name);
+            ok = false;
+        }
+    }
+
+    // ── Shader_Path() ↔ body consistency ────────────────────────
     // Forward check: every Shader_Path(xxx) call must match an extracted block
     const char *p = src;
     const char *name;
