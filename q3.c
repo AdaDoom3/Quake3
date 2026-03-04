@@ -1469,6 +1469,20 @@ typedef struct {
   char    Texture_Names[WEAPON_MAX_TEXTURES][64]; // Texture path for each surface
   uint    Surface_Count;                          // Number of surfaces composing this weapon
   int     Is_Source;                              // 1 = Source MDL viewmodel, 0 = Q3 MD3
+  // Source MDL skeletal animation data (only populated when Is_Source == 1)
+  Vertex *Bind_Vertices;                         // Bind-pose vertices (swizzled, unskinned) — base for re-skinning
+  uint8_t *Vert_Bone_Ids;                        // Per-vertex: 3 bone indices  (3 * Vertex_Count)
+  float   *Vert_Bone_Weights;                    // Per-vertex: 3 bone weights  (3 * Vertex_Count)
+  int     Bone_Count;                            // Number of bones in the skeleton
+  int     Bone_Parents[MDL_MAX_BONES];           // Parent index per bone (-1 = root)
+  float   Bind_Pose[MDL_MAX_BONES][3][4];       // Local bind-pose transforms per bone
+  float   Inv_Bind[MDL_MAX_BONES][3][4];         // Inverse bind-pose (pose_to_bone) per bone
+  uint8_t *MDL_Data;                             // Raw MDL file data (kept for animation keyframe access)
+  long    MDL_Data_Size;                         // Size of raw MDL data
+  int     Anim_Count;                            // Number of animation sequences
+  int     Anim_Frame_Counts[SKEL_MAX_ANIMS];    // Frame count per sequence
+  float   Anim_Fps[SKEL_MAX_ANIMS];             // FPS per sequence
+  int     Anim_Offsets[SKEL_MAX_ANIMS];          // Byte offset of each AnimDesc from MDL start
 } Weapon_Model;
 
 // Runtime weapon state combining the model data with per-frame animation and GPU resources
@@ -1481,6 +1495,10 @@ typedef struct {
   Acceleration_Structure Bottom_Level;         // BLAS for the weapon (rebuilt each frame)
   Gpu_Buffer             Bottom_Level_Scratch; // Scratch buffer reused across BLAS rebuilds
   uint                   Texture_Base_Index;   // Starting index into the global texture array for weapon textures
+  // Source MDL animation state
+  int                    Source_Anim_Seq;      // Active animation sequence index (0=idle, 1=shoot, etc.)
+  float                  Source_Anim_Time;     // Elapsed time within current animation
+  int                    Source_Anim_Frame;    // Last evaluated frame (avoid redundant re-skin)
 } Weapon_Instance;
 
 // Animated entity with pre-computed per-frame vertex data for BLAS refit
@@ -1903,6 +1921,8 @@ glsl comp Skinning;
 // the current player position, yaw, pitch, field-of-view, and aspect ratio.
 void Camera_Upload (Camera *State, float Field_Of_View, uint Weapon_Texture_Base, uint PBR_Stride_Value, uint Active_SPP);
 
+// Re-skin Source weapon vertices for a given animation sequence and frame
+void Source_Weapon_Skin (Weapon_Model *M, int Seq, int Frame);
 // Update the weapon viewmodel's vertex positions each frame based on the camera orientation
 void Weapon_Update (Weapon_Instance *Weapon, const Camera *Camera_Data, float Delta_Time, int Fire);
 
@@ -4195,17 +4215,30 @@ Weapon_Model Source_Weapon_Model_Load (const char *Path) {
               uint16_t *Strip_Indices = (uint16_t*)(Td + Group_Base + Group_Index_Offset);
               for (int Triangle_Index=0; Triangle_Index+2<Group_Index_Count; Triangle_Index+=3) {
                 uint Vertex_Base = Result.Vertex_Count;
-                Result.Vertices = realloc(Result.Vertices, sizeof(Vertex)*(Result.Vertex_Count+3));
-                Result.Indices = realloc(Result.Indices, sizeof(uint)*(Result.Index_Count+3));
-                Result.Texture_Ids = realloc(Result.Texture_Ids, sizeof(uint)*(Result.Triangle_Count+1));
+                Result.Vertices        = realloc(Result.Vertices,        sizeof(Vertex)  *(Result.Vertex_Count+3));
+                Result.Bind_Vertices   = realloc(Result.Bind_Vertices,   sizeof(Vertex)  *(Result.Vertex_Count+3));
+                Result.Vert_Bone_Ids   = realloc(Result.Vert_Bone_Ids,   sizeof(uint8_t) *(Result.Vertex_Count+3)*3);
+                Result.Vert_Bone_Weights = realloc(Result.Vert_Bone_Weights, sizeof(float)*(Result.Vertex_Count+3)*3);
+                Result.Indices         = realloc(Result.Indices,         sizeof(uint)    *(Result.Index_Count+3));
+                Result.Texture_Ids     = realloc(Result.Texture_Ids,     sizeof(uint)    *(Result.Triangle_Count+1));
                 for (int Corner=0; Corner<3; Corner++) {
                   int Strip_Vertex = Strip_Indices[Triangle_Index+Corner];
                   int VVD_Index = Mesh_Vert_Offset + (Strip_Vertex < Group_Vertex_Count ? Original_Vertex_Map[Strip_Vertex] : 0);
                   if (VVD_Index < 0 or VVD_Index >= VVD_N) VVD_Index = 0;
                   const VVD_Vertex *Source_Vertex = &VVD_Verts[VVD_Index];
-                  // Apply skeletal skinning: transform bind-pose vertex by weighted bone matrices
                   float Sp[3] = {Source_Vertex->Position[0], Source_Vertex->Position[1], Source_Vertex->Position[2]};
                   float Sn[3] = {Source_Vertex->Normal[0], Source_Vertex->Normal[1], Source_Vertex->Normal[2]};
+                  // Store bind-pose vertex (unskinned, swizzled) and per-vertex bone assignments
+                  uint Vi = Result.Vertex_Count;
+                  Result.Bind_Vertices[Vi] = (Vertex){
+                    .Position = {-Sp[1], Sp[2], -Sp[0]},
+                    .Normal = {-Sn[1], Sn[2], -Sn[0]},
+                    .Texture_Uv = {Source_Vertex->Tex_Coord[0], Source_Vertex->Tex_Coord[1]}};
+                  for (int Bi=0; Bi<3; Bi++) {
+                    Result.Vert_Bone_Ids[Vi*3+Bi] = (Bi < Source_Vertex->Num_Bones) ? Source_Vertex->Bone_Ids[Bi] : 0;
+                    Result.Vert_Bone_Weights[Vi*3+Bi] = (Bi < Source_Vertex->Num_Bones) ? Source_Vertex->Bone_Weights[Bi] : 0.f;
+                  }
+                  // Apply skeletal skinning for the initial idle pose
                   if (Has_Skinning) {
                     float Pp[3]={0,0,0}, Pn[3]={0,0,0};
                     for (int Bi=0; Bi < Source_Vertex->Num_Bones and Bi < 3; Bi++) {
@@ -4224,10 +4257,11 @@ Weapon_Model Source_Weapon_Model_Load (const char *Path) {
                     if (Nl>1e-6f) { Sn[0]=Pn[0]/Nl; Sn[1]=Pn[1]/Nl; Sn[2]=Pn[2]/Nl; }
                     else { Sn[0]=Pn[0]; Sn[1]=Pn[1]; Sn[2]=Pn[2]; }
                   }
-                  // Swizzle to (barrel, up, right) for Weapon_Update — Option B: barrel=-Y, up=+Z, right=+X
-                  Result.Vertices[Result.Vertex_Count] = (Vertex){
-                    .Position = {-Sp[1], Sp[2], Sp[0]},
-                    .Normal = {-Sn[1], Sn[2], Sn[0]},
+                  // Swizzle skinned vertex to (barrel, up, right) for Weapon_Update.
+                  //   barrel = -Source_Y, up = Source_Z, right = -Source_X
+                  Result.Vertices[Vi] = (Vertex){
+                    .Position = {-Sp[1], Sp[2], -Sp[0]},
+                    .Normal = {-Sn[1], Sn[2], -Sn[0]},
                     .Texture_Uv = {Source_Vertex->Tex_Coord[0], Source_Vertex->Tex_Coord[1]}};
                   Result.Indices[Result.Index_Count++] = Vertex_Base+Corner;
                   Result.Vertex_Count++;
@@ -4246,7 +4280,46 @@ Weapon_Model Source_Weapon_Model_Load (const char *Path) {
     if (Ft) fclose(Ft);
   }
   free(VVD_Verts);
-  free(D);
+
+  // Store bone hierarchy and animation metadata for runtime skeletal animation
+  if (H->Bone_N > 0) {
+    int Bone_N = H->Bone_N < MDL_MAX_BONES ? H->Bone_N : MDL_MAX_BONES;
+    Result.Bone_Count = Bone_N;
+    for (int I = 0; I < Bone_N; I++) {
+      const MDL_Bone *B = (const MDL_Bone*)(D + H->Bone_O + I * sizeof(MDL_Bone));
+      Result.Bone_Parents[I] = B->Parent;
+      // Store bind-pose local transform
+      float Qx=B->Quat[0], Qy=B->Quat[1], Qz=B->Quat[2], Qw=B->Quat[3];
+      float X2=Qx+Qx, Y2=Qy+Qy, Z2=Qz+Qz;
+      float Xx=Qx*X2, Xy=Qx*Y2, Xz=Qx*Z2, Yy=Qy*Y2, Yz=Qy*Z2, Zz=Qz*Z2;
+      float Wx=Qw*X2, Wy=Qw*Y2, Wz=Qw*Z2;
+      Result.Bind_Pose[I][0][0]=1-(Yy+Zz); Result.Bind_Pose[I][0][1]=Xy-Wz;     Result.Bind_Pose[I][0][2]=Xz+Wy;     Result.Bind_Pose[I][0][3]=B->Pos.x;
+      Result.Bind_Pose[I][1][0]=Xy+Wz;     Result.Bind_Pose[I][1][1]=1-(Xx+Zz); Result.Bind_Pose[I][1][2]=Yz-Wx;     Result.Bind_Pose[I][1][3]=B->Pos.y;
+      Result.Bind_Pose[I][2][0]=Xz-Wy;     Result.Bind_Pose[I][2][1]=Yz+Wx;     Result.Bind_Pose[I][2][2]=1-(Xx+Yy); Result.Bind_Pose[I][2][3]=B->Pos.z;
+      // Store inverse bind (pose_to_bone)
+      memcpy(Result.Inv_Bind[I], B->Pose_To_Bone, sizeof(float)*12);
+    }
+    // Store animation sequence metadata
+    int Anim_N = H->Anim_N < SKEL_MAX_ANIMS ? H->Anim_N : SKEL_MAX_ANIMS;
+    Result.Anim_Count = Anim_N;
+    for (int I = 0; I < Anim_N; I++) {
+      // AnimDesc layout: base_ptr(4), name_o(4), fps(4), flags(4), num_frames(4), ...
+      // Each AnimDesc is at H->Anim_O + I * sizeof(mstudioanimdesc_t)
+      // sizeof(mstudioanimdesc_t) = 100 bytes for Source MDL v44-48
+      const uint8_t *Ad = D + H->Anim_O + I * 100;
+      Result.Anim_Fps[I] = *(const float*)(Ad + 8);
+      Result.Anim_Frame_Counts[I] = *(const int*)(Ad + 16);
+      Result.Anim_Offsets[I] = (int)(Ad - D); // byte offset from MDL start
+    }
+    // Keep raw MDL data for animation keyframe access
+    Result.MDL_Data = D;
+    Result.MDL_Data_Size = Sz;
+    printf("[weapon] stored %d bones, %d animation sequences\n", Bone_N, Anim_N);
+    for (int I = 0; I < Anim_N && I < 8; I++)
+      printf("[weapon]   anim[%d]: %d frames @ %.1f fps\n", I, Result.Anim_Frame_Counts[I], Result.Anim_Fps[I]);
+  } else {
+    free(D);
+  }
 
   // Source viewmodels include hands in the MDL — skip Q3 hand mesh.
   // Set a single animation frame with identity tag_weapon transform.
@@ -4270,6 +4343,178 @@ Weapon_Model Source_Weapon_Model_Load (const char *Path) {
            Min[0],Min[1],Min[2], Max[0],Max[1],Max[2], Max[0]-Min[0],Max[1]-Min[1],Max[2]-Min[2]);
   }
   return Result;
+}
+
+// ══════════════════════════════
+//   Source_Weapon_Skin
+// ══════════════════════════════
+// Re-skin Source weapon vertices for a given animation sequence and frame.
+// Reads bind-pose vertices + per-vertex bone data, evaluates the skeleton at
+// the requested animation frame, and writes skinned vertices into Model->Vertices.
+
+void Source_Weapon_Skin (Weapon_Model *M, int Seq, int Frame) {
+  if (!M->MDL_Data || !M->Bind_Vertices || M->Bone_Count <= 0) return;
+  if (Seq < 0 || Seq >= M->Anim_Count) Seq = 0;
+  int Frame_Count = M->Anim_Frame_Counts[Seq];
+  if (Frame_Count <= 0) return;
+  if (Frame < 0) Frame = 0;
+  if (Frame >= Frame_Count) Frame = Frame_Count - 1;
+
+  const uint8_t *D = M->MDL_Data;
+  long Sz = M->MDL_Data_Size;
+  const MDL_Header *H = (const MDL_Header*)D;
+  int Bone_N = M->Bone_Count;
+
+  // Start with bind-pose local transforms
+  float Local[128][3][4];
+  for (int I = 0; I < Bone_N; I++)
+    memcpy(Local[I], M->Bind_Pose[I], sizeof(float)*12);
+
+  // Override with animation keyframe data
+  const uint8_t *Anim_Desc = D + M->Anim_Offsets[Seq];
+  int Anim_Off = *(const int*)(Anim_Desc + 56); // animindex
+  const uint8_t *Cur = Anim_Desc + Anim_Off;
+  for (;;) {
+    if (Cur < D || Cur >= D + Sz - 4) break;
+    int Bi = Cur[0], Fl = Cur[1];
+    int16_t Next = *(const int16_t*)(Cur + 2);
+    if (Bi < Bone_N) {
+      const MDL_Bone *B = (const MDL_Bone*)(D + H->Bone_O + Bi * sizeof(MDL_Bone));
+      int Off = 4;
+      if (Fl & 0x02) Off += 6;  // RAWROT
+      if (Fl & 0x20) Off += 8;  // RAWROT2
+      if (Fl & 0x01) Off += 6;  // RAWPOS
+      float Rot[3] = {B->Rot.x, B->Rot.y, B->Rot.z};
+      float Pos[3] = {B->Pos.x, B->Pos.y, B->Pos.z};
+      if (Fl & 0x08) { // ANIMROT
+        const int16_t *Rp = (const int16_t*)(Cur + Off);
+        float Rs[3] = {B->Rot_Scale.x, B->Rot_Scale.y, B->Rot_Scale.z};
+        float Rb[3] = {B->Rot.x, B->Rot.y, B->Rot.z};
+        for (int A=0;A<3;A++) if (Rp[A]) {
+          const uint8_t *Vp = (const uint8_t*)&Rp[A] + Rp[A];
+          // Index into animation value array for the requested frame
+          int Total_Values = *(const uint8_t*)(Vp);
+          int Valid_Values = *(const uint8_t*)(Vp+1);
+          const int16_t *Values = (const int16_t*)(Vp+2);
+          // Walk sections: each section has (total, valid) header then 'valid' values
+          int F = Frame, Val_Idx = 0;
+          while (F >= Total_Values && Total_Values > 0) {
+            F -= Total_Values;
+            Val_Idx += Valid_Values + 1; // skip header + values
+            Total_Values = Values[Val_Idx]; Valid_Values = Values[Val_Idx] >> 8;
+            // Re-read from byte array
+            const uint8_t *Sec = (const uint8_t*)&Values[Val_Idx];
+            Total_Values = Sec[0]; Valid_Values = Sec[1];
+            Val_Idx++; // skip section header
+          }
+          int16_t Val;
+          if (F < Valid_Values) Val = Values[Val_Idx + F];
+          else if (Valid_Values > 0) Val = Values[Val_Idx + Valid_Values - 1];
+          else Val = 0;
+          Rot[A] = Rb[A] + Val * Rs[A];
+        }
+        Off += 6;
+      }
+      if (Fl & 0x04) { // ANIMPOS
+        const int16_t *Pp = (const int16_t*)(Cur + Off);
+        float Ps[3] = {B->Pos_Scale.x, B->Pos_Scale.y, B->Pos_Scale.z};
+        float Pb[3] = {B->Pos.x, B->Pos.y, B->Pos.z};
+        for (int A=0;A<3;A++) if (Pp[A]) {
+          const uint8_t *Vp = (const uint8_t*)&Pp[A] + Pp[A];
+          const uint8_t *Sec = Vp;
+          int Total_Values = Sec[0], Valid_Values = Sec[1];
+          const int16_t *Values = (const int16_t*)(Vp+2);
+          int F = Frame, Val_Idx = 0;
+          while (F >= Total_Values && Total_Values > 0) {
+            F -= Total_Values;
+            Val_Idx += Valid_Values + 1;
+            Sec = (const uint8_t*)&Values[Val_Idx];
+            Total_Values = Sec[0]; Valid_Values = Sec[1];
+            Val_Idx++;
+          }
+          int16_t Val;
+          if (F < Valid_Values) Val = Values[Val_Idx + F];
+          else if (Valid_Values > 0) Val = Values[Val_Idx + Valid_Values - 1];
+          else Val = 0;
+          Pos[A] = Pb[A] + Val * Ps[A];
+        }
+        Off += 6;
+      }
+      // Euler → quaternion (XYZ order)
+      float Cx=cosf(Rot[0]*0.5f), Sx=sinf(Rot[0]*0.5f);
+      float Cy=cosf(Rot[1]*0.5f), Sy=sinf(Rot[1]*0.5f);
+      float Cz=cosf(Rot[2]*0.5f), Sz_=sinf(Rot[2]*0.5f);
+      float Aqw=Cx*Cy*Cz+Sx*Sy*Sz_, Aqx=Sx*Cy*Cz-Cx*Sy*Sz_;
+      float Aqy=Cx*Sy*Cz+Sx*Cy*Sz_, Aqz=Cx*Cy*Sz_-Sx*Sy*Cz;
+      float Ql=sqrtf(Aqx*Aqx+Aqy*Aqy+Aqz*Aqz+Aqw*Aqw);
+      if(Ql>1e-6f){Aqx/=Ql;Aqy/=Ql;Aqz/=Ql;Aqw/=Ql;}
+      float AX2=Aqx+Aqx,AY2=Aqy+Aqy,AZ2=Aqz+Aqz;
+      float AXx=Aqx*AX2,AXy=Aqx*AY2,AXz=Aqx*AZ2,AYy=Aqy*AY2,AYz=Aqy*AZ2,AZz=Aqz*AZ2;
+      float AWx=Aqw*AX2,AWy=Aqw*AY2,AWz=Aqw*AZ2;
+      Local[Bi][0][0]=1-(AYy+AZz);Local[Bi][0][1]=AXy-AWz;    Local[Bi][0][2]=AXz+AWy;    Local[Bi][0][3]=Pos[0];
+      Local[Bi][1][0]=AXy+AWz;    Local[Bi][1][1]=1-(AXx+AZz);Local[Bi][1][2]=AYz-AWx;    Local[Bi][1][3]=Pos[1];
+      Local[Bi][2][0]=AXz-AWy;    Local[Bi][2][1]=AYz+AWx;    Local[Bi][2][2]=1-(AXx+AYy);Local[Bi][2][3]=Pos[2];
+    }
+    if (Next == 0) break;
+    Cur += Next;
+  }
+
+  // Walk hierarchy: World[i] = World[parent] * Local[i]
+  float World[128][3][4];
+  for (int I = 0; I < Bone_N; I++) {
+    int P = M->Bone_Parents[I];
+    if (P >= 0 && P < I) {
+      for (int R=0;R<3;R++) for (int C=0;C<4;C++)
+        World[I][R][C] = World[P][R][0]*Local[I][0][C]
+                       + World[P][R][1]*Local[I][1][C]
+                       + World[P][R][2]*Local[I][2][C]
+                       + (C==3 ? World[P][R][3] : 0);
+    } else memcpy(World[I], Local[I], sizeof(float)*12);
+  }
+
+  // Compose: Skin[i] = World[i] * InvBind[i]
+  float Skin[128][3][4];
+  for (int I = 0; I < Bone_N; I++) {
+    for (int R=0;R<3;R++) for (int C=0;C<4;C++)
+      Skin[I][R][C] = World[I][R][0]*M->Inv_Bind[I][0][C]
+                     + World[I][R][1]*M->Inv_Bind[I][1][C]
+                     + World[I][R][2]*M->Inv_Bind[I][2][C]
+                     + (C==3 ? World[I][R][3] : 0);
+  }
+
+  // Transform each bind-pose vertex by weighted bone matrices, then swizzle
+  for (uint Vi = 0; Vi < M->Vertex_Count; Vi++) {
+    // Read original (un-swizzled) bind-pose position from swizzled storage:
+    //   stored as {-Y, Z, -X}, so reverse: X = -stored[2], Y = -stored[0], Z = stored[1]
+    float Bx = -M->Bind_Vertices[Vi].Position[2]; // original Source X
+    float By = -M->Bind_Vertices[Vi].Position[0]; // original Source Y
+    float Bz =  M->Bind_Vertices[Vi].Position[1]; // original Source Z
+    float Nx = -M->Bind_Vertices[Vi].Normal[2];
+    float Ny = -M->Bind_Vertices[Vi].Normal[0];
+    float Nz =  M->Bind_Vertices[Vi].Normal[1];
+
+    float Sp[3]={0,0,0}, Sn[3]={0,0,0};
+    for (int Bi=0; Bi<3; Bi++) {
+      int Bone = M->Vert_Bone_Ids[Vi*3+Bi];
+      float W = M->Vert_Bone_Weights[Vi*3+Bi];
+      if (W < 0.001f || Bone >= Bone_N) continue;
+      for (int R=0;R<3;R++) {
+        Sp[R] += W * (Skin[Bone][R][0]*Bx + Skin[Bone][R][1]*By + Skin[Bone][R][2]*Bz + Skin[Bone][R][3]);
+        Sn[R] += W * (Skin[Bone][R][0]*Nx + Skin[Bone][R][1]*Ny + Skin[Bone][R][2]*Nz);
+      }
+    }
+    float Nl = sqrtf(Sn[0]*Sn[0]+Sn[1]*Sn[1]+Sn[2]*Sn[2]);
+    if (Nl>1e-6f) { Sn[0]/=Nl; Sn[1]/=Nl; Sn[2]/=Nl; }
+
+    // Swizzle back to (barrel, up, right): {-Y, Z, -X}
+    M->Vertices[Vi].Position[0] = -Sp[1];
+    M->Vertices[Vi].Position[1] =  Sp[2];
+    M->Vertices[Vi].Position[2] = -Sp[0];
+    M->Vertices[Vi].Normal[0]   = -Sn[1];
+    M->Vertices[Vi].Normal[1]   =  Sn[2];
+    M->Vertices[Vi].Normal[2]   = -Sn[0];
+    // Texture UVs unchanged (already stored in Bind_Vertices)
+  }
 }
 
 // ══════════════════════
@@ -7516,6 +7761,49 @@ void Weapon_Update (Weapon_Instance *Weapon, const Camera *Camera_Data, float De
   // Advance the idle bob phase accumulator
   Weapon->Bob_Time += Delta_Time;
 
+  // ── Source weapon skeletal animation ──
+  // Evaluate the skeleton for the current animation sequence/frame and re-skin vertices.
+  // Sequences: 0=idle, 1=shoot1, 2=shoot2, 3=shoot3, 4=reload, 5=draw, 6=idle_empty, ...
+  if (Weapon->Model.Is_Source and Weapon->Model.Anim_Count > 0) {
+    // Start with draw animation on first frame, then transition to idle
+    if (Weapon->Source_Anim_Seq == 0 and Weapon->Source_Anim_Time == 0 and Weapon->Model.Anim_Count > 5) {
+      Weapon->Source_Anim_Seq = 5; // draw animation
+      Weapon->Source_Anim_Time = 0;
+      Weapon->Source_Anim_Frame = -1;
+    }
+    // Animation state transitions
+    if (Fire && Weapon->Source_Anim_Seq == 0 && Weapon->Model.Anim_Count > 1) {
+      // Start shoot animation (sequence 1)
+      Weapon->Source_Anim_Seq = 1;
+      Weapon->Source_Anim_Time = 0;
+      Weapon->Source_Anim_Frame = -1; // force re-skin
+    }
+    // Advance animation time
+    int Seq = Weapon->Source_Anim_Seq;
+    float Fps = Weapon->Model.Anim_Fps[Seq];
+    if (Fps < 1.f) Fps = 30.f;
+    Weapon->Source_Anim_Time += Delta_Time;
+    int Total_Frames = Weapon->Model.Anim_Frame_Counts[Seq];
+    int Frame = (int)(Weapon->Source_Anim_Time * Fps);
+    if (Seq != 0 && Frame >= Total_Frames) {
+      // Non-idle sequence finished — return to idle
+      Weapon->Source_Anim_Seq = 0;
+      Weapon->Source_Anim_Time = 0;
+      Frame = 0;
+      Seq = 0;
+      Total_Frames = Weapon->Model.Anim_Frame_Counts[0];
+    }
+    // Idle loops
+    if (Seq == 0 && Total_Frames > 0) Frame = Frame % Total_Frames;
+    if (Frame >= Total_Frames) Frame = Total_Frames - 1;
+    if (Frame < 0) Frame = 0;
+    // Only re-skin if the frame actually changed
+    if (Frame != Weapon->Source_Anim_Frame) {
+      Source_Weapon_Skin(&Weapon->Model, Seq, Frame);
+      Weapon->Source_Anim_Frame = Frame;
+    }
+  }
+
   // Derive the camera's orthonormal basis from yaw and pitch
   float Cosine_Yaw   = cosf (Camera_Data->Yaw);
   float Sine_Yaw     = sinf (Camera_Data->Yaw);
@@ -7533,14 +7821,11 @@ void Weapon_Update (Weapon_Instance *Weapon, const Camera *Camera_Data, float De
   float Recoil         = Weapon->Is_Firing ? -0.5f * expf (-Weapon->Fire_Time * 5.f) : 0.f;
 
   // Final weapon position: camera origin + forward/right/up offsets with bob and recoil.
-  // Source viewmodel positioning: viewmodel_fov=54° in world FOV=90° means the weapon appears ~2x larger.
-  // In the CSPromod reference, the weapon fills the entire bottom-right quadrant (~40% of screen).
-  // Place very close to camera so it fills the screen like the reference screenshot.
-  // Source viewmodels: origin = camera eye, weapon extends forward/down.
-  // Scale ~0.45 compensates for viewmodel_fov(54) → scene_fov(90) difference.
-  float Fwd_Offset   = Weapon->Model.Is_Source ? 3.f  : 5.f;
-  float Right_Offset = Weapon->Model.Is_Source ? 0.5f : 4.f;
-  float Up_Offset    = Weapon->Model.Is_Source ? -0.5f: -3.5f;
+  // Source viewmodels encode their screen placement in the geometry itself (barrel extends forward,
+  // hands hang below, weapon sits to the right). Only a small forward bias avoids near-plane clipping.
+  float Fwd_Offset   = Weapon->Model.Is_Source ? 2.f  : 5.f;
+  float Right_Offset = Weapon->Model.Is_Source ? 0.f  : 4.f;
+  float Up_Offset    = Weapon->Model.Is_Source ? 0.5f : -3.5f;
   vec3 Offset = Add (Camera_Data->Position,
                      Add (Scale (Forward, Fwd_Offset + Recoil),
                           Add (Scale (Right, Right_Offset + Bob_Horizontal),
@@ -7583,15 +7868,12 @@ void Weapon_Update (Weapon_Instance *Weapon, const Camera *Camera_Data, float De
                                  + Camera_Basis[Row * 3 + 2] * Tag_Y_Up[2 * 3 + Column];
 
   // Scale the viewmodel down - no depth hack, so we shrink the model in world space
-  // Source viewmodel: scale to fill bottom-right quadrant like CSPromod reference screenshot.
-  // Close to camera (3 units) + 0.40 scale = weapon fills ~40% of screen like reference.
-  float Model_Scale = Weapon->Model.Is_Source ? 0.45f : WEAPON_MODEL_SCALE;
+  float Model_Scale = Weapon->Model.Is_Source ? 0.18f : WEAPON_MODEL_SCALE;
 
-  // Viewmodel FOV correction for Source weapons.
-  // Source renders viewmodels at ~54° FOV within a 90° scene FOV.
-  // To simulate: scale the forward (barrel) distance so the weapon appears
-  // as if rendered with the narrower FOV. Factor = tan(27°)/tan(45°) ≈ 0.51
-  float VM_Fov_Scale = Weapon->Model.Is_Source ? 0.51f : 1.f;
+  // Viewmodel FOV correction: Source uses ~54° viewmodel FOV in a 90° scene.
+  // Factor = tan(27°)/tan(45°) ≈ 0.51 compresses the barrel axis to simulate the narrower FOV.
+  // Set to 1.0 (disabled) for uniform scale — re-enable once orientation is confirmed correct.
+  float VM_Fov_Scale = Weapon->Model.Is_Source ? 1.f : 1.f;
 
   // Transform each vertex from model space to world space.
   // Vertices are already stored as (barrel, up, right) by the Y-up swizzle in MD3_Parse_Surface
