@@ -81,15 +81,16 @@ typedef struct {
   int         Width, Height;  // Window internal resolution
   int         SPP;            // Ray count samples per pixel
   int         Parallax;       // Enable parallax occlusion mapping
-  int         Denoise_Passes; // A-trous wavelet denoise iterations 
+  int         Denoise_Passes; // A-trous wavelet denoise iterations
   bool        Checkerboard;   // Temporal checkerboard optimization for ray reduction
+  float       Render_Scale;   // Internal RT render scale (1.0 = full resolution)
 } Quality_Preset;
-const Quality_Preset QUALITY_PRESETS [QUALITY_COUNT] = {//                            Resolution SPP POM  DN  CB
-                                                        [QUALITY_CRYSIS] = {"Crysis", 3840,2160, 2,  1,   3,  true},
-                                                        [QUALITY_HIGH]   = {"High",   1600, 900, 2,  1,   2,  true}, 
-                                                        [QUALITY_MEDIUM] = {"Medium", 1280, 720, 1,  1,   3,  true},
-                                                        [QUALITY_LOW]    = {"Low",    1024, 576, 1,  1,   2,  true},
-                                                        [QUALITY_POTATO] = {"Potato",  854, 480, 1,  0,   3,  true}};
+const Quality_Preset QUALITY_PRESETS [QUALITY_COUNT] = {//                            Resolution SPP POM  DN  CB    RS
+                                                        [QUALITY_CRYSIS] = {"Crysis", 3840,2160, 2,  1,   3,  true, 1.0f},
+                                                        [QUALITY_HIGH]   = {"High",   1600, 900, 2,  1,   2,  true, 1.0f},
+                                                        [QUALITY_MEDIUM] = {"Medium", 1280, 720, 1,  1,   3,  true, 0.75f},
+                                                        [QUALITY_LOW]    = {"Low",    1024, 576, 1,  1,   2,  true, 0.5f},
+                                                        [QUALITY_POTATO] = {"Potato",  854, 480, 1,  0,   3,  true, 0.5f}};
 
 // World settings
 //
@@ -123,8 +124,6 @@ typedef struct {
   const char *Default_Map;       // Default map name (e.g. "oa_dm1.bsp")
 } World_Settings;
 
-// Player bounding box minimum corner 
-const vec3  PLAYER_MINIMUMS        = {-15, -24, -15};
 const float PLAYER_HALF_EXTENTS[3] = {15.f, 28.f, 15.f}; // Standing bbox
 
 // World presets: physics, camera, and asset defaults for each supported game family
@@ -156,7 +155,7 @@ const World_Settings WORLD_PRESETS[WORLD_COUNT] = {
 #define MAXIMUM_CLIP_PLANES 5      // Maximum simultaneous contact planes during slide-move resolution
 #define DEFAULT_VIEW_HEIGHT 22.f   // Camera height offset from capsule center 
 #define CROUCH_VIEW_HEIGHT   8.f   // Camera height offset when crouching 
-#define PLAYER_CAPSULE_SPINE 13.f  // Comment here !!!
+#define PLAYER_CAPSULE_SPINE 13.f  // Half-length of the capsule's cylindrical midsection (spine between the two hemispheres)
 
 // Valve Source player settings
 #define SRC_JUMP_VELOCITY       301.993377f 
@@ -198,15 +197,23 @@ const World_Settings WORLD_PRESETS[WORLD_COUNT] = {
 #define ASPECT_WIDE_X       4
 #define ASPECT_WIDE_Y       3
 
-// Comment here !!!
+// Timing and projection constants
 #define MAX_DELTA_TIME 0.05f   // Clamp to 20 fps minimum (prevents physics tunneling)
 #define NEAR_CLIP      0.1f    // Near clip plane distance
 #define FAR_CLIP       10000.f // Far clip plane distance
 
-// Comment here !!! 
-#define SWAPCHAIN_MAX_IMAGES     8    // Comment here !!!              
-#define DESCRIPTOR_TEXTURE_SLOTS 1536 // Comment here !!!
+// Vulkan resource limits
+#define SWAPCHAIN_MAX_IMAGES     8    // Maximum number of images in the Vulkan swapchain
+#define DESCRIPTOR_TEXTURE_SLOTS 1536 // Maximum number of bindless texture descriptors available to shaders
 
+// OpenAL resource pool limits
+#define MAX_AUDIO_BUFFERS 32 // Maximum number of OpenAL audio buffers (pre-generated or loaded PCM data)
+#define MAX_AUDIO_SOURCES 16 // Maximum number of concurrent OpenAL audio sources (simultaneously playing sounds)
+
+// Weapon/figure texture limits
+#define WEAPON_MAX_TEXTURES 16 // Maximum textures per figure/weapon model
+
+// SHADER_TUNING_BEGIN — extracted by sdk.c and passed as -D flags to glslangValidator
 // Importance sampling - control reflection ray quality and specular firefly suppression
 #define VNDF_ALPHA_FLOOR 0.01 // Min roughness² for VNDF reflection ray spread
 #define SPECULAR_D_BIAS  0.01 // Min roughness² for GGX D term (prevents firefly peak)
@@ -246,8 +253,9 @@ const World_Settings WORLD_PRESETS[WORLD_COUNT] = {
 // Temporal Anti-Aliasing (TAA) limits
 #define TAA_STATIC_FLOOR 0.25 // Min blend alpha when camera is still (history retention)
 #define TAA_SIGMA        0.15 // Variance clamp sigma (lower = tighter = less ghosting)
-#define TAA_MOVE_LO      0.95 // Moving blend base at low motion 
-#define TAA_MOVE_HI      0.99 // Moving blend base at high motion 
+#define TAA_MOVE_LO      0.95 // Moving blend base at low motion
+#define TAA_MOVE_HI      0.99 // Moving blend base at high motion
+// SHADER_TUNING_END
 
 // ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 //
@@ -311,13 +319,6 @@ typedef struct {
   float Fire_Cooldown;
   float Pad[2];
 } GPU_Projectile_Pool;
-
-// Material System
-typedef struct {
-  int   Type;         // MATERIAL_DEFAULT, MATERIAL_METAL, etc.
-  float Damage_Scale; // Percent: 0.0 (armored) to 1.0 (exposed)
-  char  Name[32];     // Human-readable name
-} Material;
 
 typedef struct {
   ALCdevice  *Device;
@@ -487,9 +488,6 @@ VkDevice         Device;                // Logical device created from the physi
 VkQueue          Queue;                 // Universal queue for graphics, compute, and transfer
 uint             Queue_Family_Index;    // Index of the queue family supporting all operations
 
-// GPU memory heap (TLSF sub-allocator — all GPU memory flows through this)
-GPU_Heap Heap;
-
 // Descriptor set
 VkDescriptorSetLayout Descriptor_Set_Layout; // Layout describing all 12 descriptor bindings
 VkDescriptorPool      Descriptor_Pool;       // Pool from which the single descriptor set is allocated
@@ -653,6 +651,7 @@ typedef struct {
   int16_t  Prev_Free;     // Intrusive doubly-linked free-list: previous free block in same (FL,SL) class
   int16_t  Next_Free;     // Next free block in same class (-1 = end)
   int16_t  Prev_Phys;     // Previous physical block in same slab (-1 = first)
+  int16_t  Next_Phys;     // Next physical block in same slab (-1 = last)
   int16_t  Slab;          // Which slab this block lives in
   uint8_t  Free;          // 1 = available, 0 = allocated
   uint8_t  Pad;
@@ -702,6 +701,9 @@ int  GPU_Heap_Pack_Create  (GPU_Heap *H, uint64_t Size, VkMemoryPropertyFlags Me
 int  GPU_Heap_Pack_Alloc   (GPU_Heap *H, int Pack_Slab, uint64_t Size, uint64_t Alignment,
                             VkDeviceMemory *Out_Memory, uint64_t *Out_Offset, uint8_t **Out_Mapped);
 void GPU_Heap_Pack_Destroy (GPU_Heap *H, int Pack_Slab);
+
+// GPU memory heap (TLSF sub-allocator — all GPU memory flows through this)
+GPU_Heap Heap;
 
 // ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 //
@@ -760,10 +762,6 @@ void Texture_Upload_With_Format (VkCommandBuffer Command_Buffer, VkQueue Queue,
                                  VkImage *Out_Image, VkDeviceMemory *Out_Memory, VkImageView *Out_View,
                                  int *Out_Heap_Block);
 
-// Convenience wrapper that uploads a texture as SRGB
-void Texture_Upload (VkCommandBuffer Command_Buffer, VkQueue Queue,
-                     const uint8_t *Pixels, uint Width, uint Height,
-                     VkImage *Out_Image, VkDeviceMemory *Out_Memory, VkImageView *Out_View);
 
 // Create a device-local 2D image suitable for use as a ray tracing storage target
 GPU_Image Image_Storage_Create (uint Width, uint Height);
@@ -1015,6 +1013,13 @@ typedef struct {
   uint  Frame_Count;                            // Number of frames (1 for static tags)
 } Figure_Tag;
 
+// Interleaved vertex layout matching the GPU shader input
+typedef struct {
+  float Position   [3], Padding_A;       // World-space XYZ position; padding aligns to 16 bytes
+  float Texture_UV [2], Lightmap_UV [2]; // Diffuse texture coordinates and lightmap atlas coordinates
+  float Normal     [3], Padding_B;       // Surface normal; padding aligns to 16 bytes
+} Vertex;
+
 // One geometric part of the figure (e.g. "barrel", "upper_body", "head")
 typedef struct {
   char     Name[64];
@@ -1077,6 +1082,10 @@ Articulated_Figure Figure_Load_Weapon (const char *Path);
 
 // Read an MD3 file from disk into a heap-allocated buffer. Returns NULL on failure; sets *Out_Size to byte count.
 uint8_t *MD3_Load_File (const char *Path, long *Out_Size);
+
+// Search MD3 tags at a given animation frame for a named tag; copies the 12-float transform to Out.
+int MD3_Find_Tag_At_Frame (const uint8_t *Data, int Tag_Count, int Tags_Offset,
+                            int Frame, const char *Name, float Out[12]);
 
 // Compose two MD3 tag transforms: C = A * B (each is origin[3] + axis[9], 12 floats total)
 void Tag_Compose (const float *A, const float *B, float *C);
@@ -1300,13 +1309,6 @@ typedef struct {
   mat4  Inverse_View, Inverse_Projection; // Inverse matrices for reconstructing world rays from screen coordinates
   uint  Frame;                            // Monotonically increasing frame counter for temporal effects
 } Camera;
-
-// Interleaved vertex layout matching the GPU shader input
-typedef struct {
-  float Position   [3], Padding_A;       // World-space XYZ position; padding aligns to 16 bytes
-  float Texture_UV [2], Lightmap_UV [2]; // Diffuse texture coordinates and lightmap atlas coordinates
-  float Normal     [3], Padding_B;       // Surface normal; padding aligns to 16 bytes
-} Vertex;
 
 // Per-scene environment settings
 typedef struct {
@@ -1729,7 +1731,6 @@ typedef struct {
 // Single spawn point parsed from the BSP entity lump
 typedef struct {vec3 Origin; float Angle;} Spawn; // World-space origin and facing angle in degrees
 
-typedef struct {float M[3][4];} Bone_Matrix; // A 3 by 4 row-major affine transform (shared by CPU skinning and GPU upload)
 
 // Figure_Instance: the runtime representation of any loaded model — weapon viewmodel, player body, NPC, prop. Combines the parsed
 // Articulated_Figure with per-frame GPU state (buffers, BLAS, animation accumulators). This is the single type used everywhere —
@@ -1774,14 +1775,12 @@ typedef struct {
   float                  TLAS_Transform[3][4];
 } Figure_Instance;
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Figure_Pool: generational-index slot allocator for Figure_Instance
+// ── Figure_Pool: generational-index slot allocator for Figure_Instance ───────────────────────────────────────────────────────────────
 //
 // Uses a free-list with generational handles for O(1) alloc / O(1) free / safe lookup.
 // Each slot has a generation counter that increments on free, so stale handles are detected.
 // Industry standard: "slot map" / "generational arena" pattern (used by Bevy ECS, Our Machinery,
 // Rust arenas, Bungie Destiny engine, etc.)
-// ─────────────────────────────────────────────────────────────────────────────
 
 #define FIGURE_POOL_MAX 64  // Maximum concurrent figures (world entities + weapon + props)
 
@@ -2047,11 +2046,11 @@ void Physics_Resources_Create (const Player *Initial_State);
 // back the updated GPU_Player state into a CPU-side.
 Player Physics_Dispatch (Input In, float Delta_Time);
 
-// Comment here !!!
+// Synchronize the projectile pool between CPU and GPU: readback retrieves updated positions/states, upload sends new spawns
 void Projectile_Pool_Readback ();
 void Projectile_Pool_Upload ();
 
-// Comment here !!!
+// Add a new projectile to the pool at the given origin traveling in the given direction
 void Projectile_Spawn (vec3 Origin, vec3 Direction);
 
 // ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
@@ -2088,11 +2087,9 @@ void Skinning_Pipeline_Create ();
 //   - Acceleration noise 
 //
 
-// Comment here !!!
-#define MAX_AUDIO_BUFFERS 32 // Comment here !!!
-#define MAX_AUDIO_SOURCES 16 // Comment here !!!
+// (MAX_AUDIO_BUFFERS and MAX_AUDIO_SOURCES moved to §1 Constants)
 
-// Comment here !!!
+// Sample rate for procedurally synthesized modal audio buffers
 #define MODAL_SAMPLE_RATE 22050
 
 typedef struct {
@@ -2132,7 +2129,14 @@ const Mode_Spec Modes_Flesh[] = {
   {100, 0.03,  0.35}, {250, 0.02,  0.22}, {700, 0.008, 0.10},
   {350, 0.016, 0.20}, {800, 0.006, 0.05}, {450, 0.013, 0.12}};
 
-// Comment here !!!
+// Water: low, bubbly, medium decay
+const Mode_Spec Modes_Water[] = {
+  { 300, 0.10,  0.35}, { 600, 0.08, 0.25}, { 900, 0.06, 0.18},
+  {1200, 0.05,  0.12}, {1500, 0.04, 0.08}, { 200, 0.12, 0.40},
+  { 450, 0.09,  0.30}, {1800, 0.03, 0.05}, { 150, 0.15, 0.32},
+  { 750, 0.07,  0.20}, {2100, 0.02, 0.03}, { 100, 0.18, 0.25}};
+
+// Maximum resonator modes per material and the lookup table mapping material type to its mode spectrum
 #define MODAL_MAX_MODES 12
 const Mode_Spec *Material_Modes[] = {Modes_Stone,  // MATERIAL_DEFAULT (Stone-like)
                                      Modes_Metal,  // MATERIAL_METAL
@@ -2141,7 +2145,7 @@ const Mode_Spec *Material_Modes[] = {Modes_Stone,  // MATERIAL_DEFAULT (Stone-li
                                      Modes_Flesh,  // MATERIAL_FLESH
                                      Modes_Water}; // MATERIAL_WATER 
 
-// Comment here !!!
+// Initialize a single resonator mode from its frequency, decay time, and gain; tick advances it one sample with input X
 void Mode_Init (Mode_Resonator *M, float Freq_Hz, float T60, float Gain);
 float Mode_Tick (Mode_Resonator *M, float X);
 
@@ -2162,13 +2166,13 @@ ALuint Audio_Generate_Explosion_Modal (float Duration, float Volume);
 ALuint Audio_Load_WAV_Or_Modal (const char *Path, int Material, float Impulse,
                                 float Duration, float Volume);
 
-// Comment here !!!
+// Track player movement and play surface-appropriate footstep sounds at regular intervals
 void Audio_Update_Footsteps (Player *P, float Dt);
 
-// Comment here !!!
+// Play a sound by index from the audio buffer pool at the given volume (0.0 to 1.0)
 void Audio_Play (int Sound_Index, float Volume);
 
-// Comment here !!!
+// Initialize OpenAL context, generate buffers/sources, and synthesize default sounds; shutdown releases all resources
 void Audio_Init ();
 void Audio_Shutdown ();
 
@@ -2282,9 +2286,6 @@ void Vulkan_Recreate_Swapchain ();
 void Vulkan_Create_Synchronization ();
 void Vulkan_Transition_Storage_Image ();
 
-// Destroy old swapchain and create a new one matching the current surface size
-void Vulkan_Recreate_Swapchain ();
-
 // Allocate the descriptor pool and set, then write the descriptor bindings for the ray tracing pipeline 
 void Descriptor_Set_Create (Figure_Pool *Pool);
 
@@ -2318,9 +2319,6 @@ void Toggle_Fullscreen ();
 
 // Handles focus gain/loss, minimize, and click-activate transitions
 void Handle_Activation (Activated_Kind New_State);
-
-// Process SDL events and sample keyboard/mouse state
-Input Poll_Input ();
 
 // ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 //
@@ -2438,7 +2436,7 @@ uint64_t Inflate_Buffer (const uint8_t *In, uint64_t In_Size, uint8_t *Out, uint
 
 // Paths to the weapon model's diffuse textures (body and sight)
 #define WEAPON_TEXTURE_COUNT 2 // Default for Q3 weapons (2 surfaces: body + hand)
-#define WEAPON_MAX_TEXTURES 16 // Maximum for Source weapons with many materials
+// (WEAPON_MAX_TEXTURES moved to §1 Constants)
 const char *WEAPON_TEXTURE_PATHS[] = {ASSET_ROOT "models/weapons2/machinegun/mgun.tga",
                                       ASSET_ROOT "models/weapons2/machinegun/sight.tga"};
 
@@ -2613,10 +2611,6 @@ int main (int Argc, char **Argv) {
   printf ("[world] %s (height %.0f, eye %.0f, fov %.0f, speed %.0f)\n",
           Active_World.Name, Active_World.Player_Height, Active_World.Eye_Height, Active_World.FOV, Active_World.Max_Speed);
 
-  // Comment here !!!
-  (void)No_PBR;
-  (void)No_Parallax; 
-
   // Verify the map file exists before starting expensive GPU setup
   char Map_Path[256];
   snprintf (Map_Path, sizeof Map_Path, "%smaps/%s", ASSET_ROOT, Map_Name);
@@ -2706,10 +2700,9 @@ int main (int Argc, char **Argv) {
                              /*pImage      =>*/ &Depth_Image.Image));
     VkMemoryRequirements Mem_Req;
     vkGetImageMemoryRequirements (Device, Depth_Image.Image, &Mem_Req);
-    uint8_t *Depth_Mapped = NULL;
     Depth_Image.Heap_Block = GPU_Heap_Alloc (&Heap, Mem_Req.size, Mem_Req.alignment,
                                               VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, Mem_Req.memoryTypeBits,
-                                              &Depth_Image.Memory, &Depth_Image.Offset, &Depth_Mapped);
+                                              &Depth_Image.Memory, &Depth_Image.Offset, NULL);
     VK_CHECK (vkBindImageMemory (Device, Depth_Image.Image, Depth_Image.Memory, Depth_Image.Offset));
     VK_CHECK (vkCreateImageView (/*device      =>*/ Device,
                                  /*pCreateInfo =>*/ &(VkImageViewCreateInfo){
@@ -3387,7 +3380,7 @@ int main (int Argc, char **Argv) {
               uint32_t Exp  = (H >> 10) & 0x1F;
               uint32_t Man  = H & 0x3FF;
 
-              // Comment here !!!
+              // Convert fp16 fields to fp32: handle denormals, max exponent clamping, and normal values
               float V;
               if (Exp == 0) V = (Man == 0) ? 0.0f : (float)Man / 1024.0f * (1.0f / 16384.0f);
               else if (Exp == 31) V = 1.0f;
@@ -3517,32 +3510,31 @@ int main (int Argc, char **Argv) {
     // Rebuild the top-level acceleration structure
     Top_Level_Rebuild (&World_Bottom_Level, &Figures);
 
-    // Adaptive quality budget
+    // Adaptive quality budget — frame-time targets per quality tier (seconds)
     float Target_Frame_Time;
-    if      (Active_Quality == QUALITY_POTATO) Target_Frame_Time = POTATO_TARGET_MS;
-    else if (Active_Quality == QUALITY_MEDIUM
-             Active_Quality == QUALITY_LOW)    Target_Frame_Time = MEDIUM_TARGET_MS;
-    else if (Active_Quality == QUALITY_CRYSIS) Target_Frame_Time = ULTRA_TARGET_MS;
-    else                                       Target_Frame_Time = DEFAULT_TARGET_MS;
+    if      (Active_Quality == QUALITY_POTATO)                                       Target_Frame_Time = 0.050f;
+    else if (Active_Quality == QUALITY_MEDIUM or Active_Quality == QUALITY_LOW)      Target_Frame_Time = 0.022f;
+    else if (Active_Quality == QUALITY_CRYSIS)                                       Target_Frame_Time = 0.016f;
+    else                                                                             Target_Frame_Time = 0.016f;
 
-    // Comment here !!!
+    // Compute quality reduction budget (0 = full quality, 1 = cheapest) based on frame time
     float Budget = 0.0f;
     if (Force_Cheap) {
       Budget = 1.0f;
 
-    // Comment here !!!
+    // Frame exceeded target: scale budget linearly between target and 2x target (capped at 1.0)
     } else if (Delta_Time > Target_Frame_Time) {
       float Budget_Max = fmaxf (Target_Frame_Time * 2.0f, 0.15f);
       Budget = (Delta_Time - Target_Frame_Time) / (Budget_Max - Target_Frame_Time);
       if (Budget > 1.0f) Budget = 1.0f;
     }
 
-    // Comment here !!!
-    if (Active_Quality == QUALITY_POTATO and Budget < POTATO_BUDGET_FLOOR) Budget = POTATO_BUDGET_FLOOR;
+    // Enforce a minimum budget floor for potato quality to keep frame times low
+    if (Active_Quality == QUALITY_POTATO and Budget < 0.25f) Budget = 0.25f;
     uint Budget_Byte = (uint)(Budget * 255.0f);
     float Denoise_Budget = Budget;
 
-    // Comment here !!!
+    // At 1 SPP, ensure a minimum denoise budget so the denoiser always gets some smoothing
     if (Active_SPP <= 1) Denoise_Budget = fmaxf (Denoise_Budget, 0.10f);
     Current_Budget_Byte = (int)(uint)(fminf (Denoise_Budget, 1.0f) * 255.0f);
     uint Packed_SPP     = (Active_SPP & 0xFF) | (Budget_Byte << 8);
@@ -3633,6 +3625,9 @@ int main (int Argc, char **Argv) {
   vkDestroyPipelineLayout      (Device, Physics_Pipeline_Layout, NULL);
   vkDestroyDescriptorPool      (Device, Physics_Descriptor_Pool, NULL);
   vkDestroyDescriptorSetLayout (Device, Physics_Descriptor_Layout, NULL);
+  vkDestroyPipeline            (Device, Skinning_Pipeline, NULL);
+  vkDestroyPipelineLayout      (Device, Skinning_Pipeline_Layout, NULL);
+  vkDestroyDescriptorSetLayout (Device, Skinning_Descriptor_Layout, NULL);
   vkDestroyPipeline            (Device, Pipeline, NULL);
   vkDestroyPipelineLayout      (Device, Pipeline_Layout, NULL);
   vkDestroyDescriptorPool      (Device, Descriptor_Pool, NULL);
@@ -3901,16 +3896,14 @@ void Buffer_Upload (GPU_Buffer Destination, const void *Data, uint64_t Size) {
 // ════════════════════
 
 uint Find_Memory_Type (uint Type_Bits, VkMemoryPropertyFlags Desired_Properties) {
-  VkPhysicalDeviceMemoryProperties Memory_Properties;
-  vkGetPhysicalDeviceMemoryProperties (Physical_Device, &Memory_Properties);
+  static VkPhysicalDeviceMemoryProperties Cached;
+  static int Initialized = 0;
+  if (not Initialized) { vkGetPhysicalDeviceMemoryProperties (Physical_Device, &Cached); Initialized = 1; }
 
-  // Test each memory type against the required bits and desired property flags
-  for (uint Index = 0; Index < Memory_Properties.memoryTypeCount; Index++) {
-    if ((Type_Bits >> Index & 1) and (Memory_Properties.memoryTypes[Index].propertyFlags & Desired_Properties) == Desired_Properties)
+  for (uint Index = 0; Index < Cached.memoryTypeCount; Index++)
+    if ((Type_Bits >> Index & 1) and (Cached.memoryTypes[Index].propertyFlags & Desired_Properties) == Desired_Properties)
       return Index;
-  }
 
-  // No matching memory type found (should be unreachable on a conformant driver)
   assert (0 and "no matching memory type");
   return 0;
 }
@@ -3941,6 +3934,8 @@ GPU_Buffer Buffer_Allocate (uint64_t Size, VkBufferUsageFlags Usage, VkMemoryPro
                                       &Result.Memory, &Result.Offset, &Mapped);
   if (Result.Heap_Block < 0) {
     printf ("[buffer] TLSF alloc failed for %llu bytes\n", (unsigned long long)Size);
+    vkDestroyBuffer (Device, Result.Buffer, NULL);
+    Result.Buffer = VK_NULL_HANDLE;
     return Result;
   }
 
@@ -4120,57 +4115,30 @@ static void Heap_FL_Remove (GPU_Heap *H, int16_t Idx) {
   }
 }
 
-// ── Find the next physical block (the one starting at Offset + Size in the same slab) ───
-
-static int16_t Heap_Next_Phys (GPU_Heap *H, int16_t Idx) {
-  GPU_Heap_Block *B = &H->Blocks[Idx];
-  uint64_t End = B->Offset + B->Size;
-  // Walk from this block's slab's chain to find the successor (O(1) with sorted blocks — we keep them insertion-ordered)
-  for (int16_t I = H->Slabs[B->Slab].First_Block; I >= 0; ) {
-    GPU_Heap_Block *C = &H->Blocks[I];
-    if (C->Slab == B->Slab and C->Offset == End) return I;
-    // Walk via Block_Count order (physical chain not needed — blocks are sorted by offset within slab)
-    I = -1;
-    for (uint J = 0; J < H->Block_Count; J++) {
-      if ((int16_t)J != Idx and H->Blocks[J].Slab == B->Slab and H->Blocks[J].Offset == End) {I = (int16_t)J; break;}
-    }
-    break;
-  }
-  return -1;
-}
-
-// ── Find the previous physical block (ending at this block's Offset) ────
-
-static int16_t Heap_Prev_Phys (GPU_Heap *H, int16_t Idx) {
-  GPU_Heap_Block *B = &H->Blocks[Idx];
-  if (B->Prev_Phys >= 0) return B->Prev_Phys;
-  return -1;
-}
-
-// ── Coalesce with physical neighbors ────────────────────────────
+// ── Coalesce with physical neighbors (O(1) via doubly-linked physical chain) ─
 
 static int16_t Heap_Coalesce (GPU_Heap *H, int16_t Idx) {
   GPU_Heap_Block *B = &H->Blocks[Idx];
 
   // Merge with next physical block if free
-  int16_t Next = Heap_Next_Phys (H, Idx);
+  int16_t Next = B->Next_Phys;
   if (Next >= 0 and H->Blocks[Next].Free) {
+    GPU_Heap_Block *N = &H->Blocks[Next];
     Heap_FL_Remove (H, Next);
-    B->Size += H->Blocks[Next].Size;
-    // Update any block whose Prev_Phys pointed to Next
-    for (uint I = 0; I < H->Block_Count; I++)
-      if (H->Blocks[I].Prev_Phys == Next) H->Blocks[I].Prev_Phys = Idx;
+    B->Size += N->Size;
+    B->Next_Phys = N->Next_Phys;
+    if (N->Next_Phys >= 0) H->Blocks[N->Next_Phys].Prev_Phys = Idx;
     Heap_Block_Return (H, Next);
   }
 
   // Merge with previous physical block if free
-  int16_t Prev = Heap_Prev_Phys (H, Idx);
+  int16_t Prev = B->Prev_Phys;
   if (Prev >= 0 and H->Blocks[Prev].Free) {
+    GPU_Heap_Block *P = &H->Blocks[Prev];
     Heap_FL_Remove (H, Prev);
-    H->Blocks[Prev].Size += B->Size;
-    // Update any block whose Prev_Phys pointed to Idx
-    for (uint I = 0; I < H->Block_Count; I++)
-      if (H->Blocks[I].Prev_Phys == Idx) H->Blocks[I].Prev_Phys = Prev;
+    P->Size += B->Size;
+    P->Next_Phys = B->Next_Phys;
+    if (B->Next_Phys >= 0) H->Blocks[B->Next_Phys].Prev_Phys = Prev;
     Heap_Block_Return (H, Idx);
     Idx = Prev;
   }
@@ -4219,7 +4187,8 @@ static int Heap_Slab_Create (GPU_Heap *H, uint64_t Size, VkMemoryPropertyFlags M
   // Create one free block spanning the entire slab
   int16_t BI = Heap_Block_New (H);
   if (BI < 0) return -1;
-  H->Blocks[BI] = (GPU_Heap_Block){.Offset = 0, .Size = Size, .Slab = (int16_t)SI, .Prev_Phys = -1, .Prev_Free = -1, .Next_Free = -1};
+  H->Blocks[BI] = (GPU_Heap_Block){.Offset = 0, .Size = Size, .Slab = (int16_t)SI,
+    .Prev_Phys = -1, .Next_Phys = -1, .Prev_Free = -1, .Next_Free = -1};
   S->First_Block = BI;
   Heap_FL_Insert (H, BI);
   H->Total_Allocated += Size;
@@ -4283,10 +4252,11 @@ int GPU_Heap_Alloc (GPU_Heap *H, uint64_t Size, uint64_t Alignment,
   uint64_t Aligned = (B->Offset + Alignment - 1) & ~(Alignment - 1);
   uint64_t Pad = Aligned - B->Offset;
   if (Pad > 0 and Pad >= GPU_HEAP_MIN_SIZE) {
-    // Split: create a free padding block before this one
     int16_t Pad_Idx = Heap_Block_New (H);
     if (Pad_Idx >= 0) {
-      H->Blocks[Pad_Idx] = (GPU_Heap_Block){.Offset = B->Offset, .Size = Pad, .Slab = B->Slab, .Prev_Phys = B->Prev_Phys, .Prev_Free = -1, .Next_Free = -1};
+      H->Blocks[Pad_Idx] = (GPU_Heap_Block){.Offset = B->Offset, .Size = Pad, .Slab = B->Slab,
+        .Prev_Phys = B->Prev_Phys, .Next_Phys = Idx, .Prev_Free = -1, .Next_Free = -1};
+      if (B->Prev_Phys >= 0) H->Blocks[B->Prev_Phys].Next_Phys = Pad_Idx;
       B->Offset = Aligned;
       B->Size  -= Pad;
       B->Prev_Phys = Pad_Idx;
@@ -4303,12 +4273,11 @@ int GPU_Heap_Alloc (GPU_Heap *H, uint64_t Size, uint64_t Alignment,
   if (Remainder >= GPU_HEAP_MIN_SIZE) {
     int16_t Rem_Idx = Heap_Block_New (H);
     if (Rem_Idx >= 0) {
-      H->Blocks[Rem_Idx] = (GPU_Heap_Block){.Offset = Aligned + Size, .Size = Remainder, .Slab = B->Slab, .Prev_Phys = Idx, .Prev_Free = -1, .Next_Free = -1};
+      H->Blocks[Rem_Idx] = (GPU_Heap_Block){.Offset = Aligned + Size, .Size = Remainder, .Slab = B->Slab,
+        .Prev_Phys = Idx, .Next_Phys = B->Next_Phys, .Prev_Free = -1, .Next_Free = -1};
+      if (B->Next_Phys >= 0) H->Blocks[B->Next_Phys].Prev_Phys = Rem_Idx;
+      B->Next_Phys = Rem_Idx;
       B->Size = Size;
-      // Update next physical block's Prev_Phys to point to remainder instead of us
-      for (uint I = 0; I < H->Block_Count; I++)
-        if (H->Blocks[I].Slab == B->Slab and H->Blocks[I].Offset == Aligned + Size + Remainder)
-          {H->Blocks[I].Prev_Phys = Rem_Idx; break;}
       Heap_FL_Insert (H, Rem_Idx);
     }
   }
@@ -4384,7 +4353,9 @@ int GPU_Heap_Pack_Alloc (GPU_Heap *H, int Pack_Slab, uint64_t Size, uint64_t Ali
   if (Pad >= GPU_HEAP_MIN_SIZE) {
     int16_t PI = Heap_Block_New (H);
     if (PI >= 0) {
-      H->Blocks[PI] = (GPU_Heap_Block){.Offset = B->Offset, .Size = Pad, .Slab = B->Slab, .Prev_Phys = B->Prev_Phys, .Prev_Free = -1, .Next_Free = -1};
+      H->Blocks[PI] = (GPU_Heap_Block){.Offset = B->Offset, .Size = Pad, .Slab = B->Slab,
+        .Prev_Phys = B->Prev_Phys, .Next_Phys = (int16_t)Found, .Prev_Free = -1, .Next_Free = -1};
+      if (B->Prev_Phys >= 0) H->Blocks[B->Prev_Phys].Next_Phys = PI;
       B->Offset = Aligned; B->Size -= Pad; B->Prev_Phys = PI;
       Heap_FL_Insert (H, PI);
     }
@@ -4394,7 +4365,10 @@ int GPU_Heap_Pack_Alloc (GPU_Heap *H, int Pack_Slab, uint64_t Size, uint64_t Ali
   if (Rem >= GPU_HEAP_MIN_SIZE) {
     int16_t RI = Heap_Block_New (H);
     if (RI >= 0) {
-      H->Blocks[RI] = (GPU_Heap_Block){.Offset = Aligned + Size, .Size = Rem, .Slab = B->Slab, .Prev_Phys = (int16_t)Found, .Prev_Free = -1, .Next_Free = -1};
+      H->Blocks[RI] = (GPU_Heap_Block){.Offset = Aligned + Size, .Size = Rem, .Slab = B->Slab,
+        .Prev_Phys = (int16_t)Found, .Next_Phys = B->Next_Phys, .Prev_Free = -1, .Next_Free = -1};
+      if (B->Next_Phys >= 0) H->Blocks[B->Next_Phys].Prev_Phys = RI;
+      B->Next_Phys = RI;
       B->Size = Size;
       Heap_FL_Insert (H, RI);
     }
@@ -4538,24 +4512,6 @@ void Image_Layout_Barrier (VkCommandBuffer      Command_Buffer, VkImage         
                           .subresourceRange    = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 }});
 }
 
-// ══════════════════
-//   Texture_Upload 
-// ══════════════════
-
-void Texture_Upload (VkCommandBuffer Command_Buffer, VkQueue Queue,
-                     const uint8_t *Pixels, uint Width, uint Height,
-                     VkImage *Out_Image, VkDeviceMemory *Out_Memory, VkImageView *Out_View) {
-  Texture_Upload_With_Format (/*Command_Buffer  =>*/ Command_Buffer,
-                              /*Queue           =>*/ Queue,
-                              /*Pixels          =>*/ Pixels,
-                              /*Width           =>*/ Width,
-                              /*Height          =>*/ Height,
-                              /*Format          =>*/ VK_FORMAT_R8G8B8A8_SRGB,
-                              /*Out_Image       =>*/ Out_Image,
-                              /*Out_Memory      =>*/ Out_Memory,
-                              /*Out_View        =>*/ Out_View,
-                              /*Out_Heap_Block  =>*/ NULL);
-}
 
 // ════════════════════════════
 //   Sampler_Create_Repeating 
@@ -5048,14 +5004,14 @@ uint VTF_Bpp (int Format) {
   switch (Format) {
     case VTF_FMT_RGBA8888:
     case VTF_FMT_ABGR8888:
-    case VTF_FMT_BGRA8888: return 4; // Comment here !!!
+    case VTF_FMT_BGRA8888: return 4; // 32-bit: 4 channels x 8 bits each
     case VTF_FMT_RGB888:
-    case VTF_FMT_BGR888:   return 3; // Comment here !!!
-    case VTF_FMT_RGB565:   return 2; // Comment here !!!
+    case VTF_FMT_BGR888:   return 3; // 24-bit: 3 channels x 8 bits each
+    case VTF_FMT_RGB565:   return 2; // 16-bit: packed 5/6/5 bits per channel
     case VTF_FMT_DXT1:     return 0; // Block-compressed, handled separately
     case VTF_FMT_DXT3:
-    case VTF_FMT_DXT5:     return 0; // Comment here !!!
-    default:               return 4; // Comment here !!!
+    case VTF_FMT_DXT5:     return 0; // Block-compressed, handled separately
+    default:               return 4; // Assume 32-bit for unknown formats
   }
 }
 
@@ -6107,7 +6063,6 @@ Figure_Instance MDL_Load (Scene *S, const char *Path, vec3 Origin, float Yaw) {
         int Idx_0  = Box_Faces[Face_Index][0];
         int Idx_1  = Box_Faces[Face_Index][Triangle ? 0 : 1];
         int Idx_2  = Box_Faces[Face_Index][Triangle + 1];
-        int Idx_3_ = Box_Faces[Face_Index][Triangle ? 3 : 2]; (void)Idx_3_;
         for (int Corner = 0; Corner < 3; Corner++) {
           int   Vert_Index = Corner == 0 ? Idx_0 : Corner == 1 ? Idx_1 : Idx_2;
           float Local_X    = Box_Verts[Vert_Index][0];
@@ -6189,7 +6144,7 @@ Articulated_Figure Source_Weapon_Model_Load (const char *Path) {
                           ? (uint)Header->Material_Count
                           : WEAPON_MAX_TEXTURES;
 
-  // Comment here !!!
+  // Resolve each material entry's name via its relative offset and store for texture lookup
   for (uint Material_Index = 0; Material_Index < Result.Surface_Count; Material_Index++) {
     const uint8_t *Material_Entry = File_Data + Header->Material_Offset + Material_Index * 64;
     int         Name_Offset   = *(const int*)Material_Entry;
@@ -6678,7 +6633,7 @@ Vertex Convert_BSP_Vertex (const BSP_Vertex *Source) {
   // Swizzle from Id Software's Z-up coordinate system to our Y-up system
   return (Vertex){
     .Position    = {Source->Position        [0], Source->Position        [2], -Source->Position [1]},
-    .Normal      = {Source->Normal          [0], Source->Normal          [2], -Source->Normal   [1]}
+    .Normal      = {Source->Normal          [0], Source->Normal          [2], -Source->Normal   [1]},
     .Texture_UV  = {Source->Texture_Coords  [0], Source->Texture_Coords  [1]},
     .Lightmap_UV = {Source->Lightmap_Coords [0], Source->Lightmap_Coords [1]},
   };
@@ -6762,9 +6717,9 @@ Scene Scene_Load_From_VBSP (const char *Path, Spawn *Out_Spawn) {
     const char *Name    = (Name_Id < Str_Table_N and (uint)Str_Table[Name_Id] < Str_Data_N)
                           ? Str_Data + Str_Table[Name_Id] : "missing";
     snprintf (S.Texture_Names[Tex_Index], 64, "%s", Name);
-    S.Materials[Tex_Index] = (vec4){Tex_Datas [Tex_Index].Refl [0],
-                                    Tex_Datas [Tex_Index].Refl [1],
-                                    Tex_Datas [Tex_Index].Refl [2], 1.f};
+    S.Materials[Tex_Index] = (vec4){Tex_Datas [Tex_Index].Reflectivity [0],
+                                    Tex_Datas [Tex_Index].Reflectivity [1],
+                                    Tex_Datas [Tex_Index].Reflectivity [2], 1.f};
   }
 
   // Build per-material skip table: suppress non-renderable tool surfaces
@@ -6784,7 +6739,7 @@ Scene Scene_Load_From_VBSP (const char *Path, Spawn *Out_Spawn) {
     int Tex_Info_Index = Faces[Face_Index].Tex_Info;
     if (Tex_Info_Index < 0 or (uint)Tex_Info_Index >= Tex_Info_N) continue;
     if (Tex_Infos[Tex_Info_Index].Flags & VBSP_SKIP_FLAGS) continue;
-    uint Material_Index = (uint)Tex_Infos[Tex_Info_Index].Tex_Data;
+    uint Material_Index = (uint)Tex_Infos[Tex_Info_Index].Texture_Data;
     if (Material_Index >= Tex_Data_N or Mat_Skip[Material_Index]) continue;
     Total_Tris += Faces[Face_Index].Num_Edges - 2;
   }
@@ -6809,7 +6764,7 @@ Scene Scene_Load_From_VBSP (const char *Path, Spawn *Out_Spawn) {
     if (Tex_Info_Index < 0 or (uint)Tex_Info_Index >= Tex_Info_N) continue;
     const VBSP_Tex_Info *Tex_Info = &Tex_Infos[Tex_Info_Index];
     if (Tex_Info->Flags & VBSP_SKIP_FLAGS) continue;
-    uint Material_Index = (uint)Tex_Info->Tex_Data;
+    uint Material_Index = (uint)Tex_Info->Texture_Data;
     if (Material_Index >= Tex_Data_N or Mat_Skip[Material_Index]) continue;
 
     // Collect face vertex positions via the surf-edge indirection table
@@ -6821,11 +6776,11 @@ Scene Scene_Load_From_VBSP (const char *Path, Spawn *Out_Spawn) {
       int  Surf_Edge_Value = Surf_Edges[Surf_Edge_Index];
       uint Abs_Surf_Edge   = (uint)(Surf_Edge_Value >= 0 ? Surf_Edge_Value : -Surf_Edge_Value);
       if (Abs_Surf_Edge >= Edge_Count) { Positions[Edge_Index] = Make (0,0,0); continue; }
-      uint Vertex_Index = Surf_Edge_Value >= 0 ? Edges[Abs_Surf_Edge].V[0] : Edges[Abs_Surf_Edge].V[1];
+      uint Vertex_Index = Surf_Edge_Value >= 0 ? Edges[Abs_Surf_Edge].Vertex_Index[0] : Edges[Abs_Surf_Edge].Vertex_Index[1];
       if (Vertex_Index >= Vert_Count) Vertex_Index = 0;
-      Positions[Edge_Index] = Make (Verts[Vertex_Index].P[0],
-                                    Verts[Vertex_Index].P[1],
-                                    Verts[Vertex_Index].P[2]);
+      Positions[Edge_Index] = Make (Verts[Vertex_Index].Position[0],
+                                    Verts[Vertex_Index].Position[1],
+                                    Verts[Vertex_Index].Position[2]);
     }
 
     // Fetch the precomputed face normal from the BSP plane lump (more reliable than cross product)
@@ -6843,22 +6798,22 @@ Scene Scene_Load_From_VBSP (const char *Path, Spawn *Out_Spawn) {
       int  Fan_Corners[3]   = {0, Fan_Index + 1, Fan_Index + 2};
       for (int Corner = 0; Corner < 3; Corner++) {
         vec3  Corner_Position = Positions[Fan_Corners[Corner]];
-        float U  = Corner_Position.x * Tex_Info->Tex_Vecs[0][0]
-                 + Corner_Position.y * Tex_Info->Tex_Vecs[0][1]
-                 + Corner_Position.z * Tex_Info->Tex_Vecs[0][2] + Tex_Info->Tex_Vecs[0][3];
-        float V  = Corner_Position.x * Tex_Info->Tex_Vecs[1][0]
-                 + Corner_Position.y * Tex_Info->Tex_Vecs[1][1]
-                 + Corner_Position.z * Tex_Info->Tex_Vecs[1][2] + Tex_Info->Tex_Vecs[1][3];
-        int Tex_Width  = Tex_Datas[Material_Index].W;
-        int Tex_Height = Tex_Datas[Material_Index].H;
+        float U  = Corner_Position.x * Tex_Info->Texture_Vecs[0][0]
+                 + Corner_Position.y * Tex_Info->Texture_Vecs[0][1]
+                 + Corner_Position.z * Tex_Info->Texture_Vecs[0][2] + Tex_Info->Texture_Vecs[0][3];
+        float V  = Corner_Position.x * Tex_Info->Texture_Vecs[1][0]
+                 + Corner_Position.y * Tex_Info->Texture_Vecs[1][1]
+                 + Corner_Position.z * Tex_Info->Texture_Vecs[1][2] + Tex_Info->Texture_Vecs[1][3];
+        int Tex_Width  = Tex_Datas[Material_Index].Width;
+        int Tex_Height = Tex_Datas[Material_Index].Height;
         if (Tex_Width  > 0) U /= Tex_Width;
         if (Tex_Height > 0) V /= Tex_Height;
-        float Lu = Corner_Position.x * Tex_Info->Lm_Vecs[0][0]
-                 + Corner_Position.y * Tex_Info->Lm_Vecs[0][1]
-                 + Corner_Position.z * Tex_Info->Lm_Vecs[0][2] + Tex_Info->Lm_Vecs[0][3];
-        float Lv = Corner_Position.x * Tex_Info->Lm_Vecs[1][0]
-                 + Corner_Position.y * Tex_Info->Lm_Vecs[1][1]
-                 + Corner_Position.z * Tex_Info->Lm_Vecs[1][2] + Tex_Info->Lm_Vecs[1][3];
+        float Lu = Corner_Position.x * Tex_Info->Lightmap_Vecs[0][0]
+                 + Corner_Position.y * Tex_Info->Lightmap_Vecs[0][1]
+                 + Corner_Position.z * Tex_Info->Lightmap_Vecs[0][2] + Tex_Info->Lightmap_Vecs[0][3];
+        float Lv = Corner_Position.x * Tex_Info->Lightmap_Vecs[1][0]
+                 + Corner_Position.y * Tex_Info->Lightmap_Vecs[1][1]
+                 + Corner_Position.z * Tex_Info->Lightmap_Vecs[1][2] + Tex_Info->Lightmap_Vecs[1][3];
         S.Vertices[S.Vertex_Count++] = VBSP_Convert (Corner_Position.x, Corner_Position.y, Corner_Position.z,
                                                       Face_Normal.x, Face_Normal.y, Face_Normal.z,
                                                       U, V, Lu, Lv);
@@ -6886,17 +6841,17 @@ Scene Scene_Load_From_VBSP (const char *Path, Spawn *Out_Spawn) {
       int  Surf_Edge_Value = Surf_Edges[Surf_Edge_Index];
       uint Abs_Surf_Edge   = (uint)(Surf_Edge_Value >= 0 ? Surf_Edge_Value : -Surf_Edge_Value);
       if (Abs_Surf_Edge >= Edge_Count) continue;
-      uint Vertex_Index = Surf_Edge_Value >= 0 ? Edges[Abs_Surf_Edge].V[0] : Edges[Abs_Surf_Edge].V[1];
+      uint Vertex_Index = Surf_Edge_Value >= 0 ? Edges[Abs_Surf_Edge].Vertex_Index[0] : Edges[Abs_Surf_Edge].Vertex_Index[1];
       if (Vertex_Index >= Vert_Count) Vertex_Index = 0;
-      Corners[Edge_Index] = Make (Verts[Vertex_Index].P[0],
-                                  Verts[Vertex_Index].P[1],
-                                  Verts[Vertex_Index].P[2]);
+      Corners[Edge_Index] = Make (Verts[Vertex_Index].Position[0],
+                                  Verts[Vertex_Index].Position[1],
+                                  Verts[Vertex_Index].Position[2]);
     }
 
     // Find the corner closest to the displacement start position and rotate the winding
     float Best_Dist   = 1e18f;
     int   Best_Corner = 0;
-    vec3  Start_Position = Make (Disp->Start[0], Disp->Start[1], Disp->Start[2]);
+    vec3  Start_Position = Make (Disp->Start_Position[0], Disp->Start_Position[1], Disp->Start_Position[2]);
     for (int Corner_Index = 0; Corner_Index < 4; Corner_Index++) {
       float Corner_Dist_Sq = Dot (Subtract (Corners[Corner_Index], Start_Position),
                                   Subtract (Corners[Corner_Index], Start_Position));
@@ -6930,7 +6885,7 @@ Scene Scene_Load_From_VBSP (const char *Path, Spawn *Out_Spawn) {
     S.Texture_Ids = realloc (S.Texture_Ids, sizeof (uint) * (S.Triangle_Count + Total_Disp_Tris));
     int Tex_Info_Index = Face->Tex_Info;
     uint Material_Index = (Tex_Info_Index >= 0 and (uint)Tex_Info_Index < Tex_Info_N)
-                          ? (uint)Tex_Infos[Tex_Info_Index].Tex_Data : 0;
+                          ? (uint)Tex_Infos[Tex_Info_Index].Texture_Data : 0;
     if (Material_Index >= Tex_Data_N) Material_Index = 0;
     for (int Grid_Y = 0; Grid_Y < Grid_Side - 1; Grid_Y++)
       for (int Grid_X = 0; Grid_X < Grid_Side - 1; Grid_X++) {
@@ -7296,7 +7251,7 @@ Scene Scene_Load_From_BSP (const char *Path, Spawn *Out_Spawn) {
     const BSP_Face *Face = &Raw_Faces[Face_Index];
 
     // Handle each face type: copy indices for planar/mesh, tessellate for patches
-    if (Face->Type == SURFACE_TYPE_PLANAR or Face->Type == SURFACE_TYPE_MESH) {
+    if (Face->Surface_Type == SURFACE_TYPE_PLANAR or Face->Surface_Type == SURFACE_TYPE_MESH) {
       uint Face_Triangles = (uint)(Face->Index_Count / 3);
 
       // Grow the index and texture-id arrays to accommodate this face
@@ -7333,7 +7288,7 @@ Scene Scene_Load_From_BSP (const char *Path, Spawn *Out_Spawn) {
       }
 
     // Tessellate the Bezier patch into triangles
-    } else if (Face->Type == SURFACE_TYPE_PATCH) {
+    } else if (Face->Surface_Type == SURFACE_TYPE_PATCH) {
       uint Previous_Vertex_Count   = Vertex_Count;
       uint Previous_Triangle_Count = Triangle_Count;
 
@@ -7782,7 +7737,7 @@ uint BSP_Parse_Entities (const uint8_t *File_Data, const BSP_Header *Header,
   const char *End  = Text + Header->Lumps[BSP_ENTITIES].Length;
   uint Count = 0;
 
-  // Comment here !!!
+  // Iterate through the entity lump text, parsing brace-delimited entity blocks
   while (Text < End and Count < Max_Entities) {
 
     // Find opening brace
@@ -8054,7 +8009,7 @@ void Scene_Load_Textures (const Scene *Scene_Data) {
     // Stone walls and floors (rough, non-metallic)
     else if (strcasestr (N, "stonewall")
           or strcasestr (N, "stone3"))
-      {Material_PBR[I][0] = 210; Material_PBR[I][1] = 0;}; // R = 0.82, M = 0.00 - Rough stone wall
+      {Material_PBR[I][0] = 210; Material_PBR[I][1] = 0;} // R = 0.82, M = 0.00 - Rough stone wall
     else if (strcasestr (N, "stonefloor")
           or strcasestr (N, "stonestep"))
       {Material_PBR[I][0] = 178; Material_PBR[I][1] = 0;} // R = 0.70, M = 0.00 - Worn stone floor
@@ -8768,15 +8723,15 @@ Acceleration_Structure Build_World_Bottom_Level (const Scene *Scene_Data) {
 // Unified BLAS initialization for any Figure_Instance (weapon, enemy, prop). Allocates host-visible vertex buffer,
 // device-local index/texture-id buffers, and builds the initial BLAS with FAST_BUILD + ALLOW_UPDATE.
 
-void Figure_BLAS_Initialize (Figure_Instance *Weapon) {
-  if (not Weapon->Figure.Vertex_Count) return;
+void Figure_BLAS_Initialize (Figure_Instance *Fig) {
+  if (not Fig->Figure.Vertex_Count) return;
 
-  // Allocate a host-visible copy of the weapon vertices for per-frame CPU transformation
-  Weapon->Transformed_Vertices = malloc (sizeof (Vertex) * Weapon->Figure.Vertex_Count);
-  memcpy (Weapon->Transformed_Vertices, Weapon->Figure.Vertices, sizeof (Vertex) * Weapon->Figure.Vertex_Count);
+  // Allocate a host-visible copy of the vertices for per-frame CPU transformation
+  Fig->Transformed_Vertices = malloc (sizeof (Vertex) * Fig->Figure.Vertex_Count);
+  memcpy (Fig->Transformed_Vertices, Fig->Figure.Vertices, sizeof (Vertex) * Fig->Figure.Vertex_Count);
 
   // Create host-visible vertex buffer for direct CPU writes each frame (host-visible so we can update without staging)
-  Weapon->Vertex_Buffer = Buffer_Allocate (/*Size         =>*/ sizeof (Vertex) * Weapon->Figure.Vertex_Count,
+  Fig->Vertex_Buffer = Buffer_Allocate (/*Size         =>*/ sizeof (Vertex) * Fig->Figure.Vertex_Count,
                                            /*Usage        =>*/ VK_BUFFER_USAGE_VERTEX_BUFFER_BIT
                                                              | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
                                                              | VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR
@@ -8785,20 +8740,20 @@ void Figure_BLAS_Initialize (Figure_Instance *Weapon) {
                                                              | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
 
   // Upload the initial vertex positions
-  Buffer_Upload (Weapon->Vertex_Buffer, Weapon->Transformed_Vertices, sizeof (Vertex) * Weapon->Figure.Vertex_Count);
+  Buffer_Upload (Fig->Vertex_Buffer, Fig->Transformed_Vertices, sizeof (Vertex) * Fig->Figure.Vertex_Count);
 
   // Upload index and texture-id data (static, device-local - these never change after the initial upload)
-  Weapon->Index_Buffer      = Buffer_Stage_Upload (/*Command_Buffer =>*/ Command_Buffer,
+  Fig->Index_Buffer      = Buffer_Stage_Upload (/*Command_Buffer =>*/ Command_Buffer,
                                                    /*Queue          =>*/ Queue,
-                                                   /*Data           =>*/ Weapon->Figure.Indices,
-                                                   /*Size           =>*/ sizeof (uint) * Weapon->Figure.Index_Count,
+                                                   /*Data           =>*/ Fig->Figure.Indices,
+                                                   /*Size           =>*/ sizeof (uint) * Fig->Figure.Index_Count,
                                                    /*Usage          =>*/ VK_BUFFER_USAGE_INDEX_BUFFER_BIT
                                                                        | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
                                                                        | VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR);
-  Weapon->Texture_Id_Buffer = Buffer_Stage_Upload (/*Command_Buffer =>*/ Command_Buffer,
+  Fig->Texture_Id_Buffer = Buffer_Stage_Upload (/*Command_Buffer =>*/ Command_Buffer,
                                                    /*Queue          =>*/ Queue,
-                                                   /*Data           =>*/ Weapon->Figure.Texture_Ids,
-                                                   /*Size           =>*/ sizeof (uint) * Weapon->Figure.Triangle_Count,
+                                                   /*Data           =>*/ Fig->Figure.Texture_Ids,
+                                                   /*Size           =>*/ sizeof (uint) * Fig->Figure.Triangle_Count,
                                                    /*Usage          =>*/ VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
 
   // Configure the BLAS for fast builds with update capability
@@ -8809,13 +8764,13 @@ void Figure_BLAS_Initialize (Figure_Instance *Weapon) {
     .geometry.triangles = {
       .sType                    = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_TRIANGLES_DATA_KHR,
       .vertexFormat             = VK_FORMAT_R32G32B32_SFLOAT,
-      .vertexData.deviceAddress = Weapon->Vertex_Buffer.Address,
+      .vertexData.deviceAddress = Fig->Vertex_Buffer.Address,
       .vertexStride             = sizeof (Vertex),
-      .maxVertex                = Weapon->Figure.Vertex_Count - 1,
+      .maxVertex                = Fig->Figure.Vertex_Count - 1,
       .indexType                = VK_INDEX_TYPE_UINT32,
-      .indexData.deviceAddress  = Weapon->Index_Buffer.Address}};
+      .indexData.deviceAddress  = Fig->Index_Buffer.Address}};
 
-  // Use FAST_BUILD + ALLOW_UPDATE since the weapon is rebuilt every frame
+  // Use FAST_BUILD + ALLOW_UPDATE since the figure is rebuilt every frame
   VkAccelerationStructureBuildGeometryInfoKHR Build_Info = {
     .sType         = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR,
     .type          = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR,
@@ -8824,8 +8779,8 @@ void Figure_BLAS_Initialize (Figure_Instance *Weapon) {
     .geometryCount = 1,
     .pGeometries   = &Geometry};
 
-  // Query required sizes for the weapon BLAS and its scratch buffer from the driver
-  uint Primitive_Count = Weapon->Figure.Triangle_Count;
+  // Query required sizes for the figure BLAS and its scratch buffer from the driver
+  uint Primitive_Count = Fig->Figure.Triangle_Count;
   VkAccelerationStructureBuildSizesInfoKHR Build_Sizes = {.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR};
   vkGetAccelerationStructureBuildSizes (/*device             =>*/ Device,
                                         /*buildType          =>*/ VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR,
@@ -8834,32 +8789,32 @@ void Figure_BLAS_Initialize (Figure_Instance *Weapon) {
                                         /*pSizeInfo          =>*/ &Build_Sizes);
 
   // Allocate the BLAS buffer and persistent scratch buffer (scratch is reused across frames for BLAS refits)
-  Weapon->Bottom_Level.Buffer  = Buffer_Allocate (/*Size         =>*/ Build_Sizes.accelerationStructureSize,
+  Fig->Bottom_Level.Buffer  = Buffer_Allocate (/*Size         =>*/ Build_Sizes.accelerationStructureSize,
                                                   /*Usage        =>*/ VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR
                                                                     | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
                                                   /*Memory_Flags =>*/ VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
   VK_CHECK (vkCreateAccelerationStructure (/*device      =>*/ Device,
                                            /*pCreateInfo =>*/ &(VkAccelerationStructureCreateInfoKHR){
                                              .sType  = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_CREATE_INFO_KHR,
-                                             .buffer = Weapon->Bottom_Level.Buffer.Buffer,
+                                             .buffer = Fig->Bottom_Level.Buffer.Buffer,
                                              .size   = Build_Sizes.accelerationStructureSize,
                                              .type   = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR},
                                            /*pAllocator  =>*/ NULL,
-                                           /*pStructure  =>*/ &Weapon->Bottom_Level.Handle));
-  Weapon->Bottom_Level_Scratch = Buffer_Allocate (/*Size         =>*/ Build_Sizes.buildScratchSize,
+                                           /*pStructure  =>*/ &Fig->Bottom_Level.Handle));
+  Fig->Bottom_Level_Scratch = Buffer_Allocate (/*Size         =>*/ Build_Sizes.buildScratchSize,
                                                   /*Usage        =>*/ VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
                                                                     | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
                                                   /*Memory_Flags =>*/ VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
 
   // Perform the initial BLAS build
-  Build_Info.dstAccelerationStructure  = Weapon->Bottom_Level.Handle;
-  Build_Info.scratchData.deviceAddress = Weapon->Bottom_Level_Scratch.Address;
+  Build_Info.dstAccelerationStructure  = Fig->Bottom_Level.Handle;
+  Build_Info.scratchData.deviceAddress = Fig->Bottom_Level_Scratch.Address;
 
-  // Build range: all weapon triangles in a single geometry entry
+  // Build range: all figure triangles in a single geometry entry
   VkAccelerationStructureBuildRangeInfoKHR Range = {.primitiveCount = Primitive_Count};
   const VkAccelerationStructureBuildRangeInfoKHR *Range_Pointer = &Range;
 
-  // Record and submit the initial weapon BLAS build
+  // Record and submit the initial figure BLAS build
   VK_CHECK (vkResetCommandBuffer (Command_Buffer, 0));
   VK_CHECK (vkBeginCommandBuffer (/*commandBuffer =>*/ Command_Buffer,
                                   /*pBeginInfo    =>*/ &(VkCommandBufferBeginInfo){
@@ -8882,10 +8837,10 @@ void Figure_BLAS_Initialize (Figure_Instance *Weapon) {
   VK_CHECK (vkQueueWaitIdle (Queue));
 
   // Query the BLAS device address for TLAS instance referencing
-  Weapon->Bottom_Level.Address = vkGetAccelerationStructureDeviceAddress (/*device =>*/ Device,
+  Fig->Bottom_Level.Address = vkGetAccelerationStructureDeviceAddress (/*device =>*/ Device,
                                    /*pInfo  =>*/ &(VkAccelerationStructureDeviceAddressInfoKHR){
                                      .sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_DEVICE_ADDRESS_INFO_KHR,
-                                     .accelerationStructure = Weapon->Bottom_Level.Handle});
+                                     .accelerationStructure = Fig->Bottom_Level.Handle});
   printf ("[figure] BLAS built: %u triangles\n", Primitive_Count);
 
 } // Figure_BLAS_Initialize
@@ -8894,17 +8849,17 @@ void Figure_BLAS_Initialize (Figure_Instance *Weapon) {
 //   Figure_BLAS_Rebuild
 // ════════════════════════════
 //
-// Rebuild/refit a figure's BLAS after vertex data has changed. Re-uploads either Transformed_Vertices (weapon viewmodel)
+// Rebuild/refit a figure's BLAS after vertex data has changed. Re-uploads either Transformed_Vertices (figure viewmodel)
 // or Current_Vertices (frame-animated entity) and performs an in-place BLAS refit (MODE_UPDATE).
 
-void Figure_BLAS_Rebuild (Figure_Instance *Weapon) {
+void Figure_BLAS_Rebuild (Figure_Instance *Fig) {
 
-  if (not Weapon->Figure.Vertex_Count) return;
+  if (not Fig->Figure.Vertex_Count) return;
 
   // Re-upload the appropriate vertex source to the GPU buffer
-  const void *Vertex_Source = Weapon->Transformed_Vertices ? (const void *)Weapon->Transformed_Vertices
-                                                           : (const void *)Weapon->Current_Vertices;
-  if (Vertex_Source) Buffer_Upload (Weapon->Vertex_Buffer, Vertex_Source, sizeof (Vertex) * Weapon->Figure.Vertex_Count);
+  const void *Vertex_Source = Fig->Transformed_Vertices ? (const void *)Fig->Transformed_Vertices
+                                                           : (const void *)Fig->Current_Vertices;
+  if (Vertex_Source) Buffer_Upload (Fig->Vertex_Buffer, Vertex_Source, sizeof (Vertex) * Fig->Figure.Vertex_Count);
 
   // Refit the BLAS with the updated vertex positions
   VkAccelerationStructureGeometryKHR Geometry = {
@@ -8914,27 +8869,27 @@ void Figure_BLAS_Rebuild (Figure_Instance *Weapon) {
     .geometry.triangles = {
       .sType                    = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_TRIANGLES_DATA_KHR,
       .vertexFormat             = VK_FORMAT_R32G32B32_SFLOAT,
-      .vertexData.deviceAddress = Weapon->Vertex_Buffer.Address,
+      .vertexData.deviceAddress = Fig->Vertex_Buffer.Address,
       .vertexStride             = sizeof (Vertex),
-      .maxVertex                = Weapon->Figure.Vertex_Count - 1,
+      .maxVertex                = Fig->Figure.Vertex_Count - 1,
       .indexType                = VK_INDEX_TYPE_UINT32,
-      .indexData.deviceAddress  = Weapon->Index_Buffer.Address}};
+      .indexData.deviceAddress  = Fig->Index_Buffer.Address}};
 
-  // BLAS refit (MODE_UPDATE) instead of full rebuild. The weapon mesh topology never changes - only vertex positions move...
+  // BLAS refit (MODE_UPDATE) instead of full rebuild. The figure mesh topology never changes - only vertex positions move...
   VkAccelerationStructureBuildGeometryInfoKHR Build_Info = {
     .sType                     = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR,
     .type                      = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR,
     .flags                     = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_BUILD_BIT_KHR
                                | VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_UPDATE_BIT_KHR,
     .mode                      = VK_BUILD_ACCELERATION_STRUCTURE_MODE_UPDATE_KHR,
-    .srcAccelerationStructure  = Weapon->Bottom_Level.Handle,
-    .dstAccelerationStructure  = Weapon->Bottom_Level.Handle,
-    .scratchData.deviceAddress = Weapon->Bottom_Level_Scratch.Address,
+    .srcAccelerationStructure  = Fig->Bottom_Level.Handle,
+    .dstAccelerationStructure  = Fig->Bottom_Level.Handle,
+    .scratchData.deviceAddress = Fig->Bottom_Level_Scratch.Address,
     .geometryCount             = 1,
     .pGeometries               = &Geometry};
 
-  // Build range covering all weapon triangles
-  VkAccelerationStructureBuildRangeInfoKHR Range = {.primitiveCount = Weapon->Figure.Triangle_Count};
+  // Build range covering all figure triangles
+  VkAccelerationStructureBuildRangeInfoKHR Range = {.primitiveCount = Fig->Figure.Triangle_Count};
   const VkAccelerationStructureBuildRangeInfoKHR *Range_Pointer = &Range;
 
   // Record the BLAS refit command into a one-shot command buffer
@@ -8962,7 +8917,6 @@ void Figure_BLAS_Rebuild (Figure_Instance *Weapon) {
   VK_CHECK (vkQueueWaitIdle (Queue));
 }
 
-// (Entity_Bottom_Level_Initialize / Entity_Bottom_Level_Rebuild removed — merged into Figure_BLAS_Initialize / Figure_BLAS_Rebuild above)
 
 // ════════════════════════
 //   Top_Level_Initialize
@@ -9085,20 +9039,23 @@ void Top_Level_Rebuild (Acceleration_Structure *World, Figure_Pool *Pool) {
       .arrayOfPointers    = VK_FALSE,
       .data.deviceAddress = Top_Level_Instance_Buffer.Address}};
 
-  static int First_Build = 1;
+  // Full rebuild required on first frame or when the instance count changes (MODE_UPDATE
+  // mandates identical instance count per Vulkan spec §12.1.2)
+  static int Prev_Instance_Count = 0;
+  int Need_Full_Build = (Prev_Instance_Count != (int)N);
+  Prev_Instance_Count = (int)N;
   VkAccelerationStructureBuildGeometryInfoKHR Build_Info = {
     .sType                     = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR,
     .type                      = VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR,
     .flags                     = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_BUILD_BIT_KHR
                                | VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_UPDATE_BIT_KHR,
-    .mode                      = First_Build ? VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR
-                                             : VK_BUILD_ACCELERATION_STRUCTURE_MODE_UPDATE_KHR,
-    .srcAccelerationStructure  = First_Build ? VK_NULL_HANDLE : Top_Level.Handle,
+    .mode                      = Need_Full_Build ? VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR
+                                                 : VK_BUILD_ACCELERATION_STRUCTURE_MODE_UPDATE_KHR,
+    .srcAccelerationStructure  = Need_Full_Build ? VK_NULL_HANDLE : Top_Level.Handle,
     .dstAccelerationStructure  = Top_Level.Handle,
     .scratchData.deviceAddress = Top_Level_Scratch_Buffer.Address,
     .geometryCount             = 1,
     .pGeometries               = &Geometry};
-  First_Build = 0;
 
   VK_CHECK (vkResetCommandBuffer (Command_Buffer, 0));
   VK_CHECK (vkBeginCommandBuffer (/*commandBuffer =>*/ Command_Buffer,
@@ -9435,12 +9392,11 @@ void Shader_Binding_Table_Create () {
                                                  /*Memory_Flags =>*/ VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT
                                                                    | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
 
-  // Map the SBT buffer and copy each group's handle at the aligned stride offset
-  uint8_t *Destination;
-  vkMapMemory (Device, Shader_Binding_Table_Buffer.Memory, 0, Table_Size, 0, (void **)&Destination);
+  // Copy each group's handle at the aligned stride offset via persistent slab mapping
+  GPU_Heap_Slab *SBT_Slab = &Heap.Slabs[Heap.Blocks[Shader_Binding_Table_Buffer.Heap_Block].Slab];
+  uint8_t *Destination = SBT_Slab->Mapped + Shader_Binding_Table_Buffer.Offset;
   for (uint Index = 0; Index < Group_Count; Index++)
     memcpy (Destination + Index * Stride, Handles + Index * Handle_Size, Handle_Size);
-  vkUnmapMemory (Device, Shader_Binding_Table_Buffer.Memory);
   free (Handles);
 
   // Set up the strided device address regions for each shader group type
@@ -10487,9 +10443,9 @@ Player Physics_Dispatch (Input In, float Dt) {
                            /*fence       =>*/ VK_NULL_HANDLE));
   VK_CHECK (vkQueueWaitIdle (Queue));
 
-  // Read back the updated player state from the GPU buffer
-  GPU_Player *Mapped;
-  vkMapMemory (Device, Player_State_Buffer.Memory, 0, sizeof (GPU_Player), 0, (void **)&Mapped);
+  // Read back the updated player state via persistent slab mapping
+  GPU_Heap_Slab *PS_Slab = &Heap.Slabs[Heap.Blocks[Player_State_Buffer.Heap_Block].Slab];
+  GPU_Player *Mapped = (GPU_Player *)(PS_Slab->Mapped + Player_State_Buffer.Offset);
   Player Result = {
     .Position    = Make (Mapped->Position[0], Mapped->Position[1], Mapped->Position[2]),
     .Velocity    = Make (Mapped->Velocity[0], Mapped->Velocity[1], Mapped->Velocity[2]),
@@ -10497,7 +10453,6 @@ Player Physics_Dispatch (Input In, float Dt) {
     .Pitch       = Mapped->Pitch,
     .On_Ground   = Mapped->On_Ground,
     .View_Height = Mapped->View_Height};
-  vkUnmapMemory (Device, Player_State_Buffer.Memory);
   return Result;
 
 } // Physics_Dispatch
@@ -10554,8 +10509,8 @@ void Projectile_Pool_Upload () {
 // ════════════════════════════
 
 void Projectile_Pool_Readback () {
-  GPU_Projectile_Pool *Mapped;
-  vkMapMemory (Device, Projectile_Buffer.Memory, 0, sizeof (GPU_Projectile_Pool), 0, (void **)&Mapped);
+  GPU_Heap_Slab *PJ_Slab = &Heap.Slabs[Heap.Blocks[Projectile_Buffer.Heap_Block].Slab];
+  GPU_Projectile_Pool *Mapped = (GPU_Projectile_Pool *)(PJ_Slab->Mapped + Projectile_Buffer.Offset);
   Projectiles.Count         = Mapped->Count;
   Projectiles.Fire_Cooldown = Mapped->Fire_Cooldown;
   for (int I = 0; I < Projectiles.Count; I++) {
@@ -10572,7 +10527,6 @@ void Projectile_Pool_Readback () {
       .Hit_V        = G->Hit_V,
       .Instance_Hit = G->Instance_Hit};
   }
-  vkUnmapMemory (Device, Projectile_Buffer.Memory);
 
   // Remove dead projectiles, play explosion sound on impact
   int Write = 0;
@@ -11172,7 +11126,7 @@ glsl rchit Closest_Hit {
   // Bindless texture array (binding 12: must be highest for variable descriptor count)
   layout(binding = 12) uniform sampler2D Textures[];
 
-  // Comment here !!! 
+  // Incoming ray payload from the closest-hit shader
   layout(location = 0) rayPayloadInEXT vec4 Payload; // rgb = color, a = hit distance
 
   // Shadow rays now use inline rayQueryEXT - no payload needed (saves continuation stack)
@@ -11277,7 +11231,7 @@ glsl rchit Closest_Hit {
     vec4 V1_S0 = Read_Raw (I1, 0, Fig), V1_S1 = Read_Raw (I1, 1, Fig), V1_S2 = Read_Raw (I1, 2, Fig);
     vec4 V2_S0 = Read_Raw (I2, 0, Fig), V2_S1 = Read_Raw (I2, 1, Fig), V2_S2 = Read_Raw (I2, 2, Fig);
 
-    // Comment here !!!
+    // Interpolate vertex attributes across the triangle using barycentric coordinates
     vec3 Position            = V0_S0.xyz * Bary.x + V1_S0.xyz * Bary.y + V2_S0.xyz * Bary.z;
     vec2 Tex_Coord           = V0_S1.xy  * Bary.x + V1_S1.xy  * Bary.y + V2_S1.xy  * Bary.z;
     vec2 Lightmap_Coordinate = V0_S1.zw  * Bary.x + V1_S1.zw  * Bary.y + V2_S1.zw  * Bary.z;
@@ -11417,7 +11371,7 @@ glsl rchit Closest_Hit {
       float D_Denom = NH * NH * (D_Bias - 1.0) + 1.0;
       float D_Safe  = D_Bias / (3.14159 * D_Denom * D_Denom);
 
-      // Comment here !!!
+      // Combine GGX distribution, visibility, and Fresnel for specular; energy-conserving Lambert for diffuse
       Specular = D_Safe * Vis * F;
       Diffuse  = (1.0 - F) * (1.0 - M) * Albedo * 0.31831;  // 1/π
     }
@@ -11480,7 +11434,7 @@ glsl rchit Closest_Hit {
       // Ensure reflection doesn't go into the surface
       if (dot (Refl_Dir, Normal) <= 0.0) Refl_Dir = reflect (-V, Normal);
 
-      // Comment here !!!
+      // Initialize payload and trace the specular reflection ray
       Payload = vec4 (0.0, 0.0, 0.0, -1.0);
       traceRayEXT (Top_Level, gl_RayFlagsOpaqueEXT,
                    0xFF,
@@ -11536,7 +11490,7 @@ glsl rchit Closest_Hit {
       float Entity_Luminance = dot (Color, vec3 (0.2126, 0.7152, 0.0722));
       Color = mix (vec3 (Entity_Luminance), Color, 1.15); // 15% saturation increase
 
-    // Otherwise, comment here !!!
+    // World geometry: use lightmap-based illumination with shadow rays and dual-path budget blend
     } else {
       vec3 Lightmap_Color = textureLod (Lightmap, Lightmap_Coordinate, 0.0).rgb * Env_Fog_Color.w; // Lightmap multiplier
   
@@ -11694,7 +11648,7 @@ glsl comp Physics {
     int   Material_Hit;
     float Radius;  
     float Damage;
-    float Hit_U,
+    float Hit_U;
     float Hit_V;                   // UV at impact point (for CPU-side damage map lookup)
     int   Instance_Hit; int Pad_B; // TLAS instance index of the object hit (-1 = none)
   };
@@ -11803,22 +11757,22 @@ glsl comp Physics {
       case SHAPE_AABB:    return sign(d) * Player.Extents;
       case SHAPE_HULL:    return hull_support (d);
   
-      // Comment here !!!
+      // Cylinder: project direction onto the XZ disc with radius, extend Y to half-height
       case SHAPE_CYLINDER: {
         vec2  xz    = d.xz;
         float len   = length (xz);
         vec2  disc  = (len > 1e-6) ? xz / len * Player.Extents.x : vec2(0.0);
         return vec3 (disc.x, sign(d.y) * Player.Extents.y, disc.y);
       }
-  
-      // Comment here !!!
+
+      // Ellipsoid: normalize direction in scaled space, then map back to ellipsoid surface
       case SHAPE_ELLIPSOID: {
         vec3 scaled = d / Player.Extents;
         float len   = length (scaled);
         return (len > 1e-6) ? normalize(scaled) * Player.Extents : vec3(0.0);
       }
 
-      // Otherwise, comment here !!!
+      // Unknown shape: fall back to sphere support using the X extent as radius
       default: return d * Player.Extents.x;
     }
   }
@@ -13316,7 +13270,7 @@ uint64_t Inflate_Buffer (const uint8_t *In, uint64_t In_Size, uint8_t *Out, uint
 
 void Constrain_Aspect_Ratio (int *W, int *H) {
 
-  // Comment here !!!
+  // Enforce minimum window dimensions before applying aspect ratio constraints
   if (*W < MINIMUM_WINDOW_SIZE) *W = MINIMUM_WINDOW_SIZE;
   int Min_H = MINIMUM_WINDOW_SIZE * ASPECT_NARROW_Y / ASPECT_NARROW_X;
   if (*H < Min_H) *H = Min_H;
