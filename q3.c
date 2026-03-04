@@ -573,10 +573,34 @@ typedef struct {int V0, V1, Face;}      Quickhull_Edge;
 // Declare all ray tracing function pointers as globals
 VULKAN_FUNCTIONS (DECLARE_VK)
 
-// Assertion to validate Vulkan return values; prints the error code, file, and line number then exits
+// Human-readable Vulkan error name from VkResult code
+static const char *VK_Error_Name (VkResult R) {
+  switch (R) {
+    case  0: return "VK_SUCCESS";
+    case -1: return "VK_ERROR_OUT_OF_HOST_MEMORY";
+    case -2: return "VK_ERROR_OUT_OF_DEVICE_MEMORY";
+    case -3: return "VK_ERROR_INITIALIZATION_FAILED";
+    case -4: return "VK_ERROR_DEVICE_LOST";
+    case -5: return "VK_ERROR_MEMORY_MAP_FAILED";
+    case -6: return "VK_ERROR_LAYER_NOT_PRESENT";
+    case -7: return "VK_ERROR_EXTENSION_NOT_PRESENT";
+    case -8: return "VK_ERROR_FEATURE_NOT_PRESENT";
+    case -9: return "VK_ERROR_INCOMPATIBLE_DRIVER";
+    case -10: return "VK_ERROR_TOO_MANY_OBJECTS";
+    case -11: return "VK_ERROR_FORMAT_NOT_SUPPORTED";
+    case -12: return "VK_ERROR_FRAGMENTED_POOL";
+    case -13: return "VK_ERROR_UNKNOWN";
+    default: return "unknown";
+  }
+}
+
+// Assertion to validate Vulkan return values; prints descriptive error name, file, and line then exits
 #define VK_CHECK(Call) do { \
   VkResult _Result = (Call); \
-  if (_Result) {fprintf (stderr, "[vulkan] error %d at %s:%d\n", _Result, __FILE__, __LINE__); exit (1);} \
+  if (_Result) { \
+    fprintf (stderr, "[vulkan] %s (%d) at %s:%d\n", VK_Error_Name(_Result), _Result, __FILE__, __LINE__); \
+    exit (1); \
+  } \
 } while (0)
 
 // Command recording and CPU-GPU synchronization
@@ -898,6 +922,7 @@ typedef struct {
 //                                    uint Assigned_Texture_Index, const float *Transform);
 //
 //   Weapon_Model Weapon_Model_Load ();
+//   Weapon_Model Source_Weapon_Model_Load (const char *Path);
 //   Entity Entity_Load (Scene *S, Spawn Spawn_Point);
 //   void Entity_Bottom_Level_Initialize (Entity *Enemy);
 //   void Entity_Bottom_Level_Rebuild (Entity *Enemy);
@@ -2908,7 +2933,7 @@ Weapon_Model Weapon_Model_Load () {
             Result.Tag_Barrel[2]);
   }
 
-  // Load the hand mesh to extract the tag_weapon animation frames for recoil
+  // Load the hand mesh: extract tag_weapon animation frames AND hand geometry (arms/fingers)
   File = fopen ("assets/models/weapons2/machinegun/machinegun_hand.md3", "rb");
   if (File) {
     fseek (File, 0, SEEK_END);
@@ -2923,6 +2948,8 @@ Weapon_Model Weapon_Model_Load () {
     int Hand_Frame_Count = *(int *)(Hand_Data + 76);
     int Hand_Tag_Count   = *(int *)(Hand_Data + 80);
     int Hand_Tags_Offset = *(int *)(Hand_Data + 96);
+    int Hand_Surface_Count   = *(int *)(Hand_Data + 84);
+    int Hand_Surfaces_Offset = *(int *)(Hand_Data + 100);
     Result.Animation_Frame_Count = Hand_Frame_Count < 30 ? Hand_Frame_Count : 30;
 
     // Extract the origin and axis for tag_weapon at each animation frame
@@ -2936,8 +2963,25 @@ Weapon_Model Weapon_Model_Load () {
         }
       }
     }
+
+    // Also parse hand surfaces for rendered hand/arm geometry
+    const uint8_t *Hand_Surf_Cursor = Hand_Data + Hand_Surfaces_Offset;
+    for (int Surface = 0; Surface < Hand_Surface_Count; Surface++) {
+      MD3_Parse_Surface (/*Surface_Data           =>*/ Hand_Surf_Cursor,
+                         /*Inout_Vertices         =>*/ &Result.Vertices,
+                         /*Inout_Vertex_Count     =>*/ &Result.Vertex_Count,
+                         /*Inout_Indices          =>*/ &Result.Indices,
+                         /*Inout_Index_Count      =>*/ &Result.Index_Count,
+                         /*Inout_Texture_Ids      =>*/ &Result.Texture_Ids,
+                         /*Inout_Triangle_Count   =>*/ &Result.Triangle_Count,
+                         /*Assigned_Texture_Index =>*/ 0,
+                         /*Transform              =>*/ NULL);
+      Hand_Surf_Cursor += ((const MD3_Surface *)Hand_Surf_Cursor)->End_Offset;
+    }
+
     free (Hand_Data);
-    printf ("[weapon] hand: %u animation frames\n", Result.Animation_Frame_Count);
+    printf ("[weapon] hand: %u animation frames, %d hand surfaces\n",
+            Result.Animation_Frame_Count, Hand_Surface_Count);
   }
 
   // Report the loaded weapon geometry statistics
@@ -3280,6 +3324,36 @@ typedef struct {
   int Flex_N, Flex_O, Mat_Type, Mat_Param, Id; vec3 Center; int Pad[6];
 } MDL_Mesh;
 
+// VVD on-disk types (vertexFileHeader_t — vertex data sidecar for Source MDL)
+#define VVD_MAGIC 0x56534449 // 'IDSV'
+typedef struct {
+  uint Magic; int Version; int Checksum; int Num_LODs;
+  int Num_LOD_Verts[7]; int Num_Fixups; int Fixup_Table_Start;
+  int Vertex_Data_Start; int Tangent_Data_Start;
+} VVD_Header;
+// VVD vertex: mstudiovertex_t (48 bytes)
+typedef struct {
+  float Bone_Weights[3]; uint8_t Bone_Ids[3]; uint8_t Num_Bones;
+  float Position[3]; float Normal[3]; float Tex_Coord[2];
+} VVD_Vertex;
+
+// VTX on-disk types (OptimizedModel — triangle strip sidecar for Source MDL)
+#define VTX_VERSION 7
+typedef struct {
+  int Version, Vert_Cache_Size; uint16_t Max_Bones_Strip, Max_Bones_Tri;
+  int Max_Bones_Vert, Checksum, Num_LODs, Mat_Repl_Offset;
+  int Num_Body_Parts, Body_Part_Offset;
+} VTX_Header;
+typedef struct { int Num_Models, Model_Offset; } VTX_Body_Part;
+typedef struct { int Num_LODs, LOD_Offset; } VTX_Model;
+typedef struct { int Num_Meshes, Mesh_Offset; float Switch_Point; } VTX_LOD;
+typedef struct { int Num_Strip_Groups, Strip_Group_Offset; uint8_t Flags; } VTX_Mesh;
+typedef struct {
+  int Num_Verts, Vert_Offset, Num_Indices, Index_Offset;
+  int Num_Strips, Strip_Offset; uint8_t Flags;
+} VTX_Strip_Group; // 25 bytes
+typedef struct { uint8_t Bwi[3]; uint8_t Num_Bones; uint16_t Orig_Mesh_Vert_Id; int8_t Bone_Id[3]; } VTX_Vertex; // 9 bytes
+
 // ══════════
 //   VTF_Load
 // ══════════
@@ -3392,7 +3466,12 @@ static Vertex VBSP_Convert (float X, float Y, float Z, float Nx, float Ny, float
 
 Scene Scene_Load_From_VBSP (const char *Path, Spawn *Out_Spawn) {
   FILE *F = fopen(Path, "rb");
-  if (not F) {fprintf(stderr, "Cannot open VBSP %s\n", Path); exit(1);}
+  if (not F) {
+    fprintf(stderr, "[error] cannot open VBSP map: %s\n", Path);
+    fprintf(stderr, "  Ensure the .bsp file exists in assets/maps/\n");
+    fprintf(stderr, "  For Source maps, use --source flag and place .bsp files in assets/maps/\n");
+    exit(1);
+  }
   fseek(F,0,SEEK_END); long Sz=ftell(F); rewind(F);
   uint8_t *D = malloc(Sz); size_t R_=fread(D,1,Sz,F); (void)R_; fclose(F);
   const VBSP_Header *H = (const VBSP_Header*)D;
@@ -3661,58 +3740,150 @@ Entity MDL_Load (Scene *S, const char *Path, vec3 Origin, float Yaw) {
     memcpy(E.Inv_Bind[I], B->Pose_To_Bone, sizeof(float)*12);
   }
 
-  // Parse body parts > models > meshes to extract geometry
-  // For skeletal models without a VVD file, synthesize a bind-pose mesh from the MDL body parts
-  uint Body_Mat = S->Material_Count;
-  int Mat_Base = S->Material_Count;
   // Add materials from the MDL material table
+  int Mat_Base = S->Material_Count;
   for (int I=0; I<H->Mat_N and I<MDL_MAX_MESHES; I++) {
-    const int *Name_O = (const int*)(D + H->Mat_O + I*64); // Material entries are 64-byte aligned name-offset blocks
-    const char *Mn = (const char*)(D + H->Mat_O + I*64); // In practice, name is at the base of the material struct
+    const uint8_t *Me = D + H->Mat_O + I*64;
+    int Name_Off = *(const int*)Me; // Relative name offset within the material entry
+    const char *Mn = (const char*)(Me + Name_Off);
     S->Material_Count++;
     S->Materials     = realloc(S->Materials, sizeof(vec4)*S->Material_Count);
     S->Texture_Names = realloc(S->Texture_Names, 64*S->Material_Count);
     S->Materials[S->Material_Count-1] = (vec4){.x=0.5f,.y=0.5f,.z=0.5f,.w=1.f};
     snprintf(S->Texture_Names[S->Material_Count-1], 64, "%s", Mn);
-    (void)Name_O;
   }
 
-  // Generate bind-pose geometry from body parts
+  // Load geometry from VVD + VTX sidecar files (real Source model pipeline)
   Vertex *Verts = NULL; uint VC = 0;
   uint *Idx = NULL; uint IC = 0;
   uint *Tex = NULL; uint TC = 0;
   float CA = cosf(Yaw), SA = sinf(Yaw);
 
-  for (int Bp=0; Bp<H->Body_N and Bp<MDL_MAX_BODYPARTS; Bp++) {
-    const MDL_Body_Part *Bp_D = (const MDL_Body_Part*)(D + H->Body_O + Bp*16);
-    for (int Mi=0; Mi<Bp_D->Model_N; Mi++) {
-      const MDL_Model *Md = (const MDL_Model*)(D + H->Body_O + Bp*16 + Bp_D->Model_O + Mi*sizeof(MDL_Model));
-      for (int Ms=0; Ms<Md->Mesh_N and Ms<MDL_MAX_MESHES; Ms++) {
-        const MDL_Mesh *Msh = (const MDL_Mesh*)(D + H->Body_O + Bp*16 + Bp_D->Model_O + Mi*sizeof(MDL_Model) + Md->Mesh_O + Ms*sizeof(MDL_Mesh));
-        uint Mat_Id = (uint)(Mat_Base + (Msh->Material < H->Mat_N ? Msh->Material : 0));
-        // Generate a placeholder sphere for this mesh (real VVD vertex data would come from the .vvd sidecar)
-        int Nv = Msh->Vert_N > 0 ? (Msh->Vert_N < 256 ? Msh->Vert_N : 256) : 4;
-        uint Base = VC;
-        Verts = realloc(Verts, sizeof(Vertex)*(VC+Nv));
-        for (int V=0; V<Nv; V++) {
-          float Angle = (float)V / Nv * 6.28318f;
-          float Px = cosf(Angle)*8.f, Pz = sinf(Angle)*8.f, Py = (float)V/(Nv-1)*24.f - 12.f;
-          // Transform by entity world placement (Source Z-up: rotate then translate, then swizzle to Y-up)
-          float Wx = CA*Px - SA*Pz + Origin.x;
-          float Wz = SA*Px + CA*Pz + Origin.z;
-          float Wy = Py + Origin.y;
-          Verts[VC++] = (Vertex){.Position={Wx,Wy,-Wz}, .Normal={cosf(Angle),0,-sinf(Angle)}, .Texture_Uv={(float)V/Nv, 0.5f}};
-        }
-        // Fan-triangulate
-        for (int T=0; T<Nv-2; T++) {
-          Idx = realloc(Idx, sizeof(uint)*(IC+3));
-          Idx[IC++]=Base; Idx[IC++]=Base+T+1; Idx[IC++]=Base+T+2;
-          Tex = realloc(Tex, sizeof(uint)*(TC+1));
-          Tex[TC++] = Mat_Id;
+  // Construct sidecar paths: replace .mdl with .vvd and .dx90.vtx
+  char Vvd_Path[512], Vtx_Path[512];
+  snprintf(Vvd_Path, sizeof Vvd_Path, "%.*s.vvd", (int)(strlen(Path)-4), Path);
+  snprintf(Vtx_Path, sizeof Vtx_Path, "%.*s.dx90.vtx", (int)(strlen(Path)-4), Path);
+
+  // Read VVD (vertex data)
+  FILE *Fv = fopen(Vvd_Path, "rb"); VVD_Vertex *VVD_Verts = NULL; int VVD_N = 0;
+  if (Fv) {
+    fseek(Fv,0,SEEK_END); long Vs=ftell(Fv); rewind(Fv);
+    uint8_t *Vd = malloc(Vs); size_t Vr=fread(Vd,1,Vs,Fv); (void)Vr; fclose(Fv);
+    const VVD_Header *Vh = (const VVD_Header*)Vd;
+    if (Vh->Magic == VVD_MAGIC and Vh->Version == 4) {
+      VVD_N = Vh->Num_LOD_Verts[0];
+      VVD_Verts = malloc(sizeof(VVD_Vertex) * VVD_N);
+      memcpy(VVD_Verts, Vd + Vh->Vertex_Data_Start, sizeof(VVD_Vertex) * VVD_N);
+      printf("[mdl] VVD: %d vertices from %s\n", VVD_N, Vvd_Path);
+    }
+    free(Vd);
+  }
+
+  // Read VTX (triangle strip data) and extract indexed triangles
+  FILE *Ft = fopen(Vtx_Path, "rb");
+  if (Ft and VVD_Verts) {
+    fseek(Ft,0,SEEK_END); long Ts=ftell(Ft); rewind(Ft);
+    uint8_t *Td = malloc(Ts); size_t Tr=fread(Td,1,Ts,Ft); (void)Tr; fclose(Ft); Ft=NULL;
+    const VTX_Header *Th = (const VTX_Header*)Td;
+    if (Th->Version == VTX_VERSION) {
+      // Walk: body parts → models → LOD 0 → meshes → strip groups → indices
+      int Mesh_Vert_Offset = 0; // Running offset into VVD vertices per-mesh
+      for (int Bp=0; Bp<Th->Num_Body_Parts; Bp++) {
+        int Bp_Base = Th->Body_Part_Offset + Bp * 8;
+        int Bp_Models = *(int*)(Td+Bp_Base);
+        int Bp_Model_O = *(int*)(Td+Bp_Base+4);
+        // Also read MDL body part to get per-model mesh vert offsets
+        const MDL_Body_Part *MBp = (Bp < H->Body_N) ? (const MDL_Body_Part*)(D + H->Body_O + Bp*16) : NULL;
+        for (int Mi=0; Mi<Bp_Models; Mi++) {
+          int M_Base = Bp_Base + Bp_Model_O + Mi * 8;
+          int M_Lods = *(int*)(Td+M_Base);
+          int M_Lod_O = *(int*)(Td+M_Base+4);
+          (void)M_Lods;
+          // LOD 0 only
+          int Lod_Base = M_Base + M_Lod_O;
+          int Lod_Meshes = *(int*)(Td+Lod_Base);
+          int Lod_Mesh_O = *(int*)(Td+Lod_Base+4);
+          // Read per-mesh VVD vertex offset from MDL
+          const MDL_Model *MdlM = (MBp and Mi < MBp->Model_N)
+            ? (const MDL_Model*)(D + H->Body_O + Bp*16 + MBp->Model_O + Mi*sizeof(MDL_Model)) : NULL;
+          for (int Ms=0; Ms<Lod_Meshes; Ms++) {
+            int Ms_Base = Lod_Base + Lod_Mesh_O + Ms * 12;
+            int Num_SG = *(int*)(Td+Ms_Base);
+            int SG_Off = *(int*)(Td+Ms_Base+4);
+            // Get material from MDL mesh
+            uint Mat_Id = 0;
+            if (MdlM and Ms < MdlM->Mesh_N) {
+              const MDL_Mesh *MdlMsh = (const MDL_Mesh*)(D + H->Body_O + Bp*16 + MBp->Model_O + Mi*sizeof(MDL_Model) + MdlM->Mesh_O + Ms*sizeof(MDL_Mesh));
+              Mat_Id = (uint)(Mat_Base + (MdlMsh->Material < H->Mat_N ? MdlMsh->Material : 0));
+              Mesh_Vert_Offset = MdlMsh->Vert_O; // Offset into VVD for this mesh's vertices
+            }
+            for (int Sg=0; Sg<Num_SG; Sg++) {
+              int Sg_Base = Ms_Base + SG_Off + Sg * 25;
+              int SG_Nv = *(int*)(Td+Sg_Base);
+              int SG_Vo = *(int*)(Td+Sg_Base+4);
+              int SG_Ni = *(int*)(Td+Sg_Base+8);
+              int SG_Io = *(int*)(Td+Sg_Base+12);
+              (void)SG_Nv;
+              // Read strip group vertices (9 bytes each) to get origMeshVertID mapping
+              uint16_t *Orig_Map = malloc(SG_Nv * sizeof(uint16_t));
+              for (int V=0; V<SG_Nv; V++) {
+                int Voff = Sg_Base + SG_Vo + V*9;
+                Orig_Map[V] = *(uint16_t*)(Td+Voff+4);
+              }
+              // Read indices (uint16_t) and emit triangles
+              uint16_t *Strip_Idx = (uint16_t*)(Td + Sg_Base + SG_Io);
+              for (int I=0; I+2<SG_Ni; I+=3) {
+                uint Base = VC;
+                Verts = realloc(Verts, sizeof(Vertex)*(VC+3));
+                Idx = realloc(Idx, sizeof(uint)*(IC+3));
+                Tex = realloc(Tex, sizeof(uint)*(TC+1));
+                for (int K=0; K<3; K++) {
+                  int Sg_Vi = Strip_Idx[I+K];
+                  int Vvd_Vi = Mesh_Vert_Offset + (Sg_Vi < SG_Nv ? Orig_Map[Sg_Vi] : 0);
+                  if (Vvd_Vi >= VVD_N) Vvd_Vi = 0;
+                  const VVD_Vertex *Sv = &VVD_Verts[Vvd_Vi];
+                  // Transform: Source Z-up to GL Y-up with entity rotation and offset
+                  float Px=Sv->Position[0], Py=Sv->Position[1], Pz=Sv->Position[2];
+                  float Wx = CA*Px - SA*Py + Origin.x;
+                  float Wy = SA*Px + CA*Py + Origin.z;
+                  float Wz = Pz + Origin.y; // Source Z = GL Y (up)
+                  // Swizzle to GL: (Wx, Wz, -Wy) where Wz is up
+                  Verts[VC] = (Vertex){.Position={Wx,Wz,-Wy},
+                    .Normal={Sv->Normal[0],Sv->Normal[2],-Sv->Normal[1]},
+                    .Texture_Uv={Sv->Tex_Coord[0], Sv->Tex_Coord[1]}};
+                  Idx[IC++] = Base+K; VC++;
+                }
+                Tex[TC++] = Mat_Id;
+              }
+              free(Orig_Map);
+            }
+          }
         }
       }
     }
+    free(Td);
+  } else {
+    if (Ft) fclose(Ft);
+    printf("[mdl] VVD/VTX sidecars not found, generating placeholder\n");
+    // Fallback: generate a simple box placeholder
+    Verts = malloc(sizeof(Vertex)*36); Idx = malloc(sizeof(uint)*36); Tex = malloc(sizeof(uint)*12);
+    float Hx=8,Hy=24,Hz=8; vec3 O={Origin.x, Origin.y, Origin.z};
+    float Bv[][3]={{-Hx,-Hy,-Hz},{Hx,-Hy,-Hz},{Hx,Hy,-Hz},{-Hx,Hy,-Hz},{-Hx,-Hy,Hz},{Hx,-Hy,Hz},{Hx,Hy,Hz},{-Hx,Hy,Hz}};
+    int Bf[][4]={{0,1,2,3},{5,4,7,6},{1,5,6,2},{4,0,3,7},{4,5,1,0},{3,2,6,7}};
+    float Bn[][3]={{0,0,-1},{0,0,1},{1,0,0},{-1,0,0},{0,-1,0},{0,1,0}};
+    for(int F_=0;F_<6;F_++) for(int T=0;T<2;T++) {
+      int I0=Bf[F_][0],I1=Bf[F_][T?0:1],I2=Bf[F_][T+1],I3=Bf[F_][T?3:2]; (void)I3;
+      for(int K=0;K<3;K++) {
+        int Vi = K==0?I0:K==1?I1:I2;
+        float Px=Bv[Vi][0],Py=Bv[Vi][1],Pz=Bv[Vi][2];
+        float Wx=CA*Px-SA*Pz+O.x, Wz=SA*Px+CA*Pz+O.z, Wy=Py+O.y;
+        Verts[VC]=(Vertex){.Position={Wx,Wy,-Wz},.Normal={Bn[F_][0],Bn[F_][2],-Bn[F_][1]}};
+        Idx[IC]=VC; IC++; VC++;
+      }
+      Tex[TC++]=0;
+    }
   }
+  free(VVD_Verts);
 
   // Populate entity
   E.Frame_Count = 1;
@@ -3734,6 +3905,160 @@ Entity MDL_Load (Scene *S, const char *Path, vec3 Origin, float Yaw) {
   free(D);
   printf("[mdl] %s: %d bones, %u verts, %u tris\n", Path, E.Bone_Count, VC, TC);
   return E;
+}
+
+// ══════════════════════════════
+//   Source_Weapon_Model_Load
+// ══════════════════════════════
+
+Weapon_Model Source_Weapon_Model_Load (const char *Path) {
+  Weapon_Model Result = {0};
+
+  // Read MDL file
+  FILE *F = fopen(Path, "rb");
+  if (not F) {printf("[weapon] cannot open Source MDL %s\n", Path); return Result;}
+  fseek(F,0,SEEK_END); long Sz=ftell(F); rewind(F);
+  uint8_t *D = malloc(Sz); size_t R_=fread(D,1,Sz,F); (void)R_; fclose(F);
+  const MDL_Header *H = (const MDL_Header*)D;
+  if (H->Magic != MDL_MAGIC_IDST) {printf("[weapon] bad magic in %s\n", Path); free(D); return Result;}
+
+  // Get material name for texture loading
+  if (H->Mat_N > 0) {
+    const uint8_t *Me = D + H->Mat_O;
+    int Name_Off = *(const int*)Me;
+    const char *Mn = (const char*)(Me + Name_Off);
+    snprintf(Result.Texture_Names[0], 64, "%s", Mn);
+    Result.Surface_Count = 1;
+  }
+
+  // Construct sidecar paths
+  char Vvd_Path[512], Vtx_Path[512];
+  snprintf(Vvd_Path, sizeof Vvd_Path, "%.*s.vvd", (int)(strlen(Path)-4), Path);
+  snprintf(Vtx_Path, sizeof Vtx_Path, "%.*s.dx90.vtx", (int)(strlen(Path)-4), Path);
+
+  // Read VVD
+  FILE *Fv = fopen(Vvd_Path, "rb"); VVD_Vertex *VVD_Verts = NULL; int VVD_N = 0;
+  if (Fv) {
+    fseek(Fv,0,SEEK_END); long Vs=ftell(Fv); rewind(Fv);
+    uint8_t *Vd = malloc(Vs); size_t Vr=fread(Vd,1,Vs,Fv); (void)Vr; fclose(Fv);
+    const VVD_Header *Vh = (const VVD_Header*)Vd;
+    if (Vh->Magic == VVD_MAGIC and Vh->Version == 4) {
+      VVD_N = Vh->Num_LOD_Verts[0];
+      VVD_Verts = malloc(sizeof(VVD_Vertex) * VVD_N);
+      memcpy(VVD_Verts, Vd + Vh->Vertex_Data_Start, sizeof(VVD_Vertex) * VVD_N);
+    }
+    free(Vd);
+  }
+
+  // Read VTX and extract geometry
+  FILE *Ft = fopen(Vtx_Path, "rb");
+  if (Ft and VVD_Verts) {
+    fseek(Ft,0,SEEK_END); long Ts=ftell(Ft); rewind(Ft);
+    uint8_t *Td = malloc(Ts); size_t Tr=fread(Td,1,Ts,Ft); (void)Tr; fclose(Ft); Ft=NULL;
+    const VTX_Header *Th = (const VTX_Header*)Td;
+    if (Th->Version == VTX_VERSION) {
+      int Mesh_Vert_Offset = 0;
+      for (int Bp=0; Bp<Th->Num_Body_Parts; Bp++) {
+        int Bp_Base = Th->Body_Part_Offset + Bp * 8;
+        int Bp_Models = *(int*)(Td+Bp_Base);
+        int Bp_Model_O = *(int*)(Td+Bp_Base+4);
+        const MDL_Body_Part *MBp = (Bp < H->Body_N) ? (const MDL_Body_Part*)(D + H->Body_O + Bp*16) : NULL;
+        for (int Mi=0; Mi<Bp_Models; Mi++) {
+          int M_Base = Bp_Base + Bp_Model_O + Mi * 8;
+          int M_Lod_O = *(int*)(Td+M_Base+4);
+          int Lod_Base = M_Base + M_Lod_O;
+          int Lod_Meshes = *(int*)(Td+Lod_Base);
+          int Lod_Mesh_O = *(int*)(Td+Lod_Base+4);
+          const MDL_Model *MdlM = (MBp and Mi < MBp->Model_N)
+            ? (const MDL_Model*)(D + H->Body_O + Bp*16 + MBp->Model_O + Mi*sizeof(MDL_Model)) : NULL;
+          for (int Ms=0; Ms<Lod_Meshes; Ms++) {
+            int Ms_Base = Lod_Base + Lod_Mesh_O + Ms * 12;
+            int Num_SG = *(int*)(Td+Ms_Base);
+            int SG_Off = *(int*)(Td+Ms_Base+4);
+            if (MdlM and Ms < MdlM->Mesh_N) {
+              const MDL_Mesh *MdlMsh = (const MDL_Mesh*)(D + H->Body_O + Bp*16 + MBp->Model_O + Mi*sizeof(MDL_Model) + MdlM->Mesh_O + Ms*sizeof(MDL_Mesh));
+              Mesh_Vert_Offset = MdlMsh->Vert_O;
+            }
+            for (int Sg=0; Sg<Num_SG; Sg++) {
+              int Sg_Base = Ms_Base + SG_Off + Sg * 25;
+              int SG_Nv = *(int*)(Td+Sg_Base);
+              int SG_Vo = *(int*)(Td+Sg_Base+4);
+              int SG_Ni = *(int*)(Td+Sg_Base+8);
+              int SG_Io = *(int*)(Td+Sg_Base+12);
+              uint16_t *Orig_Map = malloc(SG_Nv * sizeof(uint16_t));
+              for (int V=0; V<SG_Nv; V++) {
+                int Voff = Sg_Base + SG_Vo + V*9;
+                Orig_Map[V] = *(uint16_t*)(Td+Voff+4);
+              }
+              uint16_t *Strip_Idx = (uint16_t*)(Td + Sg_Base + SG_Io);
+              for (int I=0; I+2<SG_Ni; I+=3) {
+                uint Base = Result.Vertex_Count;
+                Result.Vertices = realloc(Result.Vertices, sizeof(Vertex)*(Result.Vertex_Count+3));
+                Result.Indices = realloc(Result.Indices, sizeof(uint)*(Result.Index_Count+3));
+                Result.Texture_Ids = realloc(Result.Texture_Ids, sizeof(uint)*(Result.Triangle_Count+1));
+                for (int K=0; K<3; K++) {
+                  int Sg_Vi = Strip_Idx[I+K];
+                  int Vvd_Vi = Mesh_Vert_Offset + (Sg_Vi < SG_Nv ? Orig_Map[Sg_Vi] : 0);
+                  if (Vvd_Vi >= VVD_N) Vvd_Vi = 0;
+                  const VVD_Vertex *Sv = &VVD_Verts[Vvd_Vi];
+                  // Source models: Z-up to GL Y-up swizzle (x, z, -y)
+                  Result.Vertices[Result.Vertex_Count] = (Vertex){
+                    .Position = {Sv->Position[0], Sv->Position[2], -Sv->Position[1]},
+                    .Normal = {Sv->Normal[0], Sv->Normal[2], -Sv->Normal[1]},
+                    .Texture_Uv = {Sv->Tex_Coord[0], Sv->Tex_Coord[1]}};
+                  Result.Indices[Result.Index_Count++] = Base+K;
+                  Result.Vertex_Count++;
+                }
+                Result.Texture_Ids[Result.Triangle_Count++] = 0;
+              }
+              free(Orig_Map);
+            }
+          }
+        }
+      }
+    }
+    free(Td);
+  } else {
+    if (Ft) fclose(Ft);
+  }
+  free(VVD_Verts);
+  free(D);
+
+  // Load Q3 hand mesh for arm/hand geometry and animation frames
+  FILE *Fh = fopen("assets/models/weapons2/machinegun/machinegun_hand.md3", "rb");
+  if (Fh) {
+    fseek(Fh,0,SEEK_END); long Hs=ftell(Fh); rewind(Fh);
+    uint8_t *Hd = malloc(Hs); size_t Hr=fread(Hd,1,Hs,Fh); (void)Hr; fclose(Fh);
+    if (*(uint*)Hd == MD3_MAGIC) {
+      int Hfc = *(int*)(Hd+76), Htc = *(int*)(Hd+80), Hto = *(int*)(Hd+96);
+      int Hsc = *(int*)(Hd+84), Hso = *(int*)(Hd+100);
+      Result.Animation_Frame_Count = Hfc < 30 ? Hfc : 30;
+      for (uint Fr=0; Fr<Result.Animation_Frame_Count; Fr++) {
+        const MD3_Tag *Tags = (const MD3_Tag*)(Hd + Hto + Fr * Htc * sizeof(MD3_Tag));
+        for (int T=0; T<Htc; T++) {
+          if (strncmp(Tags[T].Name,"tag_weapon",64)==0) {
+            memcpy(Result.Tag_Weapon[Fr], Tags[T].Origin, 3*sizeof(float));
+            memcpy(Result.Tag_Weapon[Fr]+3, Tags[T].Axis, 9*sizeof(float));
+            break;
+          }
+        }
+      }
+      // Parse hand surfaces for rendered arm/hand geometry
+      const uint8_t *Hs_Cursor = Hd + Hso;
+      for (int S=0; S<Hsc; S++) {
+        MD3_Parse_Surface(Hs_Cursor, &Result.Vertices, &Result.Vertex_Count,
+                          &Result.Indices, &Result.Index_Count,
+                          &Result.Texture_Ids, &Result.Triangle_Count, 0, NULL);
+        Hs_Cursor += ((const MD3_Surface*)Hs_Cursor)->End_Offset;
+      }
+      printf("[weapon] hand mesh loaded: %u anim frames\n", Result.Animation_Frame_Count);
+    }
+    free(Hd);
+  }
+
+  printf("[weapon] Source MDL: %u verts, %u tris from %s\n",
+         Result.Vertex_Count, Result.Triangle_Count, Path);
+  return Result;
 }
 
 // ══════════════════════
@@ -3922,11 +4247,24 @@ void Vulkan_Create_Instance () {
 void Vulkan_Pick_Physical_Device () {
 
   // Pick the first available physical device
-  uint Device_Count;
+  uint Device_Count = 0;
   vkEnumeratePhysicalDevices (Instance, &Device_Count, NULL);
+  if (Device_Count == 0) {
+    fprintf (stderr, "[error] no Vulkan-capable GPU found.\n");
+    fprintf (stderr, "  Install Vulkan drivers: apt install mesa-vulkan-drivers\n");
+    fprintf (stderr, "  For software rendering: export VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.json\n");
+    exit (1);
+  }
   VkPhysicalDevice *Devices = malloc (sizeof (VkPhysicalDevice) * Device_Count);
   vkEnumeratePhysicalDevices (Instance, &Device_Count, Devices);
   Physical_Device = Devices[0];
+
+  // Report which device was selected
+  VkPhysicalDeviceProperties Props;
+  vkGetPhysicalDeviceProperties (Physical_Device, &Props);
+  printf ("[vulkan] device: %s (Vulkan %d.%d.%d)\n",
+          Props.deviceName, VK_API_VERSION_MAJOR (Props.apiVersion),
+          VK_API_VERSION_MINOR (Props.apiVersion), VK_API_VERSION_PATCH (Props.apiVersion));
   free (Devices);
 
   // Search for a queue family that supports both graphics and surface presentation
@@ -4364,7 +4702,11 @@ Scene Scene_Load_From_BSP (const char *Path, Spawn *Out_Spawn) {
   FILE *File = fopen (Path, "rb");
 
   // Abandon loading scenes with invalid paths
-  if (not File) {fprintf (stderr, "Cannot open %s\n", Path); exit (1);}
+  if (not File) {
+    fprintf (stderr, "[error] cannot open Q3 BSP map: %s\n", Path);
+    fprintf (stderr, "  Download OpenArena assets: place .bsp files in assets/maps/\n");
+    exit (1);
+  }
 
   // Get the file size so we can allocate a buffer, then seek back to the beginning
   fseek (File, 0, SEEK_END); 
@@ -5178,8 +5520,27 @@ void Scene_Load_Textures (const Scene *Scene_Data) {
     uint8_t *Pixels = NULL;
     if (Scene_Data->Texture_Names) {
       char Path[256];
+      // Try TGA first (Q3 assets)
       snprintf (Path, sizeof (Path), "assets/%s.tga", Scene_Data->Texture_Names[Index]);
       Pixels = TGA_Load (Path, &W, &H);
+      // Fallback: try VTF from cspromod materials directory (Source engine textures)
+      if (not Pixels) {
+        char Vtf_Path[512]; char Lower[256];
+        const char *N = Scene_Data->Texture_Names[Index];
+        for (int C=0; N[C] and C<255; C++) Lower[C] = (N[C]>='A' and N[C]<='Z') ? N[C]+32 : N[C];
+        Lower[strlen(N)<255?strlen(N):255] = 0;
+        // Try cspromod materials path
+        static const char *VTF_Search_Dirs[] = {
+          "/tmp/cspromod_new/cspromod_b105/cspromod/materials",
+          "assets/materials",
+          NULL
+        };
+        for (const char **Dir = VTF_Search_Dirs; *Dir and not Pixels; Dir++) {
+          snprintf (Vtf_Path, sizeof Vtf_Path, "%s/%s.vtf", *Dir, Lower);
+          int Vw=0, Vh=0; uint8_t *Vp = NULL;
+          if (VTF_Load(Vtf_Path, &Vp, &Vw, &Vh) and Vp) { Pixels=Vp; W=(uint)Vw; H=(uint)Vh; }
+        }
+      }
     }
     if (Pixels and W and H) {
       Texture_Upload_With_Format (/*Command_Buffer =>*/ Command_Buffer,
@@ -5486,28 +5847,57 @@ void Weapon_Load_Textures (Weapon_Instance *Weapon) {
     {128, 128, 128, 255},   // height: mid-level
   };
 
+  // Always use WEAPON_TEXTURE_COUNT (2) slots - shader hardcodes stride=2 for weapon PBR layout
+  uint Weapon_Tex_Count = WEAPON_TEXTURE_COUNT;
+
   // Grow the global texture arrays to hold weapon PBR slots
-  uint Weapon_PBR_Maps = WEAPON_TEXTURE_COUNT * 6;
+  uint Weapon_PBR_Maps = Weapon_Tex_Count * 6;
   uint New_Total = Texture_Count + Weapon_PBR_Maps;
   Texture_Images   = realloc (Texture_Images,   sizeof (VkImage)        * New_Total);
   Texture_Memories = realloc (Texture_Memories,  sizeof (VkDeviceMemory) * New_Total);
   Texture_Views    = realloc (Texture_Views,     sizeof (VkImageView)    * New_Total);
 
-  // Load weapon textures: 6 PBR map types × WEAPON_TEXTURE_COUNT textures
+  // Load weapon textures: 6 PBR map types × Weapon_Tex_Count textures
   uint Weapon_PBR_Loaded = 0;
   for (uint Map_Type = 0; Map_Type < 6; Map_Type++) {
-    for (uint Index = 0; Index < WEAPON_TEXTURE_COUNT; Index++) {
-      uint Slot = Texture_Count + Map_Type * WEAPON_TEXTURE_COUNT + Index;
+    for (uint Index = 0; Index < Weapon_Tex_Count; Index++) {
+      uint Slot = Texture_Count + Map_Type * Weapon_Tex_Count + Index;
       uint Img_W = 0, Img_H = 0;
       uint8_t *Pixels = NULL;
 
-      // Build the PBR variant path
-      char Path[256];
-      snprintf (Path, sizeof Path, "%s", WEAPON_TEXTURE_PATHS[Index]);
-      char *Ext = strstr (Path, ".tga");
-      if (Ext) {
-        snprintf (Ext, sizeof Path - (size_t)(Ext - Path), "%s.tga", Weapon_PBR_Suffixes[Map_Type]);
-        Pixels = TGA_Load (Path, &Img_W, &Img_H);
+      if (Map_Type == 0 and Weapon->Model.Texture_Names[Index][0]) {
+        // Try loading weapon texture from model's texture name (Source VTF or TGA)
+        char Lower[256]; int Li=0;
+        for (const char *C=Weapon->Model.Texture_Names[Index]; *C and Li<255; C++)
+          Lower[Li++] = (*C>='A' and *C<='Z') ? *C+32 : *C;
+        Lower[Li]=0;
+
+        // Try VTF from cspromod materials directories
+        static const char *VTF_Dirs[] = {
+          "/tmp/cspromod_new/cspromod_b105/cspromod/materials",
+          "assets/materials", NULL
+        };
+        for (const char **Dir = VTF_Dirs; *Dir and not Pixels; Dir++) {
+          char Vtf_P[512];
+          snprintf(Vtf_P, sizeof Vtf_P, "%s/%s.vtf", *Dir, Lower);
+          int Vw=0, Vh=0; uint8_t *Vp = NULL;
+          if (VTF_Load(Vtf_P, &Vp, &Vw, &Vh) and Vp) {
+            Pixels=Vp; Img_W=(uint)Vw; Img_H=(uint)Vh;
+            printf("[weapon] loaded VTF texture %s (%ux%u)\n", Vtf_P, Img_W, Img_H);
+          }
+        }
+      }
+
+      // Fall back to TGA path for Q3 weapons
+      if (not Pixels and Index < WEAPON_TEXTURE_COUNT) {
+        char Path[256];
+        snprintf (Path, sizeof Path, "%s", WEAPON_TEXTURE_PATHS[Index]);
+        char *Ext = strstr (Path, ".tga");
+        if (Ext) {
+          snprintf (Ext, sizeof Path - (size_t)(Ext - Path), "%s.tga", Weapon_PBR_Suffixes[Map_Type]);
+          Pixels = TGA_Load (Path, &Img_W, &Img_H);
+          if (Pixels and Map_Type == 0) printf ("[weapon] loaded texture %s (%ux%u)\n", Path, Img_W, Img_H);
+        }
       }
 
       // Diffuse maps use SRGB; PBR maps (normal, roughness, metalness, emissive, height) use UNORM
@@ -5524,10 +5914,7 @@ void Weapon_Load_Textures (Weapon_Instance *Weapon) {
                                     /*Out_Memory     =>*/ &Texture_Memories[Slot],
                                     /*Out_View       =>*/ &Texture_Views[Slot]);
         free (Pixels);
-        if (Map_Type == 0)
-          printf ("[weapon] loaded texture %s (%ux%u)\n", Path, Img_W, Img_H);
-        else
-          Weapon_PBR_Loaded++;
+        if (Map_Type > 0) Weapon_PBR_Loaded++;
       } else {
         Texture_Upload_With_Format (/*Command_Buffer =>*/ Command_Buffer,
                                     /*Queue          =>*/ Queue,
@@ -5539,13 +5926,13 @@ void Weapon_Load_Textures (Weapon_Instance *Weapon) {
                                     /*Out_Memory     =>*/ &Texture_Memories[Slot],
                                     /*Out_View       =>*/ &Texture_Views[Slot]);
         if (Map_Type == 0)
-          printf ("[weapon] fallback texture for %s\n", WEAPON_TEXTURE_PATHS[Index]);
+          printf ("[weapon] fallback for weapon texture %u\n", Index);
       }
     }
   }
   Texture_Count += Weapon_PBR_Maps;
   printf ("[weapon] textures: base=%u, count=%u (diffuse), PBR maps=%u\n",
-          Weapon->Texture_Base_Index, WEAPON_TEXTURE_COUNT, Weapon_PBR_Loaded);
+          Weapon->Texture_Base_Index, Weapon_Tex_Count, Weapon_PBR_Loaded);
 }
 
 // ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
@@ -10280,6 +10667,10 @@ int main (int Argc, char **Argv) {
   //   --no-parallax     Disable parallax occlusion mapping
   //   --dump-frames D   Save each benchmark frame as D/frame_NNNN.tga
   //   --validation      Enable Vulkan validation layers (off by default)
+  //   --source          Load Source engine BSP (VBSP) instead of Q3 BSP
+  //   --mdl PATH        Load Source MDL model as enemy entity
+  //   --weapon PATH     Load Source MDL model as held weapon
+  //   --world q3|source Set world coordinate system/physics preset
   //   mapname.bsp       Load specified BSP map instead of default
 
   // Local variables
@@ -10295,11 +10686,35 @@ int main (int Argc, char **Argv) {
   int         Override_Res      = 0;    // 1 if --res was specified (overrides quality preset)
   int         Source_Mode       = 0;    // 1 = load Source BSP (VBSP) instead of Q3 BSP
   const char *Source_MDL_Path   = NULL; // Optional Source MDL model to load as entity
+  const char *Source_Weapon_Path = NULL; // Optional Source MDL model to load as held weapon
   const char *Map_Name = DEFAULT_MAP;
 
   // Parse command-line arguments
   for (int I = 1; I < Argc; I++) {
-    if      (strcmp (Argv[I], "--physics-test")   == 0) Physics_Test = 1;
+    if      (strcmp (Argv[I], "--help") == 0 or strcmp (Argv[I], "-h") == 0) {
+      printf ("Usage: %s [options] [mapname.bsp]\n\n", Argv[0]);
+      printf ("Options:\n");
+      printf ("  --source          Load Source engine BSP (VBSP) instead of Q3 BSP\n");
+      printf ("  --mdl PATH        Load Source MDL model as enemy entity\n");
+      printf ("  --weapon PATH     Load Source MDL as held weapon (viewmodel)\n");
+      printf ("  --world q3|source Set world preset (player height, FOV, speed)\n");
+      printf ("  --screenshot FILE Render one frame from spawn, save TGA, exit\n");
+      printf ("  --benchmark N     Run N frames, print FPS stats, exit\n");
+      printf ("  --spp N           Override samples-per-pixel (1, 2, 4, 8)\n");
+      printf ("  --res WxH         Override render resolution (e.g. 1920x1080)\n");
+      printf ("  --quality LEVEL   Set quality preset (ultra/high/medium/low/potato)\n");
+      printf ("  --no-postprocess  Disable tonemapping and post-processing\n");
+      printf ("  --no-pbr          Disable PBR maps (diffuse + lightmap only)\n");
+      printf ("  --no-parallax     Disable parallax occlusion mapping\n");
+      printf ("  --validation      Enable Vulkan validation layers\n");
+      printf ("  --dump-frames DIR Save benchmark frames as DIR/frame_NNNN.tga\n");
+      printf ("  --physics-test    Run physics simulation without rendering\n");
+      printf ("\nEnvironment:\n");
+      printf ("  VK_ICD_FILENAMES  Set Vulkan driver (e.g. /usr/share/vulkan/icd.d/lvp_icd.json)\n");
+      printf ("  DISPLAY           X11 display (use Xvfb for headless rendering)\n");
+      return 0;
+    }
+    else if (strcmp (Argv[I], "--physics-test")   == 0) Physics_Test = 1;
     else if (strcmp (Argv[I], "--benchmark")      == 0 and I + 1 < Argc) Benchmark_Frames = atoi (Argv[++I]);
     else if (strcmp (Argv[I], "--screenshot")     == 0 and I + 1 < Argc) Screenshot_Path = Argv[++I];
     else if (strcmp (Argv[I], "--dump-frames")    == 0 and I + 1 < Argc) Dump_Frames_Dir = Argv[++I];
@@ -10321,6 +10736,7 @@ int main (int Argc, char **Argv) {
       else if (strcmp(Mv,"q3")==0)     Active_Movement = MOVEMENT_QUAKE3;
     }
     else if (strcmp (Argv[I], "--mdl")            == 0 and I + 1 < Argc) Source_MDL_Path = Argv[++I];
+    else if (strcmp (Argv[I], "--weapon")         == 0 and I + 1 < Argc) Source_Weapon_Path = Argv[++I];
     else if (strcmp (Argv[I], "--spp")            == 0 and I + 1 < Argc) Override_SPP = atoi (Argv[++I]);
     else if (strcmp (Argv[I], "--res")            == 0 and I + 1 < Argc) {
       sscanf (Argv[++I], "%dx%d", &Width, &Height);
@@ -10356,10 +10772,33 @@ int main (int Argc, char **Argv) {
   char Map_Path[256];
   snprintf (Map_Path, sizeof Map_Path, "%smaps/%s", ASSET_ROOT, Map_Name);
 
+  // Verify the map file exists before starting expensive GPU setup
+  {
+    FILE *Map_Test = fopen (Map_Path, "rb");
+    if (not Map_Test) {
+      fprintf (stderr, "[error] map file not found: %s\n", Map_Path);
+      fprintf (stderr, "  Place .bsp files in the assets/maps/ directory.\n");
+      fprintf (stderr, "  Usage: %s [options] <mapname.bsp>\n", Argv[0]);
+      return 1;
+    }
+    fclose (Map_Test);
+  }
+
   // Initialize SDL2 with video subsystem and create a Vulkan-capable resizable window
-  SDL_Init (SDL_INIT_VIDEO);
+  if (SDL_Init (SDL_INIT_VIDEO) < 0) {
+    fprintf (stderr, "[error] SDL_Init failed: %s\n", SDL_GetError ());
+    fprintf (stderr, "  Ensure a display server (X11/Wayland) is running.\n");
+    fprintf (stderr, "  For headless use: Xvfb :99 -screen 0 1920x1080x24 & export DISPLAY=:99\n");
+    return 1;
+  }
   Window = SDL_CreateWindow (ENGINE_NAME, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
                              Width, Height, SDL_WINDOW_VULKAN | SDL_WINDOW_SHOWN | SDL_WINDOW_RESIZABLE);
+  if (not Window) {
+    fprintf (stderr, "[error] SDL_CreateWindow failed: %s\n", SDL_GetError ());
+    fprintf (stderr, "  Ensure Vulkan drivers are installed (apt install mesa-vulkan-drivers).\n");
+    SDL_Quit ();
+    return 1;
+  }
 
   // Create system cursors for menu mode rollover
   SDL_Cursor_Arrow     = SDL_CreateSystemCursor (SDL_SYSTEM_CURSOR_ARROW);
@@ -10560,7 +10999,8 @@ int main (int Argc, char **Argv) {
   // Load scene and weapon textures
   Scene_Load_Textures (&Scene_Data);
   Weapon_Instance Weapon = {0};
-  Weapon.Model = Weapon_Model_Load ();
+  Weapon.Model = Source_Weapon_Path ? Source_Weapon_Model_Load (Source_Weapon_Path)
+                                    : Weapon_Model_Load ();
   Weapon_Load_Textures (&Weapon);
 
   // --no-pbr: set PBR_Stride to 0 to force heuristic PBR for all materials.
