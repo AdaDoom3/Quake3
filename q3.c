@@ -6197,8 +6197,8 @@ void Weapon_Load_Textures (Weapon_Instance *Weapon) {
   const uint8_t Weapon_PBR_Fallbacks[][4] = {
     {180, 180, 180, 255},   // diffuse: grey
     {128, 128, 255, 255},   // normal: flat (0,0,1) encoded as (128,128,255)
-    { 30,  30,  30, 255},   // roughness: smooth metallic weapon (0.12)
-    {230, 230, 230, 255},   // metalness: highly metallic weapon (0.90)
+    {180, 180, 180, 255},   // roughness: moderate (0.70) — mix of skin and painted metal
+    { 25,  25,  25, 255},   // metalness: low (0.10) — mostly non-metallic (hands, polymer)
     {  0,   0,   0, 255},   // emissive: none
     {128, 128, 128, 255},   // height: mid-level
   };
@@ -9403,7 +9403,7 @@ glsl rchit Closest_Hit {
     // Apply per-instance lighting model
     if (Is_Weapon) {
       vec3 Direct    = (Diffuse + Specular) * Lr * NL;
-      vec3 Weapon_Full  = Direct * 0.9 + (Indirect_Diffuse + Traced_Specular) * 1.5;
+      vec3 Weapon_Full  = Direct * 0.8 + Indirect_Diffuse * 1.2 + Traced_Specular * 0.3;
       vec3 Weapon_Cheap = Ambient_Irradiance * Albedo * 2.5 + Albedo * max(NL, 0.3);
       Color = mix (Weapon_Full, Weapon_Cheap, Budget);
 
