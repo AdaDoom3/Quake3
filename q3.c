@@ -9,22 +9,25 @@
 // §3. Context               
 // §4. Math                  
 // §5. Memory                
-// §6. Textures              
+// §6. Materials              
 // §7. Models                
 // §8. Scene                 
 // §9. Acceleration Structures
 // §10. Physics               
 // §11. Pipeline              
 // §12. Shaders               
-// §13. Render                
-// §14. Main                  
-// §15. Assets                 
+// §13. Engine                
+// §14. Assets                      
+// §15. Main             
 //
 // ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 //
 //                                                       S P E C I F I C A T I O N
 //                 
 // ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+
+// Language Extensions
+#include <iso646.h>
 
 // Standard Libraries
 #include <stdio.h>
@@ -38,17 +41,16 @@
 // Media Layer
 #include <SDL2/SDL.h>
 #include <SDL2/SDL_vulkan.h>
-
-// Graphics
 #include <vulkan/vulkan.h>
-
-// Audio
 #include <AL/al.h>
 #include <AL/alc.h>
 #include <AL/efx.h>
-  
-// Language Extensions
-#include <iso646.h>
+
+// GLSL Similar Types
+typedef unsigned int uint; 
+typedef struct {float x, y, z;} vec3;
+typedef struct {float x, y, z, w;} vec4;
+typedef struct {float E[16];} mat4;
 
 // ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 //
@@ -56,29 +58,80 @@
 //
 // ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 
-// Engine id and info strings
-const char *ENGINE_NAME    = "q3";
-const char *ENGINE_VERSION = "0.1.0";              
+// Engine name and info strings
+const char *ENGINE_NAME = "q3";
+const char *ENGINE_VERSION = "0.1.0";   
 
-// Aspect ratio constraints
-#define ASPECT_NARROW_X     21
-#define ASPECT_NARROW_Y     9
-#define ASPECT_WIDE_X       4
-#define ASPECT_WIDE_Y       3
-#define MINIMUM_WINDOW_SIZE 256
+// Visual style definition
+typedef struct {
+  float Vignette;       // Vignette darkening intensity
+  float Bloom_Strength; // Bloom glow intensity
+  float Exposure;       // Tonemapping exposure multiplier   
+} Visual_Style;
 
-// Windowing and viewport settings
-#define FIELD_OF_VIEW  90.f    // Horizontal field-of-view in degrees (Quake 3 default)
-// Convert horizontal FOV to vertical given aspect ratio (width/height)
-static inline float Hfov_To_Vfov (float Hfov_Degrees, float Aspect) {
-  return 2.f * atanf (tanf (Hfov_Degrees * (float)M_PI / 360.f) / Aspect) * 180.f / (float)M_PI;
-}
-#define NEAR_CLIP      0.1f    // Near clip plane distance
-#define FAR_CLIP       10000.f // Far clip plane distance
-#define MAX_DELTA_TIME 0.05f   // Clamp to 20 fps minimum (prevents physics tunneling)
+// Default style
+const Visual_Style STYLE = {.Vignette       = 0.35f,  // Moderate-strong vignette
+                            .Bloom_Strength = 0.08f,  // Subtle bloom
+                            .Exposure       = 1.75f}; // Slightly low exposure
 
-// Player physics constants designed to mirror the Quake 3 movement parameters. The GPU physics compute shader (§10) references these same
-// values as specialization constants compiled into the SPIR-V module.
+// Quality knobs
+typedef enum {QUALITY_CRYSIS, QUALITY_HIGH, QUALITY_MEDIUM, QUALITY_LOW, QUALITY_POTATO, QUALITY_COUNT} Quality_Level;
+typedef struct {
+  const char *Name;
+  int         Width, Height;  // Window internal resolution
+  int         SPP;            // Ray count samples per pixel
+  int         Parallax;       // Enable parallax occlusion mapping
+  int         Denoise_Passes; // A-trous wavelet denoise iterations 
+  bool        Checkerboard;   // Temporal checkerboard optimization for ray reduction
+} Quality_Preset;
+const Quality_Preset QUALITY_PRESETS [QUALITY_COUNT] = {//                            Resolution SPP POM  DN  CB
+                                                        [QUALITY_CRYSIS] = {"Crysis", 3840,2160, 2,  1,   3,  true},
+                                                        [QUALITY_HIGH]   = {"High",   1600, 900, 2,  1,   2,  true}, 
+                                                        [QUALITY_MEDIUM] = {"Medium", 1280, 720, 1,  1,   3,  true},
+                                                        [QUALITY_LOW]    = {"Low",    1024, 576, 1,  1,   2,  true},
+                                                        [QUALITY_POTATO] = {"Potato",  854, 480, 1,  0,   3,  true}};
+
+// World settings
+//
+// Each asset group has a dominant coordinate convention, player scale, and camera model. The active world determines physics extents, 
+// eye height, FOV, and the swizzle applied during asset load. Assets from a non-dominant world get rescaled on load.
+//
+// Coordinate system conventions:
+//
+//   Quake 3 (Z-up): +X = forward, +Y = right, +Z = up (Right-handed)
+//   Source (Z-up):  +X = forward, +Y = left,  +Z = up (Right-handed)
+//
+//   Source:  Engine_X = Source_X, Engine_Y = Source_Z, Engine_Z = -Source_Y
+//   Quake 3: Engine_X = Q3_X,     Engine_Y = Q3_Z,     Engine_Z = -Q3_Y
+//
+typedef enum {WORLD_QUAKE3, WORLD_SOURCE, WORLD_UNREAL, WORLD_COUNT} World_Type;
+typedef struct {
+  World_Type Type;
+  const char *Name;
+  float Unit_Scale;        // World units per real-world inch 
+  float Player_Height;     // Standing bounding box height 
+  float Player_Width;      // Bounding box half-width     
+  float Eye_Height;        // Camera height above feet     
+  float Crouch_Eye_Height; // Camera height crouched      
+  float Crouch_Height;     // Crouched bounding box height 
+  float Step_Size;         // Max stair step height       
+  float FOV;               // Horizontal field of view    
+  float Max_Speed;         // Maximum wish speed     
+  float Gravity;           // Downward acceleration   
+  int   Up_Axis;           // Native up axis before swizzle
+} World_Settings;
+
+// Player bounding box minimum corner 
+const vec3  PLAYER_MINIMUMS        = {-15, -24, -15};
+const float PLAYER_HALF_EXTENTS[3] = {15.f, 28.f, 15.f}; // Standing bbox
+
+// Comment here !!!
+const World_Settings WORLD_PRESETS[WORLD_COUNT] = {
+  [WORLD_QUAKE3] = {WORLD_QUAKE3, "Quake 3",       1.f, 56.f, 15.f, 50.f, 36.f, 32.f, 18.f, 90.f, 320.f, 800.f, 2},
+  [WORLD_SOURCE] = {WORLD_SOURCE, "Source Engine", 1.f, 72.f, 16.f, 64.f, 46.f, 36.f, 18.f, 90.f, 250.f, 800.f, 2}};
+
+// Id Software player settings
+#define FIELD_OF_VIEW       90.f   // Windowing and horizontal viewport settings
 #define GRAVITY             800.f  // Downward acceleration in units per second squared
 #define GROUND_FRICTION     6.f    // Friction coefficient applied while on walkable ground
 #define STOP_SPEED          100.f  // Speed below which friction uses this as the control speed
@@ -90,24 +143,36 @@ static inline float Hfov_To_Vfov (float Hfov_Degrees, float Aspect) {
 #define MINIMUM_WALK_NORMAL 0.7f   // Minimum Y-component of a surface normal to count as walkable floor
 #define OVERBOUNCE          1.001f // Slight overshoot factor when clipping velocity off surfaces
 #define MAXIMUM_CLIP_PLANES 5      // Maximum simultaneous contact planes during slide-move resolution
-#define DEFAULT_VIEW_HEIGHT 22.f   // Camera height offset from capsule center (ground+28+22 = ground+50, matches Q3)
-#define CROUCH_VIEW_HEIGHT   8.f   // Camera height offset when crouching  (ground+28+8  = ground+36, matches Q3)
+#define DEFAULT_VIEW_HEIGHT 22.f   // Camera height offset from capsule center 
+#define CROUCH_VIEW_HEIGHT   8.f   // Camera height offset when crouching 
+#define PLAYER_CAPSULE_SPINE 13.f  // Comment here !!!
 
-// Weapon Animation Parameters
+// Valve Source player settings
+#define SRC_JUMP_VELOCITY       301.993377f 
+#define SRC_GRAVITY             800.f
+#define SRC_GROUND_FRICTION     4.f
+#define SRC_STOP_SPEED          100.f
+#define SRC_GROUND_ACCELERATE   5.5f
+#define SRC_AIR_ACCELERATE      10.f  // Source air-strafe acceleration 
+#define SRC_MAXIMUM_SPEED       250.f // Knife run speed
+#define SRC_OVERBOUNCE          1.0f  // Source clips exactly to plane (no overbounce)
+#define SRC_DUCK_SPEED          0.34f // Duck transition time in seconds
+#define SRC_WALK_SPEED          130.f // Walk modifier speed
+#define SRC_STEP_SIZE           18.f
+#define SRC_MINIMUM_WALK_NORMAL 0.7f
+
+// Weapon animation settings
 #define WEAPON_MODEL_SCALE  0.50f // Viewmodel scale factor (world-space shrink, no depth hack)
-#define WEAPON_FIRE_SPEED   10.f // Fire animation playback rate (frames per second)
-#define WEAPON_FIRE_FRAMES  6.f  // Total fire animation duration in frames
-#define WEAPON_BOB_RATE_V   3.5f // Vertical idle bob frequency (radians/second)
-#define WEAPON_BOB_RATE_H   1.7f // Horizontal idle bob frequency (radians/second)
-#define WEAPON_BOB_AMP_V    0.4f // Vertical idle bob amplitude (units)
-#define WEAPON_BOB_AMP_H    0.2f // Horizontal idle bob amplitude (units)
-#define WEAPON_RECOIL_AMP  -1.2f // Recoil kick magnitude (negative = pull back)
-#define WEAPON_RECOIL_DECAY 5.f  // Recoil exponential decay rate  
+#define WEAPON_FIRE_SPEED   10.f  // Fire animation playback rate (frames per second)
+#define WEAPON_FIRE_FRAMES  6.f   // Total fire animation duration in frames
+#define WEAPON_BOB_RATE_V   3.5f  // Vertical idle bob frequency (radians/second)
+#define WEAPON_BOB_RATE_H   1.7f  // Horizontal idle bob frequency (radians/second)
+#define WEAPON_BOB_AMP_V    0.4f  // Vertical idle bob amplitude (units)
+#define WEAPON_BOB_AMP_H    0.2f  // Horizontal idle bob amplitude (units)
+#define WEAPON_RECOIL_AMP  -1.2f  // Recoil kick magnitude (negative = pull back)
+#define WEAPON_RECOIL_DECAY 5.f   // Recoil exponential decay rate  
 
-// Capsule spine half-length: half height minus radius
-#define PLAYER_CAPSULE_SPINE 13.f // For a 28-unit tall, 15-unit radius capsule: 28 - 15 = 13 units.
-
-// Projectile constants
+// Projectile limits
 #define MAX_PROJECTILES 64    // Maximum simultaneous projectiles in flight
 #define ROCKET_SPEED    900.f // Rocket projectile speed (units/second)
 #define ROCKET_DAMAGE   100   // Direct hit damage
@@ -115,340 +180,69 @@ static inline float Hfov_To_Vfov (float Hfov_Degrees, float Aspect) {
 #define ROCKET_LIFETIME 10.f  // Seconds before projectile expires
 #define FIRE_COOLDOWN   0.8f  // Minimum seconds between shots
 
-// Vulkan limits and versioning
-#define VULKAN_API_VERSION       VK_API_VERSION_1_3
-#define SWAPCHAIN_MAX_IMAGES     8                  
-#define DESCRIPTOR_TEXTURE_SLOTS 1536               
-#define RAY_RECURSION_DEPTH      2    
+// Windowing constraints
+#define MINIMUM_WINDOW_SIZE 256
+#define ASPECT_NARROW_X     21
+#define ASPECT_NARROW_Y     9
+#define ASPECT_WIDE_X       4
+#define ASPECT_WIDE_Y       3
 
-// Enable the Khronos validation layer for debug builds
-typedef unsigned int uint; // For sanity...
-const uint  VALIDATION_LAYER_COUNT = 1;
-const char *VALIDATION_LAYERS[]    = {"VK_LAYER_KHRONOS_validation"};
+// Comment here !!!
+#define MAX_DELTA_TIME 0.05f   // Clamp to 20 fps minimum (prevents physics tunneling)
+#define NEAR_CLIP      0.1f    // Near clip plane distance
+#define FAR_CLIP       10000.f // Far clip plane distance
 
-// Required device extensions
-const uint DEVICE_EXTENSION_COUNT = 6;
-const char *DEVICE_EXTENSIONS[] = {VK_KHR_SWAPCHAIN_EXTENSION_NAME,
-                                   VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME,
-                                   VK_KHR_RAY_TRACING_PIPELINE_EXTENSION_NAME,
-                                   VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME,
-                                   VK_KHR_RAY_QUERY_EXTENSION_NAME,
-                                   VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME};
+// Comment here !!! 
+#define SWAPCHAIN_MAX_IMAGES     8    // Comment here !!!              
+#define DESCRIPTOR_TEXTURE_SLOTS 1536 // Comment here !!!
 
-// Visual style knobs define the artistic look of the game and are independent of quality/performance tier
-typedef struct {
-  float Vignette;       // Vignette darkening intensity
-  float Bloom_Strength; // Bloom glow intensity
-  float Exposure;       // Tonemapping exposure multiplier
+// Importance sampling - control reflection ray quality and specular firefly suppression
+#define VNDF_ALPHA_FLOOR 0.01 // Min roughness² for VNDF reflection ray spread
+#define SPECULAR_D_BIAS  0.01 // Min roughness² for GGX D term (prevents firefly peak)
 
-  // Should the following be added ???
-  // Fog_Density      
-  // Fog_Color     
-  // Ambient_Sky    
-  // Ambient_Ground 
-  // Sun_Radiance    
-  // Shadow_Floor    
-  // Lightmap_Mult  
-  // Contrast_Power   
-  // Saturation_Boost
-  // Color_Grade      
-} Visual_Style;
-const Visual_Style STYLE = {
-  .Vignette       = 0.35f,  // Moderate-strong vignette
-  .Bloom_Strength = 0.08f,  // Subtle bloom
-  .Exposure       = 1.75f}; // Slightly lower exposure - just enough to deepen without losing detail
+// Reflection limits 
+#define REFL_CLAMP_LO  5.0  // Reflection luminance clamp by surface luminance
+#define REFL_CLAMP_HI  1.5  // Reflection luminance clamp by surface luminance
+#define REFL_GATE_LO   0.80 // Max roughness for tracing reflection rays 
+#define REFL_GATE_HI   0.35 // Max roughness for tracing reflection rays
+#define REFL_THRESH_LO 0.02 // Reflection Fresnel weight skip threshold
+#define REFL_THRESH_HI 0.30 // Reflection Fresnel weight skip threshold
+#define REFL_DAMPING   0.3  // Budget-proportional reflection strength reduction 
+#define REFL_SOFT_EDGE 12.0 // Threshold-to-full-weight transition sharpness 
 
-// Quality knobs
-typedef enum {
-  QUALITY_ULTRA, 
-  QUALITY_HIGH,  
-  QUALITY_MEDIUM,   
-  QUALITY_LOW,     
-  QUALITY_POTATO, 
+// Reflection trace distance limits
+#define REFL_TRACE_LO 2000.0 // Reflection trace max distance at Budget=0 
+#define REFL_TRACE_HI 150.0  // Reflection trace max distance at Budget=1
 
-  QUALITY_COUNT
-} Quality_Level;
-typedef struct {
-  const char *Name;
-  int         Width, Height;  // Window resolution
-  float       Render_Scale;   // Internal RT render resolution multiplier
-  int         SPP;            // Ray count samples per pixel
-  int         Parallax;       // Enable parallax occlusion mapping
-  int         Denoise_Passes; // A-trous wavelet denoise iterations (was bool — bug!)
-  bool        Checkerboard;   // Temporal checkerboard optimization for ray reduction
-} Quality_Preset;
-const Quality_Preset QUALITY_PRESETS [QUALITY_COUNT] = {
-  //                            Res        Scale  SPP  POM  DN   CB
-  [QUALITY_ULTRA]  = {"Crysis", 3840,2160, 1.00f,  2,  1,   3,   1},
-  [QUALITY_HIGH]   = {"High",   1600, 900, 1.00f,  2,  1,   2,   1}, 
-  [QUALITY_MEDIUM] = {"Medium", 1280, 720, 0.75f,  1,  1,   3,   1},
-  [QUALITY_LOW]    = {"Low",    1024, 576, 0.55f,  1,  1,   2,   1},
-  [QUALITY_POTATO] = {"Potato",  854, 480, 0.75f,  1,  0,   3,   1},
-};
+// Shadow rays limits
+#define SHADOW_DIST_LO 2000.0 // Shadow ray max distance at Budget=0
+#define SHADOW_DIST_HI 200.0  // Shadow ray max distance at Budget=1
 
-// ── Shader Tuning ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
-// Raytracing constants injected into GLSL shaders at build time by sdk.c.
-// Override any value from the command line:  ./sdk -DVNDF_ALPHA_FLOOR=0.02
-// SHADER_TUNING_BEGIN
+// A-trous denoiser edge-stopping limits
+#define DENOISE_DEPTH_LO 100.0 // Depth sensitivity when still 
+#define DENOISE_DEPTH_HI 10.0  // Depth sensitivity during motion 
+#define DENOISE_LUM_LO   200.0 // Luminance sensitivity when still
+#define DENOISE_LUM_HI   15.0  // Luminance sensitivity during motion 
 
-// Importance sampling — controls reflection ray quality and specular firefly suppression
-#define VNDF_ALPHA_FLOOR    0.01   // Min roughness² for VNDF reflection ray spread
-#define SPECULAR_D_BIAS     0.01   // Min roughness² for GGX D term (prevents firefly peak)
+// Firefly rejection limits
+#define FIREFLY_HEADROOM 1.05 // Headroom multiplier above 2nd-brightest neighbor
+#define FIREFLY_BIAS     0.01 // Additive floor preventing zero clamp
 
-// Reflection control — Budget-adaptive (LO = full quality at Budget=0, HI = constrained at Budget=1)
-#define REFL_CLAMP_LO       5.0    // Reflection luminance clamp × surface luminance (was 2.0)
-#define REFL_CLAMP_HI       1.5    // Reflection luminance clamp × surface luminance
-#define REFL_GATE_LO        0.80   // Max roughness for tracing reflection rays (was 0.55)
-#define REFL_GATE_HI        0.35   // Max roughness for tracing reflection rays
-#define REFL_THRESH_LO      0.02   // Reflection Fresnel weight skip threshold (was 0.10)
-#define REFL_THRESH_HI      0.30   // Reflection Fresnel weight skip threshold
-#define REFL_DAMPING        0.3    // Budget-proportional reflection strength reduction (was 0.5)
-#define REFL_SOFT_EDGE      12.0   // Threshold-to-full-weight transition sharpness (was 8.0)
+// Contrast Adaptive Sharpening (CAS) limits
+#define CAS_AMOUNT 0.55 // Sharpening kernel strength
+#define CAS_MIX    1.5  // Edge enhancement multiplier
 
-// Reflection trace distance — Budget-adaptive ray length
-#define REFL_TRACE_LO       2000.0 // Reflection trace max distance at Budget=0 (was 500)
-#define REFL_TRACE_HI       150.0  // Reflection trace max distance at Budget=1
-
-// Shadow rays — Budget-adaptive cutoff distances
-#define SHADOW_DIST_LO      2000.0 // Shadow ray max distance at Budget=0 (was 600)
-#define SHADOW_DIST_HI      200.0  // Shadow ray max distance at Budget=1
-
-// A-trous denoiser edge-stopping (LO = still camera, HI = fast motion)
-#define DENOISE_DEPTH_LO    100.0  // Depth sensitivity when still (sharp edges)
-#define DENOISE_DEPTH_HI    10.0   // Depth sensitivity during motion (much smoother)
-#define DENOISE_LUM_LO      200.0  // Luminance sensitivity when still
-#define DENOISE_LUM_HI      15.0   // Luminance sensitivity during motion (aggressive smooth)
-
-// Firefly rejection — 3x3 neighborhood percentile clamp
-#define FIREFLY_HEADROOM    1.05   // Headroom multiplier above 2nd-brightest neighbor
-#define FIREFLY_BIAS        0.01   // Additive floor preventing zero clamp
-
-// CAS (Contrast Adaptive Sharpening)
-#define CAS_AMOUNT          0.55   // Sharpening kernel strength
-#define CAS_MIX             1.5    // Edge enhancement multiplier
-
-// TAA (Temporal Anti-Aliasing) — ghosting vs noise tradeoff
-#define TAA_SIGMA           0.15   // Variance clamp sigma (lower = tighter = less ghosting)
-#define TAA_STATIC_FLOOR    0.25   // Min blend alpha when camera is still (history retention)
-#define TAA_MOVE_LO         0.95   // Moving blend base at low motion (5% current frame)
-#define TAA_MOVE_HI         0.99   // Moving blend base at high motion (1% current frame)
-
-// SHADER_TUNING_END
-
-// Adaptive quality budget (C-side only — not injected into shaders)
-#define POTATO_BUDGET_FLOOR 0.35f  // Minimum budget for potato quality tier
-#define POTATO_TARGET_MS    0.033f // Target frame time for potato (~30 fps)
-#define MEDIUM_TARGET_MS    0.100f // Target frame time for medium/low (~10 fps)
-#define ULTRA_TARGET_MS     0.333f // Target frame time for Crysis/ultra (~3 fps)
-#define DEFAULT_TARGET_MS   0.016f // Target frame time for high (~60 fps)
-
-// Convex Hull Limits
-#define HULL_MAX_VERTS    256 // Per-hull vertex cap (matches GPU array size in Gpu_Hull)
-#define HULL_MAX_ADJ      16  // Maximum adjacency entries per vertex (for hill-climb support)
-#define HULL_MAX_FACES    512 // Quickhull internal face cap during construction
-#define HULL_MAX_ENTITIES 32  // Maximum simultaneous hull collider instances
-
-// Player bounding box half-extents (x, y, z) used by the capsule collider
-const float PLAYER_HALF_EXTENTS[3] = {15.f, 28.f, 15.f}; // Q3 standing bbox: height 56 (mins -24, maxs 32)
-
-// ── Source Engine Settings ───────────────────────────────────────────────────────────────────────────────────────────────────────────
-// Valve Source Engine format support: MDL skeletal models, VTF textures, Source BSP (VBSP).
-// CSPromod movement constants follow competitive CS:Source promod values.
-
-// Movement style selection
-typedef enum {MOVEMENT_QUAKE3, MOVEMENT_SOURCE, MOVEMENT_STYLE_COUNT} Movement_Style;
-
-// World settings: each asset group has a dominant coordinate convention, player scale, and camera model.
-// The active world determines physics extents, eye height, FOV, and the swizzle applied during asset load.
-// Assets from a non-dominant world are rescaled by (Active.Unit_Scale / Asset.Unit_Scale) on load.
-//
-// Coordinate system conventions (verified from Valve Developer Wiki and id Software documentation):
-//
-//   Engine (GL Y-up):  +X = right,    +Y = up,      -Z = forward     (left-handed screen space)
-//   Quake 3 (Z-up):    +X = forward,  +Y = right,   +Z = up          (right-handed)
-//   Source (Z-up):      +X = forward,  +Y = left,    +Z = up          (right-handed)
-//
-//   Source → Engine:    Engine_X = Source_X, Engine_Y = Source_Z, Engine_Z = -Source_Y
-//   Quake 3 → Engine:  Engine_X = Q3_X,     Engine_Y = Q3_Z,     Engine_Z = -Q3_Y
-//
-//   Source viewmodels store the barrel extending in -Y (toward the camera view).
-//   Source MDL model space differs from Source world: +X = north, +Y = west.
-//
-typedef enum {WORLD_QUAKE3, WORLD_SOURCE, WORLD_COUNT} World_Type;
-typedef struct {
-  World_Type Type;
-  const char *Name;
-  float Unit_Scale;        // World units per real-world inch (Q3 ≈ 1.0, Source ≈ 1.0 but proportions differ)
-  float Player_Height;     // Standing bounding box height (Q3: 56, Source: 72)
-  float Player_Width;      // Bounding box half-width     (Q3: 15, Source: 16)
-  float Eye_Height;        // Camera height above feet     (Q3: 50, Source: 64)
-  float Crouch_Eye_Height; // Camera height crouched       (Q3: 36, Source: 46)
-  float Crouch_Height;     // Crouched bounding box height (Q3: 32, Source: 36)
-  float Step_Size;         // Max stair step height        (Q3: 18, Source: 18)
-  float FOV;               // Horizontal field of view     (Q3: 90, Source: 90)
-  float Max_Speed;         // Maximum wish speed           (Q3: 320, Source: 250)
-  float Gravity;           // Downward acceleration        (Q3: 800, Source: 800)
-  int   Up_Axis;           // Native up axis before swizzle (0=X, 1=Y, 2=Z; both Q3 and Source are Z-up natively)
-} World_Settings;
-const World_Settings WORLD_PRESETS[WORLD_COUNT] = {
-  [WORLD_QUAKE3] = {WORLD_QUAKE3, "Quake 3",       1.f, 56.f, 15.f, 50.f, 36.f, 32.f, 18.f, 90.f, 320.f, 800.f, 2},
-  [WORLD_SOURCE] = {WORLD_SOURCE, "Source Engine",  1.f, 72.f, 16.f, 64.f, 46.f, 36.f, 18.f, 90.f, 250.f, 800.f, 2},
-};
-
-// Source movement physics (CS:Source / CSPromod competitive values)
-#define SRC_GRAVITY             800.f
-#define SRC_GROUND_FRICTION     4.f
-#define SRC_STOP_SPEED          100.f
-#define SRC_GROUND_ACCELERATE   5.5f
-#define SRC_AIR_ACCELERATE      10.f   // Source air-strafe acceleration (much higher than Q3)
-#define SRC_MAXIMUM_SPEED       250.f  // CS:Source knife run speed
-#define SRC_JUMP_VELOCITY       301.993377f // sqrt(2 * 800 * 57.0) — 57 unit jump height
-#define SRC_STEP_SIZE           18.f
-#define SRC_MINIMUM_WALK_NORMAL 0.7f
-#define SRC_OVERBOUNCE          1.0f   // Source clips exactly to plane (no overbounce)
-#define SRC_DUCK_SPEED          0.34f  // Duck transition time in seconds
-#define SRC_WALK_SPEED          130.f  // CS:Source walk modifier speed
-
-// Source MDL format constants
-#define MDL_MAGIC_IDST   0x54534449u // "IDST" — studio model header
-#define MDL_MAGIC_IDSQ   0x51534449u // "IDSQ" — sequence group header
-#define MDL_VERSION_44   44          // HL2 / Source 2004
-#define MDL_VERSION_48   48          // CS:Source / Source 2007+
-#define MDL_VERSION_49   49          // Source 2013 / CS:GO
-#define MDL_MAX_BONES    128         // Maximum bones per skeleton
-#define MDL_MAX_MESHES   32          // Maximum meshes per body part
-#define MDL_MAX_BODYPARTS 16         // Maximum body part groups
-
-// VTF texture format constants
-#define VTF_MAGIC        0x00465456u // "VTF\0" as 32-bit LE
-#define VTF_VERSION_MAJ  7           // VTF 7.x
-#define VTF_VERSION_MIN  5           // VTF 7.5 (latest common)
-#define VTF_MAX_FRAMES   1           // Single frame for static textures
-#define VTF_MAX_MIP      16          // Maximum mipmap count
-
-// VTF image format enumeration (subset used by CSPromod assets)
-typedef enum {
-  VTF_FMT_RGBA8888 = 0,  VTF_FMT_ABGR8888 = 1,  VTF_FMT_RGB888   = 2,
-  VTF_FMT_BGR888   = 3,  VTF_FMT_RGB565   = 4,   VTF_FMT_DXT1     = 13,
-  VTF_FMT_DXT3     = 14, VTF_FMT_DXT5     = 15,  VTF_FMT_BGRA8888 = 12,
-  VTF_FMT_UV88     = 16, VTF_FMT_RGBA16F  = 24,  VTF_FMT_NONE     = -1
-} VTF_Image_Format;
-
-// Source BSP (VBSP) format constants
-#define VBSP_MAGIC       0x50534256u // "VBSP"
-#define VBSP_VERSION_19  19          // HL2
-#define VBSP_VERSION_20  20          // CS:Source / HL2:EP1
-#define VBSP_VERSION_21  21          // CS:GO / L4D2
-#define VBSP_LUMP_COUNT  64          // Source BSP has 64 lumps
-#define VBSP_ENTITIES    0           // Entity lump
-#define VBSP_PLANES      1           // Plane lump
-#define VBSP_TEXDATA      2          // Texture data lump
-#define VBSP_VERTICES    3           // Vertex lump
-#define VBSP_NODES       5           // BSP nodes
-#define VBSP_TEXINFO     6           // Texture info lump
-#define VBSP_FACES       7           // Face lump
-#define VBSP_LIGHTING    8           // Lightmap lump (luxels)
-#define VBSP_LEAFS       10          // Leaf lump
-#define VBSP_EDGES       12          // Edge lump
-#define VBSP_SURFEDGES   13          // Surface-edge lump
-#define VBSP_MODELS      14          // Brush model lump
-#define VBSP_DISPINFO    26          // Displacement info
-#define VBSP_DISPVERTS   33          // Displacement vertices
-#define VBSP_TEXDATA_STRING_DATA  43 // Texture name strings
-#define VBSP_TEXDATA_STRING_TABLE 44 // Texture name string table
-
-// Skeletal animation limits
-#define SKEL_MAX_BONES_PER_VERT 3   // Maximum bone influences per vertex (gpu-friendly)
-#define SKEL_MAX_ANIMS          32   // Maximum animation sequences per model
-#define SKEL_MAX_FRAMES         256  // Maximum keyframes per animation
-
-// ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
-//
-// §15. Assets
-//
-// ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
-
-// Body-part damage multiplier maps: grayscale TGA textures UV-mapped to player models
-#define DAMAGE_CACHE_MAX 64
-typedef struct {
-  const char *Model_Name;       // Player model directory name
-  const char *Damage_Maps[6];   // Up to 6 damage map TGA paths per model (NULL-terminated)
-  int         Damage_Map_Count; // Number of damage maps for this model
-} Model_Damage_Entry;
-
-// Asset paths
-#define ASSET_ROOT "assets/" // Root directory for all game assets
-
-// Default BSP map to load when no command-line argument is given
-const char *DEFAULT_MAP = "oa_dm1.bsp";
-
-// Paths to the weapon model's diffuse textures (body and sight)
-#define WEAPON_TEXTURE_COUNT 2  // Default for Q3 weapons (2 surfaces: body + hand)
-#define WEAPON_MAX_TEXTURES 16 // Maximum for Source weapons with many materials
-const char *WEAPON_TEXTURE_PATHS[] = {ASSET_ROOT "models/weapons2/machinegun/mgun.tga",
-                                      ASSET_ROOT "models/weapons2/machinegun/sight.tga"};
-
-// Paths to the three-part machinegun weapon model (body, barrel, hand)
-#define WEAPON_BODY_PATH   ASSET_ROOT "models/weapons2/machinegun/machinegun.md3"
-#define WEAPON_BARREL_PATH ASSET_ROOT "models/weapons2/machinegun/machinegun_barrel.md3"
-#define WEAPON_HAND_PATH   ASSET_ROOT "models/weapons2/machinegun/machinegun_hand.md3"
-
-// Damage or "hit" texture manifest
-#define DAMAGE_MODEL_COUNT 15
-const Model_Damage_Entry DAMAGE_MAP_REGISTRY[DAMAGE_MODEL_COUNT] = {
-  {"grism",    {ASSET_ROOT "models/players/grism/enkiskin_dmg.tga"}, 1},
-  {"sarge",    {ASSET_ROOT "models/players/grism/enkiskin_dmg.tga"}, 1},
-  {"liz",      {ASSET_ROOT "models/players/liz/h_head_dmg.tga",
-                ASSET_ROOT "models/players/liz/u_torso_dmg.tga",
-                ASSET_ROOT "models/players/liz/l_legs_dmg.tga"}, 3},
-  {"major",    {ASSET_ROOT "models/players/major/head_dmg.tga",
-                ASSET_ROOT "models/players/major/torso_dmg.tga",
-                ASSET_ROOT "models/players/major/lower_dmg.tga"}, 3},
-  {"tony",     {ASSET_ROOT "models/players/tony/head_dmg.tga",
-                ASSET_ROOT "models/players/tony/suit_dmg.tga"}, 2},
-  {"assassin", {ASSET_ROOT "models/players/assassin/upper_dmg.tga",
-                ASSET_ROOT "models/players/assassin/lower_dmg.tga"}, 2},
-  {"smarine",  {ASSET_ROOT "models/players/smarine/2h_head_dmg.tga",
-                ASSET_ROOT "models/players/smarine/2u_torso_dmg.tga",
-                ASSET_ROOT "models/players/smarine/2l_legs_dmg.tga"}, 3},
-  {"beret",    {ASSET_ROOT "models/players/beret/skin1_dmg.tga",
-                ASSET_ROOT "models/players/beret/skin2_dmg.tga"}, 2},
-  {"gargoyle", {ASSET_ROOT "models/players/gargoyle/bared_dmg.tga"}, 1},
-  {"penguin",  {ASSET_ROOT "models/players/penguin/skin_dmg.tga"}, 1},
-  {"sergei",   {ASSET_ROOT "models/players/sergei/face_dmg.tga",
-                ASSET_ROOT "models/players/sergei/hairs_dmg.tga",
-                ASSET_ROOT "models/players/sergei/skin_dmg.tga"}, 3},
-  {"skelebot", {ASSET_ROOT "models/players/skelebot/skin1_dmg.tga",
-                ASSET_ROOT "models/players/skelebot/skin2_dmg.tga"}, 2},
-  {"merman",   {ASSET_ROOT "models/players/merman/skin_dmg.tga",
-                ASSET_ROOT "models/players/merman/fins_dmg.tga",
-                ASSET_ROOT "models/players/merman/brac_dmg.tga"}, 3},
-  {"sorceress", {ASSET_ROOT "models/players/sorceress/drowhead_dmg.tga",
-                 ASSET_ROOT "models/players/sorceress/drowbody_dmg.tga",
-                 ASSET_ROOT "models/players/sorceress/rings_dmg.tga"}, 3},
-  {"kyonshi",  {ASSET_ROOT "models/players/kyonshi/skin_dmg.tga",
-                ASSET_ROOT "models/players/kyonshi/torso_dmg.tga",
-                ASSET_ROOT "models/players/kyonshi/hair_dmg.tga",
-                ASSET_ROOT "models/players/kyonshi/eyes_dmg.tga",
-                ASSET_ROOT "models/players/kyonshi/lower_dmg.tga"}, 5}};
+// Temporal Anti-Aliasing (TAA) limits
+#define TAA_STATIC_FLOOR 0.25 // Min blend alpha when camera is still (history retention)
+#define TAA_SIGMA        0.15 // Variance clamp sigma (lower = tighter = less ghosting)
+#define TAA_MOVE_LO      0.95 // Moving blend base at low motion 
+#define TAA_MOVE_HI      0.99 // Moving blend base at high motion 
 
 // ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 //
 // §2. Types
 //
 // ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
-
-// Three-component floating-point vector for positions, directions, and velocities
-typedef struct {float x, y, z;} vec3;
-
-// Player bounding box minimum corner (symmetric on X/Z, asymmetric on Y for feet)
-const vec3 PLAYER_MINIMUMS = {-15, -24, -15};
-
-// Four-component floating-point vector for homogeneous coordinates and RGBA colors
-typedef struct {float x, y, z, w;} vec4;
-
-// A 4×4 column-major matrix for view, projection, and model transforms
-typedef struct {float E[16];} mat4;
 
 // Sampled keyboard and mouse state for a single frame
 typedef struct {
@@ -473,7 +267,7 @@ typedef struct {
   float Pad_A;
   vec3  Velocity;     // Units per second
   float Lifetime;     // Seconds remaining before expiry
-  int   Active;       // 1 = live, 0 = dead
+  int   Active;       // Boolean: 1 = live, 0 = dead
   int   Material_Hit; // Surface material on impact (for sound selection)
   float Radius;       // Collision radius
   float Damage;       // Base damage on impact (before body-part multiplier)
@@ -498,24 +292,21 @@ typedef struct {
   float Hit_U, Hit_V; // UV at impact point (written by GPU on hit)
   int   Instance_Hit; // TLAS instance that was hit (-1 = none)
   int   Pad_B;
-} Gpu_Projectile;
+} GPU_Projectile;
 
 typedef struct {
-  Gpu_Projectile Slots[MAX_PROJECTILES];
+  GPU_Projectile Slots[MAX_PROJECTILES];
   int   Count;
   float Fire_Cooldown;
   float Pad[2];
-} Gpu_Projectile_Pool;
+} GPU_Projectile_Pool;
 
 // Material System
 typedef struct {
   int   Type;         // MATERIAL_DEFAULT, MATERIAL_METAL, etc.
-  float Damage_Scale; // 0.0 (armored) to 1.0 (exposed)
+  float Damage_Scale; // Percent: 0.0 (armored) to 1.0 (exposed)
   char  Name[32];     // Human-readable name
 } Material;
-
-#define MAX_AUDIO_BUFFERS 32
-#define MAX_AUDIO_SOURCES 16
 
 typedef struct {
   ALCdevice  *Device;
@@ -534,13 +325,17 @@ typedef struct {
   int         Was_On_Ground;    // Previous frame ground state (for land detection)
 } Audio_System;
 
+// Quickhull internal types used during hull construction
+typedef struct {int A, B, C; int Dead;} Quickhull_Face;
+typedef struct {int V0, V1, Face;}      Quickhull_Edge;
+
 // GPU-resident buffer with its backing memory and optional device address
 typedef struct {
   VkBuffer        Buffer; 
   VkDeviceMemory  Memory;  // Device memory allocation backing the buffer
   VkDeviceAddress Address; // Buffer device address for shader access (zero if not requested)
   uint64_t        Size;    // Allocation size in bytes
-} Gpu_Buffer;
+} GPU_Buffer;
 
 // GPU-resident image with its backing memory, view, and format metadata
 typedef struct {
@@ -548,18 +343,14 @@ typedef struct {
   VkDeviceMemory Memory; // Device memory allocation backing the image
   VkImageView    View;   // Image view used for sampling or storage access
   VkFormat       Format; // Pixel format of the image
-} Gpu_Image;
+} GPU_Image;
 
 // Ray tracing acceleration structure with its backing buffer and device address
 typedef struct {
   VkAccelerationStructureKHR Handle;  // Opaque acceleration structure handle
-  Gpu_Buffer                 Buffer;  // GPU buffer holding the acceleration structure data
+  GPU_Buffer                 Buffer;  // GPU buffer holding the acceleration structure data
   VkDeviceAddress            Address; // Device address for referencing from shaders and TLAS builds
 } Acceleration_Structure;
-
-// Quickhull internal types used during hull construction
-typedef struct {int A, B, C; int Dead;} Quickhull_Face;
-typedef struct {int V0, V1, Face;}      Quickhull_Edge;
 
 // ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 //
@@ -567,55 +358,60 @@ typedef struct {int V0, V1, Face;}      Quickhull_Edge;
 //
 // ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 
-// List of required ray tracing extension functions
-#define VULKAN_FUNCTIONS(_) \
-  _(vkCreateAccelerationStructureKHR,           vkCreateAccelerationStructure)           /* Creates a BLAS or TLAS */ \
-  _(vkDestroyAccelerationStructureKHR,          vkDestroyAccelerationStructure)          /* Destroys an acceleration structure */ \
-  _(vkGetAccelerationStructureBuildSizesKHR,    vkGetAccelerationStructureBuildSizes)    /* Queries scratch and result buf sizes */ \
-  _(vkCmdBuildAccelerationStructuresKHR,        vkCmdBuildAccelerationStructures)        /* Records a build or update command */ \
-  _(vkGetAccelerationStructureDeviceAddressKHR, vkGetAccelerationStructureDeviceAddress) /* Retrieves the device address */ \
-  _(vkCreateRayTracingPipelinesKHR,             vkCreateRayTracingPipelines)             /* Creates a ray tracing pipeline */ \
-  _(vkGetRayTracingShaderGroupHandlesKHR,       vkGetRayTracingShaderGroupHandles)       /* Retrieves shader group handles (SBT) */ \
-  _(vkCmdTraceRaysKHR,                          vkCmdTraceRays)                          /* Records a ray dispatch command */
+// World and movement state with defaults
+World_Settings Active_World    = WORLD_PRESETS [WORLD_QUAKE3];
+int            Active_Movement = WORLD_QUAKE3;
 
-// Convenience macro for declaring Vulkan function pointer variables from their spec names
-#define DECLARE_VK(vk, alias) PFN_##vk alias;
+// Windowing state and settings with defaults
+Quality_Level    Active_Quality      = QUALITY_MEDIUM;
+Cursor_Kind      Current_Cursor_Kind = CURSOR_SYSTEM;
+Activated_Kind   Current_Activated   = OTHER_ACTIVATED;
+Game_Mode_Kind   Current_Game_Mode   = GAME_PLAYING;
+Window_Mode_Kind Current_Window_Mode = WINDOWED_MODE;
+int              Cursor_Centering    = 0;        // Center cursor each frame
+int              Input_Active        = 1;        // Process input when active 
+int              In_Menu             = 0;        // True when in menu mode, else false for game mode
+int              Swapchain_Dirty     = 0;        // Non-zero when swapchain needs recreation
+int              Saved_Cursor_X, Saved_Cursor_Y; // Cursor position saved across mode transitions
+int              Windowed_X, Windowed_Y;         // Saved window position before fullscreen
+int              Windowed_W, Windowed_H;         // Saved window size before fullscreen
+SDL_Window      *Window;                         // SDL window for presentation and input
+SDL_Cursor      *SDL_Cursor_Arrow;               // System arrow cursor 
+SDL_Cursor      *SDL_Cursor_Hand;                // Active cursor (hovering interactive UI)
+SDL_Cursor      *SDL_Cursor_Crosshair;           // Inactive cursor (menu, not hovering)
 
-// Convenience macro for loading Vulkan function pointers from the logical device at runtime
-#define LOAD_VK(vk, alias) alias = (PFN_##vk) vkGetDeviceProcAddr (Device, #vk);
+// Audio
+Audio_System Audio;
 
-// Declare all ray tracing function pointers as globals
-VULKAN_FUNCTIONS (DECLARE_VK)
+// Application state
+int   Quit;       // Non-zero when the application should exit
+float Delta_Time; // Time elapsed since the previous frame in seconds
 
-// Human-readable Vulkan error name from VkResult code
-static const char *VK_Error_Name (VkResult R) {
-  switch (R) {
-    case  0: return "VK_SUCCESS";
-    case -1: return "VK_ERROR_OUT_OF_HOST_MEMORY";
-    case -2: return "VK_ERROR_OUT_OF_DEVICE_MEMORY";
-    case -3: return "VK_ERROR_INITIALIZATION_FAILED";
-    case -4: return "VK_ERROR_DEVICE_LOST";
-    case -5: return "VK_ERROR_MEMORY_MAP_FAILED";
-    case -6: return "VK_ERROR_LAYER_NOT_PRESENT";
-    case -7: return "VK_ERROR_EXTENSION_NOT_PRESENT";
-    case -8: return "VK_ERROR_FEATURE_NOT_PRESENT";
-    case -9: return "VK_ERROR_INCOMPATIBLE_DRIVER";
-    case -10: return "VK_ERROR_TOO_MANY_OBJECTS";
-    case -11: return "VK_ERROR_FORMAT_NOT_SUPPORTED";
-    case -12: return "VK_ERROR_FRAGMENTED_POOL";
-    case -13: return "VK_ERROR_UNKNOWN";
-    default: return "unknown";
-  }
-}
+// Runtime mode flags
+int Skip_Postprocess; // Non-zero to bypass the post-processing compute pass
+int Use_Validation;   // Non-zero to enable Vulkan validation layers
 
-// Assertion to validate Vulkan return values; prints descriptive error name, file, and line then exits
-#define VK_CHECK(Call) do { \
-  VkResult _Result = (Call); \
-  if (_Result) { \
-    fprintf (stderr, "[vulkan] %s (%d) at %s:%d\n", VK_Error_Name(_Result), _Result, __FILE__, __LINE__); \
-    exit (1); \
-  } \
-} while (0)
+// Projectile pool (CPU-side)
+Projectile_Pool Projectiles;
+
+// Shader binding table (SBT) alignment and handle sizes
+VkPhysicalDeviceRayTracingPipelinePropertiesKHR Raytracing_Properties; 
+
+// BLAS for world geometry and TLAS combining all instances
+Acceleration_Structure Bottom_Level, Top_Level; 
+
+// GPU storage images and scene data buffers
+GPU_Buffer Vertex_Buffer, Index_Buffer, Material_Buffer; // Scene geometry and material data on GPU
+GPU_Buffer Top_Level_Instance_Buffer;                    // Host-visible instance buffer for writing TLAS instance descriptors each frame
+GPU_Buffer Top_Level_Scratch_Buffer;                     // Persistent scratch memory reused across per-frame TLAS rebuilds
+GPU_Image  Raytracing_Storage_Image;                     // Storage image written by ray generation shader
+GPU_Buffer Camera_Uniform_Buffer;                        // Uniform buffer for the Camera struct
+GPU_Buffer Texture_Id_Buffer;                            // Per-triangle texture index buffer
+
+// Skeletal animation pipeline state (shared by all skeletal entities)
+VkPipeline            Skinning_Pipeline; 
+VkPipelineLayout      Skinning_Pipeline_Layout;
+VkDescriptorSetLayout Skinning_Descriptor_Layout;
 
 // Command recording and CPU-GPU synchronization
 VkCommandPool   Command_Pool;              // Command pool for allocating command buffers
@@ -639,7 +435,7 @@ VkImageView    *Texture_Views;    // Image views for shader sampling of each tex
 VkSampler       Texture_Sampler;  // Shared sampler with linear filtering and repeat wrap
 uint            Texture_Count;    // Total number of texture slots allocated
 uint            Textures_Loaded;  // Number of textures successfully loaded from disk
-uint            PBR_Stride;       // Stride between PBR map blocks (= scene material count)
+uint            PBR_Stride;       // Stride between PBR map blocks 
 
 // Lightmap atlas
 VkImage        Lightmap_Image;   // Packed lightmap atlas image
@@ -650,14 +446,29 @@ VkSampler      Lightmap_Sampler; // Sampler for lightmap lookups (linear, clamp-
 // Ray tracing pipeline and shader binding table
 VkPipelineCache  Pipeline_Cache;              // Shared pipeline cache - amortizes SPIR-V>ISA compilation
 VkPipelineLayout Pipeline_Layout;             // Pipeline layout with descriptor set bindings
-VkPipeline       Pipeline;                    // Ray tracing pipeline (rgen, rchit, rmiss, shadow rmiss)
-Gpu_Buffer       Shader_Binding_Table_Buffer; // Buffer holding the shader binding table
+VkPipeline       Pipeline;                    // Ray tracing pipeline 
+GPU_Buffer       Shader_Binding_Table_Buffer; // Buffer holding the shader binding table
 
 // Shader binding table regions (one per shader stage)
 VkStridedDeviceAddressRegionKHR Shader_Binding_Ray_Generation; // SBT region for the ray generation shader
 VkStridedDeviceAddressRegionKHR Shader_Binding_Miss;           // SBT region for miss shaders
 VkStridedDeviceAddressRegionKHR Shader_Binding_Hit;            // SBT region for closest-hit shaders
-VkStridedDeviceAddressRegionKHR Shader_Binding_Callable;       // SBT region for callable shaders (unused, zeroed)
+VkStridedDeviceAddressRegionKHR Shader_Binding_Callable;       // SBT region for callable shaders 
+
+// Central rendering context holding all Vulkan state, GPU resources, and synchronization objects
+int              Width;                 // Window width in pixels 
+int              Height;                // Window height in pixels
+float            Active_Render_Scale;   // Internal RT render scale
+int              Active_Denoise_Passes; // A-trous denoise iterations
+int              Active_Checkerboard;   // Half-width dispatch (e.g. checkerboard)
+int              Render_Width;          // Internal RT render resolution (Width  * Render_Scale)
+int              Render_Height;         // Internal RT render resolution (Height * Render_Scale)
+VkInstance       Instance;              // Vulkan instance with validation layers
+VkSurfaceKHR     Surface;               // Window surface for presentation
+VkPhysicalDevice Physical_Device;       // Selected GPU with ray tracing support
+VkDevice         Device;                // Logical device created from the physical device
+VkQueue          Queue;                 // Universal queue for graphics, compute, and transfer
+uint             Queue_Family_Index;    // Index of the queue family supporting all operations
 
 // Descriptor set
 VkDescriptorSetLayout Descriptor_Set_Layout; // Layout describing all 12 descriptor bindings
@@ -670,100 +481,30 @@ VkPipelineLayout      Postprocess_Pipeline_Layout;
 VkDescriptorSetLayout Postprocess_Descriptor_Layout;
 VkDescriptorPool      Postprocess_Descriptor_Pool;
 VkDescriptorSet       Postprocess_Descriptor_Set;
-Gpu_Image             Depth_Image;               // R32F depth output from ray tracing
-Gpu_Image             History_Image;             // Previous frame for temporal accumulation (TAA)
-Gpu_Image             Postprocess_Output_Image;  // Final post-processed output
-int                   Frame_Count = 0;           // Frame counter for TAA convergence
-int                   Current_Budget_Byte = 0;   // 0-255, set each frame for denoiser gating
-mat4                  Prev_View_Matrix;          // Previous frame's view matrix for TAA reprojection
+GPU_Image             Depth_Image;              // R32F depth output from ray tracing
+GPU_Image             History_Image;            // Previous frame for TAA
+GPU_Image             Postprocess_Output_Image; // Final post-processed output
+int                   Frame_Count         = 0;  // Frame counter for TAA convergence
+int                   Current_Budget_Byte = 0;  // 0-255, set each frame for denoiser gating
+mat4                  Prev_View_Matrix;         // Previous frame's view matrix for TAA reprojection
 
 // A-trous wavelet denoiser
 VkPipeline            Denoise_Pipeline;
 VkPipelineLayout      Denoise_Pipeline_Layout;
 VkDescriptorSetLayout Denoise_Descriptor_Layout;
 VkDescriptorPool      Denoise_Descriptor_Pool;
-VkDescriptorSet       Denoise_Descriptor_Sets[2];  // Ping-pong: [0] reads A writes B, [1] reads B writes A
-Gpu_Image             Denoise_Ping_Image;           // Ping-pong buffer for spatial denoising
-
-// Shader binding table (SBT) alignment and handle sizes
-VkPhysicalDeviceRayTracingPipelinePropertiesKHR Raytracing_Properties; 
-
-// BLAS for world geometry and TLAS combining all instances
-Acceleration_Structure Bottom_Level, Top_Level; 
+VkDescriptorSet       Denoise_Descriptor_Sets[2]; // Ping-pong: [0] reads A writes B, [1] reads B writes A
+GPU_Image             Denoise_Ping_Image;         // Ping-pong buffer for spatial denoising
 
 // GPU physics pipeline state
 VkPipeline            Physics_Pipeline;          // Compute pipeline for physics simulation
-VkPipelineLayout      Physics_Pipeline_Layout;   // Pipeline layout with push constants for Gpu_Input
+VkPipelineLayout      Physics_Pipeline_Layout;   // Pipeline layout with push constants for GPU_Input
 VkDescriptorSetLayout Physics_Descriptor_Layout; // Layout
 VkDescriptorPool      Physics_Descriptor_Pool;   // Pool for the physics descriptor set
 VkDescriptorSet       Physics_Descriptor_Set;    // Descriptor set binding physics resources
-Gpu_Buffer            Player_State_Buffer;       // SSBO holding the Gpu_Player state (read-write each frame)
-Gpu_Buffer            Hull_Storage_Buffer;       // SSBO holding Gpu_Hull vertex + adjacency data
-Gpu_Buffer            Projectile_Buffer;         // SSBO holding Gpu_Projectile_Pool
-
-// Central rendering context holding all Vulkan state, GPU resources, and synchronization objects
-int              Width;                 // Window width in pixels (output/display resolution)
-int              Height;                // Window height in pixels
-float            Active_Render_Scale;   // Internal RT render scale
-int              Active_Denoise_Passes; // A-trous denoise iterations
-int              Active_Checkerboard;   // Half-width dispatch (e.g. checkerboard)
-int              Render_Width;          // Internal RT render resolution (Width *  Render_Scale)
-int              Render_Height;         // Internal RT render resolution (Height * Render_Scale)
-VkInstance       Instance;              // Vulkan instance with validation layers
-VkSurfaceKHR     Surface;               // Window surface for presentation
-VkPhysicalDevice Physical_Device;       // Selected GPU with ray tracing support
-VkDevice         Device;                // Logical device created from the physical device
-VkQueue          Queue;                 // Universal queue for graphics, compute, and transfer
-uint             Queue_Family_Index;    // Index of the queue family supporting all operations
-
-// GPU storage images and scene data buffers
-Gpu_Buffer Top_Level_Instance_Buffer;                    // Host-visible instance buffer for writing TLAS instance descriptors each frame
-Gpu_Buffer Top_Level_Scratch_Buffer;                     // Persistent scratch memory reused across per-frame TLAS rebuilds
-Gpu_Image  Raytracing_Storage_Image;                     // Storage image written by ray generation shader
-Gpu_Buffer Camera_Uniform_Buffer;                        // Uniform buffer for the Camera struct
-Gpu_Buffer Vertex_Buffer, Index_Buffer, Material_Buffer; // Scene geometry and material data on GPU
-Gpu_Buffer Texture_Id_Buffer;                            // Per-triangle texture index buffer
-
-// Audio
-Audio_System Audio;
-
-// Projectile pool (CPU-side)
-Projectile_Pool Projectiles;
-
-// Application state
-int   Quit;       // Non-zero when the application should exit
-float Delta_Time; // Time elapsed since the previous frame in seconds
-
-// Runtime mode flags
-int Skip_Postprocess; // Non-zero to bypass the post-processing compute pass
-int Use_Validation;   // Non-zero to enable Vulkan validation layers (--validation)
-
-// Windowing state and settings
-Quality_Level    Active_Quality      = QUALITY_MEDIUM;
-Cursor_Kind      Current_Cursor_Kind = CURSOR_SYSTEM;
-Activated_Kind   Current_Activated   = OTHER_ACTIVATED;
-Game_Mode_Kind   Current_Game_Mode   = GAME_PLAYING;
-Window_Mode_Kind Current_Window_Mode = WINDOWED_MODE;
-int              Input_Active        = 1;        // Process input when active (disabled on deactivation)
-int              Cursor_Centering    = 0;        // Center cursor each frame (game mode)
-int              In_Menu             = 0;        // 1 = menu mode, 0 = game mode
-int              Swapchain_Dirty     = 0;        // Non-zero when swapchain needs recreation
-int              Saved_Cursor_X, Saved_Cursor_Y; // Cursor position saved across mode transitions
-int              Windowed_X, Windowed_Y;         // Saved window position before fullscreen
-int              Windowed_W, Windowed_H;         // Saved window size before fullscreen
-SDL_Window      *Window;                         // SDL window for presentation and input
-SDL_Cursor      *SDL_Cursor_Arrow;               // System arrow cursor (menu default)
-SDL_Cursor      *SDL_Cursor_Hand;                // Active cursor (hovering interactive UI)
-SDL_Cursor      *SDL_Cursor_Crosshair;           // Inactive cursor (menu, not hovering)
-
-// World and movement state (switchable at runtime via key binds)
-World_Settings Active_World = {WORLD_QUAKE3, "Quake 3", 1.f, 56.f, 15.f, 50.f, 36.f, 32.f, 18.f, 90.f, 320.f, 800.f, 2};
-int Active_Movement = MOVEMENT_QUAKE3;           // Current movement physics model (Q3 or Source)
-
-// Skeletal animation pipeline state (shared by all skeletal entities)
-VkPipeline            Skinning_Pipeline;          // Compute pipeline for GPU bone skinning
-VkPipelineLayout      Skinning_Pipeline_Layout;
-VkDescriptorSetLayout Skinning_Descriptor_Layout;
+GPU_Buffer            Player_State_Buffer;       // SSBO holding the GPU_Player state (read-write each frame)
+GPU_Buffer            Hull_Storage_Buffer;       // SSBO holding GPU_Hull vertex + adjacency data
+GPU_Buffer            Projectile_Buffer;         // SSBO holding GPU_Projectile_Pool
 
 // ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 //
@@ -791,7 +532,7 @@ mat4 Perspective (float Fovy_Degrees, float Aspect, float Near, float Far);
 // the up vector is derived from the cross product of the right and forward vectors.
 mat4 View (vec3 Position, float Yaw, float Pitch);
 
-// Invert an orthogonal matrix (rotation + translation only) by transposing the 3×3 rotation block and recomputing the translation as the
+// Invert an orthogonal matrix (rotation + translation only) by transposing the 3 by 3 rotation block and recomputing the translation as the
 // negated rotated original translation.
 mat4 Inverse_Orthogonal (mat4 Source);
 
@@ -805,26 +546,22 @@ mat4 Inverse_Projection (mat4 Projection);
 //
 // ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 
-// Search the physical device's memory heaps for a memory type index that satisfies both the type bitmask (from memory requirements) and
-// the desired property flags (host-visible, device-local, etc).
+// Search the physical device's memory heaps for a memory type index that satisfies both the type bitmask and the desired property flags
 uint Find_Memory_Type (uint Type_Bits, VkMemoryPropertyFlags Desired_Properties);
 
-// Allocate a GPU buffer with the given size, usage flags, and memory properties. If the usage includes shader device address, the
-// allocation is flagged accordingly and the device address is queried.
-Gpu_Buffer Buffer_Allocate (uint64_t Size, VkBufferUsageFlags Usage, VkMemoryPropertyFlags Memory_Flags);
+// Allocate a GPU buffer with the given size, usage flags, and memory properties
+GPU_Buffer Buffer_Allocate (uint64_t Size, VkBufferUsageFlags Usage, VkMemoryPropertyFlags Memory_Flags);
 
 // Map the buffer's device memory into host address space, copy the source data, then unmap
-void Buffer_Upload (Gpu_Buffer Destination, const void *Data, uint64_t Size);
+void Buffer_Upload (GPU_Buffer Destination, const void *Data, uint64_t Size);
 
-// Upload data to device-local memory via a host-visible staging buffer. A one-shot command buffer
-// performs the copy, then the staging buffer is freed. The resulting buffer has the requested usage
-// flags plus transfer-destination and shader-device-address.
-Gpu_Buffer Buffer_Stage_Upload (VkCommandBuffer Command_Buffer, VkQueue Queue,
+// Upload data to device-local memory via a host-visible staging buffer
+GPU_Buffer Buffer_Stage_Upload (VkCommandBuffer Command_Buffer, VkQueue Queue,
                                 const void *Data, uint64_t Size, VkBufferUsageFlags Usage);
 
 // ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 //
-// §6. Textures
+// §6. Materials
 //
 // ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 
@@ -836,6 +573,39 @@ Gpu_Buffer Buffer_Stage_Upload (VkCommandBuffer Command_Buffer, VkQueue Queue,
 #define MATERIAL_FLESH   4
 #define MATERIAL_WATER   5
 #define MATERIAL_COUNT   6
+
+// VTF texture format constants
+#define VTF_MAGIC        0x00465456u // "VTF\0" as 32-bit LE
+#define VTF_VERSION_MAJ  7           // VTF 7.x
+#define VTF_VERSION_MIN  5           // VTF 7.5 (latest common)
+#define VTF_MAX_FRAMES   1           // Single frame for textures
+#define VTF_MAX_MIP      16          // Maximum mipmap count
+
+// VTF image format enumeration (subset used by CSPromod assets)
+typedef enum {
+  VTF_FMT_RGBA8888 = 0,  VTF_FMT_ABGR8888 = 1,  VTF_FMT_RGB888   = 2,
+  VTF_FMT_BGR888   = 3,  VTF_FMT_RGB565   = 4,  VTF_FMT_DXT1     = 13,
+  VTF_FMT_DXT3     = 14, VTF_FMT_DXT5     = 15, VTF_FMT_BGRA8888 = 12,
+  VTF_FMT_UV88     = 16, VTF_FMT_RGBA16F  = 24, VTF_FMT_NONE     = -1
+} VTF_Image_Format;
+
+// VTF file header (Valve Texture Format - on-disk layout)
+typedef struct {
+  uint     Magic;
+  uint     Version[2];
+  uint     Header_Size;
+  uint16_t Width, Height;
+  uint     Flags;
+  uint16_t Frames, First_Frame;
+  uint8_t  Pad0[4];
+  float    Reflectivity[3];
+  uint8_t  Pad1[4];
+  float    Bump_Scale;
+  int      High_Res_Format;
+  uint8_t  Mipmap_Count;
+  int      Low_Res_Format;
+  uint8_t  Low_Res_W, Low_Res_H;
+} VTF_Header;
 
 // Load a TGA image file and decode it into RGBA8 pixel data
 uint8_t *TGA_Load (const char *Path, uint *Out_Width, uint *Out_Height);
@@ -850,12 +620,10 @@ void Texture_Upload (VkCommandBuffer Command_Buffer, VkQueue Queue,
                      const uint8_t *Pixels, uint Width, uint Height,
                      VkImage *Out_Image, VkDeviceMemory *Out_Memory, VkImageView *Out_View);
 
-// Create a device-local 2D image suitable for use as a ray tracing storage target. The image is RGBA16F with storage and
-// transfer-source usage bits.
-Gpu_Image Image_Storage_Create (uint Width, uint Height);
+// Create a device-local 2D image suitable for use as a ray tracing storage target
+GPU_Image Image_Storage_Create (uint Width, uint Height);
 
-// Insert a pipeline barrier that transitions an image between layouts, specifying the source and destination access masks and pipeline
-// stages for proper synchronization. 
+// Insert a pipeline barrier that transitions an image between layouts
 void Image_Layout_Barrier (VkCommandBuffer      Command_Buffer, VkImage              Image,
                            VkImageLayout        Old_Layout,     VkImageLayout        New_Layout,
                            VkAccessFlags        Source_Access,  VkAccessFlags        Destination_Access,
@@ -867,7 +635,7 @@ VkSampler Sampler_Create_Repeating ();
 // Create a sampler with linear filtering and clamp-to-edge on all axes
 VkSampler Sampler_Create_Clamping ();
 
-// Load a damage map TGA and sample it at normalized UV coordinates 
+// Load a damage map TGA and sample it at normalized UV coordinates
 
 // Loaded damage mapping
 typedef struct {
@@ -875,6 +643,14 @@ typedef struct {
   uint8_t *Pixels;
   uint     Width, Height;
 } Damage_Map_Cache_Entry;
+
+// Body-part damage multiplier maps: grayscale TGA textures UV-mapped to player models
+#define DAMAGE_CACHE_MAX 64
+typedef struct {
+  const char *Model_Name;       // Player model directory name
+  const char *Damage_Maps[6];   // Up to 6 damage map TGA paths per model (NULL-terminated)
+  int         Damage_Map_Count; // Number of damage maps for this model
+} Model_Damage_Entry;
 
 // Global damage map collection
 int                    Damage_Cache_Count = 0;
@@ -886,8 +662,7 @@ void Damage_Cache_Free ();
 // Look up the damage map path for a given model name and body part index (0=head, 1=upper, 2=lower)
 const char *Damage_Map_For_Model (const char *Model_Name, int Part_Index);
 
-// Returns a damage multiplier in [0.0, 1.0] where 0.0 = fully armored, 1.0 = critical.
-// The damage map is loaded on demand and cached in a table.
+// Returns a damage multiplier in 0.0..1.0
 float Damage_Map_Sample (const char *Path, float U, float V);
 
 // ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
@@ -896,62 +671,190 @@ float Damage_Map_Sample (const char *Path, float U, float V);
 //
 // ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 
-// Quake 3 model format
-#define MD3_MAGIC            0x33504449u // "IDP3" as a 32-bit little-endian integer
-#define MD3_MAX_SURFACES     3           // Maximum surfaces per weapon part (body, barrel, hand)
-#define MD3_MAX_ANIM_FRAMES  30          // Maximum animation frames extracted from tag_weapon
+// Id Tech 3 model format
+#define MD3_MAGIC           0x33504449u // "IDP3" as a 32-bit little-endian integer
+#define MD3_MAX_SURFACES    3           // Maximum surfaces per weapon part (body, barrel, hand)
+#define MD3_MAX_ANIM_FRAMES 30          // Maximum animation frames extracted from tag_weapon
 
-// MD3 surface header: describes one mesh within an MD3 model file
+// Source MDL format constants
+#define MDL_MAGIC_IDST    0x54534449u // "IDST" - studio model header magic
+#define MDL_MAGIC_IDSQ    0x51534449u // "IDSQ" - sequence group header magic
+#define MDL_VERSION_44    44          // HL2 / Source 2004
+#define MDL_VERSION_48    48          // CS:Source / Source 2007+
+#define MDL_VERSION_49    49          // Source 2013 / CS:GO
+#define MDL_MAX_BONES     128         // Maximum bones per skeleton
+#define MDL_MAX_MESHES    32          // Maximum meshes per body part
+#define MDL_MAX_BODYPARTS 16          // Maximum body part groups
+
+// Skeletal animation limits
+#define SKEL_MAX_BONES_PER_VERT 3   // Maximum bone influences per vertex (GPU-friendly)
+#define SKEL_MAX_ANIMS          32  // Maximum animation sequences per model
+#define SKEL_MAX_FRAMES         256 // Maximum keyframes per animation
+
+// MD3 surface header - one triangle mesh within an MD3 model file
 typedef struct {
-  int  Magic;                                   // Surface magic identifier (always IDP3)
-  char Name[64];                                // Null-terminated surface name
-  int  Flags;                                   // Surface flags (unused in Quake 3)
-  int  Number_Of_Frames, Number_Of_Shaders;     // Animation frame count and attached shader count
-  int  Number_Of_Vertices, Number_Of_Triangles; // Per-frame vertex count and triangle count
-  int  Triangles_Offset, Shaders_Offset;        // Byte offsets from surface start to triangle and shader data
-  int  Texture_Coordinates_Offset;              // Byte offset to the per-vertex texture coordinate array
-  int  Vertices_Offset, End_Offset;             // Byte offset to compressed vertex frames and to the next surface
+  int  Magic;                                    // Surface magic identifier (always IDP3)
+  char Name[64];                                 // Null-terminated surface name
+  int  Flags;                                    // Surface flags (unused in Quake 3)
+  int  Number_Of_Frames, Number_Of_Shaders;      // Animation frame count and attached shader count
+  int  Number_Of_Vertices, Number_Of_Triangles;  // Per-frame vertex count and triangle count
+  int  Triangles_Offset, Shaders_Offset;         // Byte offsets from surface start to triangle and shader data
+  int  Texture_Coordinates_Offset;               // Byte offset to the per-vertex texture coordinate array
+  int  Vertices_Offset, End_Offset;              // Byte offset to compressed vertex frames and to the next surface
 } MD3_Surface;
 
-// MD3 tag: a named attachment point with position and orientation for linking model parts
+// MD3 tag - a named attachment point with position and orientation for linking model parts
 typedef struct {
-  char  Name[64];  // Null-terminated tag name (e.g. "tag_barrel", "tag_weapon")
-  float Origin[3]; // World-space position of the attachment point
-  float Axis[9];   // A 3×3 rotation matrix (row-major) defining the tag's local coordinate frame
+  char  Name  [64]; // Null-terminated tag name (e.g. "tag_barrel", "tag_weapon")
+  float Origin[3];  // World-space position of the attachment point
+  float Axis  [9];  // 3x3 rotation matrix (row-major) defining the tag's local coordinate frame
 } MD3_Tag;
 
-// Forward declarations — these reference types defined later (Vertex, Weapon_Model, Entity, Scene, Spawn)
-// so they are placed here as documentation. The implementations appear after the type definitions.
-//
-//   void MD3_Parse_Surface (const uint8_t *Surface_Data,
-//                           Vertex **Inout_Vertices, uint *Inout_Vertex_Count,
-//                           uint **Inout_Indices, uint *Inout_Index_Count,
-//                           uint **Inout_Texture_Ids, uint *Inout_Triangle_Count,
-//                           uint Assigned_Texture_Index, const float *Transform);
-//
-//   void MD3_Parse_Surface_At_Frame (const uint8_t *Surface_Data, int Frame,
-//                                    Vertex **Inout_Vertices, uint *Inout_Vertex_Count,
-//                                    uint **Inout_Indices, uint *Inout_Index_Count,
-//                                    uint **Inout_Texture_Ids, uint *Inout_Triangle_Count,
-//                                    uint Assigned_Texture_Index, const float *Transform);
-//
-//   Weapon_Model Weapon_Model_Load ();
-//   Weapon_Model Source_Weapon_Model_Load (const char *Path);
-//   Entity Entity_Load (Scene *S, Spawn Spawn_Point);
-//   void Entity_Bottom_Level_Initialize (Entity *Enemy);
-//   void Entity_Bottom_Level_Rebuild (Entity *Enemy);
-//   void Entity_Assemble_Frame (int Legs_Frame, int Torso_Frame,
-//                               uint Body_Mat, uint Gun_Mat, const float World[12],
-//                               Vertex **Out_Verts, uint *Out_Vert_Count,
-//                               uint **Out_Indices, uint *Out_Index_Count,
-//                               uint **Out_Tex_Ids, uint *Out_Tri_Count);
+// Source engine studio model header (versions 44-49)
+typedef struct {
+  int  Magic, Version, Checksum;
+  char Name[64];
+  int  Length;
+  vec3 Eye_Position, Illumination_Position, Hull_Min, Hull_Max, View_Min, View_Max;
+  int  Flags;
+  int  Bone_Count,              Bone_Offset;
+  int  Bone_Controller_Count,   Bone_Controller_Offset;
+  int  Hitbox_Count,            Hitbox_Offset;
+  int  Animation_Count,         Animation_Offset;
+  int  Sequence_Count,          Sequence_Offset;
+  int  Activity_Version,        Events_Index;
+  int  Material_Count,          Material_Offset;
+  int  Material_Dir_Count,      Material_Dir_Offset;
+  int  Skin_Ref_Count,          Skin_Family_Count,    Skin_Offset;
+  int  Body_Count,              Body_Offset;
+} MDL_Header;
 
-// Compose two tag transforms (each float[12]: origin[3] + axis[9])
-void Tag_Compose (const float *A, const float *B, float *C);
+// Per-bone data including bind pose, animation scale factors, and inverse bind
+typedef struct {
+  int   Name_Offset;        // Byte offset from struct start to the null-terminated bone name
+  int   Parent;             // Parent bone index, or -1 for root bones
+  int   Controllers[6];     // Bone controller indices for each degree of freedom
+  vec3  Position;           // Bind-pose translation (local space)
+  float Quat[4];            // Bind-pose rotation as a quaternion (xyzw)
+  vec3  Rot;                // Bind-pose rotation as Euler angles (XYZ, radians)
+  vec3  Position_Scale;     // Per-axis position animation compression scale
+  vec3  Rot_Scale;          // Per-axis rotation animation compression scale
+  float Pose_To_Bone[3][4]; // Inverse bind-pose matrix (3x4, row-major)
+  float Align[4];           // Quaternion alignment hint
+  int   Flags;
+  int   Procedure_Type, Procedure_Offset;
+  int   Physics_Bone,   Surface_Offset, Contents;
+  int   Pad[8];
+} MDL_Bone;
 
-// Returns 1 if found, 0 if not. Writes the 12-float transform (origin[3] + axis[9]) to Out
-int MD3_Find_Tag_At_Frame (const uint8_t *Data, int Tag_Count, int Tags_Offset,
-                                   int Frame, const char *Name, float Out[12]);
+// Logical body part grouping (e.g. "head", "arms")
+typedef struct {
+  int Name_Offset;  // Byte offset to the null-terminated body part name
+  int Model_Count;  // Number of model LOD sets within this body part
+  int Base_Index;   // Base index used for body part selection arithmetic
+  int Model_Offset; // Byte offset (relative) to the first MDL_Model entry
+} MDL_Body_Part;
+
+// Triangle mesh LOD set within a body part
+typedef struct {
+  char  Name[64];
+  int   Type;
+  float Radius;
+  int   Mesh_Count,       Mesh_Offset;
+  int   Vertex_Count,     Vertex_Offset,  Tangent_Offset;
+  int   Attachment_Count, Attachment_Offset;
+  int   Eye_Count,        Eye_Offset;
+  int   Pad[16];
+} MDL_Model;
+
+// Material surface within a model
+typedef struct {
+  int  Material;       // Index into the MDL material table
+  int  Model_Offset;   // Byte offset back to the owning MDL_Model
+  int  Vertex_Count;   // Number of vertices belonging to this mesh
+  int  Vertex_Offset;  // Base index into the VVD vertex array for this mesh
+  int  Flex_Count,     Flex_Offset;
+  int  Material_Type,  Material_Param;
+  int  Id;
+  vec3 Center;
+  int  Pad[17];
+} MDL_Mesh;
+
+// Vertex data sidecar for Source's "Studio Model" MDL format
+#define VVD_MAGIC 0x56534449 // 'IDSV'
+typedef struct {
+  uint Magic;
+  int  Version;
+  int  Checksum;
+  int  LOD_Count;
+  int  LOD_Vertex_Counts[8]; // Per-LOD vertex counts; index 0 is the highest-detail LOD
+  int  Fixup_Count;
+  int  Fixup_Table_Start;
+  int  Vertex_Data_Start;
+  int  Tangent_Data_Start;
+} VVD_Header;
+
+// Skinned vertex
+typedef struct {
+  float   Bone_Weights[3]; // Normalised blend weights for up to 3 bone influences
+  uint8_t Bone_Ids[3];     // Bone indices corresponding to each weight
+  uint8_t Bone_Count;      // Number of active bone influences (1-3)
+  float   Position[3];     // Bind-pose position in model space
+  float   Normal[3];       // Bind-pose normal in model space
+  float   Tex_Coord[2];    // Texture UV coordinates
+} VVD_Vertex;
+
+// VTX OptimizedModel header - triangle strip sidecar for Source MDL
+#define VTX_VERSION 7
+typedef struct {
+  int      Version;
+  int      Vertex_Cache_Size;
+  uint16_t Max_Bones_Strip, Max_Bones_Tri;
+  int      Max_Bones_Vert;
+  int      Checksum;
+  int      LOD_Count;
+  int      Material_Replacement_Offset;
+  int      Body_Part_Count;
+  int      Body_Part_Offset;
+} VTX_Header;
+
+typedef struct {int Model_Count,       Model_Offset;} VTX_Body_Part;
+typedef struct {int LOD_Count,         LOD_Offset;}   VTX_Model;
+typedef struct {int Mesh_Count,        Mesh_Offset; float Switch_Point;} VTX_LOD;
+typedef struct {int Strip_Group_Count, Strip_Group_Offset; uint8_t Flags;} VTX_Mesh;
+
+// Strip group within a mesh (25 bytes packed)
+typedef struct {
+  int     Vertex_Count, Vertex_Offset;
+  int     Index_Count,  Index_Offset;
+  int     Strip_Count,  Strip_Offset;
+  uint8_t Flags;
+} VTX_Strip_Group;
+
+// Strip-group vertex entry referencing the VVD via origMeshVertID (9 bytes packed)
+typedef struct {
+  uint8_t  Bone_Weight_Indices[3];    // Indices into the strip group's bone table for each weight
+  uint8_t  Bone_Count;                // Number of active bone influences for this vertex
+  uint16_t Original_Mesh_Vertex_Id;  // origMeshVertID: index into the mesh's VVD vertex range
+  int8_t   Bone_Ids[3];              // Bone indices (after remapping through the strip group's bone table)
+} VTX_Vertex; // 9 bytes
+
+// Parse one MD3 surface at frame 0 and append its triangles to the caller's shared geometry arrays
+void MD3_Parse_Surface (const uint8_t *Surface_Data,
+                        Vertex **Inout_Vertices,    uint *Inout_Vertex_Count,
+                        uint  **Inout_Indices,      uint *Inout_Index_Count,
+                        uint  **Inout_Texture_Ids,  uint *Inout_Triangle_Count,
+                        uint Assigned_Texture_Index, const float *Transform);
+
+// Parse one MD3 surface at a specific animation frame and append its triangles to the caller's shared geometry arrays
+void MD3_Parse_Surface_At_Frame (const uint8_t *Surface_Data, int Frame,
+                                 Vertex **Inout_Vertices,    uint *Inout_Vertex_Count,
+                                 uint  **Inout_Indices,      uint *Inout_Index_Count,
+                                 uint  **Inout_Texture_Ids,  uint *Inout_Triangle_Count,
+                                 uint Assigned_Texture_Index, const float *Transform);
+
+// Load the default Quake 3 MD3 weapon model from the assets/models directory
+Weapon_Model Weapon_Model_Load ();
 
 // ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 //
@@ -975,40 +878,158 @@ int MD3_Find_Tag_At_Frame (const uint8_t *Data, int Tag_Count, int Tags_Offset,
 #define BSP_VERTICES        10          // Lump index: vertex positions, UVs, normals, colors
 #define BSP_INDICES         11          // Lump index: triangle mesh element indices
 #define BSP_FACES           13          // Lump index: face/surface descriptors
-#define BSP_LIGHTMAPS       14          // Lump index: 128×128 RGB lightmap pages
+#define BSP_LIGHTMAPS       14          // Lump index: 128 by 128 RGB lightmap pages
 #define SURFACE_TYPE_PLANAR 1           // Face type: flat polygon rendered from indices
 #define SURFACE_TYPE_PATCH  2           // Face type: Bézier patch (tessellated at load time)
 #define SURFACE_TYPE_MESH   3           // Face type: triangle mesh (e.g. models in BSP)
 #define TESSELLATION_LEVEL  5           // Number of subdivisions per Bézier patch edge
 #define LIGHTMAP_PAGE_SIZE  128         // Width and height in texels of each lightmap page
 
-// BSP lump directory entry: byte offset and length of a data lump within the file
-typedef struct {int Offset, Length;} BSP_Lump;
+// Source BSP (VBSP) format constants
+#define VBSP_MAGIC       0x50534256u // "VBSP"
+#define VBSP_VERSION_19  19          // HL2
+#define VBSP_VERSION_20  20          // CS:Source / HL2:EP1
+#define VBSP_VERSION_21  21          // CS:GO / L4D2
+#define VBSP_LUMP_COUNT  64          // Source BSP has 64 lumps
+#define VBSP_ENTITIES    0           // Entity lump
+#define VBSP_PLANES      1           // Plane lump
+#define VBSP_TEXDATA      2          // Texture data lump
+#define VBSP_VERTICES    3           // Vertex lump
+#define VBSP_NODES       5           // BSP nodes
+#define VBSP_TEXINFO     6           // Texture info lump
+#define VBSP_FACES       7           // Face lump
+#define VBSP_LIGHTING    8           // Lightmap lump (luxels)
+#define VBSP_LEAFS       10          // Leaf lump
+#define VBSP_EDGES       12          // Edge lump
+#define VBSP_SURFEDGES   13          // Surface-edge lump
+#define VBSP_MODELS      14          // Brush model lump
+#define VBSP_DISPINFO    26          // Displacement info
+#define VBSP_DISPVERTS   33          // Displacement vertices
+#define VBSP_TEXDATA_STRING_DATA  43 // Texture name strings
+#define VBSP_TEXDATA_STRING_TABLE 44 // Texture name string table
 
-// BSP file header: magic number, version, and the 17-entry lump directory
+// One entry in the VBSP lump directory: locates and describes a single data section
 typedef struct {
-  uint     Magic, Version;         // Magic (0x50534249 = "IBSP") and format version (46 for Quake 3)
-  BSP_Lump Lumps [BSP_LUMP_COUNT]; // Directory of data lumps indexed by BSP_ENTITIES..BSP_LIGHTMAPS
+  int  Offset;     // Byte offset from the start of the file to the first byte of lump data
+  int  Length;     // Length of the lump data in bytes (0 = lump absent)
+  int  Version;    // Lump format version (usually 0; non-zero for compressed or extended lumps)
+  char Fourcc[4];  // Four-character code identifying the lump (unused in most lumps, zeroed)
+} VBSP_Lump;
+
+// VBSP file header: magic, format version, and the full lump directory
+typedef struct {
+  uint       Magic;                  // File magic: 0x50534256 ("VBSP" in little-endian ASCII)
+  uint       Version;                // BSP format version (19, 20, or 21)
+  VBSP_Lump  Lumps[VBSP_LUMP_COUNT]; // Directory of all data lumps, indexed by VBSP_* lump constants
+  int        Map_Revision;           // Hammer editor revision number at the time of the last compile
+} VBSP_Header;
+
+// A single geometric vertex position 
+typedef struct {
+  float Position[3]; // World-space XYZ coordinates in Source engine units
+} VBSP_Vertex;
+
+// A directed edge connecting two vertices - sign of the surf-edge index determines which endpoint is first
+typedef struct {
+  uint16_t Vertex_Index[2]; // Indices into the VBSP_VERTICES array: [0]=start, [1]=end
+} VBSP_Edge;
+
+// A rendered world surface, described indirectly via the surf-edge and vertex arrays
+typedef struct {
+  uint16_t Plane_Num;          // Index into the VBSP_PLANES lump; defines the surface's infinite plane
+  uint8_t  Side;               // When 0 = face is on the front side of the plane; 1 = back side
+  uint8_t  On_Node;            // True if this face sits exactly on a BSP node boundary, 0 otherwise
+  int      First_Edge;         // Index into VBSP_SURFEDGES of the first surf-edge for this face
+  int16_t  Num_Edges;          // Number of surf-edges (and therefore vertices) forming the face polygon
+  int16_t  Tex_Info;           // Index into VBSP_TEXINFO; supplies texture projection vectors and flags
+  int16_t  Disp_Info;          // Index into VBSP_DISPINFO if this face is a displacement; -1 otherwise
+  int16_t  Fog_Volume;         // Index into the fog volume list (-1 if not inside a fog volume)
+  uint8_t  Lighting_Styles[4]; // Up to four lighting style slots (255 = unused slot)
+  int      Lightmap_Offset;    // Byte offset into the VBSP_LIGHTING lump for this face's luxel grid
+  float    Area;               // Surface area in Source units squared (precomputed by vbsp)
+  int      Lightmap_Mins[2];   // Minimum texture-space extents of the lightmap region (S, T)
+  int      Lightmap_Size[2];   // Width and height of the lightmap region in luxels (S, T)
+  int      Original_Face;      // Index of the original pre-split face in VBSP_ORIGINALFACES (-1 if none)
+  uint16_t Primitive_Count;    // Number of primitives (used for water surfaces; 0 for ordinary faces)
+  uint16_t First_Primitive;    // Index into the VBSP_PRIMITIVES lump of the first primitive
+  uint     Smoothing_Groups;   // Bitmask of smoothing groups this face belongs to
+} VBSP_Face;
+
+// Texture projection and lightmap projection vectors for a face, stored in VBSP_TEXINFO
+typedef struct {
+  float Texture_Vecs [2][4]; // Texture-space projection: [0]=S row, [1]=T row; each is (X,Y,Z,Offset)
+  float Lightmap_Vecs[2][4]; // Lightmap-space projection: same layout as Texture_Vecs
+  int   Flags;               // Surface property flags (SURF_* bitmask: sky, nodraw, trigger, etc.)
+  int   Texture_Data;        // Index into VBSP_TEXDATA for the material bound to this surface
+} VBSP_Tex_Info;
+
+// Material reflectivity, name reference, and texture dimensions, stored in VBSP_TEXDATA
+typedef struct {
+  float Reflectivity[3];         // Approximate diffuse reflectivity (R, G, B) in 0–1 range; used for radiosity
+  int   Name_Id;                 // Index into VBSP_TEXDATA_STRING_TABLE, which points into VBSP_TEXDATA_STRING_DATA
+  int   Width,  Height;          // Full texture dimensions in texels (may differ from the VTF on disk)
+  int   View_Width, View_Height; // Texture dimensions as seen through the material's $basetexture view
+} VBSP_Tex_Data;
+
+// Displacement surface descriptor - describes how a quad face is subdivided and height-displaced into a terrain patch
+typedef struct {
+  float    Start_Position[3];     // World-space corner of the base quad closest to the displacement origin
+  int      Disp_Vert_Start;       // First index into VBSP_DISPVERTS for this displacement's vertex grid
+  int      Disp_Tri_Start;        // First index into VBSP_DISPTRIS for this displacement's triangle flags
+  int      Power;                 // Subdivision power: grid is (2^Power + 1) × (2^Power + 1) vertices
+  int      Min_Tessellation;      // Minimum LOD level the engine may simplify to at runtime
+  float    Smoothing_Angle;       // Maximum dihedral angle (degrees) between adjacent faces for normal smoothing
+  int      Surface_Contents;      // BSP contents flags (CONTENTS_*) inherited by the displacement surface
+  uint16_t Map_Face;              // Index into VBSP_FACES of the base quad this displacement is attached to
+  uint16_t Pad;                   // Explicit padding to maintain 4-byte alignment of subsequent fields
+  int      Lightmap_Alpha_Start;  // First index into the per-displacement lightmap alpha array
+  int      Lightmap_Sample_Start; // First index into the per-displacement lightmap sample position array
+  uint8_t  Neighbor_Data[128];    // Displacement neighbor and allowed vertex information (internal compiler data)
+} VBSP_Disp_Info;
+
+// One displaced grid vertex, stored in the VBSP_DISPVERTS lump
+typedef struct {
+  float Vec  [3]; // Unit displacement direction vector in world space
+  float Dist;     // Scalar distance to displace along Vec from the bilinearly interpolated base position
+  float Alpha;    // Per-vertex blend alpha for the displacement's secondary paint texture (0–255)
+} VBSP_Disp_Vert;
+
+// One entry in the IBSP lump directory
+typedef struct {
+  int Offset; // Byte offset from the start of the file to the first byte of lump data
+  int Length; // Length of the lump data in bytes
+} BSP_Lump;
+
+// IBSP file header: magic number, format version, and the lump directory
+typedef struct {
+  uint     Magic;                 // File magic: 0x50534249 ("IBSP" in little-endian ASCII)
+  uint     Version;               // BSP format version (46 for Quake 3 / RTCW)
+  BSP_Lump Lumps[BSP_LUMP_COUNT]; // Directory of data lumps indexed by BSP_ENTITIES..BSP_LIGHTMAPS
 } BSP_Header;
 
-// BSP vertex as stored on disk: position, two UV sets, normal, and vertex color
+// A single geometric vertex stored in the BSP_VERTICES lump
 typedef struct {
-  float   Position        [3]; // World XYZ
-  float   Texture_Coords  [2]; // Diffuse UVs 
-  float   Lightmap_Coords [2]; // Lightmap UVs
-  float   Normal          [3]; // Unit surface normal
-  uint8_t Color           [4]; // Vertex color (RGBA, 8 bits per channel)
+  float   Position       [3]; // World XYZ in engine units
+  float   Texture_Coords [2]; // Diffuse UV coordinates (S, T)
+  float   Lightmap_Coords[2]; // Lightmap UV coordinates (S, T)
+  float   Normal         [3]; // Unit surface normal
+  uint8_t Color          [4]; // Per-vertex RGBA color (8 bits per channel; used for vertex lighting)
 } BSP_Vertex;
 
-// BSP face/surface descriptor: references into vertex, index, and lightmap data
+// A rendered world surface stored in the BSP_FACES lump
 typedef struct {
-  int   Shader_Index;                            // Material shader
-  int   Fog_Volume;                              // Fog reference
-  int   Type;                                    // Surface type (planar/patch/mesh)
-  int   First_Vertex,       Vertex_Count;        // Starting vertex index and count in the global vertex array
-  int   First_Index,        Index_Count;         // Starting element index and count in the global index array
-  int   Lightmap_Index;                          // Lightmap page index (-1 if none)
-  int   Lightmap_X,         Lightmap_Y;          // Top-left corner of this face's lightmap within its page
+  int Shader_Index;  // Index into BSP_SHADERS; identifies the material
+  int Fog_Volume;    // Index into BSP_FOGS (-1 if not inside a fog volume)
+  int Surface_Type;  // Geometry type - planar polygon, patch, triangle mesh, billboard, etc
+
+  int First_Vertex; // Index of the first vertex in the global BSP_VERTICES array
+  int Vertex_Count; // Number of consecutive vertices belonging to this surface
+
+  int First_Index;  // Index of the first element in the global BSP_INDICES array
+  int Index_Count;  // Number of consecutive indices forming the triangle list
+
+  int   Lightmap_Index;                          // Lightmap page index (-1 = fullbright / no lightmap)
+  int   Lightmap_Origin_X,  Lightmap_Origin_Y;   // Top-left texel corner of this surface's region within its lightmap page
   int   Lightmap_Width,     Lightmap_Height;     // Dimensions of the lightmap region in texels
   float Lightmap_Origin[3], Lightmap_Vectors[9]; // World-space lightmap placement (origin + 2 basis vectors + normal)
   int   Patch_Width,        Patch_Height;        // Control point grid dimensions (only valid for patch surfaces)
@@ -1016,10 +1037,9 @@ typedef struct {
 
 // BSP shader entry: maps a surface material name to content and surface flags
 typedef struct {
-  char Name[64];        // Shader path (e.g. "textures/gothic_wall/wall01")
+  char Name[64];        // Shader path 
   int  Flags, Contents; // Surface flags (e.g. translucent) and content flags (e.g. solid, water)
 } BSP_Shader;
-
 
 // Per-frame camera state uploaded to the GPU as a uniform buffer
 typedef struct {
@@ -1029,10 +1049,10 @@ typedef struct {
   uint  Frame;                            // Monotonically increasing frame counter for temporal effects
 } Camera;
 
-// Interleaved vertex layout matching the GPU shader input (std430, 48 bytes per vertex)
+// Interleaved vertex layout matching the GPU shader input
 typedef struct {
   float Position   [3], Padding_A;       // World-space XYZ position; padding aligns to 16 bytes
-  float Texture_Uv [2], Lightmap_Uv [2]; // Diffuse texture coordinates and lightmap atlas coordinates
+  float Texture_UV [2], Lightmap_UV [2]; // Diffuse texture coordinates and lightmap atlas coordinates
   float Normal     [3], Padding_B;       // Surface normal; padding aligns to 16 bytes
 } Vertex;
 
@@ -1057,7 +1077,7 @@ typedef struct {
 const Scene_Environment DEFAULT_ENVIRONMENT = {
   .Sun_Direction      = {0.5f, 0.7f,  0.5f},   // High sun angle
   .Sun_Color          = {1.0f, 0.95f, 0.85f},  // Warm daylight
-  .Sun_Angular_Radius = 0.02f,                 // ~1.1 degrees (Earth sun ≈ 0.53°)
+  .Sun_Angular_Radius = 0.02f,                 // About ~1.1 degrees (Earth sun ≈ 0.53°)
   .Sun_Intensity      = 4.0f,                  // Strong direct light
   .Sky_Zenith         = {0.15f, 0.25f, 0.55f}, // Deep blue zenith
   .Sky_Horizon        = {0.4f,  0.5f,  0.6f},  // Hazy lighter blue at horizon
@@ -1072,11 +1092,10 @@ const Scene_Environment DEFAULT_ENVIRONMENT = {
 };
 Scene_Environment Active_Environment;
 
-// BSP Entity System
+// Entity System
 //
-// The entity lump in BSP files is text key/value records. We tokenize and map known keys into
-// typed fields, then discard the raw pairs. The discriminant union is the authoritative runtime
-// representation. Unknown keys are silently ignored.
+// The entity lump in BSP files is text key/value records. We tokenize and map known keys into typed fields, then discard the raw pairs.
+// The discriminant union is the authoritative runtime representation. Unknown keys are silently ignored.
 //
 typedef enum {
   NO_ENTITY = 0,
@@ -1085,9 +1104,9 @@ typedef enum {
   ENTITY_WORLD,
 
   // Player / camera / navigation
-  ENTITY_INFO_PLAYER_START,        // info_player_start - single-player spawn
-  ENTITY_INFO_PLAYER_SPAWN,        // info_player_deathmatch / team spawn (aliases map here)
-  ENTITY_INFO_PLAYER_INTERMISSION, // info_player_intermission - post-match camera
+  ENTITY_INFO_PLAYER_START,        // Single-player spawn
+  ENTITY_INFO_PLAYER_SPAWN,        // Team spawn 
+  ENTITY_INFO_PLAYER_INTERMISSION, // Post-match camera
   ENTITY_INFO_CAMERA,              // Fixed camera
   ENTITY_INFO_CAMERA_PATH,         // Camera path node
   ENTITY_INFO_NAV_NODE,            // AI/path node
@@ -1104,8 +1123,8 @@ typedef enum {
   ENTITY_PARTICLE_SYSTEM, // Particle emitter
   ENTITY_SOUND_EMITTER,   // Ambient or positional sound (target_speaker)
 
-  // Static and dynamic props
-  ENTITY_PROP_STATIC,  // Static model instance (misc_model)
+  // and dynamic props
+  ENTITY_PROP_STATIC,  // Model instance (misc_model)
   ENTITY_PROP_DYNAMIC, // Animated/dynamic prop
   ENTITY_PROP_PHYSICS, // Physics-enabled prop
 
@@ -1252,28 +1271,28 @@ typedef struct {
   float Height; // Height for cylindrical volumes
 
   // Rendering assets
-  char Model    [96];  // Model path (mesh, brush model token, etc)
+  char Model    [96];  // Model path 
   char Material [96];  // Material/shader path
   char Sound    [96];  // Sound file path
   char Script   [96];  // Script path
   char Message  [128]; // UI/message string
-  vec3 Color;          // RGB (0..1) where applicable
+  vec3 Color;          // Range RGB (0..1) where applicable
   float Alpha;         // Opacity (1.0 default)
 
   // Gameplay and physics
   int   Spawnflags; // Generic spawnflags bitfield
-  int   Flags;      // Generic runtime flags (engine-defined)
+  int   Flags;      // Generic runtime flags 
   int   Team;       // Team or faction id
-  int   Health;     // Hit points (0 if not damageable)
-  int   Armor;      // Armor points (0 if unused)
+  int   Health;     // Hit points
+  int   Armor;      // Armor points 
   int   Damage;     // Damage (for hurt/explosive/etc)
-  int   Count;      // Generic count (quantity, etc)
-  float Speed;      // Generic speed (doors/movers/projectiles)
-  float Accel;    
-  float Decel;  
+  int   Count;      // Generic count 
+  float Speed;      // Generic speed 
   float Wait;       // Seconds
   float Delay;      // Seconds
   float Random;     // Random variance (seconds or scalar)
+  float Accel;    
+  float Decel;  
 } Entity_Common;
 
 // BSP Entity discriminate union
@@ -1284,35 +1303,35 @@ typedef struct {
 
     // when ENTITY_WORLD =>
     struct {
-      float Gravity;       // World gravity scalar (0 = engine default 800)
-      float Time_Limit;    // Match time limit (0 = none)
-      int   Score_Limit;   // Score limit (0 = none)
+      float Gravity;       // World gravity scalar 
+      float Time_Limit;    // Match time limit 
+      int   Score_Limit;   // Score limit 
       float Ambient_Light; // Scalar ambient floor
     } world;
 
     // when ENTITY_INFO_PLAYER_ =>
     struct {
-      int   Player_Class;  // Class index (0 = default)
-      int   Loadout;       // Loadout id (0 = default)
-      float Fov;           // Suggested FOV (0 = engine default)
-      float View_Height;   // Standing view height (0 = engine default)
-      float Crouch_Height; // Crouch view height (0 = engine default)
+      int   Player_Class;  // Class index 
+      int   Loadout;       // Loadout id 
+      float Fov;           // Suggested FOV 
+      float View_Height;   // Standing view height 
+      float Crouch_Height; // Crouch view height 
     } player;
 
     // when ENTITY_LIGHT | ENTITY_LIGHT_SPOT =>
     struct {
       float Intensity;    // Luminous intensity / radius scalar
-      float Range;        // Explicit range (0 = derived from intensity)
-      float Inner_Angle;  // Spot inner cone degrees (spot only)
-      float Outer_Angle;  // Spot outer cone degrees (spot only)
+      float Range;        // Explicit range 
+      float Inner_Angle;  // Spot inner cone degrees 
+      float Outer_Angle;  // Spot outer cone degrees 
       int   Cast_Shadows; // Non-zero = shadow caster
-      float Falloff;      // 1 = linear, 2 = quadratic, etc
+      float Falloff;      // When 1 = linear, 2 = quadratic, etc
     } light;
 
     // when ENTITY_SOUND_EMITTER =>
     struct {
-      float Volume;       // 0..1
-      float Pitch;        // 1 = normal
+      float Volume;       // Range 0..1
+      float Pitch;        // When 1 = normal
       float Min_Distance; // Full volume within this distance
       float Max_Distance; // Silence beyond this distance
       int   Looping;      // Non-zero = loop
@@ -1322,7 +1341,7 @@ typedef struct {
     struct {
       float Size_X, Size_Y; // Projected size
       float Rotation;       // Degrees
-      float Fade_Time;      // Seconds until fully faded (0 = never)
+      float Fade_Time;      // Seconds until fully faded: (0 = never)
     } decal;
 
     // when ENTITY_PARTICLE_SYSTEM =>
@@ -1335,31 +1354,31 @@ typedef struct {
 
     // when ENTITY_TRIGGER* =>
     struct {
-      int   Enabled;      // Non-zero = active
-      int   Filter_Team;  // 0 = any, else team id
-      int   Filter_Class; // 0 = any, else class id
-      int   Fire_Count;   // How many times it can fire (0 = infinite)
+      int Enabled;      // Non-zero = active
+      int Filter_Team;  // When 0 = any, else team id
+      int Filter_Class; // When 0 = any, else class id
+      int Fire_Count;   // How many times it can fire: (0 = infinite)
     } trigger;
 
     // when ENTITY_TRIGGER_TELEPORT =>
     struct {
-      int   Preserve_Velocity; // Non-zero = keep incoming velocity
+      int Preserve_Velocity; // Non-zero - keep incoming velocity
     } teleport;
 
     // when ENTITY_TRIGGER_PUSH =>
     struct {
-      vec3  Push_Dir;   // Direction (unit or non-unit; engine normalizes)
+      vec3  Push_Dir;   // Direction
       float Push_Speed; // Magnitude
     } push;
 
     // when movers/doors/platform/train =>
     struct {
-      vec3  Move_Dir;    // Movement direction (normalized by loader)
+      vec3  Move_Dir;    // Movement direction
       float Lip;         // Remaining overlap at end of travel
-      float Distance;    // Travel distance (0 = derived from bounds)
+      float Distance;    // Travel distance 
       float Open_Angle;  // For rotating doors
-      int   Toggle;      // Non-zero = toggle behavior
-      int   Starts_Open; // Non-zero = initial state open/active
+      int   Toggle;      // Non-zero toggles behavior
+      int   Starts_Open; // Non-zero to capture initial state
     } mover;
 
     // when ENTITY_BREAKABLE | ENTITY_EXPLOSIVE =>
@@ -1375,8 +1394,8 @@ typedef struct {
       Ammo_Kind    Ammo;     // For ENTITY_ITEM_AMMO
       Powerup_Kind Powerup;  // For ENTITY_ITEM_POWERUP
       int          Key_Id;   // For ENTITY_ITEM_KEY
-      int          Respawn;  // Respawn seconds (0 = default)
-      float        Duration; // Powerup duration seconds (0 = default)
+      int          Respawn;  // Respawn seconds 
+      float        Duration; // Powerup duration seconds 
     } item;
 
     // when ENTITY_PROJECTILE_SPAWNER =>
@@ -1398,26 +1417,26 @@ typedef struct {
 
     // when ENTITY_VEHICLE =>
     struct {
-      float Mass;         // kg scalar
-      float Engine_Power; // generic power scalar
-      float Turn_Rate;    // degrees/sec
-      int   Seats;        // seat count
+      float Mass;         // Kg scalar
+      float Engine_Power; // Generic power scalar
+      float Turn_Rate;    // Degrees/sec
+      int   Seats;        // Seat count
     } vehicle;
 
     // when ENTITY_NPC =>
     struct {
-      int   Npc_Class;    // class index
-      float Aggro_Radius; // detection range
-      float Walk_Speed;   // units/sec
-      float Run_Speed;    // units/sec
+      int   Npc_Class;    // Class index
+      float Aggro_Radius; // Detection range
+      float Walk_Speed;   // Units/sec
+      float Run_Speed;    // Units/sec
     } npc;
 
     // when ENTITY_OBJECTIVE =>
     struct {
       Objective_Kind Obj_Kind;
-      int   Required_Count; // e.g. collect N items
-      float Hold_Time;      // hold/capture seconds
-      int   Obj_Team;       // owning team (0 = neutral)
+      int   Required_Count; // Objective count (e.g. collect N items)
+      float Hold_Time;      // Hold/capture seconds
+      int   Obj_Team;       // Owning team (0 = neutral)
     } objective;
 
     // when ENTITY_LOGIC_* =>
@@ -1426,14 +1445,14 @@ typedef struct {
       int   Value_B;
       int   Threshold;
       float Interval;
-      float Chance; // 0..1
+      float Chance; // Range 0..1
     } logic;
 
     // when ENTITY_ENV_SKY =>
     struct {
-      vec3  Direction; // Sun direction (normalized)
-      vec3  Color;     // Sun color (linear 0..1)
-      vec3  Ambient;   // Ambient color (linear 0..1)
+      vec3 Direction; // Sun direction (normalized)
+      vec3 Color;     // Sun color (linear 0..1)
+      vec3 Ambient;   // Ambient color (linear 0..1)
     } env;
   };
 } BSP_Entity;
@@ -1460,12 +1479,12 @@ typedef struct {vec3 Origin; float Angle;} Spawn; // World-space origin and faci
 
 // Parsed weapon model assembled from multiple MD3 surfaces
 typedef struct {
-  Vertex *Vertices;     uint Vertex_Count;     // Merged vertex array from all surfaces
-  uint    *Indices;     uint Index_Count;      // Merged index array from all surfaces
-  uint    *Texture_Ids; uint Triangle_Count;   // Per-triangle texture index and total triangle count
-  float   Tag_Barrel[12];                      // Barrel attachment transform: origin[3] + axis[9]
-  float   Tag_Weapon[MD3_MAX_ANIM_FRAMES][12]; // Per-frame weapon tag transforms (up to 30 animation frames)
-  uint    Animation_Frame_Count;               // Number of valid frames in the Tag_Weapon array
+  Vertex *Vertices;     uint Vertex_Count;        // Merged vertex array from all surfaces
+  uint    *Indices;     uint Index_Count;         // Merged index array from all surfaces
+  uint    *Texture_Ids; uint Triangle_Count;      // Per-triangle texture index and total triangle count
+  float   Tag_Barrel[12];                         // Barrel attachment transform: origin[3] + axis[9]
+  float   Tag_Weapon[MD3_MAX_ANIM_FRAMES][12];    // Per-frame weapon tag transforms (up to 30 animation frames)
+  uint    Animation_Frame_Count;                  // Number of valid frames in the Tag_Weapon array
   char    Texture_Names[WEAPON_MAX_TEXTURES][64]; // Texture path for each surface
   uint    Surface_Count;                          // Number of surfaces composing this weapon
   int     Is_Source;                              // 1 = Source MDL viewmodel, 0 = Q3 MD3
@@ -1477,15 +1496,15 @@ typedef struct {
   Vertex                *Transformed_Vertices; // Scratch buffer for CPU-side per-frame vertex transformation
   int                    Is_Firing;            // Non-zero while the fire button is held
   float                  Fire_Time, Bob_Time;  // Recoil decay timer and idle bob phase accumulator
-  Gpu_Buffer             Vertex_Buffer, Index_Buffer, Texture_Id_Buffer; // GPU buffers for weapon geometry
+  GPU_Buffer             Vertex_Buffer, Index_Buffer, Texture_Id_Buffer; // GPU buffers for weapon geometry
   Acceleration_Structure Bottom_Level;         // BLAS for the weapon (rebuilt each frame)
-  Gpu_Buffer             Bottom_Level_Scratch; // Scratch buffer reused across BLAS rebuilds
+  GPU_Buffer             Bottom_Level_Scratch; // Scratch buffer reused across BLAS rebuilds
   uint                   Texture_Base_Index;   // Starting index into the global texture array for weapon textures
 } Weapon_Instance;
 
 // Animated entity with pre-computed per-frame vertex data for BLAS refit
 #define ENTITY_MAX_FRAMES 16
-typedef struct {float M[3][4];} Bone_Matrix; // 3×4 row-major affine transform (shared by CPU skinning and GPU upload)
+typedef struct {float M[3][4];} Bone_Matrix; // A 3 by 4 row-major affine transform (shared by CPU skinning and GPU upload)
 typedef struct {
   Vertex *Frame_Vertices[ENTITY_MAX_FRAMES]; // Pre-computed world-space vertices for each animation frame
   uint    Frame_Count;                       // Number of animation frames (LEGS_IDLE = 10)
@@ -1495,27 +1514,27 @@ typedef struct {
   uint   *Indices;                           // Shared index array (topology identical across frames)
   uint   *Texture_Ids;                       // Per-triangle global texture indices
   Vertex *Current_Vertices;                  // Pointer to the active frame's vertex data
-  Gpu_Buffer             Vertex_Buffer;      // Host-visible, re-uploaded each frame
-  Gpu_Buffer             Index_Buffer;       // Device-local, static
-  Gpu_Buffer             Texture_Id_Buffer;  // Device-local, static
+  GPU_Buffer             Vertex_Buffer;      // Host-visible, re-uploaded each frame
+  GPU_Buffer             Index_Buffer;       // Device-local, static
+  GPU_Buffer             Texture_Id_Buffer;  // Device-local, static
+  GPU_Buffer             Bottom_Level_Scratch;
   Acceleration_Structure Bottom_Level;       // BLAS (refit each frame)
-  Gpu_Buffer             Bottom_Level_Scratch;
   vec3                   GL_Origin;          // World-space position in GL Y-up coordinates (for TLAS transform)
   float                  GL_Yaw;             // Entity yaw angle in GL space (radians)
 
-  // Skeletal animation (Source engine MDL models; NULL/0 when using MD3 frame-based animation)
-  int           Bone_Count;                           // Number of bones in the skeleton (0 = no skeleton)
-  int           Bone_Parents[MDL_MAX_BONES];          // Parent index per bone (-1 = root)
-  float         Bind_Pose[MDL_MAX_BONES][3][4];       // Local bind-pose matrices
-  float         Inv_Bind[MDL_MAX_BONES][3][4];        // Inverse bind-pose (model space > bone space)
-  Bone_Matrix   Pose[MDL_MAX_BONES];                  // Current world-space pose matrices (computed per-frame)
-  Gpu_Buffer    Bone_Buffer;                          // GPU SSBO for bone matrices (skinning compute shader input)
-  uint8_t      *Bone_Ids;                             // Per-vertex bone indices  (3 per vertex, packed)
-  uint8_t      *Bone_Weights;                         // Per-vertex bone weights  (3 per vertex, 0-255)
-  int           Anim_Sequence;                        // Active animation sequence index
-  int           Anim_Frame_Counts[SKEL_MAX_ANIMS];    // Frame count per animation sequence
-  float         Anim_Fps_Table[SKEL_MAX_ANIMS];       // FPS per animation sequence
-  int           Anim_Count;                           // Number of loaded animation sequences
+  // Skeletal animation (Source engine MDL models; NULL when using MD3 frame-based animation)
+  int         Bone_Count;                        // Number of bones in the skeleton (0 = no skeleton)
+  int         Bone_Parents[MDL_MAX_BONES];       // Parent index per bone (-1 = root)
+  float       Bind_Pose[MDL_MAX_BONES][3][4];    // Local bind-pose matrices
+  float       Inv_Bind[MDL_MAX_BONES][3][4];     // Inverse bind-pose (model space > bone space)
+  Bone_Matrix Pose[MDL_MAX_BONES];               // Current world-space pose matrices (computed per-frame)
+  GPU_Buffer  Bone_Buffer;                       // GPU SSBO for bone matrices (skinning compute shader input)
+  uint8_t    *Bone_Ids;                          // Per-vertex bone indices  (3 per vertex, packed)
+  uint8_t    *Bone_Weights;                      // Per-vertex bone weights  (3 per vertex, 0-255)
+  int         Anim_Sequence;                     // Active animation sequence index
+  int         Anim_Frame_Counts[SKEL_MAX_ANIMS]; // Frame count per animation sequence
+  float       Anim_Fps_Table[SKEL_MAX_ANIMS];    // FPS per animation sequence
+  int         Anim_Count;                        // Number of loaded animation sequences
 } Entity;
 
 // Player movement state
@@ -1529,22 +1548,24 @@ typedef struct {
   int   Ground_Plane;  // Non-zero if the ground trace hit a valid plane (not an edge or brush start)
   int   Ducked;        // Non-zero if the player is crouching
   float View_Height;   // Camera height offset from Position.y (smoothly interpolated)
-  int   Movement;      // Movement_Style: MOVEMENT_QUAKE3 or MOVEMENT_SOURCE (runtime switchable)
+  int   Movement;      // Movement_Style: WORLD_QUAKE3 or WORLD_SOURCE (runtime switchable)
   float Duck_Frac;     // Source duck interpolation (0=standing, 1=fully ducked)
 } Player;
 
-// Convert a BSP vertex from Quake 3's Z-up coordinate system to our Y-up system: (x,y,z) becomes (x,z,-y).
+// Convert Source Z-up vertex to our Y-up: (x,y,z) > (x,z,-y) - same as Q3 but vertex layout differs
+Vertex VBSP_Convert (float X, float Y, float Z, float Nx, float Ny, float Nz, float U, float V, float Lu, float Lv);
+
+// Convert a BSP vertex from Quake 3's Z-up coordinate system to our Y-up system: (x, y, z) becomes (x, z, -y).
 Vertex Convert_BSP_Vertex (const BSP_Vertex *Source);
 
 // Evaluate a quadratic Bézier curve at parameter t given three control points.
 vec3 Bezier_Evaluate (vec3 Control_A, vec3 Control_B, vec3 Control_C, float Parameter);
 
-// Tessellate a Bézier patch surface from its control grid into triangles. The patch is subdivided
-// into a grid of sub-patches (each defined by a 3×3 control point block), and each sub-patch is
-// evaluated at TESSELLATION_LEVEL intervals to produce a smooth triangle mesh.
+// Tessellate a Bezier patch surface from its control grid into triangles. The patch is subdivided into a grid of sub-patches (each defined
+// by a 3 by 3 control point block), and each sub-patch is evaluated at TESSELLATION_LEVEL intervals to produce a smooth triangle mesh.
 uint BSP_Tessellate_Patch (const BSP_Vertex *Control_Grid, int Patch_Width, int Patch_Height,
                            Vertex **Inout_Vertices, uint *Inout_Vertex_Count,
-                           uint **Inout_Indices, uint *Inout_Index_Count);
+                           uint   **Inout_Indices,  uint *Inout_Index_Count);
 
 // Parse the BSP entity lump to find the first info_player_deathmatch spawn point. Returns the origin (swizzled to Y-up) and facing angle.
 Spawn BSP_Find_Spawn (const uint8_t *File_Data, const BSP_Header *Header);
@@ -1559,16 +1580,15 @@ Scene_Environment Environment_Infer_From_Scene (const Scene *S);
 // Load a complete scene from a Quake 3 BSP file
 Scene Scene_Load_From_BSP (const char *Path, Spawn *Out_Spawn);
 
-// Load textures for every material in the scene. Attempts to load TGA files from the assets
-// directory; materials without a texture file fall back to a 1×1 solid-color pixel derived from the hashed shader name.
+// Load textures for every material in the scene. Attempts to load TGA files from the assets directory; materials without a texture file
+// fall back to a 1 by 1 solid-color pixel derived from the hashed shader name.
 void Scene_Load_Textures (const Scene *Scene_Data);
 
 // Load the weapon model's TGA textures and append them to the global texture array.
 void Weapon_Load_Textures (Weapon_Instance *Weapon);
 
-// ── Source Engine Scene ──────────────────────────────────────────────────────────────────────────────────────────────────────────────
 // VTF texture loading: decodes Valve Texture Format (.vtf) files into RGBA8 pixel data for GPU upload.
-int  VTF_Load (const char *Path, uint8_t **Out_Pixels, int *Out_W, int *Out_H);
+int VTF_Load (const char *Path, uint8_t **Out_Pixels, int *Out_W, int *Out_H);
 
 // Source BSP (VBSP) loading: parses Valve's BSP format into the same Scene struct used by Q3 BSP.
 Scene Scene_Load_From_VBSP (const char *Path, Spawn *Out_Spawn);
@@ -1579,11 +1599,11 @@ Entity MDL_Load (Scene *S, const char *Path, vec3 Origin, float Yaw);
 // Skeletal animation: evaluate bone hierarchy at time T, write world-space matrices to Entity.Pose[]
 void Skeleton_Evaluate (Entity *E, float Time);
 
-// GPU skeletal skinning: dispatch the Skinning compute shader to transform bind-pose vertices by bone matrices.
-// Reads bone matrices and bind-pose vertices from SSBOs, writes skinned vertices to the entity's vertex buffer.
+// GPU skeletal skinning: dispatch the Skinning compute shader to transform bind-pose vertices by bone matrices. Reads bone matrices and
+// bind-pose vertices from SSBOs, writes skinned vertices to the entity's vertex buffer.
 void Skeleton_Skin_Dispatch (Entity *E);
 
-// Cycle movement style between MOVEMENT_QUAKE3 and MOVEMENT_SOURCE
+// Cycle movement style between WORLD_QUAKE3 and WORLD_SOURCE
 void Movement_Style_Toggle (Player *P);
 
 // ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
@@ -1592,17 +1612,15 @@ void Movement_Style_Toggle (Player *P);
 //
 // ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 
-// Build the world geometry's bottom-level acceleration structure (BLAS). Uploads the scene
-// vertex, index, and material buffers to the GPU, then constructs a single BLAS geometry
-// entry covering all triangles. Uses PREFER_FAST_TRACE since the world is static.
+// Build the world geometry's bottom-level acceleration structure (BLAS). Uploads the scene vertex, index, and material buffers to the GPU,
+// then constructs a single BLAS geometry entry covering all triangles. Uses PREFER_FAST_TRACE since the world is static.
 Acceleration_Structure Build_World_Bottom_Level (const Scene *Scene_Data);
 
-// Initialize the weapon's BLAS with host-visible vertex buffer (for per-frame updates)
-// and ALLOW_UPDATE flag for fast rebuilds. Scratch memory is kept alive for reuse.
+// Initialize the weapon's BLAS with host-visible vertex buffer (for per-frame updates) and ALLOW_UPDATE flag for fast rebuilds. Scratch
+// memory is kept alive for reuse.
 void Weapon_Bottom_Level_Initialize (Weapon_Instance *Weapon);
 
-// Rebuild the weapon BLAS from scratch after CPU vertex transformation.
-// Re-uploads the vertex buffer and performs a full (non-update) rebuild.
+// Rebuild the weapon BLAS from scratch after CPU vertex transformation. Re-uploads the vertices and performs a full (non-update) rebuild
 void Weapon_Bottom_Level_Rebuild (Weapon_Instance *Weapon);
 
 // Pre-allocate the top-level acceleration structure (TLAS) for up to Maximum_Instances instance entries
@@ -1617,25 +1635,23 @@ void Top_Level_Rebuild (Acceleration_Structure *World, Acceleration_Structure *W
 // §10. Physics
 //
 //   GPU-only physics via ray tracing against the TLAS. The compute shader traces rays from the player's expanded shape against world
-//   geometry, resolves contacts via a slide-move algorithm, and writes back the updated Gpu_Player state.
-//
-//   Six collider shapes, each defining a support function s(d̂) : S² > ℝ³:
-//     SPHERE      s(d̂) = d̂ · r                               Projectiles, pickups
-//     CAPSULE     s(d̂) = d̂ · r + (0, sign(d̂.y) · spine, 0)   Player, NPCs
-//     AABB        s(d̂) = sign(d̂) ⊙ extents                  Crates, elevators
-//     CYLINDER    s(d̂) = (d̂.xz/‖d̂.xz‖ · r, sign(d̂.y) · h, 0) Barrels, columns
-//     ELLIPSOID   s(d̂) = normalize(d̂ ⊘ axes) ⊙ axes · ‖...‖ Vehicles
-//     HULL        s(d̂) = argmax(v · d̂) over vertex set       Arbitrary convex models
+//   geometry, resolves contacts via a slide-move algorithm, and writes back the updated GPU_Player state.
 //
 //   Convex hull support uses hill-climbing with adjacency for O(√n) amortized queries on hulls with ≥64 vertices, falling back to O(n)
 //   brute-force for smaller hulls.
 //
 // ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 
+// Convex Hull Limits
+#define HULL_MAX_VERTS    256 // Per-hull vertex cap (matches GPU array size in GPU_Hull)
+#define HULL_MAX_ADJ      16  // Maximum adjacency entries per vertex (for hill-climb support)
+#define HULL_MAX_FACES    512 // Quickhull internal face cap during construction
+#define HULL_MAX_ENTITIES 32  // Maximum simultaneous hull collider instances
+
 // Collider Shape Enumeration
 //
-// Six collider shapes, each defining a support function s(d̂) : S² > ℝ³ from unit directions to
-// surface offsets. The GPU physics compute shader switches on this enum to select the appropriate Minkowski support mapping.
+// Six collider shapes, each defining a support function s(d̂) : S² > ℝ³ from unit directions to surface offsets. The GPU physics compute
+// shader switches on this enum to select the appropriate Minkowski support mapping.
 //
 enum Collider_Shape {SHAPE_SPHERE,    // Projectiles:       s(d̂) = d̂ · r                                   
                      SHAPE_CAPSULE,   // Player, NPCs:      s(d̂) = d̂ · r + (0, sign(d̂.y) · spine, 0)      
@@ -1656,16 +1672,16 @@ typedef struct {
   float Speed_Last;  int Shape;        // Previous frame speed; active collider shape (enum Collider_Shape)
   float Extents      [3]; float Pad_D; // Half-extents / radii / semi-axes (shape-dependent)
   float Spine;       float Pad_E [3];  // Capsule spine half-length (hh - radius), 0 for non-capsules
-} Gpu_Player;
+} GPU_Player;
 
 // Per-frame input delivered to the physics compute shader via push constants (48 bytes)
 typedef struct {
   int   Forward, Back, Left, Right;
   int   Jump, Fire, Crouch, Movement_Style; // 0=Q3, 1=Source
   float Delta_X, Delta_Y, Dt, Pad2;
-} Gpu_Input;
+} GPU_Input;
 
-// fp16 RLE packing for push constants
+// Packing routine - fp16 RLE packing for push constants
 uint16_t Float_To_Half (float Value) {
   uint32_t Bits; memcpy (&Bits, &Value, 4);
   uint32_t Sign = (Bits >> 16) & 0x8000;
@@ -1686,18 +1702,18 @@ void Pack_Mat4_Half (const mat4 *M, uint32_t Out[8]) {
 // Push constants for the post-processing compute shader (56 bytes)
 typedef struct {
   float    Time;            // Full-precision seconds since start
-  uint32_t Dt_Frame;        // [15:0] = half(Delta_Time), [31:16] = Frame_Count
-  uint32_t Velocity;        // [15:0] = half(Velocity_X), [31:16] = half(Velocity_Z)
-  uint32_t Speed_Exposure;  // [15:0] = half(Speed),       [31:16] = half(Exposure)
-  uint32_t Bloom_Vignette;  // [15:0] = half(Bloom_Strength), [31:16] = half(Vignette_Strength)
-  uint32_t Reproject[8];    // packHalf2x16-compressed 4×4 reprojection matrix (Proj * Prev_View * Inv_View)
-  uint32_t Inv_Proj_Diag;   // [15:0] = half(InvProj[0][0]), [31:16] = half(InvProj[1][1])
-  uint32_t Sun_Screen_Pos;  // [15:0] = half(Sun_Screen_U), [31:16] = half(Sun_Screen_V) - for god rays
-  uint32_t Sun_Params;      // [15:0] = half(God_Ray_Intensity), [31:16] = half(Sun_On_Screen) (0 or 1)
-} Gpu_Postprocess_Push;
+  uint32_t Dt_Frame;        // Bits [15:0] = half(Delta_Time), [31:16] = Frame_Count
+  uint32_t Velocity;        // Bits [15:0] = half(Velocity_X), [31:16] = half(Velocity_Z)
+  uint32_t Speed_Exposure;  // Bits [15:0] = half(Speed),       [31:16] = half(Exposure)
+  uint32_t Bloom_Vignette;  // Bits [15:0] = half(Bloom_Strength), [31:16] = half(Vignette_Strength)
+  uint32_t Reproject[8];    // Packed via packHalf2x16 - compressed 4 by 4 reprojection matrix (Proj * Prev_View * Inv_View)
+  uint32_t Inv_Proj_Diag;   // Bits [15:0] = half(InvProj[0][0]), [31:16] = half(InvProj[1][1])
+  uint32_t Sun_Screen_Pos;  // Bits [15:0] = half(Sun_Screen_U), [31:16] = half(Sun_Screen_V) - for god rays
+  uint32_t Sun_Params;      // Bits [15:0] = half(God_Ray_Intensity), [31:16] = half(Sun_On_Screen) (0 or 1)
+} GPU_Postprocess_Push;
 
-// CPU-side convex hull produced by the Quickhull algorithm. Stores vertex positions and per-vertex
-// adjacency for hill-climbing support queries.
+// CPU-side convex hull produced by the Quickhull algorithm. Stores vertex positions and per-vertex adjacency for hill-climbing
+// support queries.
 typedef struct {
   vec3  Vertices  [HULL_MAX_VERTS];               // Hull vertex positions in local space
   int   Adjacency [HULL_MAX_VERTS][HULL_MAX_ADJ]; // Per-vertex neighbor indices (-1 terminated)
@@ -1706,8 +1722,8 @@ typedef struct {
   float Bounding_Radius;                          // Tight bounding sphere radius from centroid
 } Convex_Hull;
 
-// GPU-packed hull data uploaded to the physics compute shader's storage buffer (binding 4).
-// The shader uses this for SHAPE_HULL support queries via hill-climbing with adjacency.
+// GPU-packed hull data uploaded to the physics compute shader's storage buffer. The shader uses this for SHAPE_HULL support queries
+// via hill-climbing with adjacency.
 typedef struct {
   float Vertices  [HULL_MAX_VERTS][4];            // xyz + padding per vertex (std430 vec4 array)
   int   Adjacency [HULL_MAX_VERTS][HULL_MAX_ADJ]; // Neighbor indices, -1 terminated
@@ -1715,38 +1731,42 @@ typedef struct {
   float Radius;                                   // Bounding sphere radius
   float Centroid  [3];                            // Local-space centroid
   int   Pad;
-} Gpu_Hull;
+} GPU_Hull;
 
-// Build a convex hull from a point cloud using the Quickhull algorithm. Returns the hull
-// with deduplicated vertices and per-vertex adjacency tables for GPU hill-climbing support.
+// Build a convex hull from a point cloud using the Quickhull algorithm. Returns the hull with deduplicated vertices and per-vertex
+// adjacency tables for GPU hill-climbing support.
 Convex_Hull Quickhull (const vec3 *Points, uint Count);
 
 // Convenience wrapper: extract vec3 positions from a Vertex array and build the convex hull
 Convex_Hull Hull_From_Vertices (const Vertex *Vertices, uint Count);
 
-// Pack a CPU-side Convex_Hull into Gpu_Hull format and upload to the hull storage buffer (binding 4)
+// Pack a CPU-side Convex_Hull into GPU_Hull format and upload to the hull storage buffer (binding 4)
 void Hull_Upload (const Convex_Hull *Hull);
 
 // Create the GPU physics compute pipeline with 5 descriptor bindings:
-//   binding 0: TLAS (acceleration structure)
-//   binding 1: world vertex buffer (storage)
-//   binding 2: world index buffer (storage)
-//   binding 3: Gpu_Player state (storage, read-write)
-//   binding 4: Gpu_Hull data (storage, read-only)
-// Push constants deliver the Gpu_Input struct (48 bytes) per frame.
+//
+//   Binding 0: TLAS (acceleration structure)
+//   Binding 1: World vertex buffer (storage)
+//   Binding 2: World index buffer (storage)
+//   Binding 3: GPU_Player state (storage, read-write)
+//   Binding 4: GPU_Hull data (storage, read-only)
+// 
 void Physics_Pipeline_Create ();
-void Denoise_Pipeline_Create (void);
+void Denoise_Pipeline_Create ();
 
-// Initialize the Gpu_Player state buffer from a CPU-side Player, allocate the hull storage
-// buffer (with a 1-vertex dummy if no hull has been uploaded yet), create the descriptor pool and set, and bind all physics resources.
+// Initialize the GPU_Player state buffer from a CPU-side Player, allocate the hull storage buffer (with a 1-vertex dummy if no hull has
+// been uploaded yet), create the descriptor pool and set, and bind all physics resources.
 void Physics_Resources_Create (const Player *Initial_State);
 
-// Dispatch the physics compute shader for one frame: push the current input, execute a single
-// workgroup, wait for completion, then read back the updated Gpu_Player state into a CPU-side.
+// Dispatch the physics compute shader for one frame: push the current input, execute a single workgroup, wait for completion, then read
+// back the updated GPU_Player state into a CPU-side.
 Player Physics_Dispatch (Input In, float Delta_Time);
 
+// Comment here !!!
 void Projectile_Pool_Readback ();
 void Projectile_Pool_Upload ();
+
+// Comment here !!!
 void Projectile_Spawn (vec3 Origin, vec3 Direction);
 
 // ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
@@ -1761,9 +1781,6 @@ void Raytracing_Pipeline_Create ();
 // Build the shader binding table (SBT) by querying shader group 
 void Shader_Binding_Table_Create ();
 
-// Allocate the descriptor pool and set, then write the descriptor bindings for the ray tracing pipeline 
-void Descriptor_Set_Create (Weapon_Instance *Weapon, Entity *Enemy);
-
 // A-trous wavelet spatial denoiser
 void Denoise_Pipeline_Create ();
 
@@ -1773,17 +1790,19 @@ void Denoise_Pipeline_Create ();
 //
 // ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 //
-// Each material is modeled as a bank of damped resonators (modes). An impact excitation
-// (short force pulse) drives all modes simultaneously. The resonator bank produces emergent
-// timbre from the object's physical resonances - not from hand-crafted oscillators:
+// Each material is modeled as a bank of damped resonators (modes):
 //
-//   - Modal frequencies and T60 decay times per material
-//   - Contact impulse shapes the excitation
-//   - Acceleration noise restores high-frequency realism
+//   - Modal frequencies 
+//   - Contact impulse 
+//   - Acceleration noise 
 //
 
+// Comment here !!!
+#define MAX_AUDIO_BUFFERS 32 // Comment here !!!
+#define MAX_AUDIO_SOURCES 16 // Comment here !!!
+
+// Comment here !!!
 #define MODAL_SAMPLE_RATE 22050
-#define MODAL_MAX_MODES   12
 
 typedef struct {
   float a1, a2; // Feedback coefficients (from frequency and damping)
@@ -1791,11 +1810,7 @@ typedef struct {
   float y1, y2; // Filter state
 } Mode_Resonator;
 
-void Mode_Init (Mode_Resonator *M, float Freq_Hz, float T60, float Gain);
-float Mode_Tick (Mode_Resonator *M, float X);
-
-// Material mode tables: {frequency_Hz, T60_seconds, gain}. Derived from measured rigid-body resonances (SIGGRAPH modal synthesis
-// literature)
+// Material mode tables: {frequency_Hz, T60_seconds, gain}
 typedef struct {float Freq; float T60; float Gain;} Mode_Spec;
 
 // Stone: dense, high frequencies, medium-long decay
@@ -1826,38 +1841,45 @@ const Mode_Spec Modes_Flesh[] = {
   {100, 0.03,  0.35}, {250, 0.02,  0.22}, {700, 0.008, 0.10},
   {350, 0.016, 0.20}, {800, 0.006, 0.05}, {450, 0.013, 0.12}};
 
-const Mode_Spec *Material_Modes[] = {Modes_Stone,  // MATERIAL_DEFAULT = stone-like
+// Comment here !!!
+#define MODAL_MAX_MODES 12
+const Mode_Spec *Material_Modes[] = {Modes_Stone,  // MATERIAL_DEFAULT (Stone-like)
                                      Modes_Metal,  // MATERIAL_METAL
                                      Modes_Stone,  // MATERIAL_STONE
                                      Modes_Wood,   // MATERIAL_WOOD
                                      Modes_Flesh,  // MATERIAL_FLESH
-                                     Modes_Stone}; // MATERIAL_WATER (splashy, use stone as base)
+                                     Modes_Water}; // MATERIAL_WATER 
 
-// Generate a PCM buffer from a modal resonator bank excited by a contact impulse.
-// Impulse_Strength controls excitation energy (0-1), Duration is output length.
+// Comment here !!!
+void Mode_Init (Mode_Resonator *M, float Freq_Hz, float T60, float Gain);
+float Mode_Tick (Mode_Resonator *M, float X);
+
+// Generate a PCM buffer from a modal resonator bank excited by a contact impulse
 ALuint Audio_Generate_Modal_Impact (int Material, float Impulse_Strength,
                                     float Duration, float Volume);
 
 // Load a WAV file from disk into an OpenAL buffer. Supports 8/16-bit mono/stereo PCM. Returns 0 on failure.
 ALuint Audio_Load_WAV (const char *Path);
 
-// Weapon fire = sharp metallic transient (bolt mechanism) + propellant gas expansion.
-// Uses metal modes for the mechanism and broadband noise for the gas.
+// Weapon fire = sharp metallic transient (bolt mechanism) + propellant gas expansion
 ALuint Audio_Generate_Weapon_Fire (float Volume);
 
-// Explosion = broadband transient + N debris modal impacts (per SIGGRAPH 2008 scaling work).
-// The initial shock is a burst of all-mode excitation, followed by randomized sub-impacts.
+// Explosion = broadband transient + N debris modal impacts (per SIGGRAPH 2008 scaling work)
 ALuint Audio_Generate_Explosion_Modal (float Duration, float Volume);
 
-// Try to load a WAV from disk; if missing, fall back to modal synthesis.
-// This layering lets us use real recordings when available and physically-based synthesis as a fallback - the best of both worlds.
+// Try to load a WAV from disk; if missing, fall back to modal synthesis
 ALuint Audio_Load_WAV_Or_Modal (const char *Path, int Material, float Impulse,
-                                        float Duration, float Volume);
+                                ffloat Duration, float Volume);
 
-void Audio_Shutdown ();
+// Comment here !!!
 void Audio_Update_Footsteps (Player *P, float Dt);
+
+// Comment here !!!
 void Audio_Play (int Sound_Index, float Volume);
+
+// Comment here !!!
 void Audio_Init ();
+void Audio_Shutdown ();
 
 // ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 //
@@ -1889,8 +1911,7 @@ glsl comp Denoise;
 // Post-processing: tonemapping, TAA, bloom, vignette, god rays
 glsl comp Post_Process;
 
-// GPU skeletal skinning: transforms bind-pose vertices by bone matrices in a compute shader.
-// 3 bone influences per vertex, 3×4 affine bone matrices. All animation work stays on GPU.
+// GPU skeletal skinning: transforms bind-pose vertices by bone matrices in a compute shader
 glsl comp Skinning;
 
 // ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
@@ -1898,6 +1919,83 @@ glsl comp Skinning;
 // §13. Engine
 //
 // ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+
+// Khronos validation layer and extension settings
+#define VULKAN_API_VERSION VK_API_VERSION_1_3 
+const uint  VALIDATION_LAYER_COUNT = 1;
+const char *VALIDATION_LAYERS[]    = {"VK_LAYER_KHRONOS_validation"};
+const uint  DEVICE_EXTENSION_COUNT = 6;
+const char *DEVICE_EXTENSIONS[]    = {VK_KHR_SWAPCHAIN_EXTENSION_NAME,
+                                      VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME,
+                                      VK_KHR_RAY_TRACING_PIPELINE_EXTENSION_NAME,
+                                      VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME,
+                                      VK_KHR_RAY_QUERY_EXTENSION_NAME,
+                                      VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME};
+
+// Assertion to validate Vulkan return values; prints descriptive error name, file, and line then exits
+#define VK_CHECK(Call) do { \
+  VkResult _Result = (Call); \
+  if (_Result) { \
+    fprintf (stderr, "[vulkan] %s (%d) at %s:%d\n", VK_Error_Name(_Result), _Result, __FILE__, __LINE__); \
+    exit (1); \
+  } \
+} while (0)
+
+// Human-readable Vulkan error name from VkResult code
+const char *VK_Error_Name (VkResult Result) {
+  switch (Result) {
+    case  0:  return "VK_SUCCESS";
+    case -1:  return "VK_ERROR_OUT_OF_HOST_MEMORY";
+    case -2:  return "VK_ERROR_OUT_OF_DEVICE_MEMORY";
+    case -3:  return "VK_ERROR_INITIALIZATION_FAILED";
+    case -4:  return "VK_ERROR_DEVICE_LOST";
+    case -5:  return "VK_ERROR_MEMORY_MAP_FAILED";
+    case -6:  return "VK_ERROR_LAYER_NOT_PRESENT";
+    case -7:  return "VK_ERROR_EXTENSION_NOT_PRESENT";
+    case -8:  return "VK_ERROR_FEATURE_NOT_PRESENT";
+    case -9:  return "VK_ERROR_INCOMPATIBLE_DRIVER";
+    case -10: return "VK_ERROR_TOO_MANY_OBJECTS";
+    case -11: return "VK_ERROR_FORMAT_NOT_SUPPORTED";
+    case -12: return "VK_ERROR_FRAGMENTED_POOL";
+    case -13: return "VK_ERROR_UNKNOWN";
+    default:  return "unknown";
+  }
+}
+
+// List of required ray tracing extension functions
+#define VULKAN_FUNCTIONS(_) \
+  _(vkCreateAccelerationStructureKHR,           vkCreateAccelerationStructure)           /* Creates a BLAS or TLAS */ \
+  _(vkDestroyAccelerationStructureKHR,          vkDestroyAccelerationStructure)          /* Destroys an acceleration structure */ \
+  _(vkGetAccelerationStructureBuildSizesKHR,    vkGetAccelerationStructureBuildSizes)    /* Queries scratch and result buf sizes */ \
+  _(vkCmdBuildAccelerationStructuresKHR,        vkCmdBuildAccelerationStructures)        /* Records a build or update command */ \
+  _(vkGetAccelerationStructureDeviceAddressKHR, vkGetAccelerationStructureDeviceAddress) /* Retrieves the device address */ \
+  _(vkCreateRayTracingPipelinesKHR,             vkCreateRayTracingPipelines)             /* Creates a ray tracing pipeline */ \
+  _(vkGetRayTracingShaderGroupHandlesKHR,       vkGetRayTracingShaderGroupHandles)       /* Retrieves shader group handles (SBT) */ \
+  _(vkCmdTraceRaysKHR,                          vkCmdTraceRays)                          /* Records a ray dispatch command */
+
+// Convenience macro for declaring Vulkan function pointer variables from their spec names
+#define DECLARE_VK(vk, alias) PFN_##vk alias;
+
+// Convenience macro for loading Vulkan function pointers from the logical device at runtime
+#define LOAD_VK(vk, alias) alias = (PFN_##vk) vkGetDeviceProcAddr (Device, #vk);
+
+// Declare all ray tracing function pointers as globals
+VULKAN_FUNCTIONS (DECLARE_VK)
+
+// Vulkan initialization helpers (called in sequence from main)
+void Vulkan_Create_Instance ();
+void Vulkan_Pick_Physical_Device ();
+void Vulkan_Create_Logical_Device ();
+void Vulkan_Create_Swapchain ();
+void Vulkan_Recreate_Swapchain ();
+void Vulkan_Create_Synchronization ();
+void Vulkan_Transition_Storage_Image ();
+
+// Destroy old swapchain and create a new one matching the current surface size
+void Vulkan_Recreate_Swapchain ();
+
+// Allocate the descriptor pool and set, then write the descriptor bindings for the ray tracing pipeline 
+void Descriptor_Set_Create (Weapon_Instance *Weapon, Entity *Enemy);
 
 // Upload the camera uniform buffer with the inverse view and projection matrices computed from
 // the current player position, yaw, pitch, field-of-view, and aspect ratio.
@@ -1910,7 +2008,7 @@ void Weapon_Update (Weapon_Instance *Weapon, const Camera *Camera_Data, float De
 Input Poll_Input ();
 
 // Record and submit one frame of ray tracing: bind the pipeline and descriptors
-void Raytracing_Frame (Gpu_Postprocess_Push Postprocess);
+void Raytracing_Frame (GPU_Postprocess_Push Postprocess);
 
 // Ensures window aspect ratio stays between our constraints
 void Constrain_Aspect_Ratio (int *W, int *H);
@@ -1935,22 +2033,1300 @@ Input Poll_Input ();
 
 // ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 //
-// §14. Main
+// §14. Assets
 //
 // ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 
-// Vulkan initialization helpers (called in sequence from main)
-void Vulkan_Create_Instance ();
-void Vulkan_Pick_Physical_Device ();
-void Vulkan_Create_Logical_Device ();
-void Vulkan_Create_Swapchain ();
-void Vulkan_Recreate_Swapchain ();
-void Vulkan_Create_Synchronization ();
-void Vulkan_Transition_Storage_Image ();
+// Asset paths
+#define ASSET_ROOT "assets/"
 
-// Destroy old swapchain and create a new one matching the current surface size.
-// Called on window resize, fullscreen toggle, or VK_ERROR_OUT_OF_DATE_KHR.
-void Vulkan_Recreate_Swapchain ();
+// Default BSP map to load when no command-line argument is given
+const char *DEFAULT_MAP = "oa_dm1.bsp";
+
+// Paths to the weapon model's diffuse textures (body and sight)
+#define WEAPON_TEXTURE_COUNT 2 // Default for Q3 weapons (2 surfaces: body + hand)
+#define WEAPON_MAX_TEXTURES 16 // Maximum for Source weapons with many materials
+const char *WEAPON_TEXTURE_PATHS[] = {ASSET_ROOT "models/weapons2/machinegun/mgun.tga",
+                                      ASSET_ROOT "models/weapons2/machinegun/sight.tga"};
+
+// Paths to the three-part machinegun weapon model (body, barrel, hand)
+#define WEAPON_BODY_PATH   ASSET_ROOT "models/weapons2/machinegun/machinegun.md3"
+#define WEAPON_BARREL_PATH ASSET_ROOT "models/weapons2/machinegun/machinegun_barrel.md3"
+#define WEAPON_HAND_PATH   ASSET_ROOT "models/weapons2/machinegun/machinegun_hand.md3"
+
+// Damage or "hit" texture manifest
+#define DAMAGE_MODEL_COUNT 15
+const Model_Damage_Entry DAMAGE_MAP_REGISTRY[DAMAGE_MODEL_COUNT] = {
+  {"grism",    {ASSET_ROOT "models/players/grism/enkiskin_dmg.tga"}, 1},
+  {"sarge",    {ASSET_ROOT "models/players/grism/enkiskin_dmg.tga"}, 1},
+  {"liz",      {ASSET_ROOT "models/players/liz/h_head_dmg.tga",
+                ASSET_ROOT "models/players/liz/u_torso_dmg.tga",
+                ASSET_ROOT "models/players/liz/l_legs_dmg.tga"}, 3},
+  {"major",    {ASSET_ROOT "models/players/major/head_dmg.tga",
+                ASSET_ROOT "models/players/major/torso_dmg.tga",
+                ASSET_ROOT "models/players/major/lower_dmg.tga"}, 3},
+  {"tony",     {ASSET_ROOT "models/players/tony/head_dmg.tga",
+                ASSET_ROOT "models/players/tony/suit_dmg.tga"}, 2},
+  {"assassin", {ASSET_ROOT "models/players/assassin/upper_dmg.tga",
+                ASSET_ROOT "models/players/assassin/lower_dmg.tga"}, 2},
+  {"smarine",  {ASSET_ROOT "models/players/smarine/2h_head_dmg.tga",
+                ASSET_ROOT "models/players/smarine/2u_torso_dmg.tga",
+                ASSET_ROOT "models/players/smarine/2l_legs_dmg.tga"}, 3},
+  {"beret",    {ASSET_ROOT "models/players/beret/skin1_dmg.tga",
+                ASSET_ROOT "models/players/beret/skin2_dmg.tga"}, 2},
+  {"gargoyle", {ASSET_ROOT "models/players/gargoyle/bared_dmg.tga"}, 1},
+  {"penguin",  {ASSET_ROOT "models/players/penguin/skin_dmg.tga"}, 1},
+  {"sergei",   {ASSET_ROOT "models/players/sergei/face_dmg.tga",
+                ASSET_ROOT "models/players/sergei/hairs_dmg.tga",
+                ASSET_ROOT "models/players/sergei/skin_dmg.tga"}, 3},
+  {"skelebot", {ASSET_ROOT "models/players/skelebot/skin1_dmg.tga",
+                ASSET_ROOT "models/players/skelebot/skin2_dmg.tga"}, 2},
+  {"merman",   {ASSET_ROOT "models/players/merman/skin_dmg.tga",
+                ASSET_ROOT "models/players/merman/fins_dmg.tga",
+                ASSET_ROOT "models/players/merman/brac_dmg.tga"}, 3},
+  {"sorceress", {ASSET_ROOT "models/players/sorceress/drowhead_dmg.tga",
+                 ASSET_ROOT "models/players/sorceress/drowbody_dmg.tga",
+                 ASSET_ROOT "models/players/sorceress/rings_dmg.tga"}, 3},
+  {"kyonshi",  {ASSET_ROOT "models/players/kyonshi/skin_dmg.tga",
+                ASSET_ROOT "models/players/kyonshi/torso_dmg.tga",
+                ASSET_ROOT "models/players/kyonshi/hair_dmg.tga",
+                ASSET_ROOT "models/players/kyonshi/eyes_dmg.tga",
+                ASSET_ROOT "models/players/kyonshi/lower_dmg.tga"}, 5}};
+
+// ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+//
+// §15. Main
+//
+// ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+
+int main (int Argc, char **Argv) {
+
+  // Command-line flags
+  //   --quality LEVEL   Set quality preset (best/great/good/ok/normal/bad/worst)
+  //   --physics-test    Run physics-only test (no rendering), exit after 3s sim
+  //   --benchmark N     Run N frames of automated fly-through, print FPS stats, exit
+  //   --screenshot F    Render one frame from spawn, save as F (TGA), exit
+  //   --no-postprocess  Disable post-processing (raw PBR output)
+  //   --spp N           Override samples-per-pixel (1, 2, 4, 8)
+  //   --res WxH         Override render resolution
+  //   --no-pbr          Disable PBR maps (diffuse + lightmap only, for A/B comparison)
+  //   --no-parallax     Disable parallax occlusion mapping
+  //   --dump-frames D   Save each benchmark frame as D/frame_NNNN.tga
+  //   --validation      Enable Vulkan validation layers (off by default)
+  //   --source          Load Source engine BSP (VBSP) instead of Q3 BSP
+  //   --mdl PATH        Load Source MDL model as enemy entity
+  //   --weapon PATH     Load Source MDL model as held weapon
+  //   --world q3|source Set world coordinate system/physics preset
+  //   mapname.bsp       Load specified BSP map instead of default
+
+  // Local variables
+  int         Physics_Test       = 0;
+  int         No_Postprocess     = 0;
+  int         No_PBR             = 0;
+  int         No_Parallax        = 0;
+  int         Benchmark_Frames   = 0;    // Use 0 to disable, a value N > 0 means to run N frames then exit
+  int         Force_Cheap        = 0;    // Implies the --cheap was used: force Budget=1.0 (lightmap-only fallback)
+  int         Override_SPP       = 0;    // When 0 then use default from quality preset
+  int         Override_Res       = 0;    // When 1 if --res was specified (overrides quality preset)
+  int         Source_Mode        = 0;    // When 1 then Load Source BSP (VBSP) instead of Q3 BSP
+  const char *Screenshot_Path    = NULL; // Use NULL to disable, otherwise save frame and exit
+  const char *Dump_Frames_Dir    = NULL; // Use NULL to disable, otherwise dump each frame
+  const char *Source_MDL_Path    = NULL; // Optional Source MDL model to load as entity
+  const char *Source_Weapon_Path = NULL; // Optional Source MDL model to load as held weapon
+  const char *Map_Name           = DEFAULT_MAP;
+  float       Active_Exposure    = STYLE.Exposure;
+
+  // Parse command-line arguments
+  for (int I = 1; I < Argc; I++) {
+    if (strcmp (Argv[I], "--help") == 0 or strcmp (Argv[I], "-h") == 0) {
+      printf ("Usage: %s [options] [mapname.bsp]\n\n", Argv[0]);
+      printf ("Options:\n");
+      printf ("  --source          Load Source engine BSP (VBSP) instead of Q3 BSP\n");
+      printf ("  --mdl PATH        Load Source MDL model as enemy entity\n");
+      printf ("  --weapon PATH     Load Source MDL as held weapon (viewmodel)\n");
+      printf ("  --world q3|source Set world preset (player height, FOV, speed)\n");
+      printf ("  --screenshot FILE Render one frame from spawn, save TGA, exit\n");
+      printf ("  --benchmark N     Run N frames, print FPS stats, exit\n");
+      printf ("  --spp N           Override samples-per-pixel (1, 2, 4, 8)\n");
+      printf ("  --res WxH         Override render resolution (e.g. 1920x1080)\n");
+      printf ("  --quality LEVEL   Set quality preset (ultra/high/medium/low/potato)\n");
+      printf ("  --no-postprocess  Disable tonemapping and post-processing\n");
+      printf ("  --no-pbr          Disable PBR maps (diffuse + lightmap only)\n");
+      printf ("  --no-parallax     Disable parallax occlusion mapping\n");
+      printf ("  --validation      Enable Vulkan validation layers\n");
+      printf ("  --dump-frames DIR Save benchmark frames as DIR/frame_NNNN.tga\n");
+      printf ("  --physics-test    Run physics simulation without rendering\n");
+      printf ("\nEnvironment:\n");
+      printf ("  VK_ICD_FILENAMES  Set Vulkan driver (e.g. /usr/share/vulkan/icd.d/lvp_icd.json)\n");
+      printf ("  DISPLAY           X11 display (use Xvfb for headless rendering)\n");
+      return 0;
+    }
+    else if (strcmp (Argv[I], "--physics-test")   == 0) Physics_Test = 1;
+    else if (strcmp (Argv[I], "--benchmark")      == 0 and I + 1 < Argc) Benchmark_Frames = atoi (Argv[++I]);
+    else if (strcmp (Argv[I], "--screenshot")     == 0 and I + 1 < Argc) Screenshot_Path  =       Argv[++I];
+    else if (strcmp (Argv[I], "--dump-frames")    == 0 and I + 1 < Argc) Dump_Frames_Dir  =       Argv[++I];
+    else if (strcmp (Argv[I], "--no-postprocess") == 0) No_Postprocess = 1;
+    else if (strcmp (Argv[I], "--no-pbr")         == 0) No_PBR         = 1;
+    else if (strcmp (Argv[I], "--no-parallax")    == 0) No_Parallax    = 1;
+    else if (strcmp (Argv[I], "--cheap")          == 0) Force_Cheap    = 1;
+    else if (strcmp (Argv[I], "--validation")     == 0) Use_Validation = 1;
+    else if (strcmp (Argv[I], "--source")         == 0) {Source_Mode     = 1;
+                                                         Active_Movement = WORLD_SOURCE;
+                                                         Active_World    = WORLD_PRESETS[WORLD_SOURCE];
+                                                         Active_Exposure = 1.0f;}
+    else if (strcmp (Argv[I], "--world") == 0 and I + 1 < Argc) {
+      const char *W = Argv[++I];
+      if      (strcmp(W,"source") == 0) Active_World = WORLD_PRESETS [WORLD_SOURCE];
+      else if (strcmp(W,"q3")     == 0) Active_World = WORLD_PRESETS [WORLD_QUAKE3];
+      else printf("[world] unknown world '%s' (q3/source)\n", W);
+    }
+    else if (strcmp (Argv[I], "--movement")       == 0 and I + 1 < Argc) {
+      const char *Mv = Argv[++I];
+      if      (strcmp(Mv,"source") == 0) Active_Movement = WORLD_SOURCE;
+      else if (strcmp(Mv,"q3")     == 0) Active_Movement = WORLD_QUAKE3;
+    }
+    else if (strcmp (Argv[I], "--mdl")    == 0 and I + 1 < Argc) Source_MDL_Path = Argv[++I];
+    else if (strcmp (Argv[I], "--weapon") == 0 and I + 1 < Argc) Source_Weapon_Path = Argv[++I];
+    else if (strcmp (Argv[I], "--spp")    == 0 and I + 1 < Argc) Override_SPP = atoi (Argv[++I]);
+    else if (strcmp (Argv[I], "--res")    == 0 and I + 1 < Argc) {
+      sscanf (Argv[++I], "%dx%d", &Width, &Height);
+      Override_Res = 1;
+    }
+    else if (strcmp (Argv[I], "--quality") == 0 and I + 1 < Argc) {
+      const char *Q = Argv[++I];
+      if      (strcasecmp (Q, "ultra")  == 0) Active_Quality = QUALITY_CRYSIS;
+      else if (strcasecmp (Q, "high")   == 0) Active_Quality = QUALITY_HIGH;
+      else if (strcasecmp (Q, "medium") == 0) Active_Quality = QUALITY_MEDIUM;
+      else if (strcasecmp (Q, "low")    == 0) Active_Quality = QUALITY_LOW;
+      else if (strcasecmp (Q, "potato") == 0) Active_Quality = QUALITY_POTATO;
+      else printf ("[quality] unknown preset '%s' (ultra/high/medium/low/potato)\n", Q);
+    }
+    else Map_Name = Argv[I];
+  }
+
+  // Apply quality presets
+  const Quality_Preset *Preset = &QUALITY_PRESETS[Active_Quality];
+  if (not Override_Res) { Width = Preset->Width; Height = Preset->Height;}
+  Active_Render_Scale  = Preset->Render_Scale;
+  Active_Denoise_Passes = Preset->Denoise_Passes;
+  Active_Checkerboard   = Preset->Checkerboard;
+  if (not No_Parallax) No_Parallax = not Preset->Parallax;
+  printf ("[quality] preset: %s (%dx%d @ %.0f%% scale, %d SPP)\n",
+          Preset->Name, Width, Height, Active_Render_Scale * 100.f, Override_SPP ? Override_SPP : Preset->SPP);
+  printf ("[world] %s (height %.0f, eye %.0f, fov %.0f, speed %.0f)\n",
+          Active_World.Name, Active_World.Player_Height, Active_World.Eye_Height, Active_World.FOV, Active_World.Max_Speed);
+
+  // Comment here !!!
+  (void)No_PBR;
+  (void)No_Parallax; 
+
+  // Verify the map file exists before starting expensive GPU setup
+  char Map_Path[256];
+  snprintf (Map_Path, sizeof Map_Path, "%smaps/%s", ASSET_ROOT, Map_Name);
+  {
+    FILE *Map_Test = fopen (Map_Path, "rb");
+    if (not Map_Test) {
+      fprintf (stderr, "[error] map file not found: %s\n", Map_Path);
+      fprintf (stderr, "  Place .bsp files in the assets/maps/ directory.\n");
+      fprintf (stderr, "  Usage: %s [options] <mapname.bsp>\n", Argv[0]);
+      return 1;
+    }
+    fclose (Map_Test);
+  }
+
+  // Initialize SDL2 with video subsystem and create a Vulkan-capable resizable window
+  if (SDL_Init (SDL_INIT_VIDEO) < 0) {
+    fprintf (stderr, "[error] SDL_Init failed: %s\n", SDL_GetError ());
+    fprintf (stderr, "  Ensure a display server (X11/Wayland) is running.\n");
+    fprintf (stderr, "  For headless use: Xvfb :99 -screen 0 1920x1080x24 & export DISPLAY=:99\n");
+    return 1;
+  }
+  Window = SDL_CreateWindow (ENGINE_NAME, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
+                             Width, Height, SDL_WINDOW_VULKAN | SDL_WINDOW_SHOWN | SDL_WINDOW_RESIZABLE);
+  if (not Window) {
+    fprintf (stderr, "[error] SDL_CreateWindow failed: %s\n", SDL_GetError ());
+    fprintf (stderr, "  Ensure Vulkan drivers are installed (apt install mesa-vulkan-drivers).\n");
+    SDL_Quit ();
+    return 1;
+  }
+
+  // Create system cursors for menu mode rollover
+  SDL_Cursor_Arrow     = SDL_CreateSystemCursor (SDL_SYSTEM_CURSOR_ARROW);
+  SDL_Cursor_Hand      = SDL_CreateSystemCursor (SDL_SYSTEM_CURSOR_HAND);
+  SDL_Cursor_Crosshair = SDL_CreateSystemCursor (SDL_SYSTEM_CURSOR_CROSSHAIR);
+
+  // Start in game mode: capture mouse for FPS controls
+  SDL_SetRelativeMouseMode (SDL_TRUE);
+  SDL_SetWindowGrab (Window, SDL_TRUE);
+  Cursor_Centering = 1;
+  Input_Active = 1;
+  Windowed_W = Width;
+  Windowed_H = Height;
+  SDL_GetWindowPosition (Window, &Windowed_X, &Windowed_Y);
+
+  // Create the Vulkan environment
+  Vulkan_Create_Instance ();
+  Vulkan_Pick_Physical_Device ();
+  Vulkan_Create_Logical_Device ();
+  Vulkan_Create_Swapchain ();
+  Vulkan_Create_Synchronization ();
+
+  // Compute internal render resolution
+  Render_Width  = (int)(Width  * Active_Render_Scale);
+  Render_Height = (int)(Height * Active_Render_Scale);
+  Render_Width  = (Render_Width  + 7) & ~7; // Round up to multiple of 8 (postprocess workgroup size)
+  Render_Height = (Render_Height + 7) & ~7;
+
+  // Convert horizontal FOV to vertical for the Perspective matrix
+  float Vertical_FOV = 2.f * atanf (tanf (Active_World.FOV * (float)M_PI / 360.f) / ((float)Width / Height)) * 180.f / (float)M_PI;
+  printf ("[render] internal %dx%d > window %dx%d (scale %.0f%%, vFOV %.1f°)\n",
+          Render_Width, Render_Height, Width, Height, Active_Render_Scale * 100.f, Vertical_FOV);
+
+  // Create the ray tracing storage targe and depth images
+  Raytracing_Storage_Image = Image_Storage_Create (Render_Width, Render_Height);
+  Vulkan_Transition_Storage_Image ();
+
+  // Create R32F depth image for postprocessing
+  {
+    Depth_Image.Format = VK_FORMAT_R32_SFLOAT;
+    VK_CHECK (vkCreateImage (/*device      =>*/ Device,
+                             /*pCreateInfo =>*/ &(VkImageCreateInfo){
+                               .sType         = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+                               .imageType     = VK_IMAGE_TYPE_2D,
+                               .format        = VK_FORMAT_R32_SFLOAT,
+                               .extent        = {Render_Width, Render_Height, 1},
+                               .mipLevels     = 1,
+                               .arrayLayers   = 1,
+                               .samples       = VK_SAMPLE_COUNT_1_BIT,
+                               .tiling        = VK_IMAGE_TILING_OPTIMAL,
+                               .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+                               .usage         = VK_IMAGE_USAGE_STORAGE_BIT},
+                             /*pAllocator  =>*/ NULL,
+                             /*pImage      =>*/ &Depth_Image.Image));
+    VkMemoryRequirements Mem_Req;
+    vkGetImageMemoryRequirements (Device, Depth_Image.Image, &Mem_Req);
+    VK_CHECK (vkAllocateMemory (/*device       =>*/ Device,
+                                /*pAllocateInfo =>*/ &(VkMemoryAllocateInfo){
+                                  .sType           = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+                                  .allocationSize  = Mem_Req.size,
+                                  .memoryTypeIndex = Find_Memory_Type (Mem_Req.memoryTypeBits,
+                                                                       VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)},
+                                /*pAllocator    =>*/ NULL,
+                                /*pMemory       =>*/ &Depth_Image.Memory));
+    VK_CHECK (vkBindImageMemory (Device, Depth_Image.Image, Depth_Image.Memory, 0));
+    VK_CHECK (vkCreateImageView (/*device      =>*/ Device,
+                                 /*pCreateInfo =>*/ &(VkImageViewCreateInfo){
+                                   .sType            = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+                                   .image            = Depth_Image.Image,
+                                   .viewType         = VK_IMAGE_VIEW_TYPE_2D,
+                                   .format           = VK_FORMAT_R32_SFLOAT,
+                                   .subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1}},
+                                 /*pAllocator  =>*/ NULL,
+                                 /*pView       =>*/ &Depth_Image.View));
+
+    // Transition depth image to general layout
+    VkCommandBuffer Cmd;
+    VK_CHECK (vkAllocateCommandBuffers (/*device        =>*/ Device,
+                                        /*pAllocateInfo =>*/ &(VkCommandBufferAllocateInfo){
+                                          .sType              = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+                                          .commandPool        = Command_Pool,
+                                          .level              = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+                                          .commandBufferCount = 1},
+                                        /*pCommandBuffers =>*/ &Cmd));
+    VK_CHECK (vkBeginCommandBuffer (/*commandBuffer =>*/ Cmd,
+                                    /*pBeginInfo    =>*/ &(VkCommandBufferBeginInfo){
+                                      .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+                                      .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT}));
+    Image_Layout_Barrier (/*Command_Buffer     =>*/ Cmd,
+                          /*Image              =>*/ Depth_Image.Image,
+                          /*Old_Layout         =>*/ VK_IMAGE_LAYOUT_UNDEFINED,
+                          /*New_Layout         =>*/ VK_IMAGE_LAYOUT_GENERAL,
+                          /*Source_Access      =>*/ 0,
+                          /*Destination_Access =>*/ VK_ACCESS_SHADER_WRITE_BIT,
+                          /*Source_Stage       =>*/ VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                          /*Destination_Stage  =>*/ VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR);
+    VK_CHECK (vkEndCommandBuffer (Cmd));
+    VK_CHECK (vkQueueSubmit (/*queue       =>*/ Queue,
+                             /*submitCount =>*/ 1,
+                             /*pSubmits    =>*/ &(VkSubmitInfo){
+                               .sType              = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+                               .commandBufferCount = 1,
+                               .pCommandBuffers    = &Cmd},
+                             /*fence       =>*/ VK_NULL_HANDLE));
+    vkQueueWaitIdle (Queue);
+    vkFreeCommandBuffers (Device, Command_Pool, 1, &Cmd);
+  }
+
+  // Create history image for temporal accumulation
+  History_Image = Image_Storage_Create (Render_Width, Render_Height);
+  {
+    VkCommandBuffer Cmd;
+    VK_CHECK (vkAllocateCommandBuffers (/*device        =>*/ Device,
+                                        /*pAllocateInfo =>*/ &(VkCommandBufferAllocateInfo){
+                                          .sType              = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+                                          .commandPool        = Command_Pool,
+                                          .level              = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+                                          .commandBufferCount = 1},
+                                        /*pCommandBuffers =>*/ &Cmd));
+    VK_CHECK (vkBeginCommandBuffer (/*commandBuffer =>*/ Cmd,
+                                    /*pBeginInfo    =>*/ &(VkCommandBufferBeginInfo){
+                                      .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+                                      .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT}));
+    Image_Layout_Barrier (/*Command_Buffer     =>*/ Cmd,
+                          /*Image              =>*/ History_Image.Image,
+                          /*Old_Layout         =>*/ VK_IMAGE_LAYOUT_UNDEFINED,
+                          /*New_Layout         =>*/ VK_IMAGE_LAYOUT_GENERAL,
+                          /*Source_Access      =>*/ 0,
+                          /*Destination_Access =>*/ VK_ACCESS_SHADER_WRITE_BIT,
+                          /*Source_Stage       =>*/ VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                          /*Destination_Stage  =>*/ VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+    VK_CHECK (vkEndCommandBuffer (Cmd));
+    VK_CHECK (vkQueueSubmit (/*queue       =>*/ Queue,
+                             /*submitCount =>*/ 1,
+                             /*pSubmits    =>*/ &(VkSubmitInfo){
+                               .sType              = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+                               .commandBufferCount = 1,
+                               .pCommandBuffers    = &Cmd},
+                             /*fence       =>*/ VK_NULL_HANDLE));
+    vkQueueWaitIdle (Queue);
+    vkFreeCommandBuffers (Device, Command_Pool, 1, &Cmd);
+  }
+
+  // Create postprocess output image - postprocess writes here instead of back to Color_Image, so that Color_Image stays consistent
+  Postprocess_Output_Image = Image_Storage_Create (Render_Width, Render_Height);
+  {
+    VkCommandBuffer Cmd;
+    VK_CHECK (vkAllocateCommandBuffers (/*device        =>*/ Device,
+                                        /*pAllocateInfo =>*/ &(VkCommandBufferAllocateInfo){
+                                          .sType              = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+                                          .commandPool        = Command_Pool,
+                                          .level              = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+                                          .commandBufferCount = 1},
+                                        /*pCommandBuffers =>*/ &Cmd));
+    VK_CHECK (vkBeginCommandBuffer (/*commandBuffer =>*/ Cmd,
+                                    /*pBeginInfo    =>*/ &(VkCommandBufferBeginInfo){
+                                      .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+                                      .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT}));
+    Image_Layout_Barrier (/*Command_Buffer     =>*/ Cmd,
+                          /*Image              =>*/ Postprocess_Output_Image.Image,
+                          /*Old_Layout         =>*/ VK_IMAGE_LAYOUT_UNDEFINED,
+                          /*New_Layout         =>*/ VK_IMAGE_LAYOUT_GENERAL,
+                          /*Source_Access      =>*/ 0,
+                          /*Destination_Access =>*/ VK_ACCESS_SHADER_WRITE_BIT,
+                          /*Source_Stage       =>*/ VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                          /*Destination_Stage  =>*/ VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+    VK_CHECK (vkEndCommandBuffer (Cmd));
+    VK_CHECK (vkQueueSubmit (/*queue       =>*/ Queue,
+                             /*submitCount =>*/ 1,
+                             /*pSubmits    =>*/ &(VkSubmitInfo){
+                               .sType              = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+                               .commandBufferCount = 1,
+                               .pCommandBuffers    = &Cmd},
+                             /*fence       =>*/ VK_NULL_HANDLE));
+    vkQueueWaitIdle (Queue);
+    vkFreeCommandBuffers (Device, Command_Pool, 1, &Cmd);
+  }
+
+  // Allocate the camera uniform buffer
+  Camera_Uniform_Buffer = Buffer_Allocate (/*Size         =>*/ 256,
+                                           /*Usage        =>*/ VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
+                                           /*Memory_Flags =>*/ VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT
+                                                             | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+
+  // Load the BSP scene and spawn point (no CPU collision map - GPU handles physics via TLAS)
+  Spawn Spawn_Point;
+  Scene Scene_Data = Source_Mode ? Scene_Load_From_VBSP (Map_Path, &Spawn_Point)
+                                : Scene_Load_From_BSP   (Map_Path, &Spawn_Point);
+
+  // Load entity: Source mode defaults to ct_sas, Q3 mode defaults to sarge
+  const char *Entity_MDL_Path = Source_MDL_Path;
+  if (not Entity_MDL_Path and Source_Mode)
+    Entity_MDL_Path = "/tmp/cspromod_new/cspromod_b105/cspromod/models/player/ct_sas.mdl";
+
+  // Place enemy 120 units forward from spawn (in engine Y-up space: forward = camera's look direction)
+  vec3 Enemy_Origin = Spawn_Point.Origin;
+  if (Entity_MDL_Path) {
+    float Spawn_Yaw = 1.5707963f - Spawn_Point.Angle * 3.14159f / 180.f;
+    float Fwd_X = sinf(Spawn_Yaw), Fwd_Z = -cosf(Spawn_Yaw);
+    Enemy_Origin.x += Fwd_X * 120.f;
+    Enemy_Origin.z += Fwd_Z * 120.f;
+    printf("[enemy] placing at (%.1f, %.1f, %.1f), %.0f units forward from spawn\n",
+           Enemy_Origin.x, Enemy_Origin.y, Enemy_Origin.z, 120.f);
+  }
+  Entity Enemy = Entity_MDL_Path ? MDL_Load (&Scene_Data, Entity_MDL_Path, Enemy_Origin, Spawn_Point.Angle + 180.f)
+                                 : Entity_Load (&Scene_Data, Spawn_Point);
+
+  // Infer per-scene environment settings from BSP data (sky textures, worldspawn)
+  Active_Environment = Environment_Infer_From_Scene (&Scene_Data);
+
+  // Load scene and weapon textures
+  Scene_Load_Textures (&Scene_Data);
+  Weapon_Instance Weapon = {0};
+  const char *Weapon_MDL_Path = Source_Weapon_Path;
+  if (not Weapon_MDL_Path and Source_Mode)
+    Weapon_MDL_Path = "/tmp/v_m4_new/models/v_rif_m4a1.mdl";
+  Weapon.Model = Weapon_MDL_Path ? Source_Weapon_Model_Load (Weapon_MDL_Path)
+                                 : Weapon_Model_Load ();
+  Weapon_Load_Textures (&Weapon);
+
+  // Check quality arguments
+  //
+  //   --no-pbr: set PBR_Stride to 0 to force heuristic PBR for all materials.
+  //   --no-parallax / Potato quality: disables parallax and reflections via Active_SPP flags
+  //
+  if (No_PBR) {
+    printf ("[mode] PBR maps DISABLED (heuristic fallback)\n");
+    PBR_Stride = 0;
+  }
+  printf ("[mode] PBR maps %s, parallax %s\n",
+          No_PBR ? "DISABLED" : "enabled", No_Parallax ? "DISABLED" : "enabled");
+
+  // Build acceleration structures (BLAS for world + weapon + enemy, then TLAS)
+  Acceleration_Structure World_Bottom_Level = Build_World_Bottom_Level (&Scene_Data);
+  Weapon_Bottom_Level_Initialize (&Weapon);
+  Entity_Bottom_Level_Initialize (&Enemy);
+  Top_Level_Initialize (4);
+  Top_Level_Rebuild (&World_Bottom_Level, &Weapon.Bottom_Level, &Enemy.Bottom_Level, NULL);
+
+  // Create the ray tracing pipeline, shader binding table, and descriptors
+  Raytracing_Pipeline_Create ();
+  Shader_Binding_Table_Create ();
+  Descriptor_Set_Create (&Weapon, &Enemy);
+
+  // Create the post-processing pipeline (reads color + depth, writes color)
+  Postprocess_Pipeline_Create ();
+
+  // Create the a-trous spatial denoiser
+  Denoise_Ping_Image = Image_Storage_Create (Render_Width, Render_Height);
+  {
+    VkCommandBuffer Cmd;
+    VK_CHECK (vkAllocateCommandBuffers (/*device        =>*/ Device,
+                                        /*pAllocateInfo =>*/ &(VkCommandBufferAllocateInfo){
+                                          .sType              = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+                                          .commandPool        = Command_Pool,
+                                          .level              = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+                                          .commandBufferCount = 1},
+                                        /*pCommandBuffers =>*/ &Cmd));
+    VK_CHECK (vkBeginCommandBuffer (/*commandBuffer =>*/ Cmd,
+                                    /*pBeginInfo    =>*/ &(VkCommandBufferBeginInfo){
+                                      .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+                                      .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT}));
+    Image_Layout_Barrier (/*Command_Buffer     =>*/ Cmd,
+                          /*Image              =>*/ Denoise_Ping_Image.Image,
+                          /*Old_Layout         =>*/ VK_IMAGE_LAYOUT_UNDEFINED,
+                          /*New_Layout         =>*/ VK_IMAGE_LAYOUT_GENERAL,
+                          /*Source_Access      =>*/ 0,
+                          /*Destination_Access =>*/ VK_ACCESS_SHADER_WRITE_BIT,
+                          /*Source_Stage       =>*/ VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                          /*Destination_Stage  =>*/ VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+    VK_CHECK (vkEndCommandBuffer (Cmd));
+    VK_CHECK (vkQueueSubmit (/*queue       =>*/ Queue,
+                             /*submitCount =>*/ 1,
+                             /*pSubmits    =>*/ &(VkSubmitInfo){
+                               .sType              = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+                               .commandBufferCount = 1,
+                               .pCommandBuffers    = &Cmd},
+                             /*fence       =>*/ VK_NULL_HANDLE));
+    vkQueueWaitIdle (Queue);
+    vkFreeCommandBuffers (Device, Command_Pool, 1, &Cmd);
+  }
+  Denoise_Pipeline_Create ();
+
+  // Create the GPU skeletal skinning pipeline (used by Source MDL entities)
+  Skinning_Pipeline_Create ();
+
+  // Create the GPU physics pipeline and resources (with hull binding)
+  Physics_Pipeline_Create ();
+
+  // Compute world-relative spawn offset
+  float Spawn_Feet_Offset = (Active_World.Type == WORLD_SOURCE) ? 0.f : 24.f; 
+  float Capsule_Y = Active_World.Player_Height * 0.5f - Spawn_Feet_Offset; // Offset from spawn to capsule center
+  Player Initial_Player = {
+    .Position = {Spawn_Point.Origin.x, Spawn_Point.Origin.y + Capsule_Y, Spawn_Point.Origin.z},
+    .Yaw      = 1.5707963f - Spawn_Point.Angle * 3.14159f / 180.f}; // M_PI/2 - Angle: Q3 angle 0 = +X = our yaw π/2
+  Physics_Resources_Create (&Initial_Player);
+
+  // Initialize the audio system (OpenAL with synthesized sounds)
+  Audio_Init ();
+
+  // Apply runtime mode flags
+  Skip_Postprocess = No_Postprocess;
+
+  // Default SPP = 1 for maximum speed; override with --spp N
+  uint Active_SPP = Override_SPP ? (uint)Override_SPP : (uint)QUALITY_PRESETS[Active_Quality].SPP;
+
+  // Log diagnostic output
+  printf ("[init] ready - entering game loop\n");
+
+  // Physics-only test mode: run with --physics-test to skip rendering and simulate movement - Test code !!!
+  if (Physics_Test) {
+    fprintf (stderr, "[physics-test] starting physics-only test (3s simulated, fixed dt=0.016)\n");
+    float Fixed_Dt = 1.f / 60.f; // A 60fps timestep
+
+    // Phase 1: idle for 0.5s (let player settle on ground)
+    for (int I = 0; I < 30; I++) {
+      Input In = {0};
+      Player P = Physics_Dispatch (In, Fixed_Dt);
+      if (I % 10 == 0)
+        fprintf (stderr, "  [idle  %3d] pos=(%.1f,%.1f,%.1f) vel=(%.1f,%.1f,%.1f) gnd=%d\n",
+                 I, P.Position.x, P.Position.y, P.Position.z,
+                 P.Velocity.x, P.Velocity.y, P.Velocity.z, P.On_Ground);
+    }
+
+    // Phase 2: walk forward (W) for 1s
+    for (int I = 0; I < 60; I++) {
+      Input In = {.Forward = 1};
+      Player P = Physics_Dispatch (In, Fixed_Dt);
+      if (I % 15 == 0)
+        fprintf (stderr, "  [walk  %3d] pos=(%.1f,%.1f,%.1f) vel=(%.1f,%.1f,%.1f) gnd=%d\n",
+                 I, P.Position.x, P.Position.y, P.Position.z,
+                 P.Velocity.x, P.Velocity.y, P.Velocity.z, P.On_Ground);
+    }
+
+    // Phase 3: jump for 1s
+    for (int I = 0; I < 60; I++) {
+      Input In = {.Forward = 1, .Jump = (I < 3) ? 1 : 0};  // Tap jump briefly
+      Player P = Physics_Dispatch (In, Fixed_Dt);
+      if (I % 10 == 0)
+        fprintf (stderr, "  [jump  %3d] pos=(%.1f,%.1f,%.1f) vel=(%.1f,%.1f,%.1f) gnd=%d\n",
+                 I, P.Position.x, P.Position.y, P.Position.z,
+                 P.Velocity.x, P.Velocity.y, P.Velocity.z, P.On_Ground);
+    }
+
+    // Phase 4: strafe right for 0.5s
+    for (int I = 0; I < 30; I++) {
+      Input In = {.Right = 1};
+      Player P = Physics_Dispatch (In, Fixed_Dt);
+      if (I % 10 == 0)
+        fprintf (stderr, "  [strafe %2d] pos=(%.1f,%.1f,%.1f) vel=(%.1f,%.1f,%.1f) gnd=%d\n",
+                 I, P.Position.x, P.Position.y, P.Position.z,
+                 P.Velocity.x, P.Velocity.y, P.Velocity.z, P.On_Ground);
+    }
+
+    // Log diagnostic output
+    fprintf (stderr, "[physics-test] done\n");
+    vkDeviceWaitIdle (Device);
+    return 0;
+  }
+
+  // Benchmark mode
+  if (Benchmark_Frames > 0 or Screenshot_Path) {
+    float Eye_Y = Active_World.Eye_Height - Spawn_Feet_Offset; // World-relative eye height above spawn origin
+    Camera Bench_Cam = {.Position = {Spawn_Point.Origin.x, Spawn_Point.Origin.y + Eye_Y, Spawn_Point.Origin.z},
+                         .Yaw = 1.5707963f - Spawn_Point.Angle * 3.14159f / 180.f};
+    int Total_Frames = Screenshot_Path ? 1 : Benchmark_Frames;
+    float Fixed_Dt = 1.f / 60.f;
+
+    // Warm up for testing - Test code !!!
+    printf ("[benchmark] warming up (5 frames)...\n");
+    {
+      VK_CHECK (vkWaitForFences (Device, 1, &Fence, VK_TRUE, UINT64_MAX));
+      Weapon_Update (&Weapon, &Bench_Cam, Fixed_Dt, 0);
+      Weapon_Bottom_Level_Rebuild (&Weapon);
+      Top_Level_Rebuild (&World_Bottom_Level, &Weapon.Bottom_Level, &Enemy.Bottom_Level, NULL);
+      mat4 Bench_View = View (Bench_Cam.Position, Bench_Cam.Yaw, Bench_Cam.Pitch);
+      mat4 Bench_Proj = Perspective (Vertical_FOV, (float)Width / Height, 0.1f, 10000.f);
+      mat4 Bench_Inv_Proj = Inverse_Projection (Bench_Proj);
+      mat4 Bench_Reproj = Mat4_Mul (Bench_Proj, Mat4_Mul (Bench_View, Inverse_Orthogonal (Bench_View)));
+      Prev_View_Matrix = Bench_View;
+
+      // Alternate frame parity so checkerboard traces both pixel halves during warmup
+      for (int I = 0; I < 5; I++) {
+        Bench_Cam.Frame = (uint)I;
+        Camera_Upload (&Bench_Cam, Vertical_FOV, Weapon.Texture_Base_Index, PBR_Stride, Active_SPP);
+        GPU_Postprocess_Push Warmup_Postprocess = {.Time = 0,
+          .Dt_Frame       = (uint32_t)Float_To_Half (Fixed_Dt) | ((uint32_t)(Frame_Count & 0xFFFF) << 16),
+          .Velocity       = 0,
+          .Speed_Exposure = Pack_Half2x16 (0.f, Active_Exposure),
+          .Bloom_Vignette = Pack_Half2x16 (STYLE.Bloom_Strength, STYLE.Vignette),
+          .Inv_Proj_Diag  = Pack_Half2x16 (Bench_Inv_Proj.E[0], Bench_Inv_Proj.E[5]),
+          .Sun_Screen_Pos = Pack_Half2x16 (0.5f, 0.5f),
+          .Sun_Params     = Pack_Half2x16 (0.f, 0.f)};
+        Pack_Mat4_Half (&Bench_Reproj, Warmup_Postprocess.Reproject);
+        Raytracing_Frame (Warmup_Postprocess);
+        VK_CHECK (vkWaitForFences (Device, 1, &Fence, VK_TRUE, UINT64_MAX));
+        Frame_Count++;
+      }
+    }
+
+    // Log diagnostic output
+    printf ("[benchmark] rendering %d frame(s)...\n", Total_Frames);
+    (void)SDL_GetPerformanceCounter ();
+    uint64_t Bench_Freq     = SDL_GetPerformanceFrequency ();
+    float    Frame_Min      = 1e9f, Frame_Max = 0, Frame_Sum = 0;
+    float   *Frame_Times    = calloc (Total_Frames, sizeof (float)); // For percentile stats
+    vec3     Prev_Bench_Pos = Bench_Cam.Position; // Track camera position for speed computation
+
+    // Render each benchmark frame
+    for (int F = 0; F < Total_Frames; F++) {
+
+      // Wait for the previous frame's RT submission to complete before reusing Command_Buffer
+      VK_CHECK (vkWaitForFences (Device, 1, &Fence, VK_TRUE, UINT64_MAX));
+
+      // Time this frame
+      uint64_t Frame_Start = SDL_GetPerformanceCounter ();
+
+      // Slowly rotate the camera for visual coverage - Test code !!!
+      if (not Screenshot_Path) {
+        float T = F * Fixed_Dt;
+        float Yaw_Speed   = cosf (T * 3.14159f) * 120.f; // ~120 px/frame mouse sweep
+        float Pitch_Speed = sinf (T * 6.28f) * 5.f;      // Gentle pitch oscillation
+        Input In = {.Forward = 1, .Right = (F % 180 >= 90) ? 1 : 0,
+                    .Delta_X = Yaw_Speed, .Delta_Y = Pitch_Speed};
+        Player P = Physics_Dispatch (In, Fixed_Dt);
+        Bench_Cam.Position = P.Position;
+        Bench_Cam.Position.y += P.View_Height;
+        Bench_Cam.Yaw = P.Yaw;
+        Bench_Cam.Pitch = P.Pitch;
+      } else {
+        Input In = {0};
+        Physics_Dispatch (In, Fixed_Dt);
+      }
+
+      // Update scene state for this frame
+      Bench_Cam.Frame = (uint)F;
+      Weapon_Update (&Weapon, &Bench_Cam, Fixed_Dt, 0);
+      Weapon_Bottom_Level_Rebuild (&Weapon);
+      Enemy.Animation_Time += Fixed_Dt;
+      Enemy.Current_Vertices = Enemy.Frame_Vertices[(int)(Enemy.Animation_Time * Enemy.Frame_FPS) % (int)Enemy.Frame_Count];
+      Entity_Bottom_Level_Rebuild (&Enemy);
+      Top_Level_Rebuild (&World_Bottom_Level, &Weapon.Bottom_Level, &Enemy.Bottom_Level, NULL);
+      Camera_Upload (&Bench_Cam, Vertical_FOV, Weapon.Texture_Base_Index, PBR_Stride, Active_SPP);
+
+      // Build view and projection matrices
+      mat4 Bench_View = View (Bench_Cam.Position, Bench_Cam.Yaw, Bench_Cam.Pitch);
+      mat4 Bench_Projection = Perspective (Vertical_FOV, (float)Width / Height, 0.1f, 10000.f);
+      mat4 Bench_Inverse_Projection = Inverse_Projection (Bench_Projection);
+      mat4 Bench_Reproject = Mat4_Mul (Bench_Projection, Mat4_Mul (Prev_View_Matrix, Inverse_Orthogonal (Bench_View)));
+
+      // Compute actual camera speed from position delta for TAA motion detection
+      float Bench_Speed = 0.f;
+      if (F > 0) {
+        float Dx = Bench_Cam.Position.x - Prev_Bench_Pos.x;
+        float Dy = Bench_Cam.Position.y - Prev_Bench_Pos.y;
+        float Dz = Bench_Cam.Position.z - Prev_Bench_Pos.z;
+        Bench_Speed = sqrtf (Dx*Dx + Dy*Dy + Dz*Dz) / Fixed_Dt;
+      }
+      Prev_Bench_Pos = Bench_Cam.Position;
+
+      // Configure post-processing push constants
+      GPU_Postprocess_Push Postprocess = {.Time = F * Fixed_Dt,
+        .Dt_Frame       = (uint32_t)Float_To_Half (Fixed_Dt) | ((uint32_t)(Frame_Count & 0xFFFF) << 16),
+        .Velocity       = 0,
+        .Speed_Exposure = Pack_Half2x16 (Bench_Speed, Active_Exposure),
+        .Bloom_Vignette = Pack_Half2x16 (STYLE.Bloom_Strength, STYLE.Vignette),
+        .Inv_Proj_Diag  = Pack_Half2x16 (Bench_Inverse_Projection.E[0], Bench_Inverse_Projection.E[5]),
+        .Sun_Screen_Pos = Pack_Half2x16 (0.5f, 0.5f),
+        .Sun_Params     = Pack_Half2x16 (0.15f, 0.f)};
+      Pack_Mat4_Half (&Bench_Reproject, Postprocess.Reproject);
+      Raytracing_Frame (Postprocess);
+      Prev_View_Matrix = Bench_View;
+      Frame_Count++;
+
+      // Record frame timing statistics
+      uint64_t Frame_End = SDL_GetPerformanceCounter ();
+      float    Frame_Ms  = (float)(Frame_End - Frame_Start) * 1000.f / (float)Bench_Freq;
+      Frame_Times[F] = Frame_Ms;
+      if (Frame_Ms < Frame_Min) Frame_Min = Frame_Ms;
+      if (Frame_Ms > Frame_Max) Frame_Max = Frame_Ms;
+      Frame_Sum += Frame_Ms;
+
+      // Print periodic progress
+      if (F % 50 == 0)
+        printf ("  [frame %4d/%d] %.2f ms (%.1f fps)\n", F, Total_Frames, Frame_Ms, 1000.f / Frame_Ms);
+
+      // Dump_Frame_To_Disk:
+      if (Dump_Frames_Dir) {
+        VK_CHECK (vkWaitForFences (Device, 1, &Fence, VK_TRUE, UINT64_MAX));
+        uint64_t Pixel_Buffer_Size = (uint64_t)Render_Width * Render_Height * 8; // R16G16B16A16_SFLOAT = 8 bytes/pixel
+
+        // Allocate_Readback_Buffer:
+        GPU_Buffer Readback = Buffer_Allocate (Pixel_Buffer_Size, VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                                                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+
+        // Record_Download_Command:
+        VkCommandBuffer Download_Command;
+        VK_CHECK (vkAllocateCommandBuffers (/*device        =>*/ Device,
+                                            /*pAllocateInfo =>*/ &(VkCommandBufferAllocateInfo){
+                                              .sType              = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+                                              .commandPool        = Command_Pool,
+                                              .level              = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+                                              .commandBufferCount = 1},
+                                            /*pCommandBuffers =>*/ &Download_Command));
+        VK_CHECK (vkBeginCommandBuffer (/*commandBuffer =>*/ Download_Command,
+                                        /*pBeginInfo    =>*/ &(VkCommandBufferBeginInfo){
+                                          .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+                                          .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT}));
+
+        // Transition_To_Transfer_Source:
+        Image_Layout_Barrier (/*Command_Buffer     =>*/ Download_Command,
+                              /*Image              =>*/ Postprocess_Output_Image.Image,
+                              /*Old_Layout         =>*/ VK_IMAGE_LAYOUT_GENERAL,
+                              /*New_Layout         =>*/ VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                              /*Source_Access      =>*/ VK_ACCESS_SHADER_WRITE_BIT,
+                              /*Destination_Access =>*/ VK_ACCESS_TRANSFER_READ_BIT,
+                              /*Source_Stage       =>*/ VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                              /*Destination_Stage  =>*/ VK_PIPELINE_STAGE_TRANSFER_BIT);
+
+        // Copy_Image_To_Buffer:
+        vkCmdCopyImageToBuffer (Download_Command, Postprocess_Output_Image.Image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+          Readback.Buffer, 1, &(VkBufferImageCopy){
+            .imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
+            .imageExtent      = {(uint32_t)Render_Width, (uint32_t)Render_Height, 1}});
+
+        // Transition_Back_To_General:
+        Image_Layout_Barrier (/*Command_Buffer     =>*/ Download_Command,
+                              /*Image              =>*/ Postprocess_Output_Image.Image,
+                              /*Old_Layout         =>*/ VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                              /*New_Layout         =>*/ VK_IMAGE_LAYOUT_GENERAL,
+                              /*Source_Access      =>*/ VK_ACCESS_TRANSFER_READ_BIT,
+                              /*Destination_Access =>*/ VK_ACCESS_SHADER_WRITE_BIT,
+                              /*Source_Stage       =>*/ VK_PIPELINE_STAGE_TRANSFER_BIT,
+                              /*Destination_Stage  =>*/ VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+
+        // Submit_And_Wait:
+        VK_CHECK (vkEndCommandBuffer (Download_Command));
+        VK_CHECK (vkQueueSubmit (/*queue       =>*/ Queue,
+                                 /*submitCount =>*/ 1,
+                                 /*pSubmits    =>*/ &(VkSubmitInfo){
+                                   .sType              = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+                                   .commandBufferCount = 1,
+                                   .pCommandBuffers    = &Download_Command},
+                                 /*fence       =>*/ VK_NULL_HANDLE));
+        vkQueueWaitIdle (Queue);
+
+        // Map_And_Write_TGA:
+        uint16_t *Pixels;
+        vkMapMemory (Device, Readback.Memory, 0, Pixel_Buffer_Size, 0, (void **)&Pixels);
+        char Path[512];
+        snprintf (Path, sizeof (Path), "%s/frame_%04d.tga", Dump_Frames_Dir, F);
+        FILE *Tga_File = fopen (Path, "wb");
+        if (Tga_File) {
+          uint8_t Header[18] = {0};
+          Header[2]  = 2;
+          Header[12] = Render_Width & 0xFF;  Header[13] = (Render_Width >> 8) & 0xFF;
+          Header[14] = Render_Height & 0xFF; Header[15] = (Render_Height >> 8) & 0xFF;
+          Header[16] = 32; Header[17] = 0x20;
+          fwrite (Header, 1, 18, Tga_File);
+          for (int Y = 0; Y < Render_Height; Y++)
+            for (int X = 0; X < Render_Width; X++) {
+              uint16_t *P = Pixels + (Y * Render_Width + X) * 4;
+              uint8_t BGRA[4];
+              for (int C = 0; C < 3; C++) {
+                uint16_t H = P[C]; uint32_t Exp = (H >> 10) & 0x1F; uint32_t Man = H & 0x3FF;
+                float V; if (Exp == 0) V = (float)Man / 1024.0f * (1.0f / 16384.0f);
+                else if (Exp == 31) V = 1.0f;
+                else { uint32_t Fb = ((Exp + 112) << 23) | (Man << 13); memcpy (&V, &Fb, 4);}
+                if (V < 0.0f) V = 0.0f;
+                if (V > 1.0f) V = 1.0f;
+                float S = (V <= 0.0031308f) ? V * 12.92f : 1.055f * powf (V, 1.0f / 2.4f) - 0.055f;
+                BGRA[2 - C] = (uint8_t)(S * 255.0f + 0.5f);
+              }
+              BGRA[3] = 255;
+              fwrite (BGRA, 1, 4, Tga_File);
+            }
+          fclose (Tga_File);
+        }
+        vkUnmapMemory (Device, Readback.Memory);
+        vkDestroyBuffer (Device, Readback.Buffer, NULL);
+        vkFreeMemory (Device, Readback.Memory, NULL);
+        vkFreeCommandBuffers (Device, Command_Pool, 1, &Download_Command);
+      }
+    }
+
+    // Wait for GPU to finish
+    vkDeviceWaitIdle (Device);
+
+    // Compute percentiles: sort frame times for P50/P95/P99
+    for (int I = 0; I < Total_Frames - 1; I++)
+      for (int J = I + 1; J < Total_Frames; J++)
+        if (Frame_Times[I] > Frame_Times[J]) { float T = Frame_Times[I]; Frame_Times[I] = Frame_Times[J]; Frame_Times[J] = T;}
+    float P50 = Frame_Times[Total_Frames / 2];
+    float P95 = Frame_Times[(int)(Total_Frames * 0.95f)];
+    float P99 = Frame_Times[(int)(Total_Frames * 0.99f)];
+    free (Frame_Times);
+
+    // Print benchmark results
+    float Avg_Ms  = Frame_Sum / Total_Frames;
+    float Avg_Fps = 1000.f / Avg_Ms;
+    printf ("\n[benchmark] ════════════════════════════════════════════════\n");
+    printf ("  Resolution:    %dx%d (render %dx%d, scale %.0f%%)\n",
+            Width, Height, Render_Width, Render_Height, Active_Render_Scale * 100.f);
+    printf ("  Frames:        %d\n", Total_Frames);
+    printf ("  PBR maps:      %s\n", PBR_Stride > 0 ? "ON" : "OFF (heuristic)");
+    printf ("  Post-process:  %s\n", No_Postprocess ? "OFF" : "ON");
+    printf ("  Avg frame:     %.2f ms (%.1f fps)\n", Avg_Ms, Avg_Fps);
+    printf ("  P50 frame:     %.2f ms (%.1f fps)\n", P50, 1000.f / P50);
+    printf ("  P95 frame:     %.2f ms (%.1f fps)\n", P95, 1000.f / P95);
+    printf ("  P99 frame:     %.2f ms (%.1f fps)\n", P99, 1000.f / P99);
+    printf ("  Min frame:     %.2f ms (%.1f fps)\n", Frame_Min, 1000.f / Frame_Min);
+    printf ("  Max frame:     %.2f ms (%.1f fps)\n", Frame_Max, 1000.f / Frame_Max);
+    printf ("  Total time:    %.2f s\n", Frame_Sum / 1000.f);
+    printf ("[benchmark] ════════════════════════════════════════════════\n");
+
+    // Screenshot mode: read back the display output image and write a TGA
+    if (Screenshot_Path) {
+      printf ("[screenshot] saving to %s...\n", Screenshot_Path);
+
+      // Allocate_Readback_Buffer: R16G16B16A16_SFLOAT = 8 bytes/pixel
+      uint64_t Pixel_Size = (uint64_t)Render_Width * Render_Height * 8;
+      GPU_Buffer Readback = Buffer_Allocate (/*Size         =>*/ Pixel_Size,
+                                             /*Usage        =>*/ VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                                             /*Memory_Flags =>*/ VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT
+                                                               | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+
+      // Record_Download_Command:
+      VkCommandBuffer Cmd;
+      VK_CHECK (vkAllocateCommandBuffers (/*device        =>*/ Device,
+                                          /*pAllocateInfo =>*/ &(VkCommandBufferAllocateInfo){
+                                            .sType              = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+                                            .commandPool        = Command_Pool,
+                                            .level              = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+                                            .commandBufferCount = 1},
+                                          /*pCommandBuffers =>*/ &Cmd));
+      VK_CHECK (vkBeginCommandBuffer (/*commandBuffer =>*/ Cmd,
+                                      /*pBeginInfo    =>*/ &(VkCommandBufferBeginInfo){
+                                        .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+                                        .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT}));
+
+      // Transition_To_Transfer_Source:
+      Image_Layout_Barrier (/*Command_Buffer     =>*/ Cmd,
+                            /*Image              =>*/ Postprocess_Output_Image.Image,
+                            /*Old_Layout         =>*/ VK_IMAGE_LAYOUT_GENERAL,
+                            /*New_Layout         =>*/ VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                            /*Source_Access      =>*/ VK_ACCESS_SHADER_WRITE_BIT,
+                            /*Destination_Access =>*/ VK_ACCESS_TRANSFER_READ_BIT,
+                            /*Source_Stage       =>*/ VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                            /*Destination_Stage  =>*/ VK_PIPELINE_STAGE_TRANSFER_BIT);
+
+      // Copy_Image_To_Buffer:
+      vkCmdCopyImageToBuffer (Cmd, Postprocess_Output_Image.Image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+        Readback.Buffer, 1, &(VkBufferImageCopy){
+          .imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
+          .imageExtent      = {(uint32_t)Render_Width, (uint32_t)Render_Height, 1}});
+
+      // Transition_Back_To_General:
+      Image_Layout_Barrier (/*Command_Buffer     =>*/ Cmd,
+                            /*Image              =>*/ Postprocess_Output_Image.Image,
+                            /*Old_Layout         =>*/ VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                            /*New_Layout         =>*/ VK_IMAGE_LAYOUT_GENERAL,
+                            /*Source_Access      =>*/ VK_ACCESS_TRANSFER_READ_BIT,
+                            /*Destination_Access =>*/ VK_ACCESS_SHADER_WRITE_BIT,
+                            /*Source_Stage       =>*/ VK_PIPELINE_STAGE_TRANSFER_BIT,
+                            /*Destination_Stage  =>*/ VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+
+      // Submit_And_Wait:
+      VK_CHECK (vkEndCommandBuffer (Cmd));
+      VK_CHECK (vkQueueSubmit (/*queue       =>*/ Queue,
+                               /*submitCount =>*/ 1,
+                               /*pSubmits    =>*/ &(VkSubmitInfo){
+                                 .sType              = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+                                 .commandBufferCount = 1,
+                                 .pCommandBuffers    = &Cmd},
+                               /*fence       =>*/ VK_NULL_HANDLE));
+      vkQueueWaitIdle (Queue);
+
+      // Map the readback buffer and write a TGA file. Storage is R16G16B16A16_SFLOAT - convert fp16 to 8-bit sRGB for TGA output
+      uint16_t *Pixels_F16;
+      vkMapMemory (Device, Readback.Memory, 0, Pixel_Size, 0, (void **)&Pixels_F16);
+
+      // Write pixel data to TGA file
+      FILE *TGA = fopen (Screenshot_Path, "wb");
+      if (TGA) {
+
+        // TGA header (18 bytes)
+        uint8_t Header[18] = {0};
+        Header[2]  = 2;    // Uncompressed true-color
+        Header[16] = 32;   // 32 bpp (BGRA)
+        Header[17] = 0x20; // Top-left origin
+        Header[12] = Render_Width & 0xFF;  Header[13] = (Render_Width  >> 8) & 0xFF;
+        Header[14] = Render_Height & 0xFF; Header[15] = (Render_Height >> 8) & 0xFF;
+        fwrite (Header, 1, 18, TGA);
+
+        // Write pixels: fp16 linear > clamp > linear-to-sRGB > 8-bit BGRA for TGA
+        for (int Y = 0; Y < Render_Height; Y++) {
+          for (int X = 0; X < Render_Width; X++) {
+            uint16_t *P = Pixels_F16 + (Y * Render_Width + X) * 4;
+
+            // Convert fp16 to float (use half-to-float bit manipulation)
+            uint8_t BGRA[4];
+            for (int C = 0; C < 3; C++) {
+
+              // IEEE 754 fp16 to fp32 conversion
+              uint16_t H    = P[C];
+              uint32_t Sign = (uint32_t)(H >> 15) << 31;
+              uint32_t Exp  = (H >> 10) & 0x1F;
+              uint32_t Man  = H & 0x3FF;
+
+              // Comment here !!!
+              float V;
+              if (Exp == 0) V = (Man == 0) ? 0.0f : (float)Man / 1024.0f * (1.0f / 16384.0f);
+              else if (Exp == 31) V = 1.0f;
+              else {uint32_t F = Sign | ((Exp + 112) << 23) | (Man << 13); memcpy (&V, &F, 4);}
+
+              // Clamp and apply sRGB gamma
+              if (V < 0.0f) V = 0.0f;
+              if (V > 1.0f) V = 1.0f;
+              float S = (V <= 0.0031308f) ? V * 12.92f : 1.055f * powf (V, 1.0f / 2.4f) - 0.055f;
+              BGRA[2 - C] = (uint8_t)(S * 255.0f + 0.5f);  // RGB > BGR for TGA
+            }
+            BGRA[3] = 255;
+            fwrite (BGRA, 1, 4, TGA);
+          }
+        }
+        fclose (TGA);
+        printf ("[screenshot] saved %dx%d to %s\n", Render_Width, Render_Height, Screenshot_Path);
+      }
+
+      // Clean up readback resources
+      vkUnmapMemory        (Device, Readback.Memory);
+      vkDestroyBuffer      (Device, Readback.Buffer, NULL);
+      vkFreeMemory         (Device, Readback.Memory, NULL);
+      vkFreeCommandBuffers (Device, Command_Pool, 1, &Cmd);
+    }
+
+    // Wait for GPU and exit
+    vkDeviceWaitIdle (Device);
+    return 0;
+  }
+
+  // Camera and perspective
+  Camera Cam = {.Position = {Spawn_Point.Origin.x,
+                             Spawn_Point.Origin.y + (Active_World.Eye_Height - Spawn_Feet_Offset), // Game eye
+                             Spawn_Point.Origin.z},
+                .Yaw = 1.5707963f - Spawn_Point.Angle * 3.14159f / 180.f};
+  Prev_View_Matrix = View (Cam.Position, Cam.Yaw, Cam.Pitch);
+
+  // Loop timing
+  uint64_t Last       = SDL_GetPerformanceCounter ();
+  uint64_t Freq       = SDL_GetPerformanceFrequency ();
+  uint     Frame      = 0;
+  float    Total_Time = 0;
+
+  // Main game loop
+  Quit = 0;
+  while (not Quit) {
+
+    // Wait for the previous frame's RT submission to complete before reusing Command_Buffer
+    VK_CHECK (vkWaitForFences (Device, 1, &Fence, VK_TRUE, UINT64_MAX));
+
+    // Compute delta time from the high-resolution performance counter
+    uint64_t Now = SDL_GetPerformanceCounter ();
+    float    Delta_Time = (float)(Now - Last) / (float)Freq;
+    if (Delta_Time > MAX_DELTA_TIME) Delta_Time = MAX_DELTA_TIME;
+    Last = Now;
+    Total_Time += Delta_Time;
+
+    // Poll input (handles windowing events, mode transitions, resize)
+    Input In = Poll_Input ();
+
+    // Skip rendering when minimized (window may be 0x0, nothing to present)
+    if (Current_Activated == MINIMIZE_DEACTIVATED) {
+      SDL_Delay (16); // Don't spin-wait when minimized
+      Last = SDL_GetPerformanceCounter ();
+      continue;
+    }
+
+    // Recreate swapchain if window was resized or fullscreen was toggled
+    if (Swapchain_Dirty) {
+      Vulkan_Recreate_Swapchain ();
+      Swapchain_Dirty = 0;
+    }
+
+    // Spawn projectile on fire and upload to GPU before physics dispatch
+    if (In.Fire) {
+      float sy = sinf (Cam.Yaw), cy = cosf (Cam.Yaw);
+      float sp = sinf (Cam.Pitch), cp = cosf (Cam.Pitch);
+      vec3 Forward = {sy * cp, -sp, -cy * cp};
+      Projectile_Spawn (Cam.Position, Forward);
+    }
+    Projectiles.Fire_Cooldown -= Delta_Time;
+    if (Projectiles.Fire_Cooldown < 0) Projectiles.Fire_Cooldown = 0;
+    Projectile_Pool_Upload ();
+
+    // Dispatch GPU physics simulation
+    Player Physics = Physics_Dispatch (In, Delta_Time);
+
+    // Read back projectile state after GPU physics step
+    Projectile_Pool_Readback ();
+
+    // Update audio: footsteps, landing sounds
+    Audio_Update_Footsteps (&Physics, Delta_Time);
+
+    // Update the camera from the physics result - add View_Height to get eye position
+    Cam.Position.y += Physics.View_Height; // Raise camera to eye level
+    Cam.Position    = Physics.Position;
+    Cam.Yaw         = Physics.Yaw;
+    Cam.Pitch       = Physics.Pitch;
+    Cam.Frame       = Frame;
+
+    // Animate and rebuild the weapon viewmodel
+    Weapon_Update (&Weapon, &Cam, Delta_Time, In.Fire);
+    Weapon_Bottom_Level_Rebuild (&Weapon);
+
+    // Advance enemy idle animation and rebuild BLAS
+    Enemy.Animation_Time += Delta_Time;
+    {
+      int Frame_Index = (int)(Enemy.Animation_Time * Enemy.Frame_FPS) % (int)Enemy.Frame_Count;
+      Enemy.Current_Vertices = Enemy.Frame_Vertices[Frame_Index];
+    }
+    Entity_Bottom_Level_Rebuild (&Enemy);
+
+    // Compute player body TLAS transform
+    vec3  Entity_Origin = Enemy.GL_Origin;
+    float Body_Yaw      = -Physics.Yaw; 
+    float D_Yaw         = Body_Yaw - Enemy.GL_Yaw;
+    float Cosine_Yaw    = cosf (D_Yaw), Sine_Yaw = sinf (D_Yaw);
+    float Translation_X = Physics.Position.x - (Cosine_Yaw * Entity_Origin.x + Sine_Yaw * Entity_Origin.z);
+    float Translation_Y = Physics.Position.y - Entity_Origin.y;
+    float Translation_Z = Physics.Position.z - (-Sine_Yaw * Entity_Origin.x + Cosine_Yaw * Entity_Origin.z);
+    float Player_Body_Transform[12] = {Cosine_Yaw,  0.f, Sine_Yaw,  Translation_X,
+                                       0.f,         1.f, 0.f,       Translation_Y,
+                                       -Sine_Yaw,   0.f, Cosine_Yaw, Translation_Z};
+
+    // Rebuild the top-level acceleration structure
+    Top_Level_Rebuild (&World_Bottom_Level, &Weapon.Bottom_Level, &Enemy.Bottom_Level, Player_Body_Transform);
+
+    // Adaptive quality budget
+    float Target_Frame_Time;
+    if      (Active_Quality == QUALITY_POTATO) Target_Frame_Time = POTATO_TARGET_MS;
+    else if (Active_Quality == QUALITY_MEDIUM
+             Active_Quality == QUALITY_LOW)    Target_Frame_Time = MEDIUM_TARGET_MS;
+    else if (Active_Quality == QUALITY_CRYSIS) Target_Frame_Time = ULTRA_TARGET_MS;
+    else                                       Target_Frame_Time = DEFAULT_TARGET_MS;
+
+    // Comment here !!!
+    float Budget = 0.0f;
+    if (Force_Cheap) {
+      Budget = 1.0f;
+
+    // Comment here !!!
+    } else if (Delta_Time > Target_Frame_Time) {
+      float Budget_Max = fmaxf (Target_Frame_Time * 2.0f, 0.15f);
+      Budget = (Delta_Time - Target_Frame_Time) / (Budget_Max - Target_Frame_Time);
+      if (Budget > 1.0f) Budget = 1.0f;
+    }
+
+    // Comment here !!!
+    if (Active_Quality == QUALITY_POTATO and Budget < POTATO_BUDGET_FLOOR) Budget = POTATO_BUDGET_FLOOR;
+    uint Budget_Byte = (uint)(Budget * 255.0f);
+    float Denoise_Budget = Budget;
+
+    // Comment here !!!
+    if (Active_SPP <= 1) Denoise_Budget = fmaxf (Denoise_Budget, 0.10f);
+    Current_Budget_Byte = (int)(uint)(fminf (Denoise_Budget, 1.0f) * 255.0f);
+    uint Packed_SPP     = (Active_SPP & 0xFF) | (Budget_Byte << 8);
+
+    // Upload the camera and dispatch ray tracing + postprocess
+    Camera_Upload (&Cam, Vertical_FOV, Weapon.Texture_Base_Index, PBR_Stride, Packed_SPP);
+    float Horizontal_Speed = sqrtf (Physics.Velocity.x * Physics.Velocity.x +
+                                    Physics.Velocity.z * Physics.Velocity.z);
+
+    // Build reprojection matrix: Proj * Prev_View * Inverse_View (maps current view-space > previous clip-space)
+    mat4 Cur_View     = View (Cam.Position, Cam.Yaw, Cam.Pitch);
+    mat4 Cur_Inv_View = Inverse_Orthogonal (Cur_View);
+    mat4 Proj         = Perspective (Vertical_FOV, (float)Width / Height, 0.1f, 10000.f);
+    mat4 Reproject    = Mat4_Mul (Proj, Mat4_Mul (Prev_View_Matrix, Cur_Inv_View));
+    mat4 Inv_Proj     = Inverse_Projection (Proj);
+
+    // Project sun direction to screen space for god rays
+    vec3 Sun_D     = Normalize (Active_Environment.Sun_Direction);
+    vec3 Sun_World = Add (Cam.Position, Scale (Sun_D, 1000.f)); // Far point in sun direction
+
+    // Transform through View * Proj to get clip space
+    mat4 View_Projection = Mat4_Mul (Proj, Cur_View);
+    float Clip_X = View_Projection.E[0]*Sun_World.x + View_Projection.E[4]*Sun_World.y + View_Projection.E[8]*Sun_World.z  + View_Projection.E[12];
+    float Clip_Y = View_Projection.E[1]*Sun_World.x + View_Projection.E[5]*Sun_World.y + View_Projection.E[9]*Sun_World.z  + View_Projection.E[13];
+    float Clip_W = View_Projection.E[3]*Sun_World.x + View_Projection.E[7]*Sun_World.y + View_Projection.E[11]*Sun_World.z + View_Projection.E[15];
+    float Sun_U = 0.5f, Sun_V = 0.5f;
+    float Sun_Visible = 0.f;
+
+    // Sun is in front of camera
+    if (Clip_W > 0.01f) { 
+      Sun_U = (Clip_X / Clip_W) * 0.5f + 0.5f;
+      Sun_V = (Clip_Y / Clip_W) * 0.5f + 0.5f;
+
+      // Check if sun is roughly on screen (with margin for off-screen glow)
+      if (Sun_U > -0.5f and Sun_U < 1.5f and Sun_V > -0.5f and Sun_V < 1.5f)
+        Sun_Visible = 1.f;
+    }
+
+    // Build post-processing push constants and render frame
+    GPU_Postprocess_Push Postprocess = {
+      .Time           = Total_Time,
+      .Dt_Frame       = (uint32_t)Float_To_Half (Delta_Time) | ((uint32_t)(Frame_Count & 0xFFFF) << 16),
+      .Velocity       = Pack_Half2x16 (Physics.Velocity.x, Physics.Velocity.z),
+      .Speed_Exposure = Pack_Half2x16 (Horizontal_Speed, Active_Exposure),
+      .Bloom_Vignette = Pack_Half2x16 (STYLE.Bloom_Strength, STYLE.Vignette),
+      .Inv_Proj_Diag  = Pack_Half2x16 (Inv_Proj.E[0], Inv_Proj.E[5]),
+      .Sun_Screen_Pos = Pack_Half2x16 (Sun_U, Sun_V),
+      .Sun_Params     = Pack_Half2x16 (0.15f, Sun_Visible)};  // God ray intensity
+    Pack_Mat4_Half (&Reproject, Postprocess.Reproject);
+    Raytracing_Frame (Postprocess);
+    Prev_View_Matrix = Cur_View;
+    Frame++;
+    Frame_Count++;
+  }
+
+  // Cleanup
+  Audio_Shutdown ();
+  Damage_Cache_Free ();
+  vkDeviceWaitIdle (Device);
+  printf ("[shutdown] %u frames rendered\n", Frame);
+
+  // Free SDL cursors
+  if (SDL_Cursor_Arrow)     SDL_FreeCursor (SDL_Cursor_Arrow);
+  if (SDL_Cursor_Hand)      SDL_FreeCursor (SDL_Cursor_Hand);
+  if (SDL_Cursor_Crosshair) SDL_FreeCursor (SDL_Cursor_Crosshair);
+
+  // Free scene data
+  free (Scene_Data.Vertices);
+  free (Scene_Data.Indices);
+  free (Scene_Data.Materials);
+  free (Scene_Data.Texture_Ids);
+  free (Scene_Data.Texture_Names);
+  free (Scene_Data.Lightmap_Atlas);
+
+  // Pipelines and layouts
+  vkDestroyPipeline            (Device, Denoise_Pipeline, NULL);
+  vkDestroyPipelineLayout      (Device, Denoise_Pipeline_Layout, NULL);
+  vkDestroyDescriptorPool      (Device, Denoise_Descriptor_Pool, NULL);
+  vkDestroyDescriptorSetLayout (Device, Denoise_Descriptor_Layout, NULL);
+  vkDestroyImageView           (Device, Denoise_Ping_Image.View, NULL);
+  vkDestroyImage               (Device, Denoise_Ping_Image.Image, NULL);
+  vkFreeMemory                 (Device, Denoise_Ping_Image.Memory, NULL);
+  vkDestroyPipeline            (Device, Postprocess_Pipeline, NULL);
+  vkDestroyPipelineLayout      (Device, Postprocess_Pipeline_Layout, NULL);
+  vkDestroyDescriptorPool      (Device, Postprocess_Descriptor_Pool, NULL);
+  vkDestroyDescriptorSetLayout (Device, Postprocess_Descriptor_Layout, NULL);
+  vkDestroyPipeline            (Device, Physics_Pipeline, NULL);
+  vkDestroyPipelineLayout      (Device, Physics_Pipeline_Layout, NULL);
+  vkDestroyDescriptorPool      (Device, Physics_Descriptor_Pool, NULL);
+  vkDestroyDescriptorSetLayout (Device, Physics_Descriptor_Layout, NULL);
+  vkDestroyPipeline            (Device, Pipeline, NULL);
+  vkDestroyPipelineLayout      (Device, Pipeline_Layout, NULL);
+  vkDestroyDescriptorPool      (Device, Descriptor_Pool, NULL);
+  vkDestroyDescriptorSetLayout (Device, Descriptor_Set_Layout, NULL);
+  vkDestroyPipelineCache       (Device, Pipeline_Cache, NULL);
+
+  // Acceleration structures
+  vkDestroyAccelerationStructure (Device, Top_Level.Handle, NULL);
+  vkDestroyAccelerationStructure (Device, Bottom_Level.Handle, NULL);
+  vkDestroyBuffer (Device, Top_Level.Buffer.Buffer, NULL);
+  vkFreeMemory    (Device, Top_Level.Buffer.Memory, NULL);
+  vkDestroyBuffer (Device, Top_Level_Instance_Buffer.Buffer, NULL);
+  vkFreeMemory    (Device, Top_Level_Instance_Buffer.Memory, NULL);
+  vkDestroyBuffer (Device, Top_Level_Scratch_Buffer.Buffer, NULL);
+  vkFreeMemory    (Device, Top_Level_Scratch_Buffer.Memory, NULL);
+  vkDestroyBuffer (Device, Bottom_Level.Buffer.Buffer, NULL);
+  vkFreeMemory    (Device, Bottom_Level.Buffer.Memory, NULL);
+
+  // Weapon resources
+  vkDestroyAccelerationStructure (Device, Weapon.Bottom_Level.Handle, NULL);
+  vkDestroyBuffer (Device, Weapon.Bottom_Level.Buffer.Buffer, NULL);
+  vkFreeMemory    (Device, Weapon.Bottom_Level.Buffer.Memory, NULL);
+  vkDestroyBuffer (Device, Weapon.Bottom_Level_Scratch.Buffer, NULL);
+  vkFreeMemory    (Device, Weapon.Bottom_Level_Scratch.Memory, NULL);
+  vkDestroyBuffer (Device, Weapon.Vertex_Buffer.Buffer, NULL);
+  vkFreeMemory    (Device, Weapon.Vertex_Buffer.Memory, NULL);
+  vkDestroyBuffer (Device, Weapon.Index_Buffer.Buffer, NULL);
+  vkFreeMemory    (Device, Weapon.Index_Buffer.Memory, NULL);
+  vkDestroyBuffer (Device, Weapon.Texture_Id_Buffer.Buffer, NULL);
+  vkFreeMemory    (Device, Weapon.Texture_Id_Buffer.Memory, NULL);
+  free (Weapon.Model.Vertices);
+  free (Weapon.Model.Indices);
+  free (Weapon.Model.Texture_Ids);
+  free (Weapon.Transformed_Vertices);
+
+  // Entity (enemy) resources
+  for (uint I = 0; I < Enemy.Frame_Count; I++) free (Enemy.Frame_Vertices[I]);
+  vkDestroyAccelerationStructure (Device, Enemy.Bottom_Level.Handle, NULL);
+  vkDestroyBuffer (Device, Enemy.Bottom_Level.Buffer.Buffer, NULL);
+  vkFreeMemory    (Device, Enemy.Bottom_Level.Buffer.Memory, NULL);
+  vkDestroyBuffer (Device, Enemy.Bottom_Level_Scratch.Buffer, NULL);
+  vkFreeMemory    (Device, Enemy.Bottom_Level_Scratch.Memory, NULL);
+  vkDestroyBuffer (Device, Enemy.Vertex_Buffer.Buffer, NULL);
+  vkFreeMemory    (Device, Enemy.Vertex_Buffer.Memory, NULL);
+  vkDestroyBuffer (Device, Enemy.Index_Buffer.Buffer, NULL);
+  vkFreeMemory    (Device, Enemy.Index_Buffer.Memory, NULL);
+  vkDestroyBuffer (Device, Enemy.Texture_Id_Buffer.Buffer, NULL);
+  vkFreeMemory    (Device, Enemy.Texture_Id_Buffer.Memory, NULL);
+  free (Enemy.Indices);
+  free (Enemy.Texture_Ids);
+
+  // Shader binding table
+  vkDestroyBuffer (Device, Shader_Binding_Table_Buffer.Buffer, NULL);
+  vkFreeMemory    (Device, Shader_Binding_Table_Buffer.Memory, NULL);
+
+  // GPU storage images
+  vkDestroyImageView (Device, Raytracing_Storage_Image.View, NULL);
+  vkDestroyImage     (Device, Raytracing_Storage_Image.Image, NULL);
+  vkFreeMemory       (Device, Raytracing_Storage_Image.Memory, NULL);
+  vkDestroyImageView (Device, Depth_Image.View, NULL);
+  vkDestroyImage     (Device, Depth_Image.Image, NULL);
+  vkFreeMemory       (Device, Depth_Image.Memory, NULL);
+  vkDestroyImageView (Device, History_Image.View, NULL);
+  vkDestroyImage     (Device, History_Image.Image, NULL);
+  vkFreeMemory       (Device, History_Image.Memory, NULL);
+  vkDestroyImageView (Device, Postprocess_Output_Image.View, NULL);
+  vkDestroyImage     (Device, Postprocess_Output_Image.Image, NULL);
+  vkFreeMemory       (Device, Postprocess_Output_Image.Memory, NULL);
+
+  // Scene buffers
+  vkDestroyBuffer (Device, Camera_Uniform_Buffer.Buffer, NULL);
+  vkFreeMemory    (Device, Camera_Uniform_Buffer.Memory, NULL);
+  vkDestroyBuffer (Device, Vertex_Buffer.Buffer, NULL);
+  vkFreeMemory    (Device, Vertex_Buffer.Memory, NULL);
+  vkDestroyBuffer (Device, Index_Buffer.Buffer, NULL);
+  vkFreeMemory    (Device, Index_Buffer.Memory, NULL);
+  vkDestroyBuffer (Device, Material_Buffer.Buffer, NULL);
+  vkFreeMemory    (Device, Material_Buffer.Memory, NULL);
+  vkDestroyBuffer (Device, Texture_Id_Buffer.Buffer, NULL);
+  vkFreeMemory    (Device, Texture_Id_Buffer.Memory, NULL);
+  vkDestroyBuffer (Device, Player_State_Buffer.Buffer, NULL);
+  vkFreeMemory    (Device, Player_State_Buffer.Memory, NULL);
+  vkDestroyBuffer (Device, Hull_Storage_Buffer.Buffer, NULL);
+  vkFreeMemory    (Device, Hull_Storage_Buffer.Memory, NULL);
+  vkDestroyBuffer (Device, Projectile_Buffer.Buffer, NULL);
+  vkFreeMemory    (Device, Projectile_Buffer.Memory, NULL);
+
+  // Textures
+  for (uint I = 0; I < Texture_Count; I++) {
+    vkDestroyImageView (Device, Texture_Views[I], NULL);
+    vkDestroyImage     (Device, Texture_Images[I], NULL);
+    vkFreeMemory       (Device, Texture_Memories[I], NULL);
+  }
+  free (Texture_Views);
+  free (Texture_Images);
+  free (Texture_Memories);
+  vkDestroySampler (Device, Texture_Sampler, NULL);
+
+  // Lightmap
+  vkDestroyImageView (Device, Lightmap_View, NULL);
+  vkDestroyImage     (Device, Lightmap_Image, NULL);
+  vkFreeMemory       (Device, Lightmap_Memory, NULL);
+  vkDestroySampler   (Device, Lightmap_Sampler, NULL);
+
+  // Swapchain image views
+  for (uint I = 0; I < Swapchain_Image_Count; I++)
+    vkDestroyImageView (Device, Swapchain_Views[I], NULL);
+
+  // Core Vulkan objects
+  vkDestroySemaphore    (Device, Semaphore_Image_Available, NULL);
+  vkDestroySemaphore    (Device, Semaphore_Render_Finished, NULL);
+  vkDestroyCommandPool  (Device, Command_Pool, NULL);
+  vkDestroySwapchainKHR (Device, Swapchain, NULL);
+  vkDestroySurfaceKHR   (Instance, Surface, NULL);
+  vkDestroyFence        (Device, Fence, NULL);
+  vkDestroyDevice       (Device, NULL);
+  vkDestroyInstance     (Instance, NULL);
+
+  // Media layer
+  SDL_DestroyWindow (Window);
+  SDL_Quit ();
+  return 0;
+  
+} // main
 
 // ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 //
@@ -1958,12 +3334,33 @@ void Vulkan_Recreate_Swapchain ();
 //                 
 // ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 
+// Note: Sections §1 through §2 are specification only
+
+// ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+//
+// §3. Math
+//
+// ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+
 // ════════════
 //   Identity 
 // ════════════
 
-mat4 Identity (void) {mat4 Result = {0}; Result.E[0]  = 1; Result.E[5]  = 1;
-                                         Result.E[10] = 1; Result.E[15] = 1; return Result;}
+mat4 Identity () {mat4 Result = {0}; Result.E[0]  = 1; Result.E[5]  = 1;
+                                     Result.E[10] = 1; Result.E[15] = 1; return Result;}
+
+// ═════════════
+//   Mat34_Mul
+// ═════════════
+
+void Mat34_Mul (const float A[3][4], const float B[3][4], float C[3][4]) {
+  for (int R=0;R<3;R++) {
+    C[R][0] = A[R][0]*B[0][0]+A[R][1]*B[1][0]+A[R][2]*B[2][0];
+    C[R][1] = A[R][0]*B[0][1]+A[R][1]*B[1][1]+A[R][2]*B[2][1];
+    C[R][2] = A[R][0]*B[0][2]+A[R][1]*B[1][2]+A[R][2]*B[2][2];
+    C[R][3] = A[R][0]*B[0][3]+A[R][1]*B[1][3]+A[R][2]*B[2][3]+A[R][3];
+  }
+}
 
 // ═══════════════
 //   Perspective 
@@ -1979,6 +3376,53 @@ mat4 Perspective (float Fovy_Degrees, float Aspect, float Near, float Far) {
   Result.E[10] = Far / (Near - Far);
   Result.E[11] = -1;
   Result.E[14] = Near * Far / (Near - Far);
+  return Result;
+}
+
+// ══════════════════════
+//   Inverse_Orthogonal 
+// ══════════════════════
+
+mat4 Inverse_Orthogonal (mat4 Source) {
+  mat4 Result = {0};
+
+  // Transpose the upper-left 3 by 3 rotation block
+  for (int Row = 0; Row < 3; Row++)
+    for (int Column = 0; Column < 3; Column++)
+      Result.E[Row * 4 + Column] = Source.E[Column * 4 + Row];
+
+  // Recompute translation as the negated product of the transposed rotation and the original translation
+  Result.E[12] = -(Result.E[0] * Source.E[12] + Result.E[4] * Source.E[13] + Result.E[8]  * Source.E[14]);
+  Result.E[13] = -(Result.E[1] * Source.E[12] + Result.E[5] * Source.E[13] + Result.E[9]  * Source.E[14]);
+  Result.E[14] = -(Result.E[2] * Source.E[12] + Result.E[6] * Source.E[13] + Result.E[10] * Source.E[14]);
+  Result.E[15] = 1;
+  return Result;
+}
+
+// ══════════════════════
+//   Inverse_Projection 
+// ══════════════════════
+
+mat4 Inverse_Projection (mat4 Projection) {
+  mat4 Result = {0};
+  Result.E[0]  = 1.f / Projection.E[0];
+  Result.E[5]  = 1.f / Projection.E[5];
+  Result.E[11] = 1.f / Projection.E[14];
+  Result.E[14] = 1.f / Projection.E[11];
+  Result.E[15] = -Projection.E[10] / (Projection.E[11] * Projection.E[14]);
+  return Result;
+}
+
+// ════════════
+//   Mat4_Mul
+// ════════════
+
+mat4 Mat4_Mul (mat4 A, mat4 B) {
+  mat4 Result = {0};
+  for (int Row = 0; Row < 4; Row++)
+    for (int Col = 0; Col < 4; Col++)
+      for (int K = 0; K < 4; K++)
+        Result.E[Col * 4 + Row] += A.E[K * 4 + Row] * B.E[Col * 4 + K];
   return Result;
 }
 
@@ -2017,53 +3461,6 @@ mat4 View (vec3 Position, float Yaw, float Pitch) {
   return Result;
 }
 
-// ══════════════════════
-//   Inverse_Orthogonal 
-// ══════════════════════
-
-mat4 Inverse_Orthogonal (mat4 Source) {
-  mat4 Result = {0};
-
-  // Transpose the upper-left 3×3 rotation block
-  for (int Row = 0; Row < 3; Row++)
-    for (int Column = 0; Column < 3; Column++)
-      Result.E[Row * 4 + Column] = Source.E[Column * 4 + Row];
-
-  // Recompute translation as the negated product of the transposed rotation and the original translation
-  Result.E[12] = -(Result.E[0] * Source.E[12] + Result.E[4] * Source.E[13] + Result.E[8]  * Source.E[14]);
-  Result.E[13] = -(Result.E[1] * Source.E[12] + Result.E[5] * Source.E[13] + Result.E[9]  * Source.E[14]);
-  Result.E[14] = -(Result.E[2] * Source.E[12] + Result.E[6] * Source.E[13] + Result.E[10] * Source.E[14]);
-  Result.E[15] = 1;
-  return Result;
-}
-
-// ══════════════════════
-//   Inverse_Projection 
-// ══════════════════════
-
-mat4 Inverse_Projection (mat4 Projection) {
-  mat4 Result = {0};
-  Result.E[0]  = 1.f / Projection.E[0];
-  Result.E[5]  = 1.f / Projection.E[5];
-  Result.E[11] = 1.f / Projection.E[14];
-  Result.E[14] = 1.f / Projection.E[11];
-  Result.E[15] = -Projection.E[10] / (Projection.E[11] * Projection.E[14]);
-  return Result;
-}
-
-// ═════════════
-//   Mat4_Mul
-// ═════════════
-
-mat4 Mat4_Mul (mat4 A, mat4 B) {
-  mat4 Result = {0};
-  for (int Row = 0; Row < 4; Row++)
-    for (int Col = 0; Col < 4; Col++)
-      for (int K = 0; K < 4; K++)
-        Result.E[Col * 4 + Row] += A.E[K * 4 + Row] * B.E[Col * 4 + K];
-  return Result;
-}
-
 // ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 //
 // §5. Memory
@@ -2074,7 +3471,7 @@ mat4 Mat4_Mul (mat4 A, mat4 B) {
 //   Buffer_Upload 
 // ═════════════════
 
-void Buffer_Upload (Gpu_Buffer Destination, const void *Data, uint64_t Size) {
+void Buffer_Upload (GPU_Buffer Destination, const void *Data, uint64_t Size) {
   void *Mapped;
   VK_CHECK (vkMapMemory (Device, Destination.Memory, 0, Size, 0, &Mapped));
   memcpy (Mapped, Data, Size);
@@ -2104,8 +3501,8 @@ uint Find_Memory_Type (uint Type_Bits, VkMemoryPropertyFlags Desired_Properties)
 //   Buffer_Allocate 
 // ═══════════════════
 
-Gpu_Buffer Buffer_Allocate (uint64_t Size, VkBufferUsageFlags Usage, VkMemoryPropertyFlags Memory_Flags) {
-  Gpu_Buffer Result = {.Size = Size};
+GPU_Buffer Buffer_Allocate (uint64_t Size, VkBufferUsageFlags Usage, VkMemoryPropertyFlags Memory_Flags) {
+  GPU_Buffer Result = {.Size = Size};
 
   // Create the buffer object with the requested size and usage
   VK_CHECK (vkCreateBuffer (/*device      =>*/ Device,
@@ -2152,20 +3549,20 @@ Gpu_Buffer Buffer_Allocate (uint64_t Size, VkBufferUsageFlags Usage, VkMemoryPro
 //   Buffer_Stage_Upload 
 // ═══════════════════════
 
-Gpu_Buffer Buffer_Stage_Upload (VkCommandBuffer    Command_Buffer,
+GPU_Buffer Buffer_Stage_Upload (VkCommandBuffer    Command_Buffer,
                                 VkQueue            Queue,
                                 const void *Data, uint64_t Size,
                                 VkBufferUsageFlags Usage) {
 
   // Allocate a host-visible staging buffer and fill it with the source data
-  Gpu_Buffer Staging = Buffer_Allocate (/*Size         =>*/ Size,
+  GPU_Buffer Staging = Buffer_Allocate (/*Size         =>*/ Size,
                                         /*Usage        =>*/ VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
                                         /*Memory_Flags =>*/ VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT
                                                           | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
   Buffer_Upload (Staging, Data, Size);
 
   // Allocate the final device-local buffer that shaders will access
-  Gpu_Buffer Destination = Buffer_Allocate (/*Size         =>*/ Size,
+  GPU_Buffer Destination = Buffer_Allocate (/*Size         =>*/ Size,
                                             /*Usage        =>*/ Usage
                                                               | VK_BUFFER_USAGE_TRANSFER_DST_BIT
                                                               | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
@@ -2203,60 +3600,6 @@ Gpu_Buffer Buffer_Stage_Upload (VkCommandBuffer    Command_Buffer,
 // §6. Textures
 //
 // ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
-
-// ════════════════════════
-//   Image_Storage_Create
-// ════════════════════════
-
-Gpu_Image Image_Storage_Create (uint Width, uint Height) {
-  Gpu_Image Result = {.Format = VK_FORMAT_R16G16B16A16_SFLOAT};
-
-  // Create the image object with storage and transfer-source usage
-  VK_CHECK (vkCreateImage (/*device      =>*/ Device,
-                           /*pCreateInfo =>*/ &(VkImageCreateInfo){
-                             .sType         = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
-                             .imageType     = VK_IMAGE_TYPE_2D,
-                             .format        = Result.Format,
-                             .extent        = {Width, Height, 1},
-                             .mipLevels     = 1,
-                             .arrayLayers   = 1,
-                             .samples       = VK_SAMPLE_COUNT_1_BIT,
-                             .tiling        = VK_IMAGE_TILING_OPTIMAL,
-                             .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
-                             .usage         = VK_IMAGE_USAGE_STORAGE_BIT
-                                            | VK_IMAGE_USAGE_TRANSFER_SRC_BIT},
-                           /*pAllocator  =>*/ NULL,
-                           /*pImage      =>*/ &Result.Image));
-
-  // Query memory requirements and allocate device-local memory for the image
-  VkMemoryRequirements Memory_Requirements;
-  vkGetImageMemoryRequirements (Device, Result.Image, &Memory_Requirements);
-
-  // Allocate device-local memory and bind it to the image
-  VK_CHECK (vkAllocateMemory (/*device        =>*/ Device,
-                              /*pAllocateInfo =>*/ &(VkMemoryAllocateInfo){
-                                .sType           = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
-                                .allocationSize  = Memory_Requirements.size,
-                                .memoryTypeIndex =
-                                  Find_Memory_Type (Memory_Requirements.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)},
-                              /*pAllocator    =>*/ NULL,
-                              /*pMemory       =>*/ &Result.Memory));
-
-  // Bind image memory
-  VK_CHECK (vkBindImageMemory (Device, Result.Image, Result.Memory, 0));
-
-  // Create an image view so shaders can reference this image
-  VK_CHECK (vkCreateImageView (/*device      =>*/ Device,
-                               /*pCreateInfo =>*/ &(VkImageViewCreateInfo){
-                                 .sType            = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
-                                 .image            = Result.Image,
-                                 .viewType         = VK_IMAGE_VIEW_TYPE_2D,
-                                 .format           = Result.Format,
-                                 .subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1}},
-                               /*pAllocator  =>*/ NULL,
-                               /*pView       =>*/ &Result.View));
-  return Result;
-}
 
 // ════════════════════════
 //   Image_Layout_Barrier
@@ -2305,6 +3648,109 @@ void Texture_Upload (VkCommandBuffer Command_Buffer, VkQueue Queue,
                               /*Out_View        =>*/ Out_View);
 }
 
+// ════════════════════════════
+//   Sampler_Create_Repeating 
+// ════════════════════════════
+
+VkSampler Sampler_Create_Repeating () {
+  VkSampler Sampler;
+
+  // We do 16x anisotropic filtering since Hardware anisotropic is essentially free on modern GPUs
+  VK_CHECK (vkCreateSampler (/*device      =>*/ Device,
+                             /*pCreateInfo =>*/ &(VkSamplerCreateInfo){
+                               .sType            = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
+                               .magFilter        = VK_FILTER_LINEAR,
+                               .minFilter        = VK_FILTER_LINEAR,
+                               .addressModeU     = VK_SAMPLER_ADDRESS_MODE_REPEAT,
+                               .addressModeV     = VK_SAMPLER_ADDRESS_MODE_REPEAT,
+                               .addressModeW     = VK_SAMPLER_ADDRESS_MODE_REPEAT,
+                               .mipmapMode       = VK_SAMPLER_MIPMAP_MODE_LINEAR,
+                               .anisotropyEnable = VK_TRUE,
+                               .maxAnisotropy    = 16.f,
+                               .maxLod           = 12.f},
+                             /*pAllocator  =>*/ NULL,
+                             /*pSampler    =>*/ &Sampler));
+  return Sampler;
+}
+
+// ═══════════════════════════
+//   Sampler_Create_Clamping 
+// ═══════════════════════════
+
+VkSampler Sampler_Create_Clamping () {
+  VkSampler Sampler;
+  VK_CHECK (vkCreateSampler (/*device      =>*/ Device,
+                             /*pCreateInfo =>*/ &(VkSamplerCreateInfo){
+                               .sType            = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
+                               .magFilter        = VK_FILTER_LINEAR,
+                               .minFilter        = VK_FILTER_LINEAR,
+                               .addressModeU     = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+                               .addressModeV     = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+                               .addressModeW     = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+                               .mipmapMode       = VK_SAMPLER_MIPMAP_MODE_LINEAR,
+                               .anisotropyEnable = VK_TRUE,
+                               .maxAnisotropy    = 16.f,
+                               .maxLod           = 12.f},
+                             /*pAllocator  =>*/ NULL,
+                             /*pSampler    =>*/ &Sampler));
+  return Sampler;
+}
+
+// ════════════════════════
+//   Image_Storage_Create
+// ════════════════════════
+
+GPU_Image Image_Storage_Create (uint Width, uint Height) {
+  GPU_Image Result = {.Format = VK_FORMAT_R16G16B16A16_SFLOAT};
+
+  // Create the image object with storage and transfer-source usage
+  VK_CHECK (vkCreateImage (/*device      =>*/ Device,
+                           /*pCreateInfo =>*/ &(VkImageCreateInfo){
+                             .sType         = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+                             .imageType     = VK_IMAGE_TYPE_2D,
+                             .format        = Result.Format,
+                             .extent        = {Width, Height, 1},
+                             .mipLevels     = 1,
+                             .arrayLayers   = 1,
+                             .samples       = VK_SAMPLE_COUNT_1_BIT,
+                             .tiling        = VK_IMAGE_TILING_OPTIMAL,
+                             .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+                             .usage         = VK_IMAGE_USAGE_STORAGE_BIT
+                                            | VK_IMAGE_USAGE_TRANSFER_SRC_BIT},
+                           /*pAllocator  =>*/ NULL,
+                           /*pImage      =>*/ &Result.Image));
+
+  // Query memory requirements and allocate device-local memory for the image
+  VkMemoryRequirements Memory_Requirements;
+  vkGetImageMemoryRequirements (Device, Result.Image, &Memory_Requirements);
+
+  // Allocate device-local memory and bind it to the image
+  VK_CHECK (vkAllocateMemory (/*device        =>*/ Device,
+                              /*pAllocateInfo =>*/ &(VkMemoryAllocateInfo){
+                                .sType           = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+                                .allocationSize  = Memory_Requirements.size,
+                                .memoryTypeIndex =
+                                  Find_Memory_Type (Memory_Requirements.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)},
+                              /*pAllocator    =>*/ NULL,
+                              /*pMemory       =>*/ &Result.Memory));
+
+  // Bind image memory
+  VK_CHECK (vkBindImageMemory (Device, Result.Image, Result.Memory, 0));
+
+  // Create an image view so shaders can reference this image
+  VK_CHECK (vkCreateImageView (/*device      =>*/ Device,
+                               /*pCreateInfo =>*/ &(VkImageViewCreateInfo){
+                                 .sType            = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+                                 .image            = Result.Image,
+                                 .viewType         = VK_IMAGE_VIEW_TYPE_2D,
+                                 .format           = Result.Format,
+                                 .subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1}},
+                               /*pAllocator  =>*/ NULL,
+                               /*pView       =>*/ &Result.View));
+  return Result;
+
+} // Image_Storage_Create
+
 // ══════════════════════════════
 //   Texture_Upload_With_Format
 // ══════════════════════════════
@@ -2349,7 +3795,7 @@ void Texture_Upload_With_Format (VkCommandBuffer Command_Buffer, VkQueue Queue,
 
   // Stage the pixel data through a host-visible buffer
   uint64_t Byte_Size = (uint64_t)Width * Height * 4;
-  Gpu_Buffer Staging = Buffer_Allocate (/*Size         =>*/ Byte_Size,
+  GPU_Buffer Staging = Buffer_Allocate (/*Size         =>*/ Byte_Size,
                                         /*Usage        =>*/ VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
                                         /*Memory_Flags =>*/ VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT
                                                           | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
@@ -2423,61 +3869,68 @@ void Texture_Upload_With_Format (VkCommandBuffer Command_Buffer, VkQueue Queue,
   *Out_Image  = Image;
   *Out_Memory = Memory;
   *Out_View   = Image_View;
-}
 
-// ════════════════════════════
-//   Sampler_Create_Repeating 
-// ════════════════════════════
-
-VkSampler Sampler_Create_Repeating (void) {
-  VkSampler Sampler;
-
-  // We do 16x anisotropic filtering since Hardware anisotropic is essentially free on modern GPUs
-  VK_CHECK (vkCreateSampler (/*device      =>*/ Device,
-                             /*pCreateInfo =>*/ &(VkSamplerCreateInfo){
-                               .sType            = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
-                               .magFilter        = VK_FILTER_LINEAR,
-                               .minFilter        = VK_FILTER_LINEAR,
-                               .addressModeU     = VK_SAMPLER_ADDRESS_MODE_REPEAT,
-                               .addressModeV     = VK_SAMPLER_ADDRESS_MODE_REPEAT,
-                               .addressModeW     = VK_SAMPLER_ADDRESS_MODE_REPEAT,
-                               .mipmapMode       = VK_SAMPLER_MIPMAP_MODE_LINEAR,
-                               .anisotropyEnable = VK_TRUE,
-                               .maxAnisotropy    = 16.f,
-                               .maxLod           = 12.f},
-                             /*pAllocator  =>*/ NULL,
-                             /*pSampler    =>*/ &Sampler));
-  return Sampler;
-}
-
-// ═══════════════════════════
-//   Sampler_Create_Clamping 
-// ═══════════════════════════
-
-VkSampler Sampler_Create_Clamping (void) {
-  VkSampler Sampler;
-  VK_CHECK (vkCreateSampler (/*device      =>*/ Device,
-                             /*pCreateInfo =>*/ &(VkSamplerCreateInfo){
-                               .sType            = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
-                               .magFilter        = VK_FILTER_LINEAR,
-                               .minFilter        = VK_FILTER_LINEAR,
-                               .addressModeU     = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
-                               .addressModeV     = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
-                               .addressModeW     = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
-                               .mipmapMode       = VK_SAMPLER_MIPMAP_MODE_LINEAR,
-                               .anisotropyEnable = VK_TRUE,
-                               .maxAnisotropy    = 16.f,
-                               .maxLod           = 12.f},
-                             /*pAllocator  =>*/ NULL,
-                             /*pSampler    =>*/ &Sampler));
-  return Sampler;
-}
+} // Texture_Upload_With_Format
 
 // ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 //
 // §6. Textures
 //
 // ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+
+// ═════════════════════
+//   Damage_Cache_Free
+// ═════════════════════
+
+void Damage_Cache_Free () {
+  for (int I = 0; I < Damage_Cache_Count; I++) free (Damage_Cache[I].Pixels);
+  Damage_Cache_Count = 0;
+}
+
+// ═════════════════════
+//   Damage_Map_Sample
+// ═════════════════════
+
+float Damage_Map_Sample (const char *Path, float U, float V) {
+  // Find or load the damage map
+  Damage_Map_Cache_Entry *Entry = NULL;
+  for (int I = 0; I < Damage_Cache_Count; I++) {
+    if (strcmp (Damage_Cache[I].Path, Path) == 0) { Entry = &Damage_Cache[I]; break;}
+  }
+
+  // Load the damage map from disk if not cached
+  if (not Entry and Damage_Cache_Count < DAMAGE_CACHE_MAX) {
+    Entry = &Damage_Cache[Damage_Cache_Count++];
+    strncpy (Entry->Path, Path, sizeof (Entry->Path) - 1);
+    Entry->Pixels = TGA_Load (Path, &Entry->Width, &Entry->Height);
+    if (not Entry->Pixels) { Damage_Cache_Count--; return 0.5f;}
+  }
+  if (not Entry or not Entry->Pixels) return 0.5f;
+
+  // Wrap UVs to [0,1] and sample the grayscale damage value
+  U = U - floorf (U); V = V - floorf (V);
+  uint X = (uint)(U * (Entry->Width  - 1));
+  uint Y = (uint)(V * (Entry->Height - 1));
+  if (X >= Entry->Width)  X = Entry->Width  - 1;
+  if (Y >= Entry->Height) Y = Entry->Height - 1;
+
+  // TGA pixels are RGBA, damage map is grayscale so just read R channel
+  uint Idx = (Y * Entry->Width + X) * 4;
+  float Brightness = Entry->Pixels[Idx] / 255.0f;
+  return Brightness; // 0.0 = armored, 1.0 = critical
+}
+
+// Look up the damage map path for a given model name and body part index (0=head, 1=upper, 2=lower)
+const char *Damage_Map_For_Model (const char *Model_Name, int Part_Index) {
+  for (int I = 0; I < DAMAGE_MODEL_COUNT; I++) {
+    if (strcmp (DAMAGE_MAP_REGISTRY[I].Model_Name, Model_Name) == 0) {
+      if (Part_Index < DAMAGE_MAP_REGISTRY[I].Damage_Map_Count)
+        return DAMAGE_MAP_REGISTRY[I].Damage_Maps[Part_Index];
+      return DAMAGE_MAP_REGISTRY[I].Damage_Maps[0]; // Fallback to first map
+    }
+  }
+  return NULL; // Unknown model
+}
 
 // ════════════
 //   TGA_Load 
@@ -2493,7 +3946,7 @@ uint8_t *TGA_Load (const char *Path, uint *Out_Width, uint *Out_Height) {
   fseek (File, 0, SEEK_END);
   long Length = ftell (File);
   rewind (File);
-  if (Length < 18) {fclose (File); return NULL; }
+  if (Length < 18) {fclose (File); return NULL;}
 
   // Allocate a buffer and read the entire file contents
   uint8_t *Raw = malloc (Length);
@@ -2627,65 +4080,157 @@ uint8_t *TGA_Load (const char *Path, uint *Out_Width, uint *Out_Height) {
 
 } // Tga_Load
 
-// ═════════════════════
-//   Damage_Map_Sample
-// ═════════════════════
-
-float Damage_Map_Sample (const char *Path, float U, float V) {
-  // Find or load the damage map
-  Damage_Map_Cache_Entry *Entry = NULL;
-  for (int I = 0; I < Damage_Cache_Count; I++) {
-    if (strcmp (Damage_Cache[I].Path, Path) == 0) { Entry = &Damage_Cache[I]; break; }
-  }
-
-  // Load the damage map from disk if not cached
-  if (not Entry and Damage_Cache_Count < DAMAGE_CACHE_MAX) {
-    Entry = &Damage_Cache[Damage_Cache_Count++];
-    strncpy (Entry->Path, Path, sizeof (Entry->Path) - 1);
-    Entry->Pixels = TGA_Load (Path, &Entry->Width, &Entry->Height);
-    if (not Entry->Pixels) { Damage_Cache_Count--; return 0.5f; }
-  }
-  if (not Entry or not Entry->Pixels) return 0.5f;
-
-  // Wrap UVs to [0,1] and sample the grayscale damage value
-  U = U - floorf (U); V = V - floorf (V);
-  uint X = (uint)(U * (Entry->Width  - 1));
-  uint Y = (uint)(V * (Entry->Height - 1));
-  if (X >= Entry->Width)  X = Entry->Width  - 1;
-  if (Y >= Entry->Height) Y = Entry->Height - 1;
-
-  // TGA pixels are RGBA, damage map is grayscale so just read R channel
-  uint Idx = (Y * Entry->Width + X) * 4;
-  float Brightness = Entry->Pixels[Idx] / 255.0f;
-  return Brightness; // 0.0 = armored, 1.0 = critical
-}
-
-// Look up the damage map path for a given model name and body part index (0=head, 1=upper, 2=lower)
-const char *Damage_Map_For_Model (const char *Model_Name, int Part_Index) {
-  for (int I = 0; I < DAMAGE_MODEL_COUNT; I++) {
-    if (strcmp (DAMAGE_MAP_REGISTRY[I].Model_Name, Model_Name) == 0) {
-      if (Part_Index < DAMAGE_MAP_REGISTRY[I].Damage_Map_Count)
-        return DAMAGE_MAP_REGISTRY[I].Damage_Maps[Part_Index];
-      return DAMAGE_MAP_REGISTRY[I].Damage_Maps[0]; // Fallback to first map
-    }
-  }
-  return NULL; // Unknown model
-}
-
-// ═════════════════════
-//   Damage_Cache_Free
-// ═════════════════════
-
-void Damage_Cache_Free () {
-  for (int I = 0; I < Damage_Cache_Count; I++) free (Damage_Cache[I].Pixels);
-  Damage_Cache_Count = 0;
-}
-
 // ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 //
 // §7. Models
 //
 // ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+
+// ═════════════════════════
+//   MD3_Find_Tag_At_Frame
+// ═════════════════════════
+
+int MD3_Find_Tag_At_Frame (const uint8_t *Data, int Tag_Count, int Tags_Offset,
+                           int Frame, const char *Name, float Out[12])
+{
+  const MD3_Tag *Tags = (const MD3_Tag *)(Data + Tags_Offset + Frame * Tag_Count * sizeof (MD3_Tag));
+  for (int I = 0; I < Tag_Count; I++) {
+    if (strncmp (Tags[I].Name, Name, 64) == 0) {
+      memcpy (Out,     Tags[I].Origin, 3 * sizeof (float));
+      memcpy (Out + 3, Tags[I].Axis,   9 * sizeof (float));
+      return 1;
+    }
+  }
+  return 0;
+}
+
+// ═══════════════
+//   Tag_Compose
+// ═══════════════
+
+void Tag_Compose (const float *A, const float *B, float *C) {
+
+  // C.origin = R_A * B.origin + A.origin
+  C[0] = A[3]*B[0] + A[6]*B[1] + A[9]*B[2]  + A[0];
+  C[1] = A[4]*B[0] + A[7]*B[1] + A[10]*B[2] + A[1];
+  C[2] = A[5]*B[0] + A[8]*B[1] + A[11]*B[2] + A[2];
+
+  // C.axis[j] = R_A * B.axis[j] (Three column vectors, each 3 floats)
+  for (int J = 0; J < 3; J++) {
+    int S = 3 + J * 3;
+    C[S+0] = A[3]*B[S+0] + A[6]*B[S+1] + A[9]*B[S+2];
+    C[S+1] = A[4]*B[S+0] + A[7]*B[S+1] + A[10]*B[S+2];
+    C[S+2] = A[5]*B[S+0] + A[8]*B[S+1] + A[11]*B[S+2];
+  }
+}
+
+// ═════════════════
+//   MD3_Load_File
+// ═════════════════
+
+uint8_t *MD3_Load_File (const char *Path, long *Out_Size) {
+  FILE *F = fopen (Path, "rb");
+  if (not F) return NULL;
+  fseek (F, 0, SEEK_END);
+  *Out_Size = ftell (F);
+  rewind (F);
+  uint8_t *Data = malloc (*Out_Size);
+  size_t Data_Read_ = fread (Data, 1, *Out_Size, F); (void)Data_Read_;
+  fclose (F);
+  if (*(uint *)Data != MD3_MAGIC) { free (Data); return NULL;}
+  return Data;
+}
+
+// ═══════════
+//   VTF_Bpp
+// ═══════════
+
+uint VTF_Bpp (int Format) {
+  switch (Format) {
+    case VTF_FMT_RGBA8888:
+    case VTF_FMT_ABGR8888:
+    case VTF_FMT_BGRA8888: return 4; // Comment here !!!
+    case VTF_FMT_RGB888:
+    case VTF_FMT_BGR888:   return 3; // Comment here !!!
+    case VTF_FMT_RGB565:   return 2; // Comment here !!!
+    case VTF_FMT_DXT1:     return 0; // Block-compressed, handled separately
+    case VTF_FMT_DXT3:
+    case VTF_FMT_DXT5:     return 0; // Comment here !!!
+    default:               return 4; // Comment here !!!
+  }
+}
+
+// ═════════════════════
+//   DXT1_Decode_Block
+// ═════════════════════
+
+void DXT1_Decode_Block (const uint8_t *Src, uint8_t *Dst, int Stride) {
+  uint16_t C0 = Src[0] | (Src[1] << 8), C1 = Src[2] | (Src[3] << 8);
+  uint8_t Pal[4][4];
+  Pal[0][0] = ((C0>>11)&0x1F)*255/31; Pal[0][1] = ((C0>>5)&0x3F)*255/63; Pal[0][2] = (C0&0x1F)*255/31; Pal[0][3] = 255;
+  Pal[1][0] = ((C1>>11)&0x1F)*255/31; Pal[1][1] = ((C1>>5)&0x3F)*255/63; Pal[1][2] = (C1&0x1F)*255/31; Pal[1][3] = 255;
+  if (C0 > C1) {
+    for (int C=0;C<3;C++) {Pal[2][C]=(2*Pal[0][C]+Pal[1][C]+1)/3; Pal[3][C]=(Pal[0][C]+2*Pal[1][C]+1)/3;}
+    Pal[2][3]=Pal[3][3]=255;
+  } else {
+    for (int C=0;C<3;C++) Pal[2][C]=(Pal[0][C]+Pal[1][C]+1)/2;
+    Pal[2][3]=255; memset(Pal[3],0,4);
+  }
+  uint Bits = Src[4]|(Src[5]<<8)|(Src[6]<<16)|(Src[7]<<24);
+  for (int Y=0;Y<4;Y++) for (int X=0;X<4;X++,Bits>>=2) memcpy(Dst+Y*Stride+X*4,Pal[Bits&3],4);
+}
+
+// ═════════════════════
+//   DXT5_Decode_Alpha
+// ═════════════════════
+
+void DXT5_Decode_Alpha (const uint8_t *Src, uint8_t *Dst, int Stride) {
+  uint8_t A0=Src[0], A1=Src[1], Pal[8]={A0,A1};
+  if (A0>A1) {for(int I=2;I<8;I++) Pal[I]=(uint8_t)(((8-I)*A0+(I-1)*A1+3)/7);}
+  else {for(int I=2;I<6;I++) Pal[I]=(uint8_t)(((6-I)*A0+(I-1)*A1+2)/5); Pal[6]=0; Pal[7]=255;}
+  uint64_t Bits=0; for(int I=2;I<8;I++) Bits|=(uint64_t)Src[I]<<((I-2)*8);
+  for (int Y=0;Y<4;Y++) for (int X=0;X<4;X++,Bits>>=3) Dst[Y*Stride+X*4+3]=Pal[Bits&7];
+}
+
+// ═════════════════════════
+//   Movement_Style_Toggle
+// ═════════════════════════
+
+void Movement_Style_Toggle (Player *P) {
+  P->Movement = (P->Movement + 1) % WORLD_COUNT;
+  Active_Movement = P->Movement;
+  const char *Names[] = {"Quake 3", "Source"};
+  printf("[movement] switched to %s style\n", Names[P->Movement]);
+}
+
+// ═════════════════════
+//   Skeleton_Evaluate
+// ═════════════════════
+
+void Skeleton_Evaluate (Entity *E, float Time) {
+  if (E->Bone_Count <= 0) return;
+
+  // Build world-space bone matrices from the bind pose hierarchy (When animation keyframe data is available, interpolate here) ???
+  // We are only using the bind position right now ???
+  float Local[MDL_MAX_BONES][3][4];
+  for (int I=0; I<E->Bone_Count; I++)
+    memcpy(Local[I], E->Bind_Pose[I], sizeof(float)*12);
+
+  // Walk hierarchy: Pose[i] = Parent_World * Local[i]
+  for (int I=0; I<E->Bone_Count; I++) {
+    if (E->Bone_Parents[I] >= 0 and E->Bone_Parents[I] < I)
+      Mat34_Mul(E->Pose[E->Bone_Parents[I]].M, Local[I], E->Pose[I].M);
+    else
+      memcpy(E->Pose[I].M, Local[I], sizeof(float)*12);
+  }
+
+  // Compose with inverse bind-pose: Final[i] = Pose[i] * InvBind[i]
+  for (int I=0; I<E->Bone_Count; I++) {
+    float Tmp[3][4];
+    Mat34_Mul(E->Pose[I].M, E->Inv_Bind[I], Tmp);
+    memcpy(E->Pose[I].M, Tmp, sizeof(float)*12);
+  }
+}
 
 // ═════════════════════
 //   MD3_Parse_Surface
@@ -2695,8 +4240,8 @@ void MD3_Parse_Surface (const uint8_t *Surface_Data,
                         Vertex **Inout_Vertices,    uint *Inout_Vertex_Count,
                         uint    **Inout_Indices,     uint *Inout_Index_Count,
                         uint    **Inout_Texture_Ids, uint *Inout_Triangle_Count,
-                        uint Assigned_Texture_Index, const float *Transform) {
-
+                        uint Assigned_Texture_Index, const float *Transform)
+{
   // Cast the raw bytes to the surface header structure
   const MD3_Surface *Surface = (const MD3_Surface *)Surface_Data;
   uint Base_Vertex = *Inout_Vertex_Count;
@@ -2715,8 +4260,8 @@ void MD3_Parse_Surface (const uint8_t *Surface_Data,
   }
 
   // Decode packed MD3 vertices: int16_t xyz at 1/64 scale, plus spherical normal encoding
-  const uint8_t *Vertex_Data               = Surface_Data + Surface->Vertices_Offset;
-  const float   *Texture_Coordinate_Data   = (const float *)(Surface_Data + Surface->Texture_Coordinates_Offset);
+  const uint8_t *Vertex_Data             = Surface_Data + Surface->Vertices_Offset;
+  const float   *Texture_Coordinate_Data = (const float *)(Surface_Data + Surface->Texture_Coordinates_Offset);
 
   // Grow the vertex array and decode each compressed MD3 vertex position and normal
   *Inout_Vertices = realloc (*Inout_Vertices, sizeof (Vertex) * (*Inout_Vertex_Count + Surface->Number_Of_Vertices));
@@ -2731,7 +4276,6 @@ void MD3_Parse_Surface (const uint8_t *Surface_Data,
     float Position_Z = Coordinates[2] / 64.f;
 
     // Decode the spherical normal from latitude/longitude byte pair
-    // On-disk layout: packed short "normal" — low byte = longitude, high byte = latitude
     uint8_t  Longitude = Vertex_Data[Vertex_Index * 8 + 6]; // low byte
     uint8_t  Latitude  = Vertex_Data[Vertex_Index * 8 + 7]; // high byte
     float Latitude_Angle  = Latitude  * (2.f * (float)M_PI / 256.f);
@@ -2767,7 +4311,7 @@ void MD3_Parse_Surface (const uint8_t *Surface_Data,
     (*Inout_Vertices)[*Inout_Vertex_Count + Vertex_Index] = (Vertex){
       .Position   = {Position_X, Position_Z, -Position_Y},
       .Normal     = {Normal_X,   Normal_Z,   -Normal_Y},
-      .Texture_Uv = {Texture_U,  Texture_V},
+      .Texture_UV = {Texture_U,  Texture_V},
     };
   }
 
@@ -2775,18 +4319,19 @@ void MD3_Parse_Surface (const uint8_t *Surface_Data,
   *Inout_Vertex_Count   += Surface->Number_Of_Vertices;
   *Inout_Index_Count    += Surface->Number_Of_Triangles * 3;
   *Inout_Triangle_Count += Surface->Number_Of_Triangles;
-}
+  
+} // MD3_Parse_Surface
 
 // ══════════════════════════════
 //   MD3_Parse_Surface_At_Frame
 // ══════════════════════════════
 
 void MD3_Parse_Surface_At_Frame (const uint8_t *Surface_Data, int Frame,
-                                  Vertex **Inout_Vertices,    uint *Inout_Vertex_Count,
-                                  uint   **Inout_Indices,     uint *Inout_Index_Count,
-                                  uint   **Inout_Texture_Ids, uint *Inout_Triangle_Count,
-                                  uint Assigned_Texture_Index, const float *Transform) {
-
+                                 Vertex **Inout_Vertices,    uint *Inout_Vertex_Count,
+                                 uint   **Inout_Indices,     uint *Inout_Index_Count,
+                                 uint   **Inout_Texture_Ids, uint *Inout_Triangle_Count,
+                                 uint Assigned_Texture_Index, const float *Transform)
+{
   // Cast raw bytes to the surface header
   const MD3_Surface *Surface = (const MD3_Surface *)Surface_Data;
   uint Base_Vertex = *Inout_Vertex_Count;
@@ -2806,8 +4351,7 @@ void MD3_Parse_Surface_At_Frame (const uint8_t *Surface_Data, int Frame,
     (*Inout_Texture_Ids)[*Inout_Triangle_Count + T] = Assigned_Texture_Index;
 
   // Vertex data at the specified animation frame (each packed vertex = 8 bytes)
-  const uint8_t *Vertex_Data = Surface_Data + Surface->Vertices_Offset
-                              + Frame * Surface->Number_Of_Vertices * 8;
+  const uint8_t *Vertex_Data = Surface_Data + Surface->Vertices_Offset + Frame * Surface->Number_Of_Vertices * 8;
   const float *Tex_Coords = (const float *)(Surface_Data + Surface->Texture_Coordinates_Offset);
 
   // Grow the vertex array for decoded vertices
@@ -2819,7 +4363,6 @@ void MD3_Parse_Surface_At_Frame (const uint8_t *Surface_Data, int Frame,
     float PX = Coords[0] / 64.f, PY = Coords[1] / 64.f, PZ = Coords[2] / 64.f;
 
     // Decode spherical normal from latitude/longitude byte pair
-    // On-disk layout: packed short "normal" — low byte = longitude, high byte = latitude
     uint8_t Lon = Vertex_Data[V * 8 + 6]; // low byte
     uint8_t Lat = Vertex_Data[V * 8 + 7]; // high byte
     float LA = Lat * (2.f * (float)M_PI / 256.f);
@@ -2847,7 +4390,7 @@ void MD3_Parse_Surface_At_Frame (const uint8_t *Surface_Data, int Frame,
     (*Inout_Vertices)[*Inout_Vertex_Count + V] = (Vertex){
       .Position   = {PX, PZ, -PY},   // Q3 Z-up > Y-up swizzle
       .Normal     = {NX, NZ, -NY},
-      .Texture_Uv = {U,  Tv},
+      .Texture_UV = {U,  Tv},
     };
   }
 
@@ -2858,16 +4401,16 @@ void MD3_Parse_Surface_At_Frame (const uint8_t *Surface_Data, int Frame,
 
 } // MD3_Parse_Surface_At_Frame
 
-// ══════════════════════
+// ═════════════════════
 //   Weapon_Model_Load
-// ══════════════════════
+// ═════════════════════
 
 Weapon_Model Weapon_Model_Load () {
   Weapon_Model Result = {0};
 
   // Open the main weapon body mesh
   FILE *File = fopen ("assets/models/weapons2/machinegun/machinegun.md3", "rb");
-  if (not File) {printf ("[weapon] machinegun.md3 not found\n"); return Result; }
+  if (not File) {printf ("[weapon] machinegun.md3 not found\n"); return Result;}
 
   // Read the body file into memory and validate the MD3 magic number
   fseek (File, 0, SEEK_END);
@@ -2960,7 +4503,7 @@ Weapon_Model Weapon_Model_Load () {
             Result.Tag_Barrel[2]);
   }
 
-  // Load the hand model for tag_weapon animation frames (no hand geometry — weapon-only viewmodel)
+  // Load the hand model for tag_weapon animation frames (no hand geometry - weapon-only viewmodel)
   File = fopen ("assets/models/weapons2/machinegun/machinegun_hand.md3", "rb");
   if (File) {
     fseek (File, 0, SEEK_END);
@@ -3006,70 +4549,18 @@ Weapon_Model Weapon_Model_Load () {
 } // Weapon_Model_Load
 
 // ═════════════════════════
-//   MD3_Find_Tag_At_Frame
-// ═════════════════════════
-
-int MD3_Find_Tag_At_Frame (const uint8_t *Data, int Tag_Count, int Tags_Offset,
-                                   int Frame, const char *Name, float Out[12]) {
-  const MD3_Tag *Tags = (const MD3_Tag *)(Data + Tags_Offset + Frame * Tag_Count * sizeof (MD3_Tag));
-  for (int I = 0; I < Tag_Count; I++) {
-    if (strncmp (Tags[I].Name, Name, 64) == 0) {
-      memcpy (Out,     Tags[I].Origin, 3 * sizeof (float));
-      memcpy (Out + 3, Tags[I].Axis,   9 * sizeof (float));
-      return 1;
-    }
-  }
-  return 0;
-}
-
-// ═══════════════
-//   Tag_Compose
-// ═══════════════
-
-void Tag_Compose (const float *A, const float *B, float *C) {
-  // C.origin = R_A * B.origin + A.origin
-  C[0] = A[3]*B[0] + A[6]*B[1] + A[9]*B[2]  + A[0];
-  C[1] = A[4]*B[0] + A[7]*B[1] + A[10]*B[2] + A[1];
-  C[2] = A[5]*B[0] + A[8]*B[1] + A[11]*B[2] + A[2];
-
-  // C.axis[j] = R_A * B.axis[j]  (3 column vectors, each 3 floats)
-  for (int J = 0; J < 3; J++) {
-    int S = 3 + J * 3;
-    C[S+0] = A[3]*B[S+0] + A[6]*B[S+1] + A[9]*B[S+2];
-    C[S+1] = A[4]*B[S+0] + A[7]*B[S+1] + A[10]*B[S+2];
-    C[S+2] = A[5]*B[S+0] + A[8]*B[S+1] + A[11]*B[S+2];
-  }
-}
-
-// ═════════════════
-//   MD3_Load_File
-// ═════════════════
-
-uint8_t *MD3_Load_File (const char *Path, long *Out_Size) {
-  FILE *F = fopen (Path, "rb");
-  if (not F) return NULL;
-  fseek (F, 0, SEEK_END);
-  *Out_Size = ftell (F);
-  rewind (F);
-  uint8_t *Data = malloc (*Out_Size);
-  size_t Data_Read_ = fread (Data, 1, *Out_Size, F); (void)Data_Read_;
-  fclose (F);
-  if (*(uint *)Data != MD3_MAGIC) { free (Data); return NULL; }
-  return Data;
-}
-
-// ═════════════════════════
 //   Entity_Assemble_Frame
 // ═════════════════════════
 
 void Entity_Assemble_Frame (int Legs_Frame, int Torso_Frame,
-                                   uint Body_Mat, uint Gun_Mat, const float World[12],
-                                   Vertex **Out_Verts, uint *Out_Vert_Count,
-                                   uint **Out_Indices, uint *Out_Index_Count,
-                                   uint **Out_Tex_Ids, uint *Out_Tri_Count) {
-  *Out_Verts = NULL; *Out_Vert_Count = 0;
+                            uint Body_Mat, uint Gun_Mat, const float World[12],
+                            Vertex **Out_Verts, uint *Out_Vert_Count,
+                            uint **Out_Indices, uint *Out_Index_Count,
+                            uint **Out_Tex_Ids, uint *Out_Tri_Count)
+{
+  *Out_Verts   = NULL; *Out_Vert_Count  = 0;
   *Out_Indices = NULL; *Out_Index_Count = 0;
-  *Out_Tex_Ids = NULL; *Out_Tri_Count = 0;
+  *Out_Tex_Ids = NULL; *Out_Tri_Count   = 0;
 
   // Scratch variable for file sizes
   long File_Size;
@@ -3221,7 +4712,7 @@ Entity Entity_Load (Scene *S, Spawn Spawn_Point) {
   // Determine animation frame range
   long Tmp;
   uint8_t *Lower_Check = MD3_Load_File (ASSET_ROOT "models/players/sarge/lower.md3", &Tmp);
-  if (not Lower_Check) { printf ("[enemy] lower.md3 not found\n"); return E; }
+  if (not Lower_Check) { printf ("[enemy] lower.md3 not found\n"); return E;}
   int Lower_Frames = *(int *)(Lower_Check + 76);
   free (Lower_Check);
 
@@ -3277,1501 +4768,858 @@ Entity Entity_Load (Scene *S, Spawn Spawn_Point) {
 
 } // Entity_Load
 
-// ── Source Engine Loaders ────────────────────────────────────────────────────────────────────────────────────────────────────────────
-
-// VTF file header (Valve Texture Format — on-disk layout)
-typedef struct {
-  uint Magic; uint Version[2]; uint Header_Size;
-  uint16_t Width, Height; uint Flags; uint16_t Frames, First_Frame;
-  uint8_t Pad0[4]; float Reflectivity[3]; uint8_t Pad1[4];
-  float Bump_Scale; int High_Res_Format; uint8_t Mipmap_Count;
-  int Low_Res_Format; uint8_t Low_Res_W, Low_Res_H;
-} VTF_Header;
-
-// Source BSP on-disk types (VBSP format v19–21)
-typedef struct {int Offset, Length, Version; char Fourcc[4];} VBSP_Lump;
-typedef struct {uint Magic, Version; VBSP_Lump Lumps[VBSP_LUMP_COUNT]; int Map_Revision;} VBSP_Header;
-typedef struct {float P[3];}                            VBSP_Vertex;
-typedef struct {uint16_t V[2];}                         VBSP_Edge;
-typedef struct {
-  uint16_t Plane_Num; uint8_t Side, On_Node; int First_Edge; int16_t Num_Edges;
-  int16_t Tex_Info, Disp_Info, Fog_Volume; uint8_t Styles[4];
-  int Light_Ofs; float Area; int Lm_Mins[2], Lm_Size[2];
-  int Orig_Face; uint16_t Num_Prims, First_Prim; uint Smooth;
-} VBSP_Face; // 56 bytes — matches Source SDK dface_t
-typedef struct {float Tex_Vecs[2][4]; float Lm_Vecs[2][4]; int Flags, Tex_Data;} VBSP_Tex_Info;
-typedef struct {float Refl[3]; int Name_Id; int W, H, Vw, Vh;}                    VBSP_Tex_Data;
-typedef struct {
-  float Start[3]; int Disp_Vert_Start, Disp_Tri_Start, Power, Min_Tess;
-  float Smoothing; int Contents; uint16_t Map_Face, Pad;
-  int Lm_Alpha, Lm_Sample; uint8_t Tail[128]; // 176 bytes total (matches CDispInfo in Source SDK)
-} VBSP_Disp_Info;
-typedef struct {float Vec[3]; float Dist; float Alpha;} VBSP_Disp_Vert;
-
-// MDL on-disk types (studiohdr_t — Source engine, version 44–49)
-typedef struct {
-  int Magic, Version, Checksum; char Name[64]; int Length;
-  vec3 Eye, Illum, Hull_Min, Hull_Max, View_Min, View_Max;
-  int Flags;
-  int Bone_N, Bone_O, Bone_Ctrl_N, Bone_Ctrl_O, Hitbox_N, Hitbox_O;
-  int Anim_N, Anim_O, Seq_N, Seq_O, Activity_Ver, Events_Ix;
-  int Mat_N, Mat_O, Mat_Dir_N, Mat_Dir_O;
-  int Skin_Ref, Skin_Fam, Skin_O, Body_N, Body_O;
-} MDL_Header;
-typedef struct {
-  int Name_O, Parent; int Ctrl[6]; vec3 Pos; float Quat[4];
-  vec3 Rot, Pos_Scale, Rot_Scale; float Pose_To_Bone[3][4]; float Align[4];
-  int Flags, Proc_Type, Proc_O, Phys_Bone, Surf_O, Contents; int Pad[8];
-} MDL_Bone;
-typedef struct {int Name_O, Model_N, Base, Model_O;} MDL_Body_Part;
-typedef struct {
-  char Name[64]; int Type; float Radius;
-  int Mesh_N, Mesh_O, Vert_N, Vert_O, Tan_O;
-  int Attach_N, Attach_O, Eye_N, Eye_O; int Pad[16]; // 172 bytes = sizeof(mstudiomodel_t)
-} MDL_Model;
-typedef struct {
-  int Material, Model_O, Vert_N, Vert_O;
-  int Flex_N, Flex_O, Mat_Type, Mat_Param, Id; vec3 Center; int Pad[17]; // 116 bytes = sizeof(mstudiomesh_t)
-} MDL_Mesh;
-
-// VVD on-disk types (vertexFileHeader_t — vertex data sidecar for Source MDL)
-#define VVD_MAGIC 0x56534449 // 'IDSV'
-typedef struct {
-  uint Magic; int Version; int Checksum; int Num_LODs;
-  int Num_LOD_Verts[8]; int Num_Fixups; int Fixup_Table_Start;
-  int Vertex_Data_Start; int Tangent_Data_Start;
-} VVD_Header;
-// VVD vertex: mstudiovertex_t (48 bytes)
-typedef struct {
-  float Bone_Weights[3]; uint8_t Bone_Ids[3]; uint8_t Num_Bones;
-  float Position[3]; float Normal[3]; float Tex_Coord[2];
-} VVD_Vertex;
-
-// VTX on-disk types (OptimizedModel — triangle strip sidecar for Source MDL)
-#define VTX_VERSION 7
-typedef struct {
-  int Version, Vert_Cache_Size; uint16_t Max_Bones_Strip, Max_Bones_Tri;
-  int Max_Bones_Vert, Checksum, Num_LODs, Mat_Repl_Offset;
-  int Num_Body_Parts, Body_Part_Offset;
-} VTX_Header;
-typedef struct { int Num_Models, Model_Offset; } VTX_Body_Part;
-typedef struct { int Num_LODs, LOD_Offset; } VTX_Model;
-typedef struct { int Num_Meshes, Mesh_Offset; float Switch_Point; } VTX_LOD;
-typedef struct { int Num_Strip_Groups, Strip_Group_Offset; uint8_t Flags; } VTX_Mesh;
-typedef struct {
-  int Num_Verts, Vert_Offset, Num_Indices, Index_Offset;
-  int Num_Strips, Strip_Offset; uint8_t Flags;
-} VTX_Strip_Group; // 25 bytes
-typedef struct { uint8_t Bwi[3]; uint8_t Num_Bones; uint16_t Orig_Mesh_Vert_Id; int8_t Bone_Id[3]; } VTX_Vertex; // 9 bytes
-
-// ══════════
+// ═══════════
+//   VT_Load
+// ═══════════
+// ═══════════
 //   VTF_Load
-// ══════════
-
-static uint VTF_Bpp (int Fmt) {
-  switch (Fmt) {
-    case VTF_FMT_RGBA8888: case VTF_FMT_ABGR8888: case VTF_FMT_BGRA8888: return 4;
-    case VTF_FMT_RGB888: case VTF_FMT_BGR888: return 3;
-    case VTF_FMT_RGB565: return 2;
-    case VTF_FMT_DXT1: return 0; // block-compressed, handled separately
-    case VTF_FMT_DXT3: case VTF_FMT_DXT5: return 0;
-    default: return 4;
-  }
-}
-
-// Decode a single DXT1 4×4 block into 16 RGBA pixels
-static void DXT1_Decode_Block (const uint8_t *Src, uint8_t *Dst, int Stride) {
-  uint16_t C0 = Src[0] | (Src[1] << 8), C1 = Src[2] | (Src[3] << 8);
-  uint8_t Pal[4][4];
-  Pal[0][0] = ((C0>>11)&0x1F)*255/31; Pal[0][1] = ((C0>>5)&0x3F)*255/63; Pal[0][2] = (C0&0x1F)*255/31; Pal[0][3] = 255;
-  Pal[1][0] = ((C1>>11)&0x1F)*255/31; Pal[1][1] = ((C1>>5)&0x3F)*255/63; Pal[1][2] = (C1&0x1F)*255/31; Pal[1][3] = 255;
-  if (C0 > C1) {
-    for (int C=0;C<3;C++) {Pal[2][C]=(2*Pal[0][C]+Pal[1][C]+1)/3; Pal[3][C]=(Pal[0][C]+2*Pal[1][C]+1)/3;}
-    Pal[2][3]=Pal[3][3]=255;
-  } else {
-    for (int C=0;C<3;C++) Pal[2][C]=(Pal[0][C]+Pal[1][C]+1)/2;
-    Pal[2][3]=255; memset(Pal[3],0,4);
-  }
-  uint Bits = Src[4]|(Src[5]<<8)|(Src[6]<<16)|(Src[7]<<24);
-  for (int Y=0;Y<4;Y++) for (int X=0;X<4;X++,Bits>>=2) memcpy(Dst+Y*Stride+X*4,Pal[Bits&3],4);
-}
-
-// Decode DXT5 alpha block
-static void DXT5_Decode_Alpha (const uint8_t *Src, uint8_t *Dst, int Stride) {
-  uint8_t A0=Src[0], A1=Src[1], Pal[8]={A0,A1};
-  if (A0>A1) {for(int I=2;I<8;I++) Pal[I]=(uint8_t)(((8-I)*A0+(I-1)*A1+3)/7);}
-  else {for(int I=2;I<6;I++) Pal[I]=(uint8_t)(((6-I)*A0+(I-1)*A1+2)/5); Pal[6]=0; Pal[7]=255;}
-  uint64_t Bits=0; for(int I=2;I<8;I++) Bits|=(uint64_t)Src[I]<<((I-2)*8);
-  for (int Y=0;Y<4;Y++) for (int X=0;X<4;X++,Bits>>=3) Dst[Y*Stride+X*4+3]=Pal[Bits&7];
-}
+// ═══════════
 
 int VTF_Load (const char *Path, uint8_t **Out_Pixels, int *Out_W, int *Out_H) {
-  FILE *F = fopen (Path, "rb");
-  if (not F) return 0;
-  fseek(F,0,SEEK_END); long Sz=ftell(F); rewind(F);
-  uint8_t *D = malloc(Sz); size_t R_=fread(D,1,Sz,F); (void)R_; fclose(F);
-  if (*(uint*)D != VTF_MAGIC) {free(D); return 0;}
-  const VTF_Header *H = (const VTF_Header*)D;
-  int W=H->Width, Ht=H->Height, Fmt=H->High_Res_Format;
-  *Out_W=W; *Out_H=Ht; *Out_Pixels=calloc(W*Ht*4,1);
+  FILE *File = fopen (Path, "rb");
+  if (not File) return 0;
+  fseek (File, 0, SEEK_END); long File_Size = ftell (File); rewind (File);
+  uint8_t *File_Data    = malloc (File_Size);
+  size_t   Bytes_Read_  = fread (File_Data, 1, File_Size, File); (void)Bytes_Read_;
+  fclose (File);
+  if (*(uint*)File_Data != VTF_MAGIC) { free (File_Data); return 0; }
+  const VTF_Header *Header = (const VTF_Header*)File_Data;
+  int Width  = Header->Width;
+  int Height = Header->Height;
+  int Format = Header->High_Res_Format;
+  *Out_W      = Width;
+  *Out_H      = Height;
+  *Out_Pixels = calloc (Width * Height * 4, 1);
 
-  // Skip past header + low-res thumbnail to high-res mip 0 data
-  uint Ofs = H->Header_Size;
-  if (H->Low_Res_Format == VTF_FMT_DXT1 and H->Low_Res_W > 0)
-    Ofs += ((H->Low_Res_W+3)/4)*((H->Low_Res_H+3)/4)*8;
+  // Skip past the file header and the low-res thumbnail to reach full-resolution mip 0
+  uint Data_Offset = Header->Header_Size;
+  if (Header->Low_Res_Format == VTF_FMT_DXT1 and Header->Low_Res_W > 0)
+    Data_Offset += ((Header->Low_Res_W + 3) / 4) * ((Header->Low_Res_H + 3) / 4) * 8;
 
-  // Skip lower mip levels (stored smallest-first in VTF)
-  for (int M=H->Mipmap_Count-1; M>0; M--) {
-    int Mw = W>>M, Mh = Ht>>M; if(Mw<1)Mw=1; if(Mh<1)Mh=1;
-    switch(Fmt) {
-      case VTF_FMT_DXT1: Ofs+=((Mw+3)/4)*((Mh+3)/4)*8; break;
-      case VTF_FMT_DXT3: case VTF_FMT_DXT5: Ofs+=((Mw+3)/4)*((Mh+3)/4)*16; break;
-      default: Ofs += Mw*Mh*(VTF_Bpp(Fmt)?VTF_Bpp(Fmt):4); break;
+  // Skip lower mip levels (VTF stores mips smallest-first; mip 0 is the full-size image)
+  for (int Mip_Level = Header->Mipmap_Count - 1; Mip_Level > 0; Mip_Level--) {
+    int Mip_Width  = Width  >> Mip_Level; if (Mip_Width  < 1) Mip_Width  = 1;
+    int Mip_Height = Height >> Mip_Level; if (Mip_Height < 1) Mip_Height = 1;
+    switch (Format) {
+      case VTF_FMT_DXT1:
+        Data_Offset += ((Mip_Width + 3) / 4) * ((Mip_Height + 3) / 4) * 8;
+        break;
+      case VTF_FMT_DXT3:
+      case VTF_FMT_DXT5:
+        Data_Offset += ((Mip_Width + 3) / 4) * ((Mip_Height + 3) / 4) * 16;
+        break;
+      default:
+        Data_Offset += Mip_Width * Mip_Height * (VTF_Bpp (Format) ? VTF_Bpp (Format) : 4);
+        break;
     }
   }
+  const uint8_t *Source_Pixels = File_Data + Data_Offset;
+  uint8_t       *Output_Pixels = *Out_Pixels;
 
-  const uint8_t *Src = D + Ofs;
-  uint8_t *Px = *Out_Pixels;
-
-  switch (Fmt) {
-    case VTF_FMT_RGBA8888: memcpy(Px, Src, W*Ht*4); break;
+  // Decode source pixels into the RGBA8 output buffer, swizzling channels as required per format
+  switch (Format) {
+    case VTF_FMT_RGBA8888:
+      memcpy (Output_Pixels, Source_Pixels, Width * Height * 4);
+      break;
     case VTF_FMT_BGRA8888:
-      for(int I=0;I<W*Ht;I++){Px[I*4]=Src[I*4+2];Px[I*4+1]=Src[I*4+1];Px[I*4+2]=Src[I*4];Px[I*4+3]=Src[I*4+3];}
+      for (int Pixel_Index = 0; Pixel_Index < Width * Height; Pixel_Index++) {
+        Output_Pixels[Pixel_Index*4 + 0] = Source_Pixels[Pixel_Index*4 + 2];
+        Output_Pixels[Pixel_Index*4 + 1] = Source_Pixels[Pixel_Index*4 + 1];
+        Output_Pixels[Pixel_Index*4 + 2] = Source_Pixels[Pixel_Index*4 + 0];
+        Output_Pixels[Pixel_Index*4 + 3] = Source_Pixels[Pixel_Index*4 + 3];
+      }
       break;
     case VTF_FMT_RGB888:
-      for(int I=0;I<W*Ht;I++){memcpy(Px+I*4,Src+I*3,3);Px[I*4+3]=255;}
+      for (int Pixel_Index = 0; Pixel_Index < Width * Height; Pixel_Index++) {
+        memcpy (Output_Pixels + Pixel_Index * 4, Source_Pixels + Pixel_Index * 3, 3);
+        Output_Pixels[Pixel_Index * 4 + 3] = 255;
+      }
       break;
     case VTF_FMT_BGR888:
-      for(int I=0;I<W*Ht;I++){Px[I*4]=Src[I*3+2];Px[I*4+1]=Src[I*3+1];Px[I*4+2]=Src[I*3];Px[I*4+3]=255;}
+      for (int Pixel_Index = 0; Pixel_Index < Width * Height; Pixel_Index++) {
+        Output_Pixels[Pixel_Index*4 + 0] = Source_Pixels[Pixel_Index*3 + 2];
+        Output_Pixels[Pixel_Index*4 + 1] = Source_Pixels[Pixel_Index*3 + 1];
+        Output_Pixels[Pixel_Index*4 + 2] = Source_Pixels[Pixel_Index*3 + 0];
+        Output_Pixels[Pixel_Index*4 + 3] = 255;
+      }
       break;
     case VTF_FMT_DXT1: {
-      int Bw=(W+3)/4, Bh=(Ht+3)/4;
-      for(int By=0;By<Bh;By++) for(int Bx=0;Bx<Bw;Bx++)
-        DXT1_Decode_Block(Src+(By*Bw+Bx)*8, Px+(By*4*W+Bx*4)*4, W*4);
+      int Block_Width  = (Width  + 3) / 4;
+      int Block_Height = (Height + 3) / 4;
+      for (int Block_Y = 0; Block_Y < Block_Height; Block_Y++)
+        for (int Block_X = 0; Block_X < Block_Width; Block_X++)
+          DXT1_Decode_Block (/*Source     =>*/ Source_Pixels + (Block_Y * Block_Width + Block_X) * 8,
+                             /*Dest       =>*/ Output_Pixels + (Block_Y * 4 * Width   + Block_X * 4) * 4,
+                             /*Row_Stride =>*/ Width * 4);
     } break;
     case VTF_FMT_DXT5: {
-      int Bw=(W+3)/4, Bh=(Ht+3)/4;
-      for(int By=0;By<Bh;By++) for(int Bx=0;Bx<Bw;Bx++) {
-        const uint8_t *Blk = Src+(By*Bw+Bx)*16;
-        uint8_t *Dp = Px+(By*4*W+Bx*4)*4;
-        DXT1_Decode_Block(Blk+8, Dp, W*4);
-        DXT5_Decode_Alpha(Blk, Dp, W*4);
-      }
+      int Block_Width  = (Width  + 3) / 4;
+      int Block_Height = (Height + 3) / 4;
+      for (int Block_Y = 0; Block_Y < Block_Height; Block_Y++)
+        for (int Block_X = 0; Block_X < Block_Width; Block_X++) {
+          const uint8_t *Block_Data        = Source_Pixels + (Block_Y * Block_Width + Block_X) * 16;
+          uint8_t       *Destination_Pixel = Output_Pixels + (Block_Y * 4 * Width   + Block_X * 4) * 4;
+          DXT1_Decode_Block (/*Source     =>*/ Block_Data + 8,
+                             /*Dest       =>*/ Destination_Pixel,
+                             /*Row_Stride =>*/ Width * 4);
+          DXT5_Decode_Alpha (/*Source     =>*/ Block_Data,
+                             /*Dest       =>*/ Destination_Pixel,
+                             /*Row_Stride =>*/ Width * 4);
+        }
     } break;
-    default: memset(Px,128,W*Ht*4); break; // Unknown format: mid-grey fallback
+    default:
+      memset (Output_Pixels, 128, Width * Height * 4); // Unknown format: mid-grey fallback
+      break;
   }
-  free(D);
-  printf("[vtf] %s %dx%d fmt=%d\n", Path, W, Ht, Fmt);
+  free (File_Data);
+  printf ("[vtf] %s %dx%d fmt=%d\n", Path, Width, Height, Format);
   return 1;
-}
 
-// ════════════════════════════
-//   Scene_Load_From_VBSP
-// ════════════════════════════
+} // VTF_Load
 
-// Convert Source Z-up vertex to our Y-up: (x,y,z) → (x,z,-y) — same as Q3 but vertex layout differs
-static Vertex VBSP_Convert (float X, float Y, float Z, float Nx, float Ny, float Nz, float U, float V, float Lu, float Lv) {
-  return (Vertex){.Position={X,Z,-Y}, .Normal={Nx,Nz,-Ny}, .Texture_Uv={U,V}, .Lightmap_Uv={Lu,Lv}};
-}
 
-Scene Scene_Load_From_VBSP (const char *Path, Spawn *Out_Spawn) {
-  FILE *F = fopen(Path, "rb");
-  if (not F) {
-    fprintf(stderr, "[error] cannot open VBSP map: %s\n", Path);
-    fprintf(stderr, "  Ensure the .bsp file exists in assets/maps/\n");
-    fprintf(stderr, "  For Source maps, use --source flag and place .bsp files in assets/maps/\n");
-    exit(1);
-  }
-  fseek(F,0,SEEK_END); long Sz=ftell(F); rewind(F);
-  uint8_t *D = malloc(Sz); size_t R_=fread(D,1,Sz,F); (void)R_; fclose(F);
-  const VBSP_Header *H = (const VBSP_Header*)D;
-  assert(H->Magic==VBSP_MAGIC and (H->Version>=VBSP_VERSION_19 and H->Version<=VBSP_VERSION_21));
-
-  // Locate lumps
-  const VBSP_Vertex   *Verts     = (const VBSP_Vertex*)  (D+H->Lumps[VBSP_VERTICES].Offset);
-  const VBSP_Edge     *Edges     = (const VBSP_Edge*)    (D+H->Lumps[VBSP_EDGES].Offset);
-  const int           *Surf_Edges= (const int*)          (D+H->Lumps[VBSP_SURFEDGES].Offset);
-  const VBSP_Face     *Faces     = (const VBSP_Face*)    (D+H->Lumps[VBSP_FACES].Offset);
-  const VBSP_Tex_Info *Tex_Infos = (const VBSP_Tex_Info*)(D+H->Lumps[VBSP_TEXINFO].Offset);
-  const VBSP_Tex_Data *Tex_Datas = (const VBSP_Tex_Data*)(D+H->Lumps[VBSP_TEXDATA].Offset);
-  const int           *Str_Table = (const int*)          (D+H->Lumps[VBSP_TEXDATA_STRING_TABLE].Offset);
-  const char          *Str_Data  = (const char*)         (D+H->Lumps[VBSP_TEXDATA_STRING_DATA].Offset);
-  // Planes lump: each plane is 20 bytes (float normal[3], float dist, int type)
-  const uint8_t       *Plane_Data= D+H->Lumps[VBSP_PLANES].Offset;
-  uint Plane_Count  = (uint)(H->Lumps[VBSP_PLANES].Length / 20);
-  uint Vert_Count   = (uint)(H->Lumps[VBSP_VERTICES].Length / sizeof(VBSP_Vertex));
-  uint Edge_Count   = (uint)(H->Lumps[VBSP_EDGES].Length / sizeof(VBSP_Edge));
-  uint Surf_Edge_N  = (uint)(H->Lumps[VBSP_SURFEDGES].Length / sizeof(int));
-  uint Face_Count   = (uint)(H->Lumps[VBSP_FACES].Length / sizeof(VBSP_Face));
-  uint Tex_Info_N   = (uint)(H->Lumps[VBSP_TEXINFO].Length / sizeof(VBSP_Tex_Info));
-  uint Tex_Data_N   = (uint)(H->Lumps[VBSP_TEXDATA].Length / sizeof(VBSP_Tex_Data));
-  printf("[vbsp] %u verts, %u edges, %u surfedges, %u faces, %u texinfos, %u texdatas\n",
-         Vert_Count, Edge_Count, Surf_Edge_N, Face_Count, Tex_Info_N, Tex_Data_N);
-
-  // Displacement data
-  const VBSP_Disp_Info *Disps    = (const VBSP_Disp_Info*)(D+H->Lumps[VBSP_DISPINFO].Offset);
-  const VBSP_Disp_Vert *Disp_Vs = (const VBSP_Disp_Vert*)(D+H->Lumps[VBSP_DISPVERTS].Offset);
-  uint Disp_Count = (uint)(H->Lumps[VBSP_DISPINFO].Length / sizeof(VBSP_Disp_Info));
-
-  // Build material name table
-  uint Str_Table_N = (uint)(H->Lumps[VBSP_TEXDATA_STRING_TABLE].Length / sizeof(int));
-  uint Str_Data_N  = (uint)(H->Lumps[VBSP_TEXDATA_STRING_DATA].Length);
-  Scene S = {0};
-  S.Material_Count = Tex_Data_N;
-  S.Materials      = calloc(Tex_Data_N, sizeof(vec4));
-  S.Texture_Names  = calloc(Tex_Data_N, 64);
-  for (uint I=0; I<Tex_Data_N; I++) {
-    uint Nid = (uint)Tex_Datas[I].Name_Id;
-    const char *Name = (Nid < Str_Table_N and (uint)Str_Table[Nid] < Str_Data_N) ? Str_Data+Str_Table[Nid] : "missing";
-    snprintf(S.Texture_Names[I], 64, "%s", Name);
-    S.Materials[I] = (vec4){Tex_Datas[I].Refl[0], Tex_Datas[I].Refl[1], Tex_Datas[I].Refl[2], 1.f};
-  }
-
-  // Build per-material skip table: skip non-renderable surfaces
-  // Flags: SURF_SKY2D=0x2 SURF_SKY=0x4 SURF_TRIGGER=0x40 SURF_NODRAW=0x80 SURF_HINT=0x100 SURF_SKIP=0x200
-  #define VBSP_SKIP_FLAGS 0x3C6
-  uint8_t *Mat_Skip = calloc(Tex_Data_N, 1);
-  for (uint I=0; I<Tex_Data_N; I++) {
-    const char *N = S.Texture_Names[I];
-    if (strncasecmp(N, "TOOLS/", 6)==0 or strncasecmp(N, "tools/", 6)==0) Mat_Skip[I]=1;
-  }
-
-  // First pass: count triangles (must match second pass filtering)
-  uint Total_Tris = 0;
-  for (uint I=0; I<Face_Count; I++) {
-    if (Faces[I].Disp_Info >= 0) continue; // handle displacements separately
-    if (Faces[I].Num_Edges < 3) continue;
-    int Ti = Faces[I].Tex_Info;
-    if (Ti<0 or (uint)Ti>=Tex_Info_N) continue;
-    if (Tex_Infos[Ti].Flags & VBSP_SKIP_FLAGS) continue;
-    uint Mat = (uint)Tex_Infos[Ti].Tex_Data;
-    if (Mat>=Tex_Data_N or Mat_Skip[Mat]) continue;
-    Total_Tris += Faces[I].Num_Edges - 2;
-  }
-  // Displacement triangles
-  for (uint I=0; I<Disp_Count; I++) {
-    int Side = (1<<Disps[I].Power);
-    Total_Tris += Side*Side*2;
-  }
-
-  // Allocate
-  S.Vertices    = malloc(sizeof(Vertex) * Total_Tris * 3);
-  S.Indices     = malloc(sizeof(uint)   * Total_Tris * 3);
-  S.Texture_Ids = malloc(sizeof(uint)   * Total_Tris);
-  S.Vertex_Count = S.Index_Count = S.Triangle_Count = 0;
-
-  // Second pass: emit fan-triangulated face geometry
-  for (uint I=0; I<Face_Count; I++) {
-    const VBSP_Face *Fc = &Faces[I];
-    if (Fc->Disp_Info >= 0 or Fc->Num_Edges < 3) continue;
-    int Ti = Fc->Tex_Info; if (Ti<0 or (uint)Ti>=Tex_Info_N) continue;
-    const VBSP_Tex_Info *Tx = &Tex_Infos[Ti];
-    if (Tx->Flags & VBSP_SKIP_FLAGS) continue;
-    uint Mat = (uint)Tx->Tex_Data; if (Mat>=Tex_Data_N or Mat_Skip[Mat]) continue;
-
-    // Collect face vertex positions from surf-edge indirection
-    int Ne = Fc->Num_Edges; if (Ne > 4096) continue; // sanity cap
-    vec3 *Positions = alloca(sizeof(vec3) * Ne);
-    for (int E=0; E<Ne; E++) {
-      uint Se_Idx = (uint)(Fc->First_Edge+E);
-      if (Se_Idx >= Surf_Edge_N) { Positions[E] = Make(0,0,0); continue; }
-      int Se = Surf_Edges[Se_Idx];
-      uint Abs_Se = (uint)(Se >= 0 ? Se : -Se);
-      if (Abs_Se >= Edge_Count) { Positions[E] = Make(0,0,0); continue; }
-      uint Vi = Se >= 0 ? Edges[Abs_Se].V[0] : Edges[Abs_Se].V[1];
-      if (Vi >= Vert_Count) Vi = 0;
-      Positions[E] = Make(Verts[Vi].P[0], Verts[Vi].P[1], Verts[Vi].P[2]);
-    }
-    // Get face normal from BSP plane lump (precomputed, more reliable than cross product)
-    vec3 Face_Normal = {0,1,0};
-    if (Fc->Plane_Num < Plane_Count) {
-      const float *Pn = (const float*)(Plane_Data + (uint)Fc->Plane_Num * 20);
-      Face_Normal = Fc->Side ? Make(-Pn[0],-Pn[1],-Pn[2]) : Make(Pn[0],Pn[1],Pn[2]);
-    }
-
-    // Fan triangulate and compute texture coordinates from texinfo projection
-    for (int T=0; T<Fc->Num_Edges-2; T++) {
-      uint Base = S.Vertex_Count;
-      int Vis[3] = {0, T+1, T+2};
-      for (int K=0; K<3; K++) {
-        vec3 P = Positions[Vis[K]];
-        float U = P.x*Tx->Tex_Vecs[0][0]+P.y*Tx->Tex_Vecs[0][1]+P.z*Tx->Tex_Vecs[0][2]+Tx->Tex_Vecs[0][3];
-        float V = P.x*Tx->Tex_Vecs[1][0]+P.y*Tx->Tex_Vecs[1][1]+P.z*Tx->Tex_Vecs[1][2]+Tx->Tex_Vecs[1][3];
-        int Tw = Tex_Datas[Mat].W; int Th = Tex_Datas[Mat].H;
-        if(Tw>0) U/=Tw; if(Th>0) V/=Th;
-        float Lu = P.x*Tx->Lm_Vecs[0][0]+P.y*Tx->Lm_Vecs[0][1]+P.z*Tx->Lm_Vecs[0][2]+Tx->Lm_Vecs[0][3];
-        float Lv = P.x*Tx->Lm_Vecs[1][0]+P.y*Tx->Lm_Vecs[1][1]+P.z*Tx->Lm_Vecs[1][2]+Tx->Lm_Vecs[1][3];
-        S.Vertices[S.Vertex_Count++] = VBSP_Convert(P.x,P.y,P.z, Face_Normal.x,Face_Normal.y,Face_Normal.z, U,V,Lu,Lv);
-      }
-      S.Indices[S.Index_Count++] = Base;
-      S.Indices[S.Index_Count++] = Base+1;
-      S.Indices[S.Index_Count++] = Base+2;
-      S.Texture_Ids[S.Triangle_Count++] = Mat;
-    }
-  }
-
-  // Displacement surfaces: subdivided height-mapped patches
-  for (uint I=0; I<Disp_Count; I++) {
-    const VBSP_Disp_Info *Di = &Disps[I];
-    int Side = (1 << Di->Power) + 1;
-    if (Di->Map_Face >= Face_Count) continue;
-    const VBSP_Face *Fc = &Faces[Di->Map_Face];
-    if (Fc->Num_Edges < 4) continue;
-
-    // Get the face's 4 corner positions
-    vec3 Corners[4] = {{0}};
-    for (int E=0; E<4 and E<Fc->Num_Edges; E++) {
-      uint Se_Idx = (uint)(Fc->First_Edge+E);
-      if (Se_Idx >= Surf_Edge_N) continue;
-      int Se = Surf_Edges[Se_Idx];
-      uint Abs_Se = (uint)(Se >= 0 ? Se : -Se);
-      if (Abs_Se >= Edge_Count) continue;
-      uint Vi = Se>=0 ? Edges[Abs_Se].V[0] : Edges[Abs_Se].V[1];
-      if (Vi >= Vert_Count) Vi = 0;
-      Corners[E] = Make(Verts[Vi].P[0], Verts[Vi].P[1], Verts[Vi].P[2]);
-    }
-
-    // Find which corner matches the start position and rotate
-    float Best_D = 1e18f; int Best_C = 0;
-    vec3 Sp = Make(Di->Start[0], Di->Start[1], Di->Start[2]);
-    for (int C=0; C<4; C++) {
-      float Dd = Dot(Subtract(Corners[C],Sp), Subtract(Corners[C],Sp));
-      if (Dd < Best_D) {Best_D=Dd; Best_C=C;}
-    }
-    vec3 Rot[4]; for(int C=0;C<4;C++) Rot[C]=Corners[(C+Best_C)%4];
-
-    // Bilinear interpolation + displacement offset for each grid point
-    uint Disp_Base = S.Vertex_Count;
-    S.Vertices = realloc(S.Vertices, sizeof(Vertex)*(S.Vertex_Count+Side*Side));
-    for(int Y=0;Y<Side;Y++) for(int X=0;X<Side;X++) {
-      float U=(float)X/(Side-1), V=(float)Y/(Side-1);
-      vec3 A=Add(Scale(Rot[0],1-U), Scale(Rot[1],U));
-      vec3 B=Add(Scale(Rot[3],1-U), Scale(Rot[2],U));
-      vec3 P=Add(Scale(A,1-V), Scale(B,V));
-      const VBSP_Disp_Vert *Dv = &Disp_Vs[Di->Disp_Vert_Start+Y*Side+X];
-      P = Add(P, Scale(Make(Dv->Vec[0],Dv->Vec[1],Dv->Vec[2]), Dv->Dist));
-      S.Vertices[S.Vertex_Count++] = VBSP_Convert(P.x,P.y,P.z, 0,0,1, U,V, U,V);
-    }
-
-    // Triangulate the grid
-    int Tris = (Side-1)*(Side-1)*2;
-    S.Indices     = realloc(S.Indices,     sizeof(uint)*(S.Index_Count+Tris*3));
-    S.Texture_Ids = realloc(S.Texture_Ids, sizeof(uint)*(S.Triangle_Count+Tris));
-    int Ti = Fc->Tex_Info;
-    uint Mat = (Ti>=0 and (uint)Ti<Tex_Info_N) ? (uint)Tex_Infos[Ti].Tex_Data : 0;
-    if (Mat >= Tex_Data_N) Mat = 0;
-    for(int Y=0;Y<Side-1;Y++) for(int X=0;X<Side-1;X++) {
-      uint A=Disp_Base+Y*Side+X, B=A+1, C=A+Side, Dd=C+1;
-      S.Indices[S.Index_Count++]=A; S.Indices[S.Index_Count++]=C; S.Indices[S.Index_Count++]=B;
-      S.Indices[S.Index_Count++]=B; S.Indices[S.Index_Count++]=C; S.Indices[S.Index_Count++]=Dd;
-      S.Texture_Ids[S.Triangle_Count++]=Mat; S.Texture_Ids[S.Triangle_Count++]=Mat;
-    }
-  }
-
-  // Lightmap atlas: Source stores per-face luxel grids in VBSP_LIGHTING lump (RGB888).
-  // Build a packed atlas the same way we do for Q3 BSP (grid of pages).
-  uint Lm_Size = (uint)H->Lumps[VBSP_LIGHTING].Length;
-  if (Lm_Size > 0) {
-    // Compute total luxels needed — use a single white fallback atlas for now
-    uint Atlas_W = 512, Atlas_H = 512;
-    S.Lightmap_Atlas  = calloc(Atlas_W*Atlas_H*4,1);
-    memset(S.Lightmap_Atlas, 255, Atlas_W*Atlas_H*4); // Full-bright fallback
-    S.Lightmap_Width  = Atlas_W;
-    S.Lightmap_Height = Atlas_H;
-  } else {
-    S.Lightmap_Atlas  = calloc(4,1);
-    memset(S.Lightmap_Atlas,255,4);
-    S.Lightmap_Width = S.Lightmap_Height = 1;
-  }
-
-  // Parse entities from entity lump (Source BSP: key-value pairs)
-  *Out_Spawn = (Spawn){{0,64,0}, 0};
-  S.Sky_Name[0] = 0;
-  S.Entities     = calloc(MAX_BSP_ENTITIES, sizeof(BSP_Entity));
-  S.Entity_Count = 0;
-  uint Ent_Len = (uint)H->Lumps[VBSP_ENTITIES].Length;
-  char *Ent_Copy = malloc(Ent_Len+1); memcpy(Ent_Copy, D+H->Lumps[VBSP_ENTITIES].Offset, Ent_Len); Ent_Copy[Ent_Len]=0;
-  int Spawn_Found = 0;
-  { char *Cur = Ent_Copy;
-    while (*Cur) {
-      while (*Cur and *Cur!='{') Cur++;
-      if (!*Cur) break; Cur++;
-      // Parse all key-value pairs in this entity block
-      char Class[64]={0}, Sky[64]={0}, Light[128]={0}, Ambient[128]={0};
-      float Origin_X=0, Origin_Y=0, Origin_Z=0;
-      float Angles_Pitch=0, Angles_Yaw=0, Explicit_Pitch=0, Scale=16;
-      int Has_Explicit_Pitch = 0;
-      while (*Cur and *Cur!='}') {
-        while (*Cur and *Cur!='"') { if (*Cur=='}') goto done; Cur++; }
-        if (!*Cur) break; Cur++;
-        char Key[64]={0}; int Key_Index=0;
-        while (*Cur and *Cur!='"' and Key_Index<63) Key[Key_Index++]=*Cur++;
-        if (*Cur=='"') Cur++;
-        while (*Cur and *Cur!='"' and *Cur!='}') Cur++;
-        if (*Cur!='"') continue; Cur++;
-        char Value[128]={0}; int Value_Index=0;
-        while (*Cur and *Cur!='"' and Value_Index<127) Value[Value_Index++]=*Cur++;
-        if (*Cur=='"') Cur++;
-        if (strcmp(Key,"classname")==0) snprintf(Class,64,"%s",Value);
-        if (strcmp(Key,"origin")==0)    sscanf(Value,"%f %f %f",&Origin_X,&Origin_Y,&Origin_Z);
-        if (strcmp(Key,"angles")==0)    sscanf(Value,"%f %f",&Angles_Pitch,&Angles_Yaw);
-        if (strcmp(Key,"skyname")==0)   snprintf(Sky,64,"%s",Value);
-        if (strcmp(Key,"_light")==0)    snprintf(Light,128,"%s",Value);
-        if (strcmp(Key,"_ambient")==0)  snprintf(Ambient,128,"%s",Value);
-        if (strcmp(Key,"pitch")==0)     { sscanf(Value,"%f",&Explicit_Pitch); Has_Explicit_Pitch=1; }
-        if (strcmp(Key,"scale")==0)     sscanf(Value,"%f",&Scale);
-      }
-      done:
-      if (*Cur=='}') Cur++;
-      float Sun_Pitch = Has_Explicit_Pitch ? Explicit_Pitch : Angles_Pitch;
-      float Sun_Yaw   = Angles_Yaw;
-      // Spawn points
-      if (!Spawn_Found and (strcmp(Class,"info_player_terrorist")==0 or strcmp(Class,"info_player_counterterrorist")==0
-          or strcmp(Class,"info_player_start")==0 or strcmp(Class,"info_player_deathmatch")==0)) {
-        Out_Spawn->Origin = Make(Origin_X, Origin_Z, -Origin_Y); Out_Spawn->Angle = Angles_Yaw; Spawn_Found = 1;
-        printf("[vbsp] spawn '%s': src=(%g,%g,%g) gl=(%g,%g,%g) yaw=%g\n", Class, Origin_X,Origin_Y,Origin_Z, Origin_X,Origin_Z,-Origin_Y, Angles_Yaw);
-      }
-      // Worldspawn: extract skyname
-      if (strcmp(Class,"worldspawn")==0 and Sky[0]) {
-        snprintf(S.Sky_Name, 64, "%s", Sky);
-        printf("[vbsp] skyname: %s\n", S.Sky_Name);
-      }
-      // light_environment: store as BSP_Entity for environment setup
-      if (strcmp(Class,"light_environment")==0 and S.Entity_Count < MAX_BSP_ENTITIES) {
-        BSP_Entity *Light_Entity = &S.Entities[S.Entity_Count++];
-        Light_Entity->Kind = ENTITY_ENV_SKY;
-        Light_Entity->Common.Origin = Make(Origin_X, Origin_Z, -Origin_Y);
-        // Parse sun color from "_light" key (R G B [brightness])
-        float Light_Red=255, Light_Green=255, Light_Blue=255;
-        sscanf(Light, "%f %f %f", &Light_Red, &Light_Green, &Light_Blue);
-        Light_Entity->env.Color = Make(Light_Red/255.f, Light_Green/255.f, Light_Blue/255.f);
-        // Parse ambient from "_ambient" key: R G B brightness (Source scales ambient by brightness/200)
-        float Ambient_Red=128, Ambient_Green=128, Ambient_Blue=128, Ambient_Brightness=200;
-        sscanf(Ambient, "%f %f %f %f", &Ambient_Red, &Ambient_Green, &Ambient_Blue, &Ambient_Brightness);
-        float Ambient_Scale = (Ambient_Brightness / 200.f) * 0.15f; // Scale down for our ray tracer
-        Light_Entity->env.Ambient = Make(Ambient_Red/255.f * Ambient_Scale,
-                                         Ambient_Green/255.f * Ambient_Scale,
-                                         Ambient_Blue/255.f * Ambient_Scale);
-        // Sun direction from pitch and yaw
-        // Source: pitch is negative for downward light rays, yaw is compass bearing
-        // We want the direction TO the sun (opposite of light ray direction)
-        float Pitch_Radians = Sun_Pitch * 3.14159f / 180.f;
-        float Yaw_Radians   = Sun_Yaw   * 3.14159f / 180.f;
-        // Source space: X=right, Y=forward, Z=up; light rays come FROM the sun
-        float Source_X = cosf(Pitch_Radians) * cosf(Yaw_Radians);
-        float Source_Y = cosf(Pitch_Radians) * sinf(Yaw_Radians);
-        float Source_Z = sinf(Pitch_Radians);
-        // Negate to get direction TO sun, then convert Source (x,y,z) -> engine (x,z,-y)
-        Light_Entity->env.Direction = Normalize(Make(-Source_X, -Source_Z, Source_Y));
-        printf("[vbsp] light_environment: sun=(%g,%g,%g) dir=(%g,%g,%g) ambient=(%g,%g,%g) pitch=%g yaw=%g\n",
-               Light_Entity->env.Color.x, Light_Entity->env.Color.y, Light_Entity->env.Color.z,
-               Light_Entity->env.Direction.x, Light_Entity->env.Direction.y, Light_Entity->env.Direction.z,
-               Light_Entity->env.Ambient.x, Light_Entity->env.Ambient.y, Light_Entity->env.Ambient.z,
-               Sun_Pitch, Sun_Yaw);
-      }
-      // sky_camera: store position and scale for 3D skybox
-      if (strcmp(Class,"sky_camera")==0 and S.Entity_Count < MAX_BSP_ENTITIES) {
-        BSP_Entity *Sky_Camera_Entity = &S.Entities[S.Entity_Count++];
-        Sky_Camera_Entity->Kind = ENTITY_WORLD;
-        Sky_Camera_Entity->Common.Origin = Make(Origin_X, Origin_Z, -Origin_Y);
-        printf("[vbsp] sky_camera: src=(%g,%g,%g) scale=%g\n", Origin_X, Origin_Y, Origin_Z, Scale);
-      }
-    }
-  }
-  free(Ent_Copy);
-  if (!Spawn_Found) printf("[vbsp] WARNING: no spawn found in entity lump (%u bytes)\n", Ent_Len);
-
-  free(Mat_Skip);
-  free(D);
-  printf("[vbsp] %s: %u verts, %u tris, %u materials\n", Path, S.Vertex_Count, S.Triangle_Count, S.Material_Count);
-  return S;
-}
-
-// ═══════════
+// ════════════
 //   MDL_Load
-// ═══════════
+// ════════════
 
 Entity MDL_Load (Scene *S, const char *Path, vec3 Origin, float Yaw) {
-  Entity E = {0};
+  Entity Entity_Result = {0};
 
   // Read MDL file
-  FILE *F = fopen(Path, "rb");
-  if (not F) {printf("[mdl] cannot open %s\n", Path); return E;}
-  fseek(F,0,SEEK_END); long Sz=ftell(F); rewind(F);
-  uint8_t *D = malloc(Sz); size_t R_=fread(D,1,Sz,F); (void)R_; fclose(F);
-  const MDL_Header *H = (const MDL_Header*)D;
-  if (H->Magic != MDL_MAGIC_IDST or (H->Version < MDL_VERSION_44 or H->Version > MDL_VERSION_49))
-    {printf("[mdl] bad magic/version in %s\n", Path); free(D); return E;}
-
-  // Parse bones
-  E.Bone_Count = H->Bone_N < MDL_MAX_BONES ? H->Bone_N : MDL_MAX_BONES;
-  for (int I=0; I<E.Bone_Count; I++) {
-    const MDL_Bone *B = (const MDL_Bone*)(D + H->Bone_O + I*sizeof(MDL_Bone));
-    E.Bone_Parents[I] = B->Parent;
-    // Store bind pose as 3×4 identity-ish from the bone's default position/quaternion
-    float *M = E.Bind_Pose[I][0];
-    // Simplified: use Position as translation, quaternion as rotation
-    float Qx=B->Quat[0], Qy=B->Quat[1], Qz=B->Quat[2], Qw=B->Quat[3];
-    float X2=Qx+Qx, Y2=Qy+Qy, Z2=Qz+Qz;
-    float Xx=Qx*X2, Xy=Qx*Y2, Xz=Qx*Z2, Yy=Qy*Y2, Yz=Qy*Z2, Zz=Qz*Z2;
-    float Wx=Qw*X2, Wy=Qw*Y2, Wz=Qw*Z2;
-    E.Bind_Pose[I][0][0]=1-(Yy+Zz); E.Bind_Pose[I][0][1]=Xy-Wz;     E.Bind_Pose[I][0][2]=Xz+Wy;     E.Bind_Pose[I][0][3]=B->Pos.x;
-    E.Bind_Pose[I][1][0]=Xy+Wz;     E.Bind_Pose[I][1][1]=1-(Xx+Zz); E.Bind_Pose[I][1][2]=Yz-Wx;     E.Bind_Pose[I][1][3]=B->Pos.y;
-    E.Bind_Pose[I][2][0]=Xz-Wy;     E.Bind_Pose[I][2][1]=Yz+Wx;     E.Bind_Pose[I][2][2]=1-(Xx+Yy); E.Bind_Pose[I][2][3]=B->Pos.z;
-    // Copy inverse bind-pose from MDL (pose_to_bone)
-    memcpy(E.Inv_Bind[I], B->Pose_To_Bone, sizeof(float)*12);
+  FILE *File = fopen (Path, "rb");
+  if (not File) { printf ("[mdl] cannot open %s\n", Path); return Entity_Result; }
+  fseek (File, 0, SEEK_END); long File_Size = ftell (File); rewind (File);
+  uint8_t *File_Data   = malloc (File_Size);
+  size_t   Bytes_Read_ = fread (File_Data, 1, File_Size, File); (void)Bytes_Read_;
+  fclose (File);
+  const MDL_Header *Header = (const MDL_Header*)File_Data;
+  if (Header->Magic != MDL_MAGIC_IDST
+      or (Header->Version < MDL_VERSION_44 or Header->Version > MDL_VERSION_49)) {
+    printf ("[mdl] bad magic/version in %s\n", Path);
+    free (File_Data);
+    return Entity_Result;
   }
 
-  // Add materials from the MDL material table
-  int Mat_Base = S->Material_Count;
-  for (int I=0; I<H->Mat_N and I<MDL_MAX_MESHES; I++) {
-    const uint8_t *Me = D + H->Mat_O + I*64;
-    int Name_Off = *(const int*)Me; // Relative name offset within the material entry
-    const char *Mn = (const char*)(Me + Name_Off);
+  // Parse bones and build each bone's 3x4 bind-pose matrix from its default position and quaternion
+  Entity_Result.Bone_Count = Header->Bone_Count < MDL_MAX_BONES
+                             ? Header->Bone_Count : MDL_MAX_BONES;
+  for (int Bone_Index = 0; Bone_Index < Entity_Result.Bone_Count; Bone_Index++) {
+    const MDL_Bone *Bone = (const MDL_Bone*)(File_Data + Header->Bone_Offset
+                                             + Bone_Index * sizeof (MDL_Bone));
+    Entity_Result.Bone_Parents[Bone_Index] = Bone->Parent;
+
+    // Expand the bind-pose quaternion into a row-major 3x4 rotation-translation matrix
+    float Quat_X = Bone->Quat[0], Quat_Y = Bone->Quat[1];
+    float Quat_Z = Bone->Quat[2], Quat_W = Bone->Quat[3];
+    float Two_X  = Quat_X + Quat_X, Two_Y = Quat_Y + Quat_Y, Two_Z = Quat_Z + Quat_Z;
+    float XX = Quat_X * Two_X, XY = Quat_X * Two_Y, XZ = Quat_X * Two_Z;
+    float YY = Quat_Y * Two_Y, YZ = Quat_Y * Two_Z, ZZ = Quat_Z * Two_Z;
+    float WX = Quat_W * Two_X, WY = Quat_W * Two_Y, WZ = Quat_W * Two_Z;
+    Entity_Result.Bind_Pose[Bone_Index][0][0] = 1-(YY+ZZ); Entity_Result.Bind_Pose[Bone_Index][0][1] = XY-WZ;      Entity_Result.Bind_Pose[Bone_Index][0][2] = XZ+WY;      Entity_Result.Bind_Pose[Bone_Index][0][3] = Bone->Position.x;
+    Entity_Result.Bind_Pose[Bone_Index][1][0] = XY+WZ;     Entity_Result.Bind_Pose[Bone_Index][1][1] = 1-(XX+ZZ);  Entity_Result.Bind_Pose[Bone_Index][1][2] = YZ-WX;      Entity_Result.Bind_Pose[Bone_Index][1][3] = Bone->Position.y;
+    Entity_Result.Bind_Pose[Bone_Index][2][0] = XZ-WY;     Entity_Result.Bind_Pose[Bone_Index][2][1] = YZ+WX;      Entity_Result.Bind_Pose[Bone_Index][2][2] = 1-(XX+YY);  Entity_Result.Bind_Pose[Bone_Index][2][3] = Bone->Position.z;
+
+    // Copy the inverse bind-pose (pose_to_bone) directly from the MDL bone descriptor
+    memcpy (Entity_Result.Inv_Bind[Bone_Index], Bone->Pose_To_Bone, sizeof (float) * 12);
+  }
+
+  // Append materials from the MDL material table into the shared scene material list
+  int Material_Base_Index = S->Material_Count;
+  for (int Material_Index = 0;
+       Material_Index < Header->Material_Count and Material_Index < MDL_MAX_MESHES;
+       Material_Index++) {
+    const uint8_t *Material_Entry = File_Data + Header->Material_Offset + Material_Index * 64;
+    int         Name_Offset   = *(const int*)Material_Entry; // Relative name offset within the entry block
+    const char *Material_Name = (const char*)(Material_Entry + Name_Offset);
     S->Material_Count++;
-    S->Materials     = realloc(S->Materials, sizeof(vec4)*S->Material_Count);
-    S->Texture_Names = realloc(S->Texture_Names, 64*S->Material_Count);
-    S->Materials[S->Material_Count-1] = (vec4){.x=0.5f,.y=0.5f,.z=0.5f,.w=1.f};
-    snprintf(S->Texture_Names[S->Material_Count-1], 64, "%s", Mn);
+    S->Materials     = realloc (S->Materials,     sizeof (vec4) * S->Material_Count);
+    S->Texture_Names = realloc (S->Texture_Names, 64            * S->Material_Count);
+    S->Materials    [S->Material_Count - 1] = (vec4){.x=0.5f, .y=0.5f, .z=0.5f, .w=1.f};
+    snprintf (S->Texture_Names[S->Material_Count - 1], 64, "%s", Material_Name);
   }
 
-  // Load geometry from VVD + VTX sidecar files (real Source model pipeline)
-  Vertex *Verts = NULL; uint VC = 0;
-  uint *Idx = NULL; uint IC = 0;
-  uint *Tex = NULL; uint TC = 0;
-  float CA = cosf(Yaw), SA = sinf(Yaw);
+  // Load geometry from the VVD and VTX sidecar files (Source engine model pipeline)
+  Vertex *Vertices      = NULL; uint Vertex_Count   = 0;
+  uint   *Indices       = NULL; uint Index_Count    = 0;
+  uint   *Texture_Ids   = NULL; uint Triangle_Count = 0;
+  float   Cosine_Yaw    = cosf (Yaw);
+  float   Sine_Yaw      = sinf (Yaw);
 
-  // Construct sidecar paths: replace .mdl with .vvd and .dx90.vtx
-  char Vvd_Path[512], Vtx_Path[512];
-  snprintf(Vvd_Path, sizeof Vvd_Path, "%.*s.vvd", (int)(strlen(Path)-4), Path);
-  snprintf(Vtx_Path, sizeof Vtx_Path, "%.*s.dx90.vtx", (int)(strlen(Path)-4), Path);
+  // Derive sidecar file paths by replacing the .mdl extension
+  char VVD_Path[512], VTX_Path[512];
+  snprintf (VVD_Path, sizeof VVD_Path, "%.*s.vvd",      (int)(strlen (Path) - 4), Path);
+  snprintf (VTX_Path, sizeof VTX_Path, "%.*s.dx90.vtx", (int)(strlen (Path) - 4), Path);
 
-  // Read VVD (vertex data)
-  FILE *Fv = fopen(Vvd_Path, "rb"); VVD_Vertex *VVD_Verts = NULL; int VVD_N = 0;
-  if (Fv) {
-    fseek(Fv,0,SEEK_END); long Vs=ftell(Fv); rewind(Fv);
-    uint8_t *Vd = malloc(Vs); size_t Vr=fread(Vd,1,Vs,Fv); (void)Vr; fclose(Fv);
-    const VVD_Header *Vh = (const VVD_Header*)Vd;
-    if (Vh->Magic == VVD_MAGIC and Vh->Version == 4) {
-      VVD_N = Vh->Num_LOD_Verts[0];
-      VVD_Verts = malloc(sizeof(VVD_Vertex) * VVD_N);
-      memcpy(VVD_Verts, Vd + Vh->Vertex_Data_Start, sizeof(VVD_Vertex) * VVD_N);
-      printf("[mdl] VVD: %d vertices from %s\n", VVD_N, Vvd_Path);
+  // Read VVD (vertex data sidecar)
+  FILE       *VVD_File         = fopen (VVD_Path, "rb");
+  VVD_Vertex *VVD_Vertices     = NULL;
+  int         VVD_Vertex_Count = 0;
+  if (VVD_File) {
+    fseek (VVD_File, 0, SEEK_END); long VVD_File_Size = ftell (VVD_File); rewind (VVD_File);
+    uint8_t *VVD_Data      = malloc (VVD_File_Size);
+    size_t   VVD_Bytes_Read_ = fread (VVD_Data, 1, VVD_File_Size, VVD_File); (void)VVD_Bytes_Read_;
+    fclose (VVD_File);
+    const VVD_Header *VVD_Hdr = (const VVD_Header*)VVD_Data;
+    if (VVD_Hdr->Magic == VVD_MAGIC and VVD_Hdr->Version == 4) {
+      VVD_Vertex_Count = VVD_Hdr->LOD_Vertex_Counts[0];
+      VVD_Vertices     = malloc (sizeof (VVD_Vertex) * VVD_Vertex_Count);
+      memcpy (VVD_Vertices, VVD_Data + VVD_Hdr->Vertex_Data_Start,
+              sizeof (VVD_Vertex) * VVD_Vertex_Count);
+      printf ("[mdl] VVD: %d vertices from %s\n", VVD_Vertex_Count, VVD_Path);
     }
-    free(Vd);
+    free (VVD_Data);
   }
 
-  // Read VTX (triangle strip data) and extract indexed triangles
-  FILE *Ft = fopen(Vtx_Path, "rb");
-  if (Ft and VVD_Verts) {
-    fseek(Ft,0,SEEK_END); long Ts=ftell(Ft); rewind(Ft);
-    uint8_t *Td = malloc(Ts); size_t Tr=fread(Td,1,Ts,Ft); (void)Tr; fclose(Ft); Ft=NULL;
-    const VTX_Header *Th = (const VTX_Header*)Td;
-    if (Th->Version == VTX_VERSION) {
-      // Walk: body parts → models → LOD 0 → meshes → strip groups → indices
-      int Mesh_Vert_Offset = 0; // Running offset into VVD vertices per-mesh
-      for (int Bp=0; Bp<Th->Num_Body_Parts; Bp++) {
-        int Bp_Base = Th->Body_Part_Offset + Bp * 8;
-        int Bp_Models = *(int*)(Td+Bp_Base);
-        int Bp_Model_O = *(int*)(Td+Bp_Base+4);
-        // Also read MDL body part to get per-model mesh vert offsets
-        const MDL_Body_Part *MBp = (Bp < H->Body_N) ? (const MDL_Body_Part*)(D + H->Body_O + Bp*16) : NULL;
-        for (int Mi=0; Mi<Bp_Models; Mi++) {
-          int M_Base = Bp_Base + Bp_Model_O + Mi * 8;
-          int M_Lods = *(int*)(Td+M_Base);
-          int M_Lod_O = *(int*)(Td+M_Base+4);
-          (void)M_Lods;
-          // LOD 0 only
-          int Lod_Base = M_Base + M_Lod_O;
-          int Lod_Meshes = *(int*)(Td+Lod_Base);
-          int Lod_Mesh_O = *(int*)(Td+Lod_Base+4);
-          // Read per-mesh VVD vertex offset from MDL
-          const MDL_Model *MdlM = (MBp and Mi < MBp->Model_N)
-            ? (const MDL_Model*)(D + H->Body_O + Bp*16 + MBp->Model_O + Mi*sizeof(MDL_Model)) : NULL;
-          for (int Ms=0; Ms<Lod_Meshes; Ms++) {
-            int Ms_Base = Lod_Base + Lod_Mesh_O + Ms * 9; // VTX MeshHeader_t is packed (9 bytes)
-            int Num_SG = *(int*)(Td+Ms_Base);
-            int SG_Off = *(int*)(Td+Ms_Base+4);
-            // Get material from MDL mesh
-            uint Mat_Id = 0;
-            if (MdlM and Ms < MdlM->Mesh_N) {
-              const MDL_Mesh *MdlMsh = (const MDL_Mesh*)(D + H->Body_O + Bp*16 + MBp->Model_O + Mi*sizeof(MDL_Model) + MdlM->Mesh_O + Ms*sizeof(MDL_Mesh));
-              Mat_Id = (uint)(Mat_Base + (MdlMsh->Material < H->Mat_N ? MdlMsh->Material : 0));
-              Mesh_Vert_Offset = MdlMsh->Vert_O; // Offset into VVD for this mesh's vertices
+  // Read VTX (triangle strip sidecar) and extract an indexed triangle list
+  FILE *VTX_File = fopen (VTX_Path, "rb");
+  if (VTX_File and VVD_Vertices) {
+    fseek (VTX_File, 0, SEEK_END); long VTX_File_Size = ftell (VTX_File); rewind (VTX_File);
+    uint8_t *VTX_Data       = malloc (VTX_File_Size);
+    size_t   VTX_Bytes_Read_ = fread (VTX_Data, 1, VTX_File_Size, VTX_File); (void)VTX_Bytes_Read_;
+    fclose (VTX_File); VTX_File = NULL;
+    const VTX_Header *VTX_Hdr = (const VTX_Header*)VTX_Data;
+    if (VTX_Hdr->Version == VTX_VERSION) {
+
+      // Walk body parts > models > LOD 0 > meshes > strip groups > index list
+      int Mesh_Vertex_Offset = 0; // Running base into the VVD vertex array, updated per mesh
+      for (int Body_Part_Index = 0; Body_Part_Index < VTX_Hdr->Body_Part_Count; Body_Part_Index++) {
+        int Body_Part_Base         = VTX_Hdr->Body_Part_Offset + Body_Part_Index * 8;
+        int Body_Part_Model_Count  = *(int*)(VTX_Data + Body_Part_Base);
+        int Body_Part_Model_Offset = *(int*)(VTX_Data + Body_Part_Base + 4);
+
+        // Cross-reference the MDL body part to resolve per-model vertex offsets
+        const MDL_Body_Part *MDL_Body = (Body_Part_Index < Header->Body_Count)
+          ? (const MDL_Body_Part*)(File_Data + Header->Body_Offset
+                                   + Body_Part_Index * sizeof (MDL_Body_Part))
+          : NULL;
+        for (int Model_Index = 0; Model_Index < Body_Part_Model_Count; Model_Index++) {
+          int Model_Base       = Body_Part_Base + Body_Part_Model_Offset + Model_Index * 8;
+          int Model_LOD_Count  = *(int*)(VTX_Data + Model_Base);     (void)Model_LOD_Count; // LOD 0 only
+          int Model_LOD_Offset = *(int*)(VTX_Data + Model_Base + 4);
+          int LOD_Base         = Model_Base + Model_LOD_Offset;
+          int LOD_Mesh_Count   = *(int*)(VTX_Data + LOD_Base);
+          int LOD_Mesh_Offset  = *(int*)(VTX_Data + LOD_Base + 4);
+
+          // Locate the MDL model descriptor to read per-mesh VVD vertex offsets
+          const MDL_Model *MDL_Model_Ptr = (MDL_Body and Model_Index < MDL_Body->Model_Count)
+            ? (const MDL_Model*)(File_Data + Header->Body_Offset
+                                 + Body_Part_Index * sizeof (MDL_Body_Part)
+                                 + MDL_Body->Model_Offset
+                                 + Model_Index * sizeof (MDL_Model))
+            : NULL;
+          for (int Mesh_Index = 0; Mesh_Index < LOD_Mesh_Count; Mesh_Index++) {
+            int Mesh_Base          = LOD_Base + LOD_Mesh_Offset + Mesh_Index * 9; // VTX MeshHeader_t is packed (9 bytes)
+            int Strip_Group_Count  = *(int*)(VTX_Data + Mesh_Base);
+            int Strip_Group_Offset = *(int*)(VTX_Data + Mesh_Base + 4);
+
+            // Resolve the MDL mesh descriptor to get its material index and VVD vertex base
+            uint Material_Id = 0;
+            if (MDL_Model_Ptr and Mesh_Index < MDL_Model_Ptr->Mesh_Count) {
+              const MDL_Mesh *MDL_Mesh_Ptr =
+                (const MDL_Mesh*)(File_Data + Header->Body_Offset
+                                  + Body_Part_Index * sizeof (MDL_Body_Part)
+                                  + MDL_Body->Model_Offset
+                                  + Model_Index  * sizeof (MDL_Model)
+                                  + MDL_Model_Ptr->Mesh_Offset
+                                  + Mesh_Index   * sizeof (MDL_Mesh));
+              Material_Id        = (uint)(Material_Base_Index
+                                          + (MDL_Mesh_Ptr->Material < Header->Material_Count
+                                             ? MDL_Mesh_Ptr->Material : 0));
+              Mesh_Vertex_Offset = MDL_Mesh_Ptr->Vertex_Offset; // Base into VVD for this mesh's verts
             }
-            for (int Sg=0; Sg<Num_SG; Sg++) {
-              int Sg_Base = Ms_Base + SG_Off + Sg * 25;
-              int SG_Nv = *(int*)(Td+Sg_Base);
-              int SG_Vo = *(int*)(Td+Sg_Base+4);
-              int SG_Ni = *(int*)(Td+Sg_Base+8);
-              int SG_Io = *(int*)(Td+Sg_Base+12);
-              (void)SG_Nv;
-              // Read strip group vertices (9 bytes each) to get origMeshVertID mapping
-              uint16_t *Orig_Map = malloc(SG_Nv * sizeof(uint16_t));
-              for (int V=0; V<SG_Nv; V++) {
-                int Voff = Sg_Base + SG_Vo + V*9;
-                Orig_Map[V] = *(uint16_t*)(Td+Voff+4);
+            for (int Strip_Group_Index = 0; Strip_Group_Index < Strip_Group_Count; Strip_Group_Index++) {
+              int Strip_Group_Base    = Mesh_Base + Strip_Group_Offset + Strip_Group_Index * 25;
+              int Group_Vertex_Count  = *(int*)(VTX_Data + Strip_Group_Base);
+              int Group_Vertex_Offset = *(int*)(VTX_Data + Strip_Group_Base + 4);
+              int Group_Index_Count   = *(int*)(VTX_Data + Strip_Group_Base + 8);
+              int Group_Index_Offset  = *(int*)(VTX_Data + Strip_Group_Base + 12);
+
+              // Build origMeshVertID mapping: strip-group vertex index -> VVD vertex index
+              uint16_t *Original_Vertex_Map = malloc (Group_Vertex_Count * sizeof (uint16_t));
+              for (int Vertex_Index = 0; Vertex_Index < Group_Vertex_Count; Vertex_Index++) {
+                int Vertex_Data_Offset = Strip_Group_Base + Group_Vertex_Offset + Vertex_Index * 9;
+                Original_Vertex_Map[Vertex_Index] = *(uint16_t*)(VTX_Data + Vertex_Data_Offset + 4);
               }
-              // Read indices (uint16_t) and emit triangles
-              uint16_t *Strip_Idx = (uint16_t*)(Td + Sg_Base + SG_Io);
-              for (int I=0; I+2<SG_Ni; I+=3) {
-                uint Base = VC;
-                Verts = realloc(Verts, sizeof(Vertex)*(VC+3));
-                Idx = realloc(Idx, sizeof(uint)*(IC+3));
-                Tex = realloc(Tex, sizeof(uint)*(TC+1));
-                for (int K=0; K<3; K++) {
-                  int Sg_Vi = Strip_Idx[I+K];
-                  int Vvd_Vi = Mesh_Vert_Offset + (Sg_Vi < SG_Nv ? Orig_Map[Sg_Vi] : 0);
-                  if (Vvd_Vi >= VVD_N) Vvd_Vi = 0;
-                  const VVD_Vertex *Sv = &VVD_Verts[Vvd_Vi];
-                  // Transform: Source Z-up to GL Y-up with entity rotation and offset
-                  float Px=Sv->Position[0], Py=Sv->Position[1], Pz=Sv->Position[2];
-                  float Wx = CA*Px - SA*Py + Origin.x;
-                  float Wy = SA*Px + CA*Py + Origin.z;
-                  float Wz = Pz + Origin.y; // Source Z = GL Y (up)
-                  // Swizzle to GL: (Wx, Wz, -Wy) where Wz is up
-                  Verts[VC] = (Vertex){.Position={Wx,Wz,-Wy},
-                    .Normal={Sv->Normal[0],Sv->Normal[2],-Sv->Normal[1]},
-                    .Texture_Uv={Sv->Tex_Coord[0], Sv->Tex_Coord[1]}};
-                  Idx[IC++] = Base+K; VC++;
+
+              // Emit one triangle at a time from the flat index list
+              uint16_t *Strip_Indices = (uint16_t*)(VTX_Data + Strip_Group_Base + Group_Index_Offset);
+              for (int Triangle_Index = 0; Triangle_Index + 2 < Group_Index_Count; Triangle_Index += 3) {
+                uint Vertex_Base = Vertex_Count;
+                Vertices    = realloc (Vertices,    sizeof (Vertex) * (Vertex_Count   + 3));
+                Indices     = realloc (Indices,     sizeof (uint)   * (Index_Count    + 3));
+                Texture_Ids = realloc (Texture_Ids, sizeof (uint)   * (Triangle_Count + 1));
+                for (int Corner = 0; Corner < 3; Corner++) {
+                  int Strip_Vertex = Strip_Indices[Triangle_Index + Corner];
+                  int VVD_Index    = Mesh_Vertex_Offset
+                                     + (Strip_Vertex < Group_Vertex_Count
+                                        ? Original_Vertex_Map[Strip_Vertex] : 0);
+                  if (VVD_Index >= VVD_Vertex_Count) VVD_Index = 0;
+                  const VVD_Vertex *Source_Vertex = &VVD_Vertices[VVD_Index];
+
+                  // Transform: Source Z-up to GL Y-up with entity yaw rotation and world offset
+                  float Src_X   = Source_Vertex->Position[0];
+                  float Src_Y   = Source_Vertex->Position[1];
+                  float Src_Z   = Source_Vertex->Position[2];
+                  float World_X = Cosine_Yaw * Src_X - Sine_Yaw * Src_Y + Origin.x;
+                  float World_Y = Sine_Yaw   * Src_X + Cosine_Yaw * Src_Y + Origin.z;
+                  float World_Z = Src_Z + Origin.y; // Source Z = GL Y (up axis)
+
+                  // Swizzle to OpenGL Y-up: (World_X, World_Z, -World_Y)
+                  Vertices[Vertex_Count] = (Vertex){
+                    .Position   = {World_X, World_Z, -World_Y},
+                    .Normal     = {Source_Vertex->Normal[0], Source_Vertex->Normal[2], -Source_Vertex->Normal[1]},
+                    .Texture_UV = {Source_Vertex->Tex_Coord[0], Source_Vertex->Tex_Coord[1]}};
+                  Indices[Index_Count++] = Vertex_Base + Corner;
+                  Vertex_Count++;
                 }
-                Tex[TC++] = Mat_Id;
+                Texture_Ids[Triangle_Count++] = Material_Id;
               }
-              free(Orig_Map);
+              free (Original_Vertex_Map);
             }
           }
         }
       }
     }
-    free(Td);
+    free (VTX_Data);
   } else {
-    if (Ft) fclose(Ft);
-    printf("[mdl] VVD/VTX sidecars not found, generating placeholder\n");
-    // Fallback: generate a simple box placeholder
-    Verts = malloc(sizeof(Vertex)*36); Idx = malloc(sizeof(uint)*36); Tex = malloc(sizeof(uint)*12);
-    float Hx=8,Hy=24,Hz=8; vec3 O={Origin.x, Origin.y, Origin.z};
-    float Bv[][3]={{-Hx,-Hy,-Hz},{Hx,-Hy,-Hz},{Hx,Hy,-Hz},{-Hx,Hy,-Hz},{-Hx,-Hy,Hz},{Hx,-Hy,Hz},{Hx,Hy,Hz},{-Hx,Hy,Hz}};
-    int Bf[][4]={{0,1,2,3},{5,4,7,6},{1,5,6,2},{4,0,3,7},{4,5,1,0},{3,2,6,7}};
-    float Bn[][3]={{0,0,-1},{0,0,1},{1,0,0},{-1,0,0},{0,-1,0},{0,1,0}};
-    for(int F_=0;F_<6;F_++) for(int T=0;T<2;T++) {
-      int I0=Bf[F_][0],I1=Bf[F_][T?0:1],I2=Bf[F_][T+1],I3=Bf[F_][T?3:2]; (void)I3;
-      for(int K=0;K<3;K++) {
-        int Vi = K==0?I0:K==1?I1:I2;
-        float Px=Bv[Vi][0],Py=Bv[Vi][1],Pz=Bv[Vi][2];
-        float Wx=CA*Px-SA*Pz+O.x, Wz=SA*Px+CA*Pz+O.z, Wy=Py+O.y;
-        Verts[VC]=(Vertex){.Position={Wx,Wy,-Wz},.Normal={Bn[F_][0],Bn[F_][2],-Bn[F_][1]}};
-        Idx[IC]=VC; IC++; VC++;
+    if (VTX_File) fclose (VTX_File);
+    printf ("[mdl] VVD/VTX sidecars not found, generating placeholder\n");
+
+    // Fallback: generate an axis-aligned box to stand in for the missing geometry
+    Vertices    = malloc (sizeof (Vertex) * 36);
+    Indices     = malloc (sizeof (uint)   * 36);
+    Texture_Ids = malloc (sizeof (uint)   * 12);
+    float Half_X = 8, Half_Y = 24, Half_Z = 8;
+    vec3  Entity_Origin = {Origin.x, Origin.y, Origin.z};
+    float Box_Verts[][3] = {
+      {-Half_X,-Half_Y,-Half_Z}, { Half_X,-Half_Y,-Half_Z},
+      { Half_X, Half_Y,-Half_Z}, {-Half_X, Half_Y,-Half_Z},
+      {-Half_X,-Half_Y, Half_Z}, { Half_X,-Half_Y, Half_Z},
+      { Half_X, Half_Y, Half_Z}, {-Half_X, Half_Y, Half_Z}};
+    int Box_Faces[][4] = {
+      {0,1,2,3}, {5,4,7,6}, {1,5,6,2}, {4,0,3,7}, {4,5,1,0}, {3,2,6,7}};
+    float Box_Normals[][3] = {
+      {0,0,-1}, {0,0,1}, {1,0,0}, {-1,0,0}, {0,-1,0}, {0,1,0}};
+    for (int Face_Index = 0; Face_Index < 6; Face_Index++)
+      for (int Triangle = 0; Triangle < 2; Triangle++) {
+        int Idx_0  = Box_Faces[Face_Index][0];
+        int Idx_1  = Box_Faces[Face_Index][Triangle ? 0 : 1];
+        int Idx_2  = Box_Faces[Face_Index][Triangle + 1];
+        int Idx_3_ = Box_Faces[Face_Index][Triangle ? 3 : 2]; (void)Idx_3_;
+        for (int Corner = 0; Corner < 3; Corner++) {
+          int   Vert_Index = Corner == 0 ? Idx_0 : Corner == 1 ? Idx_1 : Idx_2;
+          float Local_X    = Box_Verts[Vert_Index][0];
+          float Local_Y    = Box_Verts[Vert_Index][1];
+          float Local_Z    = Box_Verts[Vert_Index][2];
+          float World_X    = Cosine_Yaw * Local_X - Sine_Yaw   * Local_Z + Entity_Origin.x;
+          float World_Z    = Sine_Yaw   * Local_X + Cosine_Yaw * Local_Z + Entity_Origin.z;
+          float World_Y    = Local_Y + Entity_Origin.y;
+          Vertices[Vertex_Count] = (Vertex){
+            .Position = {World_X, World_Y, -World_Z},
+            .Normal   = {Box_Normals[Face_Index][0], Box_Normals[Face_Index][2], -Box_Normals[Face_Index][1]}};
+          Indices[Index_Count] = Vertex_Count;
+          Index_Count++;
+          Vertex_Count++;
+        }
+        Texture_Ids[Triangle_Count++] = 0;
       }
-      Tex[TC++]=0;
-    }
   }
-  free(VVD_Verts);
+  free (VVD_Vertices);
 
-  // Populate entity
-  E.Frame_Count = 1;
-  E.Frame_Vertices[0] = Verts;
-  E.Frame_FPS = 1.f;
-  E.Vertex_Count = VC; E.Index_Count = IC; E.Triangle_Count = TC;
-  E.Indices = Idx; E.Texture_Ids = Tex;
-  E.Current_Vertices = E.Frame_Vertices[0];
-  E.GL_Origin = Origin;
-  E.GL_Yaw = Yaw;
-  E.Anim_Sequence = 0;
-  E.Anim_Count = 0;
+  // Populate entity fields from the assembled geometry buffers
+  Entity_Result.Frame_Count       = 1;
+  Entity_Result.Frame_Vertices[0] = Vertices;
+  Entity_Result.Frame_FPS         = 1.f;
+  Entity_Result.Vertex_Count      = Vertex_Count;
+  Entity_Result.Index_Count       = Index_Count;
+  Entity_Result.Triangle_Count    = Triangle_Count;
+  Entity_Result.Indices           = Indices;
+  Entity_Result.Texture_Ids       = Texture_Ids;
+  Entity_Result.Current_Vertices  = Entity_Result.Frame_Vertices[0];
+  Entity_Result.GL_Origin         = Origin;
+  Entity_Result.GL_Yaw            = Yaw;
+  Entity_Result.Anim_Sequence     = 0;
+  Entity_Result.Anim_Count        = 0;
 
-  // Allocate bone weight arrays (zeroed — default: rigid attachment to bone 0)
-  E.Bone_Ids     = calloc(VC * SKEL_MAX_BONES_PER_VERT, 1);
-  E.Bone_Weights = calloc(VC * SKEL_MAX_BONES_PER_VERT, 1);
-  for (uint V=0; V<VC; V++) E.Bone_Weights[V*SKEL_MAX_BONES_PER_VERT] = 255; // 100% weight on bone 0
+  // Allocate bone weight arrays; default every vertex to rigid attachment on bone 0 (100% weight)
+  Entity_Result.Bone_Ids     = calloc (Vertex_Count * SKEL_MAX_BONES_PER_VERT, 1);
+  Entity_Result.Bone_Weights = calloc (Vertex_Count * SKEL_MAX_BONES_PER_VERT, 1);
+  for (uint Vert_Index = 0; Vert_Index < Vertex_Count; Vert_Index++)
+    Entity_Result.Bone_Weights[Vert_Index * SKEL_MAX_BONES_PER_VERT] = 255;
 
-  free(D);
-  printf("[mdl] %s: %d bones, %u verts, %u tris\n", Path, E.Bone_Count, VC, TC);
-  return E;
-}
+  free (File_Data);
+  printf ("[mdl] %s: %d bones, %u verts, %u tris\n",
+          Path, Entity_Result.Bone_Count, Vertex_Count, Triangle_Count);
+  return Entity_Result;
 
-// ══════════════════════════════
+} // MDL_Load
+
+
+// ════════════════════════════
 //   Source_Weapon_Model_Load
-// ══════════════════════════════
+// ════════════════════════════
 
 Weapon_Model Source_Weapon_Model_Load (const char *Path) {
   Weapon_Model Result = {0};
   Result.Is_Source = 1;
 
   // Read MDL file
-  FILE *F = fopen(Path, "rb");
-  if (not F) {printf("[weapon] cannot open Source MDL %s\n", Path); return Result;}
-  fseek(F,0,SEEK_END); long Sz=ftell(F); rewind(F);
-  uint8_t *D = malloc(Sz); size_t R_=fread(D,1,Sz,F); (void)R_; fclose(F);
-  const MDL_Header *H = (const MDL_Header*)D;
-  if (H->Magic != MDL_MAGIC_IDST) {printf("[weapon] bad magic in %s\n", Path); free(D); return Result;}
+  FILE *File = fopen (Path, "rb");
+  if (not File) { printf ("[weapon] cannot open Source MDL %s\n", Path); return Result; }
+  fseek (File, 0, SEEK_END); long File_Size = ftell (File); rewind (File);
+  uint8_t *File_Data   = malloc (File_Size);
+  size_t   Bytes_Read_ = fread (File_Data, 1, File_Size, File); (void)Bytes_Read_;
+  fclose (File);
+  const MDL_Header *Header = (const MDL_Header*)File_Data;
+  if (Header->Magic != MDL_MAGIC_IDST) {
+    printf ("[weapon] bad magic in %s\n", Path);
+    free (File_Data);
+    return Result;
+  }
 
   // Read all material names from the MDL material table
-  Result.Surface_Count = H->Mat_N < WEAPON_MAX_TEXTURES ? (uint)H->Mat_N : WEAPON_MAX_TEXTURES;
+  Result.Surface_Count = Header->Material_Count < WEAPON_MAX_TEXTURES
+                          ? (uint)Header->Material_Count
+                          : WEAPON_MAX_TEXTURES;
+
+  // Comment here !!!
   for (uint Material_Index = 0; Material_Index < Result.Surface_Count; Material_Index++) {
-    const uint8_t *Material_Entry = D + H->Mat_O + Material_Index * 64;
-    int Name_Offset = *(const int*)Material_Entry;
+    const uint8_t *Material_Entry = File_Data + Header->Material_Offset + Material_Index * 64;
+    int         Name_Offset   = *(const int*)Material_Entry;
     const char *Material_Name = (const char*)(Material_Entry + Name_Offset);
-    snprintf(Result.Texture_Names[Material_Index], 64, "%s", Material_Name);
-    printf("[weapon] material[%u]: %s\n", Material_Index, Material_Name);
+    snprintf (Result.Texture_Names[Material_Index], 64, "%s", Material_Name);
+    printf ("[weapon] material[%u]: %s\n", Material_Index, Material_Name);
   }
 
-  // Construct sidecar paths
-  char Vvd_Path[512], Vtx_Path[512];
-  snprintf(Vvd_Path, sizeof Vvd_Path, "%.*s.vvd", (int)(strlen(Path)-4), Path);
-  snprintf(Vtx_Path, sizeof Vtx_Path, "%.*s.dx90.vtx", (int)(strlen(Path)-4), Path);
+  // Construct sidecar file paths by replacing the .mdl extension
+  char VVD_Path[512], VTX_Path[512];
+  snprintf (VVD_Path, sizeof VVD_Path, "%.*s.vvd",      (int)(strlen (Path) - 4), Path);
+  snprintf (VTX_Path, sizeof VTX_Path, "%.*s.dx90.vtx", (int)(strlen (Path) - 4), Path);
 
-  // Read VVD
-  FILE *Fv = fopen(Vvd_Path, "rb"); VVD_Vertex *VVD_Verts = NULL; int VVD_N = 0;
-  if (Fv) {
-    fseek(Fv,0,SEEK_END); long Vs=ftell(Fv); rewind(Fv);
-    uint8_t *Vd = malloc(Vs); size_t Vr=fread(Vd,1,Vs,Fv); (void)Vr; fclose(Fv);
-    const VVD_Header *Vh = (const VVD_Header*)Vd;
-    if (Vh->Magic == VVD_MAGIC and Vh->Version == 4) {
-      VVD_N = Vh->Num_LOD_Verts[0];
-      VVD_Verts = malloc(sizeof(VVD_Vertex) * VVD_N);
-      memcpy(VVD_Verts, Vd + Vh->Vertex_Data_Start, sizeof(VVD_Vertex) * VVD_N);
+  // Read VVD (vertex data sidecar)
+  FILE       *VVD_File         = fopen (VVD_Path, "rb");
+  VVD_Vertex *VVD_Vertices     = NULL;
+  int         VVD_Vertex_Count = 0;
+  if (VVD_File) {
+    fseek (VVD_File, 0, SEEK_END); long VVD_File_Size = ftell (VVD_File); rewind (VVD_File);
+    uint8_t *VVD_Data       = malloc (VVD_File_Size);
+    size_t   VVD_Bytes_Read_ = fread (VVD_Data, 1, VVD_File_Size, VVD_File); (void)VVD_Bytes_Read_;
+    fclose (VVD_File);
+    const VVD_Header *VVD_Hdr = (const VVD_Header*)VVD_Data;
+    if (VVD_Hdr->Magic == VVD_MAGIC and VVD_Hdr->Version == 4) {
+      VVD_Vertex_Count = VVD_Hdr->LOD_Vertex_Counts[0];
+      VVD_Vertices     = malloc (sizeof (VVD_Vertex) * VVD_Vertex_Count);
+      memcpy (VVD_Vertices, VVD_Data + VVD_Hdr->Vertex_Data_Start,
+              sizeof (VVD_Vertex) * VVD_Vertex_Count);
     }
-    free(Vd);
+    free (VVD_Data);
   }
 
-  // ── Compute skeletal skinning matrices from idle animation (frame 0) ─────
-  // This transforms vertices from bind pose → natural holding position.
+  // Compute skeletal skinning matrices from the idle animation (sequence 0, frame 0).
+  // This bakes the natural weapon-holding pose into the vertex positions at load time.
   float Skin_Matrices[128][3][4];
-  int Has_Skinning = 0;
-  if (VVD_Verts and H->Bone_N > 0 and H->Anim_N > 0) {
-    int Bone_N = H->Bone_N < 128 ? H->Bone_N : 128;
+  int   Has_Skinning = 0;
+  if (VVD_Vertices and Header->Bone_Count > 0 and Header->Animation_Count > 0) {
+    int Total_Bone_Count = Header->Bone_Count < 128 ? Header->Bone_Count : 128;
 
-    // Parse per-bone local transforms: start with bind pose
+    // Seed each bone's local transform from the MDL bind pose
     float Local[128][3][4];
-    for (int I = 0; I < Bone_N; I++) {
-      const MDL_Bone *B = (const MDL_Bone*)(D + H->Bone_O + I * sizeof(MDL_Bone));
-      float Qx=B->Quat[0], Qy=B->Quat[1], Qz=B->Quat[2], Qw=B->Quat[3];
-      float X2=Qx+Qx, Y2=Qy+Qy, Z2=Qz+Qz;
-      float Xx=Qx*X2, Xy=Qx*Y2, Xz=Qx*Z2, Yy=Qy*Y2, Yz=Qy*Z2, Zz=Qz*Z2;
-      float Wx=Qw*X2, Wy=Qw*Y2, Wz=Qw*Z2;
-      Local[I][0][0]=1-(Yy+Zz); Local[I][0][1]=Xy-Wz;     Local[I][0][2]=Xz+Wy;     Local[I][0][3]=B->Pos.x;
-      Local[I][1][0]=Xy+Wz;     Local[I][1][1]=1-(Xx+Zz); Local[I][1][2]=Yz-Wx;     Local[I][1][3]=B->Pos.y;
-      Local[I][2][0]=Xz-Wy;     Local[I][2][1]=Yz+Wx;     Local[I][2][2]=1-(Xx+Yy); Local[I][2][3]=B->Pos.z;
+    for (int Bone_Index = 0; Bone_Index < Total_Bone_Count; Bone_Index++) {
+      const MDL_Bone *Bone = (const MDL_Bone*)(File_Data + Header->Bone_Offset
+                                               + Bone_Index * sizeof (MDL_Bone));
+      float Quat_X = Bone->Quat[0], Quat_Y = Bone->Quat[1];
+      float Quat_Z = Bone->Quat[2], Quat_W = Bone->Quat[3];
+      float Two_X  = Quat_X + Quat_X, Two_Y = Quat_Y + Quat_Y, Two_Z = Quat_Z + Quat_Z;
+      float XX = Quat_X*Two_X, XY = Quat_X*Two_Y, XZ = Quat_X*Two_Z;
+      float YY = Quat_Y*Two_Y, YZ = Quat_Y*Two_Z, ZZ = Quat_Z*Two_Z;
+      float WX = Quat_W*Two_X, WY = Quat_W*Two_Y, WZ = Quat_W*Two_Z;
+      Local[Bone_Index][0][0] = 1-(YY+ZZ); Local[Bone_Index][0][1] = XY-WZ;     Local[Bone_Index][0][2] = XZ+WY;     Local[Bone_Index][0][3] = Bone->Position.x;
+      Local[Bone_Index][1][0] = XY+WZ;     Local[Bone_Index][1][1] = 1-(XX+ZZ); Local[Bone_Index][1][2] = YZ-WX;     Local[Bone_Index][1][3] = Bone->Position.y;
+      Local[Bone_Index][2][0] = XZ-WY;     Local[Bone_Index][2][1] = YZ+WX;     Local[Bone_Index][2][2] = 1-(XX+YY); Local[Bone_Index][2][3] = Bone->Position.z;
     }
 
-    // Override with animation 0 (idle) frame 0 data
-    // AnimDesc layout: base_ptr(4), name_o(4), fps(4), flags(4), num_frames(4),
-    //   num_movements(4), movement_o(4), unused(24), anim_block(4), anim_index(4)
-    const uint8_t *Anim_Desc = D + H->Anim_O;
-    int Anim_Off = *(const int*)(Anim_Desc + 56); // animindex at byte 56
-    const uint8_t *Cur = Anim_Desc + Anim_Off;
+    // Walk the animation 0 data stream and override bind-pose transforms with frame 0 values
+    const uint8_t *Anim_Desc           = File_Data + Header->Animation_Offset;
+    int            Animation_Index_Offset = *(const int*)(Anim_Desc + 56); // animindex field at byte 56 of animdesc_t
+    const uint8_t *Animation_Cursor    = Anim_Desc + Animation_Index_Offset;
     for (;;) {
-      if (Cur < D or Cur >= D + Sz - 4) break;
-      int Bi = Cur[0], Fl = Cur[1];
-      int16_t Next = *(const int16_t*)(Cur + 2);
-      if (Bi < Bone_N) {
-        const MDL_Bone *B = (const MDL_Bone*)(D + H->Bone_O + Bi * sizeof(MDL_Bone));
-        int Off = 4;
-        if (Fl & 0x02) Off += 6;  // RAWROT
-        if (Fl & 0x20) Off += 8;  // RAWROT2
-        if (Fl & 0x01) Off += 6;  // RAWPOS
-        float Rot[3] = {B->Rot.x, B->Rot.y, B->Rot.z};
-        float Pos[3] = {B->Pos.x, B->Pos.y, B->Pos.z};
-        if (Fl & 0x08) { // ANIMROT
-          const int16_t *Rp = (const int16_t*)(Cur + Off);
-          float Rs[3] = {B->Rot_Scale.x, B->Rot_Scale.y, B->Rot_Scale.z};
-          float Rb[3] = {B->Rot.x, B->Rot.y, B->Rot.z};
-          for (int A=0;A<3;A++) if (Rp[A]) {
-            const uint8_t *Vp = (const uint8_t*)&Rp[A] + Rp[A];
-            Rot[A] = Rb[A] + *(const int16_t*)(Vp+2) * Rs[A];
-          }
-          Off += 6;
+      if (Animation_Cursor < File_Data or Animation_Cursor >= File_Data + File_Size - 4) break;
+      int     Anim_Bone_Index   = Animation_Cursor[0];
+      int     Anim_Flags        = Animation_Cursor[1];
+      int16_t Next_Entry_Offset = *(const int16_t*)(Animation_Cursor + 2);
+      if (Anim_Bone_Index < Total_Bone_Count) {
+        const MDL_Bone *Bone = (const MDL_Bone*)(File_Data + Header->Bone_Offset
+                                                 + Anim_Bone_Index * sizeof (MDL_Bone));
+        int Data_Offset = 4;
+        if (Anim_Flags & 0x02) Data_Offset += 6; // RAWROT
+        if (Anim_Flags & 0x20) Data_Offset += 8; // RAWROT2
+        if (Anim_Flags & 0x01) Data_Offset += 6; // RAWPOS
+        float Rotation[3] = {Bone->Rot.x,      Bone->Rot.y,      Bone->Rot.z     };
+        float Position[3] = {Bone->Position.x,  Bone->Position.y, Bone->Position.z};
+
+        // ANIMROT: decode compressed per-axis rotation deltas and apply them
+        if (Anim_Flags & 0x08) {
+          const int16_t *Rotation_Pointer = (const int16_t*)(Animation_Cursor + Data_Offset);
+          float Rotation_Scale[3] = {Bone->Rot_Scale.x,      Bone->Rot_Scale.y,      Bone->Rot_Scale.z     };
+          float Rotation_Base [3] = {Bone->Rot.x,            Bone->Rot.y,            Bone->Rot.z           };
+          for (int Axis_Index = 0; Axis_Index < 3; Axis_Index++)
+            if (Rotation_Pointer[Axis_Index]) {
+              const uint8_t *Value_Pointer = (const uint8_t*)&Rotation_Pointer[Axis_Index]
+                                             + Rotation_Pointer[Axis_Index];
+              Rotation[Axis_Index] = Rotation_Base[Axis_Index]
+                                     + *(const int16_t*)(Value_Pointer + 2) * Rotation_Scale[Axis_Index];
+            }
+          Data_Offset += 6;
         }
-        if (Fl & 0x04) { // ANIMPOS
-          const int16_t *Pp = (const int16_t*)(Cur + Off);
-          float Ps[3] = {B->Pos_Scale.x, B->Pos_Scale.y, B->Pos_Scale.z};
-          float Pb[3] = {B->Pos.x, B->Pos.y, B->Pos.z};
-          for (int A=0;A<3;A++) if (Pp[A]) {
-            const uint8_t *Vp = (const uint8_t*)&Pp[A] + Pp[A];
-            Pos[A] = Pb[A] + *(const int16_t*)(Vp+2) * Ps[A];
-          }
-          Off += 6;
+
+        // ANIMPOS: decode compressed per-axis position deltas and apply them
+        if (Anim_Flags & 0x04) {
+          const int16_t *Position_Pointer = (const int16_t*)(Animation_Cursor + Data_Offset);
+          float Position_Scale[3] = {Bone->Position_Scale.x, Bone->Position_Scale.y, Bone->Position_Scale.z};
+          float Position_Base [3] = {Bone->Position.x,       Bone->Position.y,       Bone->Position.z      };
+          for (int Axis_Index = 0; Axis_Index < 3; Axis_Index++)
+            if (Position_Pointer[Axis_Index]) {
+              const uint8_t *Value_Pointer = (const uint8_t*)&Position_Pointer[Axis_Index]
+                                             + Position_Pointer[Axis_Index];
+              Position[Axis_Index] = Position_Base[Axis_Index]
+                                     + *(const int16_t*)(Value_Pointer + 2) * Position_Scale[Axis_Index];
+            }
+          Data_Offset += 6;
         }
-        // Euler → quaternion (XYZ order)
-        float Cx=cosf(Rot[0]*0.5f), Sx=sinf(Rot[0]*0.5f);
-        float Cy=cosf(Rot[1]*0.5f), Sy=sinf(Rot[1]*0.5f);
-        float Cz=cosf(Rot[2]*0.5f), Sz_=sinf(Rot[2]*0.5f);
-        float Aqw=Cx*Cy*Cz+Sx*Sy*Sz_, Aqx=Sx*Cy*Cz-Cx*Sy*Sz_;
-        float Aqy=Cx*Sy*Cz+Sx*Cy*Sz_, Aqz=Cx*Cy*Sz_-Sx*Sy*Cz;
-        float Ql=sqrtf(Aqx*Aqx+Aqy*Aqy+Aqz*Aqz+Aqw*Aqw);
-        if(Ql>1e-6f){Aqx/=Ql;Aqy/=Ql;Aqz/=Ql;Aqw/=Ql;}
-        float AX2=Aqx+Aqx,AY2=Aqy+Aqy,AZ2=Aqz+Aqz;
-        float AXx=Aqx*AX2,AXy=Aqx*AY2,AXz=Aqx*AZ2,AYy=Aqy*AY2,AYz=Aqy*AZ2,AZz=Aqz*AZ2;
-        float AWx=Aqw*AX2,AWy=Aqw*AY2,AWz=Aqw*AZ2;
-        Local[Bi][0][0]=1-(AYy+AZz);Local[Bi][0][1]=AXy-AWz;    Local[Bi][0][2]=AXz+AWy;    Local[Bi][0][3]=Pos[0];
-        Local[Bi][1][0]=AXy+AWz;    Local[Bi][1][1]=1-(AXx+AZz);Local[Bi][1][2]=AYz-AWx;    Local[Bi][1][3]=Pos[1];
-        Local[Bi][2][0]=AXz-AWy;    Local[Bi][2][1]=AYz+AWx;    Local[Bi][2][2]=1-(AXx+AYy);Local[Bi][2][3]=Pos[2];
+
+        // Convert the resulting Euler angles (XYZ order) to a normalised unit quaternion
+        float Cos_X = cosf (Rotation[0] * 0.5f), Sin_X = sinf (Rotation[0] * 0.5f);
+        float Cos_Y = cosf (Rotation[1] * 0.5f), Sin_Y = sinf (Rotation[1] * 0.5f);
+        float Cos_Z = cosf (Rotation[2] * 0.5f), Sin_Z = sinf (Rotation[2] * 0.5f);
+        float Anim_Quat_W = Cos_X*Cos_Y*Cos_Z + Sin_X*Sin_Y*Sin_Z;
+        float Anim_Quat_X = Sin_X*Cos_Y*Cos_Z - Cos_X*Sin_Y*Sin_Z;
+        float Anim_Quat_Y = Cos_X*Sin_Y*Cos_Z + Sin_X*Cos_Y*Sin_Z;
+        float Anim_Quat_Z = Cos_X*Cos_Y*Sin_Z - Sin_X*Sin_Y*Cos_Z;
+        float Quat_Length = sqrtf (Anim_Quat_X*Anim_Quat_X + Anim_Quat_Y*Anim_Quat_Y
+                                   + Anim_Quat_Z*Anim_Quat_Z + Anim_Quat_W*Anim_Quat_W);
+        if (Quat_Length > 1e-6f) {
+          Anim_Quat_X /= Quat_Length; Anim_Quat_Y /= Quat_Length;
+          Anim_Quat_Z /= Quat_Length; Anim_Quat_W /= Quat_Length;
+        }
+        float A_Two_X = Anim_Quat_X + Anim_Quat_X;
+        float A_Two_Y = Anim_Quat_Y + Anim_Quat_Y;
+        float A_Two_Z = Anim_Quat_Z + Anim_Quat_Z;
+        float AXX = Anim_Quat_X*A_Two_X, AXY = Anim_Quat_X*A_Two_Y, AXZ = Anim_Quat_X*A_Two_Z;
+        float AYY = Anim_Quat_Y*A_Two_Y, AYZ = Anim_Quat_Y*A_Two_Z, AZZ = Anim_Quat_Z*A_Two_Z;
+        float AWX = Anim_Quat_W*A_Two_X, AWY = Anim_Quat_W*A_Two_Y, AWZ = Anim_Quat_W*A_Two_Z;
+        Local[Anim_Bone_Index][0][0] = 1-(AYY+AZZ); Local[Anim_Bone_Index][0][1] = AXY-AWZ;      Local[Anim_Bone_Index][0][2] = AXZ+AWY;      Local[Anim_Bone_Index][0][3] = Position[0];
+        Local[Anim_Bone_Index][1][0] = AXY+AWZ;     Local[Anim_Bone_Index][1][1] = 1-(AXX+AZZ);  Local[Anim_Bone_Index][1][2] = AYZ-AWX;      Local[Anim_Bone_Index][1][3] = Position[1];
+        Local[Anim_Bone_Index][2][0] = AXZ-AWY;     Local[Anim_Bone_Index][2][1] = AYZ+AWX;       Local[Anim_Bone_Index][2][2] = 1-(AXX+AYY); Local[Anim_Bone_Index][2][3] = Position[2];
       }
-      if (Next == 0) break;
-      Cur += Next;
+      if (Next_Entry_Offset == 0) break;
+      Animation_Cursor += Next_Entry_Offset;
     }
 
-    // Walk hierarchy: World[i] = World[parent] * Local[i]
+    // Forward pass: World[i] = World[parent] * Local[i]
     float World[128][3][4];
-    for (int I = 0; I < Bone_N; I++) {
-      const MDL_Bone *B = (const MDL_Bone*)(D + H->Bone_O + I * sizeof(MDL_Bone));
-      if (B->Parent >= 0 and B->Parent < I) {
-        for (int R=0;R<3;R++) for (int C=0;C<4;C++)
-          World[I][R][C] = World[B->Parent][R][0]*Local[I][0][C]
-                         + World[B->Parent][R][1]*Local[I][1][C]
-                         + World[B->Parent][R][2]*Local[I][2][C]
-                         + (C==3 ? World[B->Parent][R][3] : 0);
-      } else memcpy(World[I], Local[I], sizeof(float)*12);
+    for (int Bone_Index = 0; Bone_Index < Total_Bone_Count; Bone_Index++) {
+      const MDL_Bone *Bone = (const MDL_Bone*)(File_Data + Header->Bone_Offset
+                                               + Bone_Index * sizeof (MDL_Bone));
+      if (Bone->Parent >= 0 and Bone->Parent < Bone_Index) {
+        for (int Row = 0; Row < 3; Row++)
+          for (int Column = 0; Column < 4; Column++)
+            World[Bone_Index][Row][Column] =
+              World[Bone->Parent][Row][0] * Local[Bone_Index][0][Column]
+            + World[Bone->Parent][Row][1] * Local[Bone_Index][1][Column]
+            + World[Bone->Parent][Row][2] * Local[Bone_Index][2][Column]
+            + (Column == 3 ? World[Bone->Parent][Row][3] : 0);
+      } else {
+        memcpy (World[Bone_Index], Local[Bone_Index], sizeof (float) * 12);
+      }
     }
 
-    // Compose: Skin[i] = World[i] * InvBind[i]
-    for (int I = 0; I < Bone_N; I++) {
-      const MDL_Bone *B = (const MDL_Bone*)(D + H->Bone_O + I * sizeof(MDL_Bone));
-      for (int R=0;R<3;R++) for (int C=0;C<4;C++)
-        Skin_Matrices[I][R][C] = World[I][R][0]*B->Pose_To_Bone[0][C]
-                                + World[I][R][1]*B->Pose_To_Bone[1][C]
-                                + World[I][R][2]*B->Pose_To_Bone[2][C]
-                                + (C==3 ? World[I][R][3] : 0);
+    // Compose: Skin_Matrices[i] = World[i] * InvBind[i]  (pose_to_bone is the inverse bind)
+    for (int Bone_Index = 0; Bone_Index < Total_Bone_Count; Bone_Index++) {
+      const MDL_Bone *Bone = (const MDL_Bone*)(File_Data + Header->Bone_Offset
+                                               + Bone_Index * sizeof (MDL_Bone));
+      for (int Row = 0; Row < 3; Row++)
+        for (int Column = 0; Column < 4; Column++)
+          Skin_Matrices[Bone_Index][Row][Column] =
+            World[Bone_Index][Row][0] * Bone->Pose_To_Bone[0][Column]
+          + World[Bone_Index][Row][1] * Bone->Pose_To_Bone[1][Column]
+          + World[Bone_Index][Row][2] * Bone->Pose_To_Bone[2][Column]
+          + (Column == 3 ? World[Bone_Index][Row][3] : 0);
     }
     Has_Skinning = 1;
-    printf("[weapon] skeletal: %d bones, idle animation applied\n", Bone_N);
+    printf ("[weapon] skeletal: %d bones, idle animation applied\n", Total_Bone_Count);
   }
 
-  // Read VTX and extract geometry
-  FILE *Ft = fopen(Vtx_Path, "rb");
-  if (Ft and VVD_Verts) {
-    fseek(Ft,0,SEEK_END); long Vtx_File_Size=ftell(Ft); rewind(Ft);
-    uint8_t *Td = malloc(Vtx_File_Size); size_t Tr=fread(Td,1,Vtx_File_Size,Ft); (void)Tr; fclose(Ft); Ft=NULL;
-    const VTX_Header *Th = (const VTX_Header*)Td;
-    #define VTX_BOUNDS(Offset, Size) ((Offset) >= 0 and (Offset) + (Size) <= Vtx_File_Size)
-    if (Th->Version == VTX_VERSION) {
-      int Mesh_Vert_Offset = 0;
-      for (int Bp=0; Bp<Th->Num_Body_Parts; Bp++) {
-        int Bp_Base = Th->Body_Part_Offset + Bp * 8;
-        if (!VTX_BOUNDS(Bp_Base, 8)) continue;
-        int Bp_Models = *(int*)(Td+Bp_Base);
-        int Bp_Model_Offset = *(int*)(Td+Bp_Base+4);
-        const MDL_Body_Part *Mdl_Body = (Bp < H->Body_N) ? (const MDL_Body_Part*)(D + H->Body_O + Bp*16) : NULL;
-        for (int Model_Index=0; Model_Index<Bp_Models; Model_Index++) {
-          int Model_Base = Bp_Base + Bp_Model_Offset + Model_Index * 8;
-          if (!VTX_BOUNDS(Model_Base, 8)) continue;
-          int Model_Lod_Offset = *(int*)(Td+Model_Base+4);
-          int Lod_Base = Model_Base + Model_Lod_Offset;
-          if (!VTX_BOUNDS(Lod_Base, 8)) continue;
-          int Lod_Mesh_Count = *(int*)(Td+Lod_Base);
-          int Lod_Mesh_Offset = *(int*)(Td+Lod_Base+4);
-          const MDL_Model *Mdl_Model = (Mdl_Body and Model_Index < Mdl_Body->Model_N)
-            ? (const MDL_Model*)(D + H->Body_O + Bp*16 + Mdl_Body->Model_O + Model_Index*sizeof(MDL_Model)) : NULL;
-          for (int Mesh_Index=0; Mesh_Index<Lod_Mesh_Count; Mesh_Index++) {
-            int Mesh_Base = Lod_Base + Lod_Mesh_Offset + Mesh_Index * 9; // VTX MeshHeader_t is packed (9 bytes)
-            if (!VTX_BOUNDS(Mesh_Base, 9)) continue;
-            int Strip_Group_Count  = *(int*)(Td+Mesh_Base);
-            int Strip_Group_Offset = *(int*)(Td+Mesh_Base+4);
-            uint Mesh_Material_Id = 0;
-            if (Mdl_Model and Mesh_Index < Mdl_Model->Mesh_N) {
-              const MDL_Mesh *Mdl_Mesh_Data = (const MDL_Mesh*)(D + H->Body_O + Bp*16 + Mdl_Body->Model_O + Model_Index*sizeof(MDL_Model) + Mdl_Model->Mesh_O + Mesh_Index*sizeof(MDL_Mesh));
-              Mesh_Vert_Offset = Mdl_Mesh_Data->Vert_O;
-              Mesh_Material_Id = (uint)Mdl_Mesh_Data->Material < Result.Surface_Count ? (uint)Mdl_Mesh_Data->Material : 0;
+  // Read VTX (triangle strip sidecar) and extract skinned geometry
+  FILE *VTX_File = fopen (VTX_Path, "rb");
+  if (VTX_File and VVD_Vertices) {
+    fseek (VTX_File, 0, SEEK_END); long VTX_File_Size = ftell (VTX_File); rewind (VTX_File);
+    uint8_t *VTX_Data        = malloc (VTX_File_Size);
+    size_t   VTX_Bytes_Read_  = fread (VTX_Data, 1, VTX_File_Size, VTX_File); (void)VTX_Bytes_Read_;
+    fclose (VTX_File); VTX_File = NULL;
+    const VTX_Header *VTX_Hdr = (const VTX_Header*)VTX_Data;
+    #define VTX_BOUNDS(Offset, Size) ((Offset) >= 0 and (Offset) + (Size) <= VTX_File_Size)
+    if (VTX_Hdr->Version == VTX_VERSION) {
+      int Mesh_Vertex_Offset = 0;
+      for (int Body_Part_Index = 0; Body_Part_Index < VTX_Hdr->Body_Part_Count; Body_Part_Index++) {
+        int Body_Part_Base         = VTX_Hdr->Body_Part_Offset + Body_Part_Index * 8;
+        if (not VTX_BOUNDS (Body_Part_Base, 8)) continue;
+        int Body_Part_Model_Count  = *(int*)(VTX_Data + Body_Part_Base);
+        int Body_Part_Model_Offset = *(int*)(VTX_Data + Body_Part_Base + 4);
+        const MDL_Body_Part *MDL_Body = (Body_Part_Index < Header->Body_Count)
+          ? (const MDL_Body_Part*)(File_Data + Header->Body_Offset
+                                   + Body_Part_Index * sizeof (MDL_Body_Part))
+          : NULL;
+        for (int Model_Index = 0; Model_Index < Body_Part_Model_Count; Model_Index++) {
+          int Model_Base       = Body_Part_Base + Body_Part_Model_Offset + Model_Index * 8;
+          if (not VTX_BOUNDS (Model_Base, 8)) continue;
+          int Model_LOD_Offset = *(int*)(VTX_Data + Model_Base + 4);
+          int LOD_Base         = Model_Base + Model_LOD_Offset;
+          if (not VTX_BOUNDS (LOD_Base, 8)) continue;
+          int LOD_Mesh_Count   = *(int*)(VTX_Data + LOD_Base);
+          int LOD_Mesh_Offset  = *(int*)(VTX_Data + LOD_Base + 4);
+          const MDL_Model *MDL_Model_Ptr = (MDL_Body and Model_Index < MDL_Body->Model_Count)
+            ? (const MDL_Model*)(File_Data + Header->Body_Offset
+                                 + Body_Part_Index * sizeof (MDL_Body_Part)
+                                 + MDL_Body->Model_Offset
+                                 + Model_Index * sizeof (MDL_Model))
+            : NULL;
+          for (int Mesh_Index = 0; Mesh_Index < LOD_Mesh_Count; Mesh_Index++) {
+            int Mesh_Base          = LOD_Base + LOD_Mesh_Offset + Mesh_Index * 9; // VTX MeshHeader_t is packed (9 bytes)
+            if (not VTX_BOUNDS (Mesh_Base, 9)) continue;
+            int Strip_Group_Count  = *(int*)(VTX_Data + Mesh_Base);
+            int Strip_Group_Offset = *(int*)(VTX_Data + Mesh_Base + 4);
+            uint Mesh_Material_Id  = 0;
+            if (MDL_Model_Ptr and Mesh_Index < MDL_Model_Ptr->Mesh_Count) {
+              const MDL_Mesh *MDL_Mesh_Ptr =
+                (const MDL_Mesh*)(File_Data + Header->Body_Offset
+                                  + Body_Part_Index * sizeof (MDL_Body_Part)
+                                  + MDL_Body->Model_Offset
+                                  + Model_Index  * sizeof (MDL_Model)
+                                  + MDL_Model_Ptr->Mesh_Offset
+                                  + Mesh_Index   * sizeof (MDL_Mesh));
+              Mesh_Vertex_Offset = MDL_Mesh_Ptr->Vertex_Offset;
+              Mesh_Material_Id   = (uint)MDL_Mesh_Ptr->Material < Result.Surface_Count
+                                   ? (uint)MDL_Mesh_Ptr->Material : 0;
             }
-            for (int Strip_Group_Index=0; Strip_Group_Index<Strip_Group_Count; Strip_Group_Index++) {
-              int Group_Base = Mesh_Base + Strip_Group_Offset + Strip_Group_Index * 25;
-              if (!VTX_BOUNDS(Group_Base, 25)) continue;
-              int Group_Vertex_Count  = *(int*)(Td+Group_Base);
-              int Group_Vertex_Offset = *(int*)(Td+Group_Base+4);
-              int Group_Index_Count   = *(int*)(Td+Group_Base+8);
-              int Group_Index_Offset  = *(int*)(Td+Group_Base+12);
-              if (Group_Vertex_Count <= 0 or Group_Vertex_Count > 65536) continue;
-              if (Group_Index_Count <= 0 or Group_Index_Count > 300000) continue;
-              // Verify vertex and index data are within file bounds
-              int Vertex_Data_End = Group_Base + Group_Vertex_Offset + Group_Vertex_Count * 9;
-              int Index_Data_End  = Group_Base + Group_Index_Offset + Group_Index_Count * 2;
-              if (!VTX_BOUNDS(Group_Base + Group_Vertex_Offset, Group_Vertex_Count * 9)) continue;
-              if (!VTX_BOUNDS(Group_Base + Group_Index_Offset, Group_Index_Count * 2)) continue;
-              uint16_t *Original_Vertex_Map = malloc(Group_Vertex_Count * sizeof(uint16_t));
-              for (int Vertex_Index=0; Vertex_Index<Group_Vertex_Count; Vertex_Index++) {
-                int Vertex_Data_Offset = Group_Base + Group_Vertex_Offset + Vertex_Index*9;
-                Original_Vertex_Map[Vertex_Index] = *(uint16_t*)(Td+Vertex_Data_Offset+4);
+            for (int Strip_Group_Index = 0; Strip_Group_Index < Strip_Group_Count; Strip_Group_Index++) {
+              int Group_Base          = Mesh_Base + Strip_Group_Offset + Strip_Group_Index * 25;
+              if (not VTX_BOUNDS (Group_Base, 25)) continue;
+              int Group_Vertex_Count  = *(int*)(VTX_Data + Group_Base);
+              int Group_Vertex_Offset = *(int*)(VTX_Data + Group_Base + 4);
+              int Group_Index_Count   = *(int*)(VTX_Data + Group_Base + 8);
+              int Group_Index_Offset  = *(int*)(VTX_Data + Group_Base + 12);
+              if (Group_Vertex_Count <= 0 or Group_Vertex_Count > 65536)  continue;
+              if (Group_Index_Count  <= 0 or Group_Index_Count  > 300000) continue;
+
+              // Verify vertex and index regions are within file bounds before reading
+              if (not VTX_BOUNDS (Group_Base + Group_Vertex_Offset, Group_Vertex_Count * 9)) continue;
+              if (not VTX_BOUNDS (Group_Base + Group_Index_Offset,  Group_Index_Count  * 2)) continue;
+              uint16_t *Original_Vertex_Map = malloc (Group_Vertex_Count * sizeof (uint16_t));
+              for (int Vertex_Index = 0; Vertex_Index < Group_Vertex_Count; Vertex_Index++) {
+                int Vertex_Data_Offset = Group_Base + Group_Vertex_Offset + Vertex_Index * 9;
+                Original_Vertex_Map[Vertex_Index] = *(uint16_t*)(VTX_Data + Vertex_Data_Offset + 4);
               }
-              uint16_t *Strip_Indices = (uint16_t*)(Td + Group_Base + Group_Index_Offset);
-              for (int Triangle_Index=0; Triangle_Index+2<Group_Index_Count; Triangle_Index+=3) {
+              uint16_t *Strip_Indices = (uint16_t*)(VTX_Data + Group_Base + Group_Index_Offset);
+              for (int Triangle_Index = 0; Triangle_Index + 2 < Group_Index_Count; Triangle_Index += 3) {
                 uint Vertex_Base = Result.Vertex_Count;
-                Result.Vertices = realloc(Result.Vertices, sizeof(Vertex)*(Result.Vertex_Count+3));
-                Result.Indices = realloc(Result.Indices, sizeof(uint)*(Result.Index_Count+3));
-                Result.Texture_Ids = realloc(Result.Texture_Ids, sizeof(uint)*(Result.Triangle_Count+1));
-                for (int Corner=0; Corner<3; Corner++) {
-                  int Strip_Vertex = Strip_Indices[Triangle_Index+Corner];
-                  int VVD_Index = Mesh_Vert_Offset + (Strip_Vertex < Group_Vertex_Count ? Original_Vertex_Map[Strip_Vertex] : 0);
-                  if (VVD_Index < 0 or VVD_Index >= VVD_N) VVD_Index = 0;
-                  const VVD_Vertex *Source_Vertex = &VVD_Verts[VVD_Index];
-                  // Apply skeletal skinning: transform bind-pose vertex by weighted bone matrices
-                  float Sp[3] = {Source_Vertex->Position[0], Source_Vertex->Position[1], Source_Vertex->Position[2]};
-                  float Sn[3] = {Source_Vertex->Normal[0], Source_Vertex->Normal[1], Source_Vertex->Normal[2]};
+                Result.Vertices     = realloc (Result.Vertices,     sizeof (Vertex) * (Result.Vertex_Count   + 3));
+                Result.Indices      = realloc (Result.Indices,      sizeof (uint)   * (Result.Index_Count    + 3));
+                Result.Texture_Ids  = realloc (Result.Texture_Ids,  sizeof (uint)   * (Result.Triangle_Count + 1));
+                for (int Corner = 0; Corner < 3; Corner++) {
+                  int Strip_Vertex = Strip_Indices[Triangle_Index + Corner];
+                  int VVD_Index    = Mesh_Vertex_Offset
+                                     + (Strip_Vertex < Group_Vertex_Count
+                                        ? Original_Vertex_Map[Strip_Vertex] : 0);
+                  if (VVD_Index < 0 or VVD_Index >= VVD_Vertex_Count) VVD_Index = 0;
+                  const VVD_Vertex *Source_Vertex = &VVD_Vertices[VVD_Index];
+
+                  // Apply weighted skeletal skinning: blend the bind-pose vertex through each bone's skin matrix
+                  float Skinned_Position[3] = {Source_Vertex->Position[0], Source_Vertex->Position[1], Source_Vertex->Position[2]};
+                  float Skinned_Normal  [3] = {Source_Vertex->Normal[0],   Source_Vertex->Normal[1],   Source_Vertex->Normal[2]  };
                   if (Has_Skinning) {
-                    float Pp[3]={0,0,0}, Pn[3]={0,0,0};
-                    for (int Bi=0; Bi < Source_Vertex->Num_Bones and Bi < 3; Bi++) {
-                      int Bone = Source_Vertex->Bone_Ids[Bi];
-                      float W = Source_Vertex->Bone_Weights[Bi];
-                      if (W < 0.001f or Bone >= 128) continue;
-                      for (int R=0;R<3;R++) {
-                        Pp[R] += W * (Skin_Matrices[Bone][R][0]*Sp[0] + Skin_Matrices[Bone][R][1]*Sp[1]
-                                    + Skin_Matrices[Bone][R][2]*Sp[2] + Skin_Matrices[Bone][R][3]);
-                        Pn[R] += W * (Skin_Matrices[Bone][R][0]*Sn[0] + Skin_Matrices[Bone][R][1]*Sn[1]
-                                    + Skin_Matrices[Bone][R][2]*Sn[2]);
+                    float Blended_Position[3] = {0, 0, 0};
+                    float Blended_Normal  [3] = {0, 0, 0};
+                    for (int Bone_Influence = 0;
+                         Bone_Influence < Source_Vertex->Bone_Count and Bone_Influence < 3;
+                         Bone_Influence++) {
+                      int   Bone_Index  = Source_Vertex->Bone_Ids    [Bone_Influence];
+                      float Bone_Weight = Source_Vertex->Bone_Weights[Bone_Influence];
+                      if (Bone_Weight < 0.001f or Bone_Index >= 128) continue;
+                      for (int Row = 0; Row < 3; Row++) {
+                        Blended_Position[Row] += Bone_Weight *
+                          (Skin_Matrices[Bone_Index][Row][0] * Skinned_Position[0]
+                         + Skin_Matrices[Bone_Index][Row][1] * Skinned_Position[1]
+                         + Skin_Matrices[Bone_Index][Row][2] * Skinned_Position[2]
+                         + Skin_Matrices[Bone_Index][Row][3]);
+                        Blended_Normal[Row] += Bone_Weight *
+                          (Skin_Matrices[Bone_Index][Row][0] * Skinned_Normal[0]
+                         + Skin_Matrices[Bone_Index][Row][1] * Skinned_Normal[1]
+                         + Skin_Matrices[Bone_Index][Row][2] * Skinned_Normal[2]);
                       }
                     }
-                    Sp[0]=Pp[0]; Sp[1]=Pp[1]; Sp[2]=Pp[2];
-                    float Nl = sqrtf(Pn[0]*Pn[0]+Pn[1]*Pn[1]+Pn[2]*Pn[2]);
-                    if (Nl>1e-6f) { Sn[0]=Pn[0]/Nl; Sn[1]=Pn[1]/Nl; Sn[2]=Pn[2]/Nl; }
-                    else { Sn[0]=Pn[0]; Sn[1]=Pn[1]; Sn[2]=Pn[2]; }
+                    Skinned_Position[0] = Blended_Position[0];
+                    Skinned_Position[1] = Blended_Position[1];
+                    Skinned_Position[2] = Blended_Position[2];
+                    float Normal_Length = sqrtf (Blended_Normal[0]*Blended_Normal[0]
+                                               + Blended_Normal[1]*Blended_Normal[1]
+                                               + Blended_Normal[2]*Blended_Normal[2]);
+                    if (Normal_Length > 1e-6f) {
+                      Skinned_Normal[0] = Blended_Normal[0] / Normal_Length;
+                      Skinned_Normal[1] = Blended_Normal[1] / Normal_Length;
+                      Skinned_Normal[2] = Blended_Normal[2] / Normal_Length;
+                    } else {
+                      Skinned_Normal[0] = Blended_Normal[0];
+                      Skinned_Normal[1] = Blended_Normal[1];
+                      Skinned_Normal[2] = Blended_Normal[2];
+                    }
                   }
-                  // Swizzle to (barrel, up, right) for Weapon_Update — Option B: barrel=-Y, up=+Z, right=+X
+
+                  // Swizzle to (barrel=-Y, up=+Z, right=+X) for Weapon_Update
                   Result.Vertices[Result.Vertex_Count] = (Vertex){
-                    .Position = {-Sp[1], Sp[2], Sp[0]},
-                    .Normal = {-Sn[1], Sn[2], Sn[0]},
-                    .Texture_Uv = {Source_Vertex->Tex_Coord[0], Source_Vertex->Tex_Coord[1]}};
-                  Result.Indices[Result.Index_Count++] = Vertex_Base+Corner;
+                    .Position   = {-Skinned_Position[1],  Skinned_Position[2],  Skinned_Position[0]},
+                    .Normal     = {-Skinned_Normal  [1],  Skinned_Normal  [2],  Skinned_Normal  [0]},
+                    .Texture_UV = {Source_Vertex->Tex_Coord[0], Source_Vertex->Tex_Coord[1]}};
+                  Result.Indices[Result.Index_Count++] = Vertex_Base + Corner;
                   Result.Vertex_Count++;
                 }
                 Result.Texture_Ids[Result.Triangle_Count++] = Mesh_Material_Id;
               }
-              free(Original_Vertex_Map);
+              free (Original_Vertex_Map);
             }
           }
         }
       }
     }
     #undef VTX_BOUNDS
-    free(Td);
+    free (VTX_Data);
   } else {
-    if (Ft) fclose(Ft);
+    if (VTX_File) fclose (VTX_File);
   }
-  free(VVD_Verts);
-  free(D);
+  free (VVD_Vertices);
+  free (File_Data);
 
-  // Source viewmodels include hands in the MDL — skip Q3 hand mesh.
-  // Set a single animation frame with identity tag_weapon transform.
-  // Tag layout: [0..2]=origin, [3..5]=axis0, [6..8]=axis1, [9..11]=axis2
+  // Source viewmodels include the hands; set a single-frame identity tag transform
   Result.Animation_Frame_Count = 1;
-  memset(Result.Tag_Weapon[0], 0, sizeof(float)*12);
-  Result.Tag_Weapon[0][3] = 1; Result.Tag_Weapon[0][7] = 1; Result.Tag_Weapon[0][11] = 1; // Identity rotation
+  memset (Result.Tag_Weapon[0], 0, sizeof (float) * 12);
+  Result.Tag_Weapon[0][3] = 1; Result.Tag_Weapon[0][7] = 1; Result.Tag_Weapon[0][11] = 1;
 
-  printf("[weapon] Source MDL: %u verts, %u tris from %s\n",
-         Result.Vertex_Count, Result.Triangle_Count, Path);
-  // Debug: print bounding box of loaded weapon vertices
+  printf ("[weapon] Source MDL: %u verts, %u tris from %s\n",
+          Result.Vertex_Count, Result.Triangle_Count, Path);
+
+  // Print the bounding box of the loaded weapon vertices for placement debugging
   if (Result.Vertex_Count > 0) {
-    float Min[3] = {1e9,1e9,1e9}, Max[3] = {-1e9,-1e9,-1e9};
-    for (uint Vi=0; Vi < Result.Vertex_Count; Vi++) {
-      for (int A=0;A<3;A++) {
-        if (Result.Vertices[Vi].Position[A] < Min[A]) Min[A] = Result.Vertices[Vi].Position[A];
-        if (Result.Vertices[Vi].Position[A] > Max[A]) Max[A] = Result.Vertices[Vi].Position[A];
+    float Min[3] = { 1e9f,  1e9f,  1e9f};
+    float Max[3] = {-1e9f, -1e9f, -1e9f};
+    for (uint Vert_Index = 0; Vert_Index < Result.Vertex_Count; Vert_Index++)
+      for (int Axis = 0; Axis < 3; Axis++) {
+        if (Result.Vertices[Vert_Index].Position[Axis] < Min[Axis]) Min[Axis] = Result.Vertices[Vert_Index].Position[Axis];
+        if (Result.Vertices[Vert_Index].Position[Axis] > Max[Axis]) Max[Axis] = Result.Vertices[Vert_Index].Position[Axis];
       }
-    }
-    printf("[weapon] bounds: min(%.1f, %.1f, %.1f) max(%.1f, %.1f, %.1f) size(%.1f, %.1f, %.1f)\n",
-           Min[0],Min[1],Min[2], Max[0],Max[1],Max[2], Max[0]-Min[0],Max[1]-Min[1],Max[2]-Min[2]);
+    printf ("[weapon] bounds: min(%.1f, %.1f, %.1f) max(%.1f, %.1f, %.1f) size(%.1f, %.1f, %.1f)\n",
+            Min[0], Min[1], Min[2], Max[0], Max[1], Max[2],
+            Max[0]-Min[0], Max[1]-Min[1], Max[2]-Min[2]);
   }
   return Result;
-}
 
-// ══════════════════════
-//   Skeleton_Evaluate
-// ══════════════════════
+} // Source_Weapon_Model_Load
 
-// Multiply two 3×4 affine matrices: C = A * B
-static void Mat34_Mul (const float A[3][4], const float B[3][4], float C[3][4]) {
-  for (int R=0;R<3;R++) {
-    C[R][0] = A[R][0]*B[0][0]+A[R][1]*B[1][0]+A[R][2]*B[2][0];
-    C[R][1] = A[R][0]*B[0][1]+A[R][1]*B[1][1]+A[R][2]*B[2][1];
-    C[R][2] = A[R][0]*B[0][2]+A[R][1]*B[1][2]+A[R][2]*B[2][2];
-    C[R][3] = A[R][0]*B[0][3]+A[R][1]*B[1][3]+A[R][2]*B[2][3]+A[R][3];
-  }
-}
-
-void Skeleton_Evaluate (Entity *E, float Time) {
-  if (E->Bone_Count <= 0) return;
-
-  // Build world-space bone matrices from the bind pose hierarchy
-  // (When animation keyframe data is available, interpolate here; for now, use bind pose)
-  float Local[MDL_MAX_BONES][3][4];
-  for (int I=0; I<E->Bone_Count; I++)
-    memcpy(Local[I], E->Bind_Pose[I], sizeof(float)*12);
-
-  // Walk hierarchy: Pose[i] = Parent_World * Local[i]
-  for (int I=0; I<E->Bone_Count; I++) {
-    if (E->Bone_Parents[I] >= 0 and E->Bone_Parents[I] < I)
-      Mat34_Mul(E->Pose[E->Bone_Parents[I]].M, Local[I], E->Pose[I].M);
-    else
-      memcpy(E->Pose[I].M, Local[I], sizeof(float)*12);
-  }
-
-  // Compose with inverse bind-pose: Final[i] = Pose[i] * InvBind[i]
-  for (int I=0; I<E->Bone_Count; I++) {
-    float Tmp[3][4];
-    Mat34_Mul(E->Pose[I].M, E->Inv_Bind[I], Tmp);
-    memcpy(E->Pose[I].M, Tmp, sizeof(float)*12);
-  }
-}
-
-// ═══════════════════════════
+// ══════════════════════════
 //   Skeleton_Skin_Dispatch
-// ═══════════════════════════
-
-void Skeleton_Skin_Dispatch (Entity *E) {
-  if (E->Bone_Count <= 0 or E->Vertex_Count == 0) return;
-
-  // Upload bone matrices to the bone SSBO
-  void *Map;
-  VK_CHECK (vkMapMemory (Device, E->Bone_Buffer.Memory, 0,
-                          sizeof(Bone_Matrix) * E->Bone_Count, 0, &Map));
-  memcpy (Map, E->Pose, sizeof(Bone_Matrix) * E->Bone_Count);
-  vkUnmapMemory (Device, E->Bone_Buffer.Memory);
-
-  // Allocate a one-shot command buffer and dispatch the skinning compute shader
-  VkCommandBuffer Cmd;
-  VK_CHECK (vkAllocateCommandBuffers (/*device        =>*/ Device,
-                                      /*pAllocateInfo =>*/ &(VkCommandBufferAllocateInfo){
-                                        .sType              = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
-                                        .commandPool        = Command_Pool,
-                                        .level              = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
-                                        .commandBufferCount = 1},
-                                      /*pCommandBuffers =>*/ &Cmd));
-  VK_CHECK (vkBeginCommandBuffer (/*commandBuffer =>*/ Cmd,
-                                  /*pBeginInfo    =>*/ &(VkCommandBufferBeginInfo){
-                                    .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
-                                    .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT}));
-
-  vkCmdBindPipeline (Cmd, VK_PIPELINE_BIND_POINT_COMPUTE, Skinning_Pipeline);
-
-  // Push constants: vertex count and bone count packed into uvec2
-  uint Push[2] = {E->Vertex_Count, (uint)E->Bone_Count};
-  vkCmdPushConstants (Cmd, Skinning_Pipeline_Layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, 8, Push);
-
-  // Bind descriptors via push descriptor (reuse the entity's bone buffer + vertex buffers)
-  VkDescriptorBufferInfo Bone_Info   = {E->Bone_Buffer.Buffer,   0, VK_WHOLE_SIZE};
-  VkDescriptorBufferInfo Bind_Info   = {E->Vertex_Buffer.Buffer, 0, VK_WHOLE_SIZE};
-  VkDescriptorBufferInfo Output_Info = {E->Vertex_Buffer.Buffer, 0, VK_WHOLE_SIZE};
-
-  VkWriteDescriptorSet Writes[] = {
-    {.sType=VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstBinding=0, .descriptorCount=1,
-     .descriptorType=VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .pBufferInfo=&Bone_Info},
-    {.sType=VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstBinding=1, .descriptorCount=1,
-     .descriptorType=VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .pBufferInfo=&Bind_Info},
-    {.sType=VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstBinding=2, .descriptorCount=1,
-     .descriptorType=VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .pBufferInfo=&Output_Info},
-  };
-  PFN_vkCmdPushDescriptorSetKHR Push_Desc =
-    (PFN_vkCmdPushDescriptorSetKHR)vkGetDeviceProcAddr(Device, "vkCmdPushDescriptorSetKHR");
-  Push_Desc (Cmd, VK_PIPELINE_BIND_POINT_COMPUTE, Skinning_Pipeline_Layout, 0, 3, Writes);
-
-  // Dispatch: one invocation per vertex, workgroup size 64
-  vkCmdDispatch (Cmd, (E->Vertex_Count + 63) / 64, 1, 1);
-
-  VK_CHECK (vkEndCommandBuffer (Cmd));
-  VK_CHECK (vkQueueSubmit (/*queue       =>*/ Queue,
-                           /*submitCount =>*/ 1,
-                           /*pSubmits    =>*/ &(VkSubmitInfo){
-                             .sType              = VK_STRUCTURE_TYPE_SUBMIT_INFO,
-                             .commandBufferCount = 1,
-                             .pCommandBuffers    = &Cmd},
-                           /*fence       =>*/ VK_NULL_HANDLE));
-  vkQueueWaitIdle (Queue);
-  vkFreeCommandBuffers (Device, Command_Pool, 1, &Cmd);
-}
-
-// ══════════════════════════
-//   Movement_Style_Toggle
 // ══════════════════════════
 
-void Movement_Style_Toggle (Player *P) {
-  P->Movement = (P->Movement + 1) % MOVEMENT_STYLE_COUNT;
-  Active_Movement = P->Movement;
-  const char *Names[] = {"Quake 3", "Source"};
-  printf("[movement] switched to %s style\n", Names[P->Movement]);
-}
+void Skeleton_Skin_Dispatch (Entity *Entity_Ptr) {
+  if (Entity_Ptr->Bone_Count <= 0 or Entity_Ptr->Vertex_Count == 0) return;
 
-// ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
-//
-// §8. Scene - Setup
-//
-// ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+  // Upload the current pose matrices into the entity's bone SSBO
+  void *Mapped_Memory;
+  VK_CHECK (vkMapMemory (/*device  =>*/ Device,
+                         /*memory  =>*/ Entity_Ptr->Bone_Buffer.Memory,
+                         /*offset  =>*/ 0,
+                         /*size    =>*/ sizeof (Bone_Matrix) * Entity_Ptr->Bone_Count,
+                         /*flags   =>*/ 0,
+                         /*ppData  =>*/ &Mapped_Memory));
+  memcpy (Mapped_Memory, Entity_Ptr->Pose, sizeof (Bone_Matrix) * Entity_Ptr->Bone_Count);
+  vkUnmapMemory (Device, Entity_Ptr->Bone_Buffer.Memory);
 
-// ══════════════════════════
-//   Vulkan_Create_Instance
-// ══════════════════════════
-
-void Vulkan_Create_Instance () {
-
-  // Gather the instance extensions required by SDL for Vulkan surface presentation
-  uint Extension_Count;
-  SDL_Vulkan_GetInstanceExtensions (Window, &Extension_Count, NULL);
-  const char **Extensions = malloc (sizeof (char *) * (Extension_Count + 1));
-  SDL_Vulkan_GetInstanceExtensions (Window, &Extension_Count, Extensions);
-
-  // Check if the validation layer is available before requesting it
-  uint Layer_Count = 0;
-  vkEnumerateInstanceLayerProperties (&Layer_Count, NULL);
-  VkLayerProperties *Layers = malloc (sizeof (VkLayerProperties) * Layer_Count);
-  vkEnumerateInstanceLayerProperties (&Layer_Count, Layers);
-
-  bool Have_Validation = false;
-  if (Use_Validation) {
-    for (uint L = 0; L < Layer_Count; L++) {
-      if (strcmp (Layers[L].layerName, VALIDATION_LAYERS[0]) == 0) {
-        Have_Validation = true;
-        break;
-      }
-    }
-  }
-  free (Layers);
-
-  // Add the debug utils extension only when validation is present
-  uint Ext_Count = Extension_Count;
-  if (Have_Validation) Extensions[Ext_Count++] = VK_EXT_DEBUG_UTILS_EXTENSION_NAME;
-
-  // Create the Vulkan instance targeting API version 1.3
-  VK_CHECK (vkCreateInstance (/*pCreateInfo =>*/ &(VkInstanceCreateInfo){
-                                .sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO,
-                                .pApplicationInfo = &(VkApplicationInfo){
-                                  .sType            = VK_STRUCTURE_TYPE_APPLICATION_INFO,
-                                  .pApplicationName = "quake3rt",
-                                  .apiVersion       = VK_API_VERSION_1_3},
-                                .enabledLayerCount       = Have_Validation ? VALIDATION_LAYER_COUNT : 0,
-                                .ppEnabledLayerNames     = VALIDATION_LAYERS,
-                                .enabledExtensionCount   = Ext_Count,
-                                .ppEnabledExtensionNames = Extensions},
-                              /*pAllocator  =>*/ NULL,
-                              /*pInstance   =>*/ &Instance));
-
-  if (Use_Validation and not Have_Validation) printf ("[vulkan] validation layer not found - running without validation\n");
-  else if (Have_Validation) printf ("[vulkan] validation layers enabled\n");
-
-  // Release the temporary extensions array now that the instance owns the data
-  free (Extensions);
-
-  // Create the platform window surface via SDL's Vulkan integration
-  SDL_Vulkan_CreateSurface (Window, Instance, &Surface);
-}
-
-// ═══════════════════════════════
-//   Vulkan_Pick_Physical_Device
-// ═══════════════════════════════
-
-void Vulkan_Pick_Physical_Device () {
-
-  // Pick the first available physical device
-  uint Device_Count = 0;
-  vkEnumeratePhysicalDevices (Instance, &Device_Count, NULL);
-  if (Device_Count == 0) {
-    fprintf (stderr, "[error] no Vulkan-capable GPU found.\n");
-    fprintf (stderr, "  Install Vulkan drivers: apt install mesa-vulkan-drivers\n");
-    fprintf (stderr, "  For software rendering: export VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.json\n");
-    exit (1);
-  }
-  VkPhysicalDevice *Devices = malloc (sizeof (VkPhysicalDevice) * Device_Count);
-  vkEnumeratePhysicalDevices (Instance, &Device_Count, Devices);
-  Physical_Device = Devices[0];
-
-  // Report which device was selected
-  VkPhysicalDeviceProperties Props;
-  vkGetPhysicalDeviceProperties (Physical_Device, &Props);
-  printf ("[vulkan] device: %s (Vulkan %d.%d.%d)\n",
-          Props.deviceName, VK_API_VERSION_MAJOR (Props.apiVersion),
-          VK_API_VERSION_MINOR (Props.apiVersion), VK_API_VERSION_PATCH (Props.apiVersion));
-  free (Devices);
-
-  // Search for a queue family that supports both graphics and surface presentation
-  uint Family_Count;
-  vkGetPhysicalDeviceQueueFamilyProperties (Physical_Device, &Family_Count, NULL);
-  VkQueueFamilyProperties *Families = malloc (sizeof (*Families) * Family_Count);
-  vkGetPhysicalDeviceQueueFamilyProperties (Physical_Device, &Family_Count, Families);
-
-  // Select the first queue family that supports both graphics and presentation
-  Queue_Family_Index = 0;
-  for (uint Index = 0; Index < Family_Count; Index++) {
-    VkBool32 Supports_Present;
-    vkGetPhysicalDeviceSurfaceSupportKHR (Physical_Device, Index, Surface, &Supports_Present);
-    if ((Families[Index].queueFlags & VK_QUEUE_GRAPHICS_BIT) and Supports_Present) {
-      Queue_Family_Index = Index;
-      break;
-    }
-  }
-  free (Families);
-}
-
-// ═══════════════════════════════════
-//   Vulkan_Create_Logical_Device
-// ═══════════════════════════════════
-
-void Vulkan_Create_Logical_Device () {
-
-  // Chain together the feature structures for acceleration structure and ray tracing pipeline
-  VkPhysicalDeviceAccelerationStructureFeaturesKHR Acceleration_Structure_Features = {
-    .sType                  = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR,
-    .accelerationStructure  = VK_TRUE};
-
-  // Enable ray query features for the physics compute shader's TLAS ray queries
-  VkPhysicalDeviceRayQueryFeaturesKHR Ray_Query_Features = {
-    .sType    = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_QUERY_FEATURES_KHR,
-    .pNext    = &Acceleration_Structure_Features,
-    .rayQuery = VK_TRUE};
-
-  // Enable ray tracing pipeline features chained to the ray query features
-  VkPhysicalDeviceRayTracingPipelineFeaturesKHR Raytracing_Pipeline_Features = {
-    .sType              = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_PIPELINE_FEATURES_KHR,
-    .pNext              = &Ray_Query_Features,
-    .rayTracingPipeline = VK_TRUE};
-
-  // Enable Vulkan 1.2 features: buffer device address, descriptor indexing with runtime arrays
-  VkPhysicalDeviceVulkan12Features Vulkan_12_Features = {
-    .sType                                     = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES,
-    .pNext                                     = &Raytracing_Pipeline_Features,
-    .bufferDeviceAddress                       = VK_TRUE,
-    .descriptorIndexing                        = VK_TRUE,
-    .runtimeDescriptorArray                    = VK_TRUE,
-    .shaderSampledImageArrayNonUniformIndexing = VK_TRUE,
-    .descriptorBindingPartiallyBound           = VK_TRUE,
-    .descriptorBindingVariableDescriptorCount  = VK_TRUE};
-
-  // Enable Vulkan 1.3 features: synchronization2 and dynamic rendering
-  VkPhysicalDeviceVulkan13Features Vulkan_13_Features = {.sType            = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES,
-                                                         .pNext            = &Vulkan_12_Features,
-                                                         .synchronization2 = VK_TRUE,
-                                                         .dynamicRendering = VK_TRUE};
-
-  // Specify device extensions: core RT + Mesa/Intel optimizations
-  const char *Device_Extensions[] = {VK_KHR_SWAPCHAIN_EXTENSION_NAME,
-                                     VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME,
-                                     VK_KHR_RAY_TRACING_PIPELINE_EXTENSION_NAME,
-                                     VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME,
-                                     VK_KHR_RAY_QUERY_EXTENSION_NAME,
-                                     VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME};
-
-  // Set queue priority to maximum (1.0) for the single graphics queue
-  float Priority = 1.f;
-
-  // Enable core 1.0 features: samplerAnisotropy for 16x anisotropic texture filtering
-  VkPhysicalDeviceFeatures Core_Features = {.samplerAnisotropy = VK_TRUE};
-
-  // Create the logical device with a single graphics queue and all chained features
-  VK_CHECK (vkCreateDevice (/*physicalDevice =>*/ Physical_Device,
-                            /*pCreateInfo    =>*/ &(VkDeviceCreateInfo){
-                              .sType                = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
-                              .pNext                = &Vulkan_13_Features,
-                              .queueCreateInfoCount = 1,
-                              .pQueueCreateInfos  = &(VkDeviceQueueCreateInfo){
-                                .sType            = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
-                                .queueFamilyIndex = Queue_Family_Index,
-                                .queueCount       = 1,
-                                .pQueuePriorities = &Priority},
-                              .enabledExtensionCount   = 6,
-                              .ppEnabledExtensionNames = Device_Extensions,
-                              .pEnabledFeatures        = &Core_Features},
-                            /*pAllocator     =>*/ NULL,
-                            /*pDevice        =>*/ &Device));
-
-  // Retrieve the queue handle from the newly created device
-  vkGetDeviceQueue (Device, Queue_Family_Index, 0, &Queue);
-
-  // Query the physical device's ray tracing pipeline properties for SBT layout
-  Raytracing_Properties.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_PIPELINE_PROPERTIES_KHR;
-  VkPhysicalDeviceProperties2 Device_Properties = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2,
-                                                   .pNext = &Raytracing_Properties};
-  vkGetPhysicalDeviceProperties2 (Physical_Device, &Device_Properties);
-
-  // Load the ray tracing extension function pointers from the logical device
-  VULKAN_FUNCTIONS (LOAD_VK)
-}
-
-// ════════════════════════════
-//   Vulkan_Create_Swapchain
-// ════════════════════════════
-
-void Vulkan_Create_Swapchain () {
-  VkSurfaceCapabilitiesKHR Capabilities;
-  vkGetPhysicalDeviceSurfaceCapabilitiesKHR (Physical_Device, Surface, &Capabilities);
-
-  // When currentExtent is 0xFFFFFFFF the surface size is undefined - use the window size instead
-  if (Capabilities.currentExtent.width == 0xFFFFFFFF) {
-    int W, H;
-    SDL_Vulkan_GetDrawableSize (Window, &W, &H);
-    Swapchain_Extent = (VkExtent2D){(uint)W, (uint)H};
-    if (Swapchain_Extent.width  < Capabilities.minImageExtent.width)  Swapchain_Extent.width  = Capabilities.minImageExtent.width;
-    if (Swapchain_Extent.height < Capabilities.minImageExtent.height) Swapchain_Extent.height = Capabilities.minImageExtent.height;
-    if (Swapchain_Extent.width  > Capabilities.maxImageExtent.width)  Swapchain_Extent.width  = Capabilities.maxImageExtent.width;
-    if (Swapchain_Extent.height > Capabilities.maxImageExtent.height) Swapchain_Extent.height = Capabilities.maxImageExtent.height;
-  } else {
-    Swapchain_Extent = Capabilities.currentExtent;
-  }
-
-  Swapchain_Format = VK_FORMAT_B8G8R8A8_SRGB;
-
-  // Request one more image than the minimum to avoid stalling on the driver
-  uint Image_Count = Capabilities.minImageCount + 1;
-  if (Capabilities.maxImageCount and Image_Count > Capabilities.maxImageCount)
-    Image_Count = Capabilities.maxImageCount;
-
-  // Create the swapchain with the determined format and present mode
-  VK_CHECK (vkCreateSwapchainKHR (/*device      =>*/ Device,
-                                  /*pCreateInfo =>*/ &(VkSwapchainCreateInfoKHR){
-                                    .sType            = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR,
-                                    .surface          = Surface,
-                                    .minImageCount    = Image_Count,
-                                    .imageFormat      = Swapchain_Format,
-                                    .imageColorSpace  = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR,
-                                    .imageExtent      = Swapchain_Extent,
-                                    .imageArrayLayers = 1,
-                                    .imageUsage       = VK_IMAGE_USAGE_TRANSFER_DST_BIT,
-                                    .imageSharingMode = VK_SHARING_MODE_EXCLUSIVE,
-                                    .preTransform     = Capabilities.currentTransform,
-                                    .compositeAlpha   = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR,
-                                    .presentMode      = VK_PRESENT_MODE_FIFO_KHR,
-                                    .clipped          = VK_TRUE},
-                                  /*pAllocator  =>*/ NULL,
-                                  /*pSwapchain  =>*/ &Swapchain));
-
-  // Retrieve the swapchain image handles
-  vkGetSwapchainImagesKHR (Device, Swapchain, &Swapchain_Image_Count, NULL);
-  vkGetSwapchainImagesKHR (Device, Swapchain, &Swapchain_Image_Count, Swapchain_Images);
-
-} // Vulkan_Create_Swapchain
-
-// ═════════════════════════════
-//   Vulkan_Recreate_Swapchain
-// ═════════════════════════════
-
-void Vulkan_Recreate_Swapchain () {
-  vkDeviceWaitIdle (Device);
-  VkSwapchainKHR Old = Swapchain;
-
-  // Query current surface capabilities for the new swapchain
-  VkSurfaceCapabilitiesKHR Capabilities;
-  vkGetPhysicalDeviceSurfaceCapabilitiesKHR (Physical_Device, Surface, &Capabilities);
-
-  // When currentExtent is 0xFFFFFFFF the surface size is undefined - use the window size instead
-  if (Capabilities.currentExtent.width == 0xFFFFFFFF) {
-    int W, H;
-    SDL_Vulkan_GetDrawableSize (Window, &W, &H);
-    Swapchain_Extent = (VkExtent2D){(uint)W, (uint)H};
-    if (Swapchain_Extent.width  < Capabilities.minImageExtent.width)  Swapchain_Extent.width  = Capabilities.minImageExtent.width;
-    if (Swapchain_Extent.height < Capabilities.minImageExtent.height) Swapchain_Extent.height = Capabilities.minImageExtent.height;
-    if (Swapchain_Extent.width  > Capabilities.maxImageExtent.width)  Swapchain_Extent.width  = Capabilities.maxImageExtent.width;
-    if (Swapchain_Extent.height > Capabilities.maxImageExtent.height) Swapchain_Extent.height = Capabilities.maxImageExtent.height;
-  } else {
-    Swapchain_Extent = Capabilities.currentExtent;
-  }
-
-  // Request one more image than the minimum to avoid stalling
-  uint Image_Count = Capabilities.minImageCount + 1;
-  if (Capabilities.maxImageCount and Image_Count > Capabilities.maxImageCount)
-    Image_Count = Capabilities.maxImageCount;
-
-  // Create the new swapchain, chaining from the old one
-  VK_CHECK (vkCreateSwapchainKHR (/*device      =>*/ Device,
-                                  /*pCreateInfo =>*/ &(VkSwapchainCreateInfoKHR){
-                                    .sType            = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR,
-                                    .surface          = Surface,
-                                    .minImageCount    = Image_Count,
-                                    .imageFormat      = Swapchain_Format,
-                                    .imageColorSpace  = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR,
-                                    .imageExtent      = Swapchain_Extent,
-                                    .imageArrayLayers = 1,
-                                    .imageUsage       = VK_IMAGE_USAGE_TRANSFER_DST_BIT,
-                                    .imageSharingMode = VK_SHARING_MODE_EXCLUSIVE,
-                                    .preTransform     = Capabilities.currentTransform,
-                                    .compositeAlpha   = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR,
-                                    .presentMode      = VK_PRESENT_MODE_FIFO_KHR,
-                                    .clipped          = VK_TRUE,
-                                    .oldSwapchain     = Old},
-                                  /*pAllocator  =>*/ NULL,
-                                  /*pSwapchain  =>*/ &Swapchain));
-
-  // Destroy the old swapchain and retrieve new image handles
-  vkDestroySwapchainKHR (Device, Old, NULL);
-  vkGetSwapchainImagesKHR (Device, Swapchain, &Swapchain_Image_Count, NULL);
-  vkGetSwapchainImagesKHR (Device, Swapchain, &Swapchain_Image_Count, Swapchain_Images);
-  printf ("[window] swapchain recreated %ux%u\n", Swapchain_Extent.width, Swapchain_Extent.height);
-
-} // Vulkan_Recreate_Swapchain
-
-// ══════════════════════════════════
-//   Vulkan_Create_Synchronization
-// ══════════════════════════════════
-
-void Vulkan_Create_Synchronization () {
-
-  // Create a command pool with per-buffer reset capability for our single reusable command buffer
-  VK_CHECK (vkCreateCommandPool (/*device       =>*/ Device,
-                                 /*pCreateInfo  =>*/ &(VkCommandPoolCreateInfo){
-                                   .sType            = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
-                                   .flags            = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT,
-                                   .queueFamilyIndex = Queue_Family_Index},
-                                 /*pAllocator   =>*/ NULL,
-                                 /*pCommandPool =>*/ &Command_Pool));
-
-  // Allocate a single primary-level command buffer for all GPU work
+  // Allocate a one-shot command buffer and record the skinning compute dispatch
+  VkCommandBuffer Skinning_Command_Buffer;
   VK_CHECK (vkAllocateCommandBuffers (/*device          =>*/ Device,
                                       /*pAllocateInfo   =>*/ &(VkCommandBufferAllocateInfo){
                                         .sType              = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
                                         .commandPool        = Command_Pool,
                                         .level              = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
                                         .commandBufferCount = 1},
-                                      /*pCommandBuffers =>*/ &Command_Buffer));
-
-  // Create a fence (pre-signaled so the first frame doesn't deadlock on vkWaitForFences)
-  VK_CHECK (vkCreateFence (/*device      =>*/ Device,
-                           /*pCreateInfo =>*/ &(VkFenceCreateInfo){
-                             .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO,
-                             .flags = VK_FENCE_CREATE_SIGNALED_BIT},
-                           /*pAllocator  =>*/ NULL,
-                           /*pFence      =>*/ &Fence));
-
-  // Create semaphores for swapchain image acquisition and render completion signaling
-  VkSemaphoreCreateInfo Semaphore_Info = {.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO };
-  VK_CHECK (vkCreateSemaphore (Device, &Semaphore_Info, NULL, &Semaphore_Image_Available));
-  VK_CHECK (vkCreateSemaphore (Device, &Semaphore_Info, NULL, &Semaphore_Render_Finished));
-}
-
-// ══════════════════════════════════════
-//   Vulkan_Transition_Storage_Image
-// ══════════════════════════════════════
-
-void Vulkan_Transition_Storage_Image () {
-
-  // Begin a one-shot command buffer for the initial layout transition
-  VK_CHECK (vkResetCommandBuffer (Command_Buffer, 0));
-  VK_CHECK (vkBeginCommandBuffer (/*commandBuffer =>*/ Command_Buffer,
+                                      /*pCommandBuffers =>*/ &Skinning_Command_Buffer));
+  VK_CHECK (vkBeginCommandBuffer (/*commandBuffer =>*/ Skinning_Command_Buffer,
                                   /*pBeginInfo    =>*/ &(VkCommandBufferBeginInfo){
                                     .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
                                     .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT}));
+  vkCmdBindPipeline (Skinning_Command_Buffer, VK_PIPELINE_BIND_POINT_COMPUTE, Skinning_Pipeline);
 
-  // Record and submit a layout transition from undefined to general for storage writes
-  Image_Layout_Barrier (/*Command_Buffer     =>*/ Command_Buffer,
-                        /*Image              =>*/ Raytracing_Storage_Image.Image,
-                        /*Old_Layout         =>*/ VK_IMAGE_LAYOUT_UNDEFINED,
-                        /*New_Layout         =>*/ VK_IMAGE_LAYOUT_GENERAL,
-                        /*Source_Access      =>*/ 0,
-                        /*Destination_Access =>*/ VK_ACCESS_SHADER_WRITE_BIT,
-                        /*Source_Stage       =>*/ VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
-                        /*Destination_Stage  =>*/ VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR);
+  // Push vertex count and bone count as a uvec2 push constant
+  uint Push[2] = {Entity_Ptr->Vertex_Count, (uint)Entity_Ptr->Bone_Count};
+  vkCmdPushConstants (/*commandBuffer =>*/ Skinning_Command_Buffer,
+                      /*layout        =>*/ Skinning_Pipeline_Layout,
+                      /*stageFlags    =>*/ VK_SHADER_STAGE_COMPUTE_BIT,
+                      /*offset        =>*/ 0,
+                      /*size          =>*/ 8,
+                      /*pValues       =>*/ Push);
 
-  // Finalize the command buffer recording
-  VK_CHECK (vkEndCommandBuffer (Command_Buffer));
+  // Bind the bone SSBO (set 0), bind-pose vertex buffer (set 1), and skinned output buffer (set 2)
+  VkDescriptorBufferInfo Bone_Info   = {Entity_Ptr->Bone_Buffer.Buffer,   0, VK_WHOLE_SIZE};
+  VkDescriptorBufferInfo Bind_Info   = {Entity_Ptr->Vertex_Buffer.Buffer, 0, VK_WHOLE_SIZE};
+  VkDescriptorBufferInfo Output_Info = {Entity_Ptr->Vertex_Buffer.Buffer, 0, VK_WHOLE_SIZE};
+  VkWriteDescriptorSet Writes[] = {
+    {.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstBinding = 0, .descriptorCount = 1,
+     .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .pBufferInfo = &Bone_Info},
+    {.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstBinding = 1, .descriptorCount = 1,
+     .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .pBufferInfo = &Bind_Info},
+    {.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstBinding = 2, .descriptorCount = 1,
+     .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .pBufferInfo = &Output_Info}};
+  PFN_vkCmdPushDescriptorSetKHR Push_Desc =
+    (PFN_vkCmdPushDescriptorSetKHR)vkGetDeviceProcAddr (Device, "vkCmdPushDescriptorSetKHR");
+  Push_Desc (/*commandBuffer        =>*/ Skinning_Command_Buffer,
+             /*pipelineBindPoint    =>*/ VK_PIPELINE_BIND_POINT_COMPUTE,
+             /*layout               =>*/ Skinning_Pipeline_Layout,
+             /*set                  =>*/ 0,
+             /*descriptorWriteCount =>*/ 3,
+             /*pDescriptorWrites    =>*/ Writes);
 
-  // Submit the transition command and wait for completion before proceeding
+  // Dispatch: one compute invocation per vertex, grouped into workgroups of 64
+  vkCmdDispatch (Skinning_Command_Buffer, (Entity_Ptr->Vertex_Count + 63) / 64, 1, 1);
+
+  // End recording and submit without a fence; synchronize by blocking on the queue
+  VK_CHECK (vkEndCommandBuffer (Skinning_Command_Buffer));
   VK_CHECK (vkQueueSubmit (/*queue       =>*/ Queue,
-                           /*submitCount =>*/ 1,
-                           /*pSubmits    =>*/ &(VkSubmitInfo){
-                             .sType              = VK_STRUCTURE_TYPE_SUBMIT_INFO,
-                             .commandBufferCount = 1,
-                             .pCommandBuffers    = &Command_Buffer},
-                           /*fence       =>*/ VK_NULL_HANDLE));
-  VK_CHECK (vkQueueWaitIdle (Queue));
-}
+                            /*submitCount =>*/ 1,
+                            /*pSubmits    =>*/ &(VkSubmitInfo){
+                              .sType              = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+                              .commandBufferCount = 1,
+                              .pCommandBuffers    = &Skinning_Command_Buffer},
+                            /*fence       =>*/ VK_NULL_HANDLE));
+
+  // Block the CPU until the GPU finishes skinning, then release the one-shot command buffer
+  vkQueueWaitIdle (Queue);
+  vkFreeCommandBuffers (Device, Command_Pool, 1, &Skinning_Command_Buffer);
+
+} // Skeleton_Skin_Dispatch
 
 // ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 //
-// §8. Scene - BSP Loading
+// §8. Scene
 //
 // ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+
+// ════════════════
+//   VBSP_Convert
+// ════════════════
+
+Vertex VBSP_Convert (float X, float Y, float Z, float Nx, float Ny, float Nz, float U, float V, float Lu, float Lv) {
+  return (Vertex){.Position    = {X, Z, -Y},
+                  .Normal      = {Nx, Nz, -Ny},
+                  .Texture_UV  = {U, V},
+                  .Lightmap_UV = {Lu, Lv}};
+}
 
 // ══════════════════════
 //   Convert_BSP_Vertex  
@@ -4779,12 +5627,12 @@ void Vulkan_Transition_Storage_Image () {
 
 Vertex Convert_BSP_Vertex (const BSP_Vertex *Source) {
 
-  // Swizzle from Id Software's Z-up coordinate system to our Y-up system: (x, y, z) becomes (x, z, -y)
+  // Swizzle from Id Software's Z-up coordinate system to our Y-up system
   return (Vertex){
-    .Position    = {Source->Position[0],        Source->Position[2],       -Source->Position[1]},
-    .Texture_Uv  = {Source->Texture_Coords[0],  Source->Texture_Coords[1]},
-    .Lightmap_Uv = {Source->Lightmap_Coords[0], Source->Lightmap_Coords[1]},
-    .Normal      = {Source->Normal[0],          Source->Normal[2],         -Source->Normal[1]}
+    .Position    = {Source->Position        [0], Source->Position        [2], -Source->Position [1]},
+    .Normal      = {Source->Normal          [0], Source->Normal          [2], -Source->Normal   [1]}
+    .Texture_UV  = {Source->Texture_Coords  [0], Source->Texture_Coords  [1]},
+    .Lightmap_UV = {Source->Lightmap_Coords [0], Source->Lightmap_Coords [1]},
   };
 }
 
@@ -4794,20 +5642,409 @@ Vertex Convert_BSP_Vertex (const BSP_Vertex *Source) {
 
 vec3 Bezier_Evaluate (vec3 Control_A, vec3 Control_B, vec3 Control_C, float Parameter) {
 
-  // Evaluate the quadratic Bézier curve: B(t) = (1-t)²·A + 2(1-t)t·B + t²·C
+  // Evaluate the quadratic Bezier curve: B(t) = (1 - t)^2 * A + 2(1 - t) t * B + t^2 * C
   float Inverse = 1.f - Parameter;
-  return Add (Add (Scale (Control_A, Inverse * Inverse),
-                   Scale (Control_B, 2.f * Inverse * Parameter)),
-              Scale (Control_C, Parameter * Parameter));
+  return Add (Add (Scale (Control_A,       Inverse   * Inverse),
+                   Scale (Control_B, 2.f * Inverse   * Parameter)),
+                   Scale (Control_C,       Parameter * Parameter));
 }
+
+// ════════════════════════
+//   Scene_Load_From_VBSP
+// ════════════════════════
+
+Scene Scene_Load_From_VBSP (const char *Path, Spawn *Out_Spawn) {
+
+  // Open and read the full BSP file into memory; abort with a diagnostic message if missing
+  FILE *File = fopen (Path, "rb");
+  if (not File) {
+    fprintf (stderr, "[error] cannot open VBSP map: %s\n", Path);
+    fprintf (stderr, "  Ensure the .bsp file exists in assets/maps/\n");
+    fprintf (stderr, "  For Source maps, use --source flag and place .bsp files in assets/maps/\n");
+    exit (1);
+  }
+
+  // Allocate and load the file data
+  fseek (File, 0, SEEK_END); long File_Size = ftell (File); rewind (File);
+  uint8_t *File_Data   = malloc (File_Size);
+  size_t   Bytes_Read_ = fread (File_Data, 1, File_Size, File); (void)Bytes_Read_;
+  fclose (File);
+
+  // Validate the BSP header magic and version
+  const VBSP_Header *Header = (const VBSP_Header*)File_Data;
+  assert (Header->Magic == VBSP_MAGIC
+          and (Header->Version >= VBSP_VERSION_19 and Header->Version <= VBSP_VERSION_21));
+
+  // Locate lump base pointers
+  const VBSP_Vertex   *Verts      = (const VBSP_Vertex*)   (File_Data + Header->Lumps [VBSP_VERTICES].Offset);
+  const VBSP_Edge     *Edges      = (const VBSP_Edge*)     (File_Data + Header->Lumps [VBSP_EDGES].Offset);
+  const int           *Surf_Edges = (const int*)           (File_Data + Header->Lumps [VBSP_SURFEDGES].Offset);
+  const VBSP_Face     *Faces      = (const VBSP_Face*)     (File_Data + Header->Lumps [VBSP_FACES].Offset);
+  const VBSP_Tex_Info *Tex_Infos  = (const VBSP_Tex_Info*) (File_Data + Header->Lumps [VBSP_TEXINFO].Offset);
+  const VBSP_Tex_Data *Tex_Datas  = (const VBSP_Tex_Data*) (File_Data + Header->Lumps [VBSP_TEXDATA].Offset);
+  const int           *Str_Table  = (const int*)           (File_Data + Header->Lumps [VBSP_TEXDATA_STRING_TABLE].Offset);
+  const char          *Str_Data   = (const char*)          (File_Data + Header->Lumps [VBSP_TEXDATA_STRING_DATA].Offset);
+
+  // Planes lump: each plane is 20 bytes (float normal[3], float dist, int type)
+  const uint8_t *Plane_Data  = File_Data + Header->Lumps[VBSP_PLANES].Offset;
+  uint Plane_Count  = (uint) (Header->Lumps [VBSP_PLANES]    .Length / 20);
+  uint Vert_Count   = (uint) (Header->Lumps [VBSP_VERTICES]  .Length / sizeof (VBSP_Vertex));
+  uint Edge_Count   = (uint) (Header->Lumps [VBSP_EDGES]     .Length / sizeof (VBSP_Edge));
+  uint Surf_Edge_N  = (uint) (Header->Lumps [VBSP_SURFEDGES] .Length / sizeof (int));
+  uint Face_Count   = (uint) (Header->Lumps [VBSP_FACES]     .Length / sizeof (VBSP_Face));
+  uint Tex_Info_N   = (uint) (Header->Lumps [VBSP_TEXINFO]   .Length / sizeof (VBSP_Tex_Info));
+  uint Tex_Data_N   = (uint) (Header->Lumps [VBSP_TEXDATA]   .Length / sizeof (VBSP_Tex_Data));
+  printf ("[vbsp] %u verts, %u edges, %u surfedges, %u faces, %u texinfos, %u texdatas\n",
+          Vert_Count, Edge_Count, Surf_Edge_N, Face_Count, Tex_Info_N, Tex_Data_N);
+
+  // Displacement data
+  const VBSP_Disp_Info *Disps   = (const VBSP_Disp_Info*) (File_Data + Header->Lumps [VBSP_DISPINFO].Offset);
+  const VBSP_Disp_Vert *Disp_Vs = (const VBSP_Disp_Vert*) (File_Data + Header->Lumps [VBSP_DISPVERTS].Offset);
+  uint Disp_Count = (uint) (Header->Lumps [VBSP_DISPINFO].Length / sizeof (VBSP_Disp_Info));
+
+  // Build the scene material name table from the texdata string pool
+  uint Str_Table_N = (uint) (Header->Lumps [VBSP_TEXDATA_STRING_TABLE].Length / sizeof (int));
+  uint Str_Data_N  = (uint) (Header->Lumps [VBSP_TEXDATA_STRING_DATA].Length);
+  Scene S = {0};
+  S.Material_Count = Tex_Data_N;
+  S.Materials      = calloc (Tex_Data_N, sizeof (vec4));
+  S.Texture_Names  = calloc (Tex_Data_N, 64);
+  for (uint Tex_Index = 0; Tex_Index < Tex_Data_N; Tex_Index++) {
+    uint        Name_Id = (uint)Tex_Datas[Tex_Index].Name_Id;
+    const char *Name    = (Name_Id < Str_Table_N and (uint)Str_Table[Name_Id] < Str_Data_N)
+                          ? Str_Data + Str_Table[Name_Id] : "missing";
+    snprintf (S.Texture_Names[Tex_Index], 64, "%s", Name);
+    S.Materials[Tex_Index] = (vec4){Tex_Datas [Tex_Index].Refl [0],
+                                    Tex_Datas [Tex_Index].Refl [1],
+                                    Tex_Datas [Tex_Index].Refl [2], 1.f};
+  }
+
+  // Build per-material skip table: suppress non-renderable tool surfaces
+  #define VBSP_SKIP_FLAGS 0x3C6 // SURF_SKY2D=0x2 SURF_SKY=0x4 SURF_TRIGGER=0x40 SURF_NODRAW=0x80 SURF_HINT=0x100 SURF_SKIP=0x200
+  uint8_t *Mat_Skip = calloc (Tex_Data_N, 1);
+  for (uint Tex_Index = 0; Tex_Index < Tex_Data_N; Tex_Index++) {
+    const char *Name = S.Texture_Names[Tex_Index];
+    if (strncasecmp (Name, "TOOLS/", 6) == 0 or strncasecmp (Name, "tools/", 6) == 0)
+      Mat_Skip[Tex_Index] = 1;
+  }
+
+  // First pass: count triangles (filter logic must exactly match the second pass below)
+  uint Total_Tris = 0;
+  for (uint Face_Index = 0; Face_Index < Face_Count; Face_Index++) {
+    if (Faces[Face_Index].Disp_Info >= 0) continue; // displacements handled separately
+    if (Faces[Face_Index].Num_Edges < 3)  continue;
+    int Tex_Info_Index = Faces[Face_Index].Tex_Info;
+    if (Tex_Info_Index < 0 or (uint)Tex_Info_Index >= Tex_Info_N) continue;
+    if (Tex_Infos[Tex_Info_Index].Flags & VBSP_SKIP_FLAGS) continue;
+    uint Material_Index = (uint)Tex_Infos[Tex_Info_Index].Tex_Data;
+    if (Material_Index >= Tex_Data_N or Mat_Skip[Material_Index]) continue;
+    Total_Tris += Faces[Face_Index].Num_Edges - 2;
+  }
+
+  // Displacement triangles
+  for (uint Disp_Index = 0; Disp_Index < Disp_Count; Disp_Index++) {
+    int Grid_Side = (1 << Disps[Disp_Index].Power);
+    Total_Tris += Grid_Side * Grid_Side * 2;
+  }
+
+  // Allocate geometry buffers sized for the worst-case triangle count
+  S.Vertices     = malloc (sizeof (Vertex) * Total_Tris * 3);
+  S.Indices      = malloc (sizeof (uint)   * Total_Tris * 3);
+  S.Texture_Ids  = malloc (sizeof (uint)   * Total_Tris);
+  S.Vertex_Count = S.Index_Count = S.Triangle_Count = 0;
+
+  // Second pass: emit fan-triangulated face geometry
+  for (uint Face_Index = 0; Face_Index < Face_Count; Face_Index++) {
+    const VBSP_Face *Face = &Faces[Face_Index];
+    if (Face->Disp_Info >= 0 or Face->Num_Edges < 3) continue;
+    int Tex_Info_Index = Face->Tex_Info;
+    if (Tex_Info_Index < 0 or (uint)Tex_Info_Index >= Tex_Info_N) continue;
+    const VBSP_Tex_Info *Tex_Info = &Tex_Infos[Tex_Info_Index];
+    if (Tex_Info->Flags & VBSP_SKIP_FLAGS) continue;
+    uint Material_Index = (uint)Tex_Info->Tex_Data;
+    if (Material_Index >= Tex_Data_N or Mat_Skip[Material_Index]) continue;
+
+    // Collect face vertex positions via the surf-edge indirection table
+    int  Face_Edge_Count = Face->Num_Edges; if (Face_Edge_Count > 4096) continue; // sanity cap
+    vec3 *Positions = alloca (sizeof (vec3) * Face_Edge_Count);
+    for (int Edge_Index = 0; Edge_Index < Face_Edge_Count; Edge_Index++) {
+      uint Surf_Edge_Index = (uint)(Face->First_Edge + Edge_Index);
+      if (Surf_Edge_Index >= Surf_Edge_N) { Positions[Edge_Index] = Make (0,0,0); continue; }
+      int  Surf_Edge_Value = Surf_Edges[Surf_Edge_Index];
+      uint Abs_Surf_Edge   = (uint)(Surf_Edge_Value >= 0 ? Surf_Edge_Value : -Surf_Edge_Value);
+      if (Abs_Surf_Edge >= Edge_Count) { Positions[Edge_Index] = Make (0,0,0); continue; }
+      uint Vertex_Index = Surf_Edge_Value >= 0 ? Edges[Abs_Surf_Edge].V[0] : Edges[Abs_Surf_Edge].V[1];
+      if (Vertex_Index >= Vert_Count) Vertex_Index = 0;
+      Positions[Edge_Index] = Make (Verts[Vertex_Index].P[0],
+                                    Verts[Vertex_Index].P[1],
+                                    Verts[Vertex_Index].P[2]);
+    }
+
+    // Fetch the precomputed face normal from the BSP plane lump (more reliable than cross product)
+    vec3 Face_Normal = {0, 1, 0};
+    if (Face->Plane_Num < Plane_Count) {
+      const float *Plane_Normal = (const float*)(Plane_Data + (uint)Face->Plane_Num * 20);
+      Face_Normal = Face->Side
+        ? Make (-Plane_Normal[0], -Plane_Normal[1], -Plane_Normal[2])
+        : Make ( Plane_Normal[0],  Plane_Normal[1],  Plane_Normal[2]);
+    }
+
+    // Fan-triangulate the polygon and project texture and lightmap coordinates
+    for (int Fan_Index = 0; Fan_Index < Face->Num_Edges - 2; Fan_Index++) {
+      uint Triangle_Base    = S.Vertex_Count;
+      int  Fan_Corners[3]   = {0, Fan_Index + 1, Fan_Index + 2};
+      for (int Corner = 0; Corner < 3; Corner++) {
+        vec3  Corner_Position = Positions[Fan_Corners[Corner]];
+        float U  = Corner_Position.x * Tex_Info->Tex_Vecs[0][0]
+                 + Corner_Position.y * Tex_Info->Tex_Vecs[0][1]
+                 + Corner_Position.z * Tex_Info->Tex_Vecs[0][2] + Tex_Info->Tex_Vecs[0][3];
+        float V  = Corner_Position.x * Tex_Info->Tex_Vecs[1][0]
+                 + Corner_Position.y * Tex_Info->Tex_Vecs[1][1]
+                 + Corner_Position.z * Tex_Info->Tex_Vecs[1][2] + Tex_Info->Tex_Vecs[1][3];
+        int Tex_Width  = Tex_Datas[Material_Index].W;
+        int Tex_Height = Tex_Datas[Material_Index].H;
+        if (Tex_Width  > 0) U /= Tex_Width;
+        if (Tex_Height > 0) V /= Tex_Height;
+        float Lu = Corner_Position.x * Tex_Info->Lm_Vecs[0][0]
+                 + Corner_Position.y * Tex_Info->Lm_Vecs[0][1]
+                 + Corner_Position.z * Tex_Info->Lm_Vecs[0][2] + Tex_Info->Lm_Vecs[0][3];
+        float Lv = Corner_Position.x * Tex_Info->Lm_Vecs[1][0]
+                 + Corner_Position.y * Tex_Info->Lm_Vecs[1][1]
+                 + Corner_Position.z * Tex_Info->Lm_Vecs[1][2] + Tex_Info->Lm_Vecs[1][3];
+        S.Vertices[S.Vertex_Count++] = VBSP_Convert (Corner_Position.x, Corner_Position.y, Corner_Position.z,
+                                                      Face_Normal.x, Face_Normal.y, Face_Normal.z,
+                                                      U, V, Lu, Lv);
+      }
+      S.Indices    [S.Index_Count++]    = Triangle_Base;
+      S.Indices    [S.Index_Count++]    = Triangle_Base + 1;
+      S.Indices    [S.Index_Count++]    = Triangle_Base + 2;
+      S.Texture_Ids[S.Triangle_Count++] = Material_Index;
+    }
+  }
+
+  // Displacement surfaces: subdivided height-mapped quad patches
+  for (uint Disp_Index = 0; Disp_Index < Disp_Count; Disp_Index++) {
+    const VBSP_Disp_Info *Disp     = &Disps[Disp_Index];
+    int                   Grid_Side = (1 << Disp->Power) + 1;
+    if (Disp->Map_Face >= Face_Count) continue;
+    const VBSP_Face *Face = &Faces[Disp->Map_Face];
+    if (Face->Num_Edges < 4) continue;
+
+    // Collect the four corner positions of the base quad
+    vec3 Corners[4] = {{0}};
+    for (int Edge_Index = 0; Edge_Index < 4 and Edge_Index < Face->Num_Edges; Edge_Index++) {
+      uint Surf_Edge_Index = (uint)(Face->First_Edge + Edge_Index);
+      if (Surf_Edge_Index >= Surf_Edge_N) continue;
+      int  Surf_Edge_Value = Surf_Edges[Surf_Edge_Index];
+      uint Abs_Surf_Edge   = (uint)(Surf_Edge_Value >= 0 ? Surf_Edge_Value : -Surf_Edge_Value);
+      if (Abs_Surf_Edge >= Edge_Count) continue;
+      uint Vertex_Index = Surf_Edge_Value >= 0 ? Edges[Abs_Surf_Edge].V[0] : Edges[Abs_Surf_Edge].V[1];
+      if (Vertex_Index >= Vert_Count) Vertex_Index = 0;
+      Corners[Edge_Index] = Make (Verts[Vertex_Index].P[0],
+                                  Verts[Vertex_Index].P[1],
+                                  Verts[Vertex_Index].P[2]);
+    }
+
+    // Find the corner closest to the displacement start position and rotate the winding
+    float Best_Dist   = 1e18f;
+    int   Best_Corner = 0;
+    vec3  Start_Position = Make (Disp->Start[0], Disp->Start[1], Disp->Start[2]);
+    for (int Corner_Index = 0; Corner_Index < 4; Corner_Index++) {
+      float Corner_Dist_Sq = Dot (Subtract (Corners[Corner_Index], Start_Position),
+                                  Subtract (Corners[Corner_Index], Start_Position));
+      if (Corner_Dist_Sq < Best_Dist) { Best_Dist = Corner_Dist_Sq; Best_Corner = Corner_Index; }
+    }
+    vec3 Rotated_Corners[4];
+    for (int Corner_Index = 0; Corner_Index < 4; Corner_Index++)
+      Rotated_Corners[Corner_Index] = Corners[(Corner_Index + Best_Corner) % 4];
+
+    // Bilinearly interpolate the grid and displace each point along the stored vector
+    uint Disp_Vertex_Base = S.Vertex_Count;
+    S.Vertices = realloc (S.Vertices, sizeof (Vertex) * (S.Vertex_Count + Grid_Side * Grid_Side));
+    for (int Grid_Y = 0; Grid_Y < Grid_Side; Grid_Y++)
+      for (int Grid_X = 0; Grid_X < Grid_Side; Grid_X++) {
+        float U = (float)Grid_X / (Grid_Side - 1);
+        float V = (float)Grid_Y / (Grid_Side - 1);
+        vec3 Interp_Bottom  = Add (Scale (Rotated_Corners[0], 1-U), Scale (Rotated_Corners[1], U));
+        vec3 Interp_Top     = Add (Scale (Rotated_Corners[3], 1-U), Scale (Rotated_Corners[2], U));
+        vec3 Surface_Position = Add (Scale (Interp_Bottom, 1-V), Scale (Interp_Top, V));
+        const VBSP_Disp_Vert *Disp_Vertex = &Disp_Vs[Disp->Disp_Vert_Start + Grid_Y * Grid_Side + Grid_X];
+        Surface_Position = Add (Surface_Position,
+                                Scale (Make (Disp_Vertex->Vec[0], Disp_Vertex->Vec[1], Disp_Vertex->Vec[2]),
+                                       Disp_Vertex->Dist));
+        S.Vertices[S.Vertex_Count++] = VBSP_Convert (Surface_Position.x, Surface_Position.y, Surface_Position.z,
+                                                      0, 0, 1, U, V, U, V);
+      }
+
+    // Triangulate the displacement grid into two triangles per cell
+    int Total_Disp_Tris = (Grid_Side - 1) * (Grid_Side - 1) * 2;
+    S.Indices     = realloc (S.Indices,     sizeof (uint) * (S.Index_Count    + Total_Disp_Tris * 3));
+    S.Texture_Ids = realloc (S.Texture_Ids, sizeof (uint) * (S.Triangle_Count + Total_Disp_Tris));
+    int Tex_Info_Index = Face->Tex_Info;
+    uint Material_Index = (Tex_Info_Index >= 0 and (uint)Tex_Info_Index < Tex_Info_N)
+                          ? (uint)Tex_Infos[Tex_Info_Index].Tex_Data : 0;
+    if (Material_Index >= Tex_Data_N) Material_Index = 0;
+    for (int Grid_Y = 0; Grid_Y < Grid_Side - 1; Grid_Y++)
+      for (int Grid_X = 0; Grid_X < Grid_Side - 1; Grid_X++) {
+        uint Grid_A = Disp_Vertex_Base + Grid_Y * Grid_Side + Grid_X;
+        uint Grid_B = Grid_A + 1;
+        uint Grid_C = Grid_A + Grid_Side;
+        uint Grid_D = Grid_C + 1;
+        S.Indices[S.Index_Count++] = Grid_A; S.Indices[S.Index_Count++] = Grid_C; S.Indices[S.Index_Count++] = Grid_B;
+        S.Indices[S.Index_Count++] = Grid_B; S.Indices[S.Index_Count++] = Grid_C; S.Indices[S.Index_Count++] = Grid_D;
+        S.Texture_Ids[S.Triangle_Count++] = Material_Index;
+        S.Texture_Ids[S.Triangle_Count++] = Material_Index;
+      }
+  }
+
+  // Lightmap atlas: build from the VBSP_LIGHTING lump if present, otherwise use a 1x1 full-bright fallback
+  uint Lightmap_Lump_Size = (uint)Header->Lumps[VBSP_LIGHTING].Length;
+  if (Lightmap_Lump_Size > 0) {
+    uint Atlas_Width = 512, Atlas_Height = 512;
+    S.Lightmap_Atlas  = calloc (Atlas_Width * Atlas_Height * 4, 1);
+    memset (S.Lightmap_Atlas, 255, Atlas_Width * Atlas_Height * 4); // Full-bright fallback
+    S.Lightmap_Width  = Atlas_Width;
+    S.Lightmap_Height = Atlas_Height;
+  } else {
+    S.Lightmap_Atlas  = calloc (4, 1);
+    memset (S.Lightmap_Atlas, 255, 4);
+    S.Lightmap_Width = S.Lightmap_Height = 1;
+  }
+
+  // Parse entities from the entity lump (Source BSP key-value format)
+  *Out_Spawn = (Spawn){{0, 64, 0}, 0};
+  S.Sky_Name[0]  = 0;
+  S.Entities     = calloc (MAX_BSP_ENTITIES, sizeof (BSP_Entity));
+  S.Entity_Count = 0;
+  uint  Entity_Lump_Len = (uint)Header->Lumps[VBSP_ENTITIES].Length;
+  char *Entity_String   = malloc (Entity_Lump_Len + 1);
+  memcpy (Entity_String, File_Data + Header->Lumps[VBSP_ENTITIES].Offset, Entity_Lump_Len);
+  Entity_String[Entity_Lump_Len] = 0;
+  int Spawn_Found = 0;
+  {
+    char *Cursor = Entity_String;
+    while (*Cursor) {
+      while (*Cursor and *Cursor != '{') Cursor++;
+      if (not *Cursor) break; Cursor++;
+
+      // Parse all key-value pairs in this entity block
+      char  Class[64]={0}, Sky[64]={0}, Light[128]={0}, Ambient[128]={0};
+      float Origin_X=0, Origin_Y=0, Origin_Z=0;
+      float Angles_Pitch=0, Angles_Yaw=0, Explicit_Pitch=0, Scale=16;
+      int   Has_Explicit_Pitch = 0;
+      while (*Cursor and *Cursor != '}') {
+        while (*Cursor and *Cursor != '"') { if (*Cursor == '}') goto done; Cursor++; }
+        if (not *Cursor) break; Cursor++;
+        char Key[64] = {0}; int Key_Index = 0;
+        while (*Cursor and *Cursor != '"' and Key_Index < 63) Key[Key_Index++] = *Cursor++;
+        if (*Cursor == '"') Cursor++;
+        while (*Cursor and *Cursor != '"' and *Cursor != '}') Cursor++;
+        if (*Cursor != '"') continue; Cursor++;
+        char Value[128] = {0}; int Value_Index = 0;
+        while (*Cursor and *Cursor != '"' and Value_Index < 127) Value[Value_Index++] = *Cursor++;
+        if (*Cursor == '"') Cursor++;
+        if (strcmp (Key, "classname") == 0) snprintf (Class,   64,  "%s", Value);
+        if (strcmp (Key, "origin")    == 0) sscanf   (Value, "%f %f %f", &Origin_X, &Origin_Y, &Origin_Z);
+        if (strcmp (Key, "angles")    == 0) sscanf   (Value,    "%f %f", &Angles_Pitch, &Angles_Yaw);
+        if (strcmp (Key, "skyname")   == 0) snprintf (Sky,      64,  "%s", Value);
+        if (strcmp (Key, "_light")    == 0) snprintf (Light,   128,  "%s", Value);
+        if (strcmp (Key, "_ambient")  == 0) snprintf (Ambient, 128,  "%s", Value);
+        if (strcmp (Key, "pitch")     == 0) { sscanf (Value, "%f", &Explicit_Pitch); Has_Explicit_Pitch = 1; }
+        if (strcmp (Key, "scale")     == 0) sscanf   (Value, "%f", &Scale);
+      }
+      done:
+      if (*Cursor == '}') Cursor++;
+      float Sun_Pitch = Has_Explicit_Pitch ? Explicit_Pitch : Angles_Pitch;
+      float Sun_Yaw   = Angles_Yaw;
+
+      // Spawn points: record the first one found as the player start
+      if (not Spawn_Found
+          and (strcmp (Class, "info_player_terrorist")        == 0
+            or strcmp (Class, "info_player_counterterrorist") == 0
+            or strcmp (Class, "info_player_start")            == 0
+            or strcmp (Class, "info_player_deathmatch")       == 0)) {
+        Out_Spawn->Origin = Make (Origin_X, Origin_Z, -Origin_Y);
+        Out_Spawn->Angle  = Angles_Yaw;
+        Spawn_Found = 1;
+        printf ("[vbsp] spawn '%s': src=(%g,%g,%g) gl=(%g,%g,%g) yaw=%g\n",
+                Class, Origin_X, Origin_Y, Origin_Z, Origin_X, Origin_Z, -Origin_Y, Angles_Yaw);
+      }
+
+      // Worldspawn: extract the skybox name
+      if (strcmp (Class, "worldspawn") == 0 and Sky[0]) {
+        snprintf (S.Sky_Name, 64, "%s", Sky);
+        printf ("[vbsp] skyname: %s\n", S.Sky_Name);
+      }
+
+      // light_environment: record sun colour, direction, and ambient for the renderer
+      if (strcmp (Class, "light_environment") == 0 and S.Entity_Count < MAX_BSP_ENTITIES) {
+        BSP_Entity *Light_Entity = &S.Entities[S.Entity_Count++];
+        Light_Entity->Kind              = ENTITY_ENV_SKY;
+        Light_Entity->Common.Origin     = Make (Origin_X, Origin_Z, -Origin_Y);
+
+        // Parse sun colour from the "_light" key (R G B [brightness])
+        float Light_Red = 255, Light_Green = 255, Light_Blue = 255;
+        sscanf (Light, "%f %f %f", &Light_Red, &Light_Green, &Light_Blue);
+        Light_Entity->env.Color = Make (Light_Red/255.f, Light_Green/255.f, Light_Blue/255.f);
+
+        // Parse ambient from the "_ambient" key: R G B brightness (Source scales by brightness/200)
+        float Ambient_Red=128, Ambient_Green=128, Ambient_Blue=128, Ambient_Brightness=200;
+        sscanf (Ambient, "%f %f %f %f", &Ambient_Red, &Ambient_Green, &Ambient_Blue, &Ambient_Brightness);
+        float Ambient_Scale = (Ambient_Brightness / 200.f) * 0.15f; // Scale down for the ray tracer
+        Light_Entity->env.Ambient = Make (Ambient_Red   / 255.f * Ambient_Scale,
+                                          Ambient_Green / 255.f * Ambient_Scale,
+                                          Ambient_Blue  / 255.f * Ambient_Scale);
+
+        // Convert pitch and yaw to a world-space sun direction vector
+        float Pitch_Radians = Sun_Pitch * 3.14159f / 180.f;
+        float Yaw_Radians   = Sun_Yaw   * 3.14159f / 180.f;
+
+        // Source space: X=right, Y=forward, Z=up; light rays come FROM the sun position
+        float Source_Sun_X = cosf (Pitch_Radians) * cosf (Yaw_Radians);
+        float Source_Sun_Y = cosf (Pitch_Radians) * sinf (Yaw_Radians);
+        float Source_Sun_Z = sinf (Pitch_Radians);
+
+        // Negate to get direction TO the sun, then swizzle Source (x,y,z) -> engine (x,z,-y)
+        Light_Entity->env.Direction = Normalize (Make (-Source_Sun_X, -Source_Sun_Z, Source_Sun_Y));
+        printf ("[vbsp] light_environment: sun=(%g,%g,%g) dir=(%g,%g,%g) ambient=(%g,%g,%g) pitch=%g yaw=%g\n",
+                Light_Entity->env.Color.x,     Light_Entity->env.Color.y,     Light_Entity->env.Color.z,
+                Light_Entity->env.Direction.x, Light_Entity->env.Direction.y, Light_Entity->env.Direction.z,
+                Light_Entity->env.Ambient.x,   Light_Entity->env.Ambient.y,   Light_Entity->env.Ambient.z,
+                Sun_Pitch, Sun_Yaw);
+      }
+
+      // sky_camera: record origin and scale for 3D skybox rendering
+      if (strcmp (Class, "sky_camera") == 0 and S.Entity_Count < MAX_BSP_ENTITIES) {
+        BSP_Entity *Sky_Camera_Entity = &S.Entities[S.Entity_Count++];
+        Sky_Camera_Entity->Kind           = ENTITY_WORLD;
+        Sky_Camera_Entity->Common.Origin  = Make (Origin_X, Origin_Z, -Origin_Y);
+        printf ("[vbsp] sky_camera: src=(%g,%g,%g) scale=%g\n", Origin_X, Origin_Y, Origin_Z, Scale);
+      }
+    }
+  }
+
+  // Release the entity lump string buffer and warn if no valid spawn point was found
+  free (Entity_String);
+  if (not Spawn_Found)
+    printf ("[vbsp] WARNING: no spawn found in entity lump (%u bytes)\n", Entity_Lump_Len);
+
+  // Free temporary parsing buffers and the raw file data
+  free (Mat_Skip);
+  free (File_Data);
+  printf ("[vbsp] %s: %u verts, %u tris, %u materials\n",
+          Path, S.Vertex_Count, S.Triangle_Count, S.Material_Count);
+
+  // Return the fully assembled scene to the caller
+  return S;
+} // Scene_Load_From_VBSP
 
 // ════════════════════════
 //   BSP_Tessellate_Patch
 // ════════════════════════
 
 uint BSP_Tessellate_Patch (const BSP_Vertex *Control_Grid, int Patch_Width, int Patch_Height,
-                          Vertex **Inout_Vertices, uint *Inout_Vertex_Count,
-                          uint **Inout_Indices, uint *Inout_Index_Count) {
+                           Vertex **Inout_Vertices, uint *Inout_Vertex_Count,
+                           uint    **Inout_Indices, uint *Inout_Index_Count) {
 
   // Compute how many 3x3 sub-patches exist in the control grid
   int Grid_Columns = (Patch_Width  - 1) / 2;
@@ -4823,7 +6060,7 @@ uint BSP_Tessellate_Patch (const BSP_Vertex *Control_Grid, int Patch_Width, int 
 
   // Grow the output vertex and index arrays to hold the tessellated patch geometry
   *Inout_Vertices = realloc (*Inout_Vertices, sizeof (Vertex) * (*Inout_Vertex_Count + Added_Vertices));
-  *Inout_Indices  = realloc (*Inout_Indices,  sizeof (uint)    * (*Inout_Index_Count  + Added_Indices));
+  *Inout_Indices  = realloc (*Inout_Indices,  sizeof (uint)   * (*Inout_Index_Count  + Added_Indices));
 
   // Track the insertion points for new vertices and indices
   uint Vertex_Base  = *Inout_Vertex_Count;
@@ -4875,8 +6112,8 @@ uint BSP_Tessellate_Patch (const BSP_Vertex *Control_Grid, int Patch_Width, int 
         (*Inout_Vertices)[Patch_Base + Vertical * Stride + Horizontal] = (Vertex){
           .Normal      = {Normal.x,   Normal.y,   Normal.z},
           .Position    = {Position.x, Position.y, Position.z},
-          .Texture_Uv  = {Texture.x,  Texture.y},
-          .Lightmap_Uv = {Lightmap.x, Lightmap.y},
+          .Texture_UV  = {Texture.x,  Texture.y},
+          .Lightmap_UV = {Lightmap.x, Lightmap.y},
         };
       }
     }
@@ -4940,9 +6177,9 @@ Scene Scene_Load_From_BSP (const char *Path, Spawn *Out_Spawn) {
   BSP_Face   *Raw_Faces         = (BSP_Face *)   (File_Data + Header->Lumps [BSP_FACES]   .Offset);
   BSP_Shader *Raw_Shaders       = (BSP_Shader *) (File_Data + Header->Lumps [BSP_SHADERS] .Offset);
   int        *Raw_Indices       = (int *)        (File_Data + Header->Lumps [BSP_INDICES] .Offset);
-  uint        Raw_Vertex_Count  = (uint)          (Header->Lumps [BSP_VERTICES] .Length / sizeof (BSP_Vertex));
-  uint        Raw_Face_Count    = (uint)          (Header->Lumps [BSP_FACES]    .Length / sizeof (BSP_Face));
-  uint        Raw_Shader_Count  = (uint)          (Header->Lumps [BSP_SHADERS]  .Length / sizeof (BSP_Shader));
+  uint        Raw_Vertex_Count  = (uint)         (Header->Lumps [BSP_VERTICES] .Length / sizeof (BSP_Vertex));
+  uint        Raw_Face_Count    = (uint)         (Header->Lumps [BSP_FACES]    .Length / sizeof (BSP_Face));
+  uint        Raw_Shader_Count  = (uint)         (Header->Lumps [BSP_SHADERS]  .Length / sizeof (BSP_Shader));
 
   // Build the lightmap atlas by packing all 128x128 lightmap pages into a single texture
   uint8_t *Lightmap_Atlas       = NULL;
@@ -5036,14 +6273,14 @@ Scene Scene_Load_From_BSP (const char *Path, Spawn *Out_Spawn) {
         float Row_Offset    = (float)((uint)Face->Lightmap_Index / Atlas_Columns);
         for (int Vertex_Loop = 0; Vertex_Loop < Face->Vertex_Count; Vertex_Loop++) {
           uint Vertex_Index = (uint)(Face->First_Vertex + Vertex_Loop);
-          Vertices[Vertex_Index].Lightmap_Uv[0] = (Column_Offset + Vertices[Vertex_Index].Lightmap_Uv[0]) / (float)Atlas_Columns;
-          Vertices[Vertex_Index].Lightmap_Uv[1] = (Row_Offset    + Vertices[Vertex_Index].Lightmap_Uv[1]) / (float)Atlas_Rows;
+          Vertices[Vertex_Index].Lightmap_UV[0] = (Column_Offset + Vertices[Vertex_Index].Lightmap_UV[0]) / (float)Atlas_Columns;
+          Vertices[Vertex_Index].Lightmap_UV[1] = (Row_Offset    + Vertices[Vertex_Index].Lightmap_UV[1]) / (float)Atlas_Rows;
         }
       } else {
         for (int Vertex_Loop = 0; Vertex_Loop < Face->Vertex_Count; Vertex_Loop++) {
           uint Vertex_Index = (uint)(Face->First_Vertex + Vertex_Loop);
-          Vertices[Vertex_Index].Lightmap_Uv[0] = White_Fallback_U;
-          Vertices[Vertex_Index].Lightmap_Uv[1] = White_Fallback_V;
+          Vertices[Vertex_Index].Lightmap_UV[0] = White_Fallback_U;
+          Vertices[Vertex_Index].Lightmap_UV[1] = White_Fallback_V;
         }
       }
 
@@ -5072,13 +6309,13 @@ Scene Scene_Load_From_BSP (const char *Path, Spawn *Out_Spawn) {
         float Column_Offset = (float)((uint)Face->Lightmap_Index % Atlas_Columns);
         float Row_Offset    = (float)((uint)Face->Lightmap_Index / Atlas_Columns);
         for (uint Vertex_Index = Previous_Vertex_Count; Vertex_Index < Vertex_Count; Vertex_Index++) {
-          Vertices[Vertex_Index].Lightmap_Uv[0] = (Column_Offset + Vertices[Vertex_Index].Lightmap_Uv[0]) / (float)Atlas_Columns;
-          Vertices[Vertex_Index].Lightmap_Uv[1] = (Row_Offset    + Vertices[Vertex_Index].Lightmap_Uv[1]) / (float)Atlas_Rows;
+          Vertices[Vertex_Index].Lightmap_UV[0] = (Column_Offset + Vertices[Vertex_Index].Lightmap_UV[0]) / (float)Atlas_Columns;
+          Vertices[Vertex_Index].Lightmap_UV[1] = (Row_Offset    + Vertices[Vertex_Index].Lightmap_UV[1]) / (float)Atlas_Rows;
         }
       } else {
         for (uint Vertex_Index = Previous_Vertex_Count; Vertex_Index < Vertex_Count; Vertex_Index++) {
-          Vertices[Vertex_Index].Lightmap_Uv[0] = White_Fallback_U;
-          Vertices[Vertex_Index].Lightmap_Uv[1] = White_Fallback_V;
+          Vertices[Vertex_Index].Lightmap_UV[0] = White_Fallback_U;
+          Vertices[Vertex_Index].Lightmap_UV[1] = White_Fallback_V;
         }
       }
     }
@@ -5142,7 +6379,7 @@ Scene_Environment Environment_Infer_From_Scene (const Scene *S) {
     for (int C = 0; Name[C] and Name[C + 1] and Name[C + 2]; C++)
       if ((Name[C] == 's' or Name[C] == 'S') and
           (Name[C+1] == 'k' or Name[C+1] == 'K') and
-          (Name[C+2] == 'y' or Name[C+2] == 'Y')) { Has_Sky = 1; break; }
+          (Name[C+2] == 'y' or Name[C+2] == 'Y')) { Has_Sky = 1; break;}
     if (Has_Sky) {
       memcpy (Sky_Shader_Name, Name, 63);
       printf ("[environment] found sky shader: %s\n", Sky_Shader_Name);
@@ -5154,11 +6391,11 @@ Scene_Environment Environment_Infer_From_Scene (const Scene *S) {
   if (Sky_Shader_Name[0]) {
     char Sky_Path[256];
     snprintf (Sky_Path, sizeof (Sky_Path), "assets/%s.tga", Sky_Shader_Name);
-
     uint W = 0, H = 0;
     uint8_t *Pixels = TGA_Load (Sky_Path, &W, &H);
+
+    // Sample sky texture: top quarter = zenith, middle band = horizon. Compute average color for each region (sRGB > linear)
     if (Pixels and W > 0 and H > 0) {
-      // Sample sky texture: top quarter = zenith, middle band = horizon. Compute average color for each region (sRGB > linear)
       double Zenith_R = 0, Zenith_G = 0, Zenith_B = 0;
       double Horiz_R = 0, Horiz_G = 0, Horiz_B = 0;
       int Zenith_Count = 0, Horiz_Count = 0;
@@ -5199,7 +6436,7 @@ Scene_Environment Environment_Infer_From_Scene (const Scene *S) {
       }
 
       // Derive ambient hemisphere from sky colors
-      float Sky_Lum = Env.Sky_Zenith.x * 0.2126f + Env.Sky_Zenith.y * 0.7152f + Env.Sky_Zenith.z * 0.0722f;
+      float Sky_Lum = Env.Sky_Zenith.x  * 0.2126f + Env.Sky_Zenith.y  * 0.7152f + Env.Sky_Zenith.z  * 0.0722f;
       float Hor_Lum = Env.Sky_Horizon.x * 0.2126f + Env.Sky_Horizon.y * 0.7152f + Env.Sky_Horizon.z * 0.0722f;
       float Avg_Lum = (Sky_Lum + Hor_Lum) * 0.5f;
 
@@ -5248,17 +6485,20 @@ Scene_Environment Environment_Infer_From_Scene (const Scene *S) {
   // 3. Check entities for explicit overrides (Q3 worldspawn, Source light_environment)
   for (uint I = 0; I < S->Entity_Count; I++) {
     if (S->Entities[I].Kind == ENTITY_ENV_SKY) {
+
       // Source light_environment: use parsed sun/ambient data
       const BSP_Entity *E = &S->Entities[I];
       Env.Sun_Direction = E->env.Direction;
       Env.Sun_Color     = E->env.Color;
-      // Source lightmaps already include baked direct sun. Use moderate sun for shadow contrast only,
-      // low lightmap multiplier to prevent double-bright from baked sun + raytraced sun overlap.
-      Env.Sun_Intensity  = 2.0f;   // Needs to be strong for visible shadow contrast
+
+      // Source lightmaps already include baked direct sun. Use moderate sun for shadow contrast only, low lightmap multiplier to prevent
+      // double-bright from baked sun + raytraced sun overlap.
+      Env.Sun_Intensity  = 2.0f; // Needs to be strong for visible shadow contrast
       Env.Ambient_Up     = Scale(E->env.Ambient, 0.4f);
       Env.Ambient_Down   = Scale(E->env.Ambient, 0.2f);
-      Env.Lightmap_Mult  = 1.0f;  // Source lightmaps store full intensity (Q3 uses 4.0)
-      // Atmospheric fog — gives depth and matches CSPromod's hazy look
+      Env.Lightmap_Mult  = 1.0f; // Source lightmaps store full intensity 
+
+      // Atmospheric fog - gives depth and matches CSPromod's hazy look
       Env.Fog_Color    = (vec3){0.5f, 0.55f, 0.6f};  // Slightly blue-grey atmospheric haze
       Env.Fog_Density  = 0.0003f;  // Moderate distance fog
       printf ("[environment] using Source light_environment\n");
@@ -5270,7 +6510,7 @@ Scene_Environment Environment_Infer_From_Scene (const Scene *S) {
   if (S->Sky_Name[0]) {
     printf ("[environment] Source skyname: %s\n", S->Sky_Name);
     // Try to load skybox _up face for zenith color
-    static const char *VTF_Search_Dirs[] = {
+    const char *VTF_Search_Dirs[] = {
       "/tmp/cspromod_new/cspromod_b105/cspromod/materials",
       "/tmp/v_m4/materials",
       "assets/materials",
@@ -5332,7 +6572,7 @@ Spawn BSP_Find_Spawn (const uint8_t *File_Data, const BSP_Header *Header) {
       if (Cursor >= End or *Cursor == '}') break;
 
       // Read the quoted key string
-      if (*Cursor != '"') {Cursor++; continue; }
+      if (*Cursor != '"') {Cursor++; continue;}
       Cursor++;
       const char *Key = Cursor;
       while (Cursor < End and *Cursor != '"') Cursor++;
@@ -5398,50 +6638,50 @@ Spawn BSP_Find_Spawn (const uint8_t *File_Data, const BSP_Header *Header) {
 
 void Classify_Entity (const char *Classname, int Length, BSP_Entity *E) {
 
-  // Macros for concise string matching - populate Kind and sub-kind in one step
+  // Macros for easy string matching - populate Kind and sub-kind in one step
   #define MATCH(STR, KIND) \
-    if (Length == (int)sizeof(STR) - 1 and memcmp (Classname, STR, sizeof(STR) - 1) == 0) { E->Kind = KIND; return; }
+    if (Length == (int)sizeof(STR) - 1 and memcmp (Classname, STR, sizeof(STR) - 1) == 0) { E->Kind = KIND; return;}
   #define MATCH_WEAPON(STR, WK, CNT) \
     if (Length == (int)sizeof(STR) - 1 and memcmp (Classname, STR, sizeof(STR) - 1) == 0) { \
-      E->Kind = ENTITY_ITEM_WEAPON; E->item.Weapon = WK; E->Common.Count = CNT; return; }
+      E->Kind = ENTITY_ITEM_WEAPON; E->item.Weapon = WK; E->Common.Count = CNT; return;}
   #define MATCH_AMMO(STR, AK, CNT) \
     if (Length == (int)sizeof(STR) - 1 and memcmp (Classname, STR, sizeof(STR) - 1) == 0) { \
-      E->Kind = ENTITY_ITEM_AMMO; E->item.Ammo = AK; E->Common.Count = CNT; return; }
+      E->Kind = ENTITY_ITEM_AMMO; E->item.Ammo = AK; E->Common.Count = CNT; return;}
   #define MATCH_HEALTH(STR, AMT) \
     if (Length == (int)sizeof(STR) - 1 and memcmp (Classname, STR, sizeof(STR) - 1) == 0) { \
-      E->Kind = ENTITY_ITEM_HEALTH; E->Common.Health = AMT; return; }
+      E->Kind = ENTITY_ITEM_HEALTH; E->Common.Health = AMT; return;}
   #define MATCH_ARMOR(STR, AMT) \
     if (Length == (int)sizeof(STR) - 1 and memcmp (Classname, STR, sizeof(STR) - 1) == 0) { \
-      E->Kind = ENTITY_ITEM_ARMOR; E->Common.Armor = AMT; return; }
+      E->Kind = ENTITY_ITEM_ARMOR; E->Common.Armor = AMT; return;}
   #define MATCH_POWERUP(STR, PK) \
     if (Length == (int)sizeof(STR) - 1 and memcmp (Classname, STR, sizeof(STR) - 1) == 0) { \
-      E->Kind = ENTITY_ITEM_POWERUP; E->item.Powerup = PK; E->item.Duration = 30.f; return; }
+      E->Kind = ENTITY_ITEM_POWERUP; E->item.Powerup = PK; E->item.Duration = 30.f; return;}
 
   // Spawn points
-  MATCH ("info_player_deathmatch",  ENTITY_INFO_PLAYER_SPAWN);
-  MATCH ("info_player_start",       ENTITY_INFO_PLAYER_START);
-  MATCH ("info_player_intermission",ENTITY_INFO_PLAYER_INTERMISSION);
+  MATCH ("info_player_deathmatch",   ENTITY_INFO_PLAYER_SPAWN);
+  MATCH ("info_player_start",        ENTITY_INFO_PLAYER_START);
+  MATCH ("info_player_intermission", ENTITY_INFO_PLAYER_INTERMISSION);
 
   // Weapons (Q3 classname > generic Weapon_Kind + default ammo count)
-  MATCH_WEAPON ("weapon_gauntlet",        WEAPON_MELEE,      0);
-  MATCH_WEAPON ("weapon_shotgun",         WEAPON_SHOTGUN,    10);
-  MATCH_WEAPON ("weapon_machinegun",      WEAPON_SMG,        40);
-  MATCH_WEAPON ("weapon_grenadelauncher", WEAPON_GRENADE,    10);
-  MATCH_WEAPON ("weapon_rocketlauncher",  WEAPON_ROCKET,     10);
-  MATCH_WEAPON ("weapon_lightning",       WEAPON_LIGHTNING,   100);
-  MATCH_WEAPON ("weapon_railgun",         WEAPON_RAIL,       10);
-  MATCH_WEAPON ("weapon_plasmagun",       WEAPON_ENERGY,     50);
-  MATCH_WEAPON ("weapon_bfg",             WEAPON_BFG,        20);
+  MATCH_WEAPON ("weapon_gauntlet",        WEAPON_MELEE,     0);
+  MATCH_WEAPON ("weapon_shotgun",         WEAPON_SHOTGUN,   10);
+  MATCH_WEAPON ("weapon_machinegun",      WEAPON_SMG,       40);
+  MATCH_WEAPON ("weapon_grenadelauncher", WEAPON_GRENADE,   10);
+  MATCH_WEAPON ("weapon_rocketlauncher",  WEAPON_ROCKET,    10);
+  MATCH_WEAPON ("weapon_lightning",       WEAPON_LIGHTNING, 100);
+  MATCH_WEAPON ("weapon_railgun",         WEAPON_RAIL,      10);
+  MATCH_WEAPON ("weapon_plasmagun",       WEAPON_ENERGY,    50);
+  MATCH_WEAPON ("weapon_bfg",             WEAPON_BFG,       20);
 
   // Ammo (Q3 classname > generic Ammo_Kind + count)
-  MATCH_AMMO ("ammo_shells",     AMMO_SHELLS,    10);
-  MATCH_AMMO ("ammo_bullets",    AMMO_BULLETS,   50);
-  MATCH_AMMO ("ammo_grenades",   AMMO_GRENADES,  5);
-  MATCH_AMMO ("ammo_cells",      AMMO_CELLS,     30);
-  MATCH_AMMO ("ammo_lightning",  AMMO_ENERGY,    60);
-  MATCH_AMMO ("ammo_rockets",    AMMO_ROCKETS,   5);
-  MATCH_AMMO ("ammo_slugs",      AMMO_SLUGS,     10);
-  MATCH_AMMO ("ammo_bfg",        AMMO_CELLS,     15);
+  MATCH_AMMO ("ammo_shells",    AMMO_SHELLS,   10);
+  MATCH_AMMO ("ammo_bullets",   AMMO_BULLETS,  50);
+  MATCH_AMMO ("ammo_grenades",  AMMO_GRENADES, 5);
+  MATCH_AMMO ("ammo_cells",     AMMO_CELLS,    30);
+  MATCH_AMMO ("ammo_lightning", AMMO_ENERGY,   60);
+  MATCH_AMMO ("ammo_rockets",   AMMO_ROCKETS,  5);
+  MATCH_AMMO ("ammo_slugs",     AMMO_SLUGS,    10);
+  MATCH_AMMO ("ammo_bfg",       AMMO_CELLS,    15);
 
   // Health
   MATCH_HEALTH ("item_health_small", 5);
@@ -5455,26 +6695,27 @@ void Classify_Entity (const char *Classname, int Length, BSP_Entity *E) {
   MATCH_ARMOR ("item_armor_body",   100);
 
   // Powerups
-  MATCH_POWERUP ("item_quad",    POWERUP_QUAD_DAMAGE);
-  MATCH_POWERUP ("item_enviro",  POWERUP_ENV_SUIT);
-  MATCH_POWERUP ("item_haste",   POWERUP_HASTE);
-  MATCH_POWERUP ("item_invis",   POWERUP_INVISIBILITY);
-  MATCH_POWERUP ("item_regen",   POWERUP_REGENERATION);
-  MATCH_POWERUP ("item_flight",  POWERUP_FLIGHT);
+  MATCH_POWERUP ("item_quad",   POWERUP_QUAD_DAMAGE);
+  MATCH_POWERUP ("item_enviro", POWERUP_ENV_SUIT);
+  MATCH_POWERUP ("item_haste",  POWERUP_HASTE);
+  MATCH_POWERUP ("item_invis",  POWERUP_INVISIBILITY);
+  MATCH_POWERUP ("item_regen",  POWERUP_REGENERATION);
+  MATCH_POWERUP ("item_flight", POWERUP_FLIGHT);
 
   // Holdables > generic items
-  MATCH ("holdable_teleporter",     ENTITY_ITEM_GENERIC);
-  MATCH ("holdable_medkit",         ENTITY_ITEM_GENERIC);
+  MATCH ("holdable_teleporter", ENTITY_ITEM_GENERIC);
+  MATCH ("holdable_medkit",     ENTITY_ITEM_GENERIC);
 
   // Map geometry & logic
-  MATCH ("trigger_teleport",        ENTITY_TRIGGER_TELEPORT);
-  MATCH ("trigger_push",            ENTITY_TRIGGER_PUSH);
-  MATCH ("target_position",         ENTITY_TARGET_POSITION);
-  MATCH ("target_speaker",          ENTITY_SOUND_EMITTER);
-  MATCH ("misc_model",              ENTITY_PROP_STATIC);
-  MATCH ("light",                   ENTITY_LIGHT);
-  MATCH ("worldspawn",              ENTITY_WORLD);
+  MATCH ("trigger_teleport", ENTITY_TRIGGER_TELEPORT);
+  MATCH ("trigger_push",     ENTITY_TRIGGER_PUSH);
+  MATCH ("target_position",  ENTITY_TARGET_POSITION);
+  MATCH ("target_speaker",   ENTITY_SOUND_EMITTER);
+  MATCH ("misc_model",       ENTITY_PROP_STATIC);
+  MATCH ("light",            ENTITY_LIGHT);
+  MATCH ("worldspawn",       ENTITY_WORLD);
 
+  // Clean up helper macros
   #undef MATCH
   #undef MATCH_WEAPON
   #undef MATCH_AMMO
@@ -5493,21 +6734,23 @@ uint BSP_Parse_Entities (const uint8_t *File_Data, const BSP_Header *Header,
   const char *End  = Text + Header->Lumps[BSP_ENTITIES].Length;
   uint Count = 0;
 
+  // Comment here !!!
   while (Text < End and Count < Max_Entities) {
+
     // Find opening brace
     while (Text < End and *Text != '{') Text++;
     if (Text >= End) break;
     Text++;
 
     // Temporary storage for this entity's key-value pairs
-    BSP_Entity Entity = {0};
-    Entity.Common.Scale = 1.0f;   // Default scale
-    Entity.Common.Alpha = 1.0f;   // Default opacity
-    char Classname[64]   = {0};
-    int  Classname_Len   = 0;
-    float Color[3]       = {1, 1, 1};
-    float Intensity      = 300;
-    int   Gravity        = 800;
+    BSP_Entity Entity   = {0};
+    Entity.Common.Scale = 1.0f; // Default scale
+    Entity.Common.Alpha = 1.0f; // Default opacity
+    char Classname[64]  = {0};
+    int  Classname_Len  = 0;
+    float Color[3]      = {1, 1, 1};
+    float Intensity     = 300;
+    int   Gravity       = 800;
 
     // Parse key-value pairs
     while (Text < End and *Text != '}') {
@@ -5516,7 +6759,7 @@ uint BSP_Parse_Entities (const uint8_t *File_Data, const BSP_Header *Header,
       if (Text >= End or *Text == '}') break;
 
       // Read quoted key
-      if (*Text != '"') { Text++; continue; }
+      if (*Text != '"') { Text++; continue;}
       Text++;
       const char *Key = Text;
       while (Text < End and *Text != '"') Text++;
@@ -5552,18 +6795,18 @@ uint BSP_Parse_Entities (const uint8_t *File_Data, const BSP_Header *Header,
       }
       else if (Key_Len == 5 and memcmp (Key, "angle", 5) == 0) {
         char Tmp[32]; COPY_VAL(Tmp, 32);
-        sscanf (Tmp, "%f", &Entity.Common.Angles.y);  // Q3 "angle" = yaw
+        sscanf (Tmp, "%f", &Entity.Common.Angles.y); 
       }
       else if (Key_Len == 10 and memcmp (Key, "spawnflags", 10) == 0) {
         char Tmp[32]; COPY_VAL(Tmp, 32);
         sscanf (Tmp, "%d", &Entity.Common.Spawnflags);
       }
-      else if (Key_Len == 10 and memcmp (Key, "targetname", 10) == 0) { COPY_VAL(Entity.Common.Name, 64); }
-      else if (Key_Len == 6  and memcmp (Key, "target", 6)     == 0) { COPY_VAL(Entity.Common.Target, 64); }
-      else if (Key_Len == 5  and memcmp (Key, "noise",  5)     == 0) { COPY_VAL(Entity.Common.Sound, 96); }
-      else if (Key_Len == 5  and memcmp (Key, "model",  5)     == 0) { COPY_VAL(Entity.Common.Model, 96); }
-      else if (Key_Len == 7  and memcmp (Key, "message",7)     == 0) { COPY_VAL(Entity.Common.Message, 128); }
-      else if (Key_Len == 5  and memcmp (Key, "light",  5)     == 0) {
+      else if (Key_Len == 10 and memcmp (Key, "targetname", 10) == 0) {COPY_VAL(Entity.Common.Name,     64);}
+      else if (Key_Len == 6  and memcmp (Key, "target",      6) == 0) {COPY_VAL(Entity.Common.Target,   64);}
+      else if (Key_Len == 5  and memcmp (Key, "noise",       5) == 0) {COPY_VAL(Entity.Common.Sound,    96);}
+      else if (Key_Len == 5  and memcmp (Key, "model",       5) == 0) {COPY_VAL(Entity.Common.Model,    96);}
+      else if (Key_Len == 7  and memcmp (Key, "message",     7) == 0) {COPY_VAL(Entity.Common.Message, 128);}
+      else if (Key_Len == 5  and memcmp (Key, "light",       5) == 0) {
         char Tmp[32]; COPY_VAL(Tmp, 32); sscanf (Tmp, "%f", &Intensity);
       }
       else if (Key_Len == 7 and memcmp (Key, "gravity", 7) == 0) {
@@ -5647,165 +6890,185 @@ uint BSP_Parse_Entities (const uint8_t *File_Data, const BSP_Header *Header,
 // ═══════════════════════
 
 void Scene_Load_Textures (const Scene *Scene_Data) {
-  Texture_Sampler  = Sampler_Create_Repeating ();
+  Texture_Sampler = Sampler_Create_Repeating ();
 
   // PBR texture layout in the bindless array:
-  //   [0 .. N-1]       diffuse maps
-  //   [N .. 2N-1]      normal maps    (_n.tga)
-  //   [2N .. 3N-1]     roughness maps (_r.tga)
-  //   [3N .. 4N-1]     metalness maps (_m.tga)
-  //   [4N .. 5N-1]     emissive maps  (_e.tga)
-  //   [5N .. 6N-1]     height maps    (_h.tga)
-  //   [6N ..]          weapon textures (appended later)
+  //
+  //   [0  .. N-1]  Diffuse maps
+  //   [N  .. 2N-1] Normal maps    (_n.tga)
+  //   [2N .. 3N-1] Roughness maps (_r.tga)
+  //   [3N .. 4N-1] Metalness maps (_m.tga)
+  //   [4N .. 5N-1] Emissive maps  (_e.tga)
+  //   [5N .. 6N-1] Height maps    (_h.tga)
+  //   [6N ..]      Weapon textures (appended later)
+  //
   uint Material_Count = Scene_Data->Material_Count;
-  uint PBR_Slots      = Material_Count * 6;  // 6 maps per material (diffuse + 5 PBR)
-  PBR_Stride       = Material_Count;         // Distance between map blocks in the texture array
-  Texture_Count    = PBR_Slots;
-  Textures_Loaded  = 0;
-  Texture_Images   = calloc (PBR_Slots, sizeof (VkImage));
-  Texture_Memories = calloc (PBR_Slots, sizeof (VkDeviceMemory));
-  Texture_Views    = calloc (PBR_Slots, sizeof (VkImageView));
+  uint PBR_Slots      = Material_Count * 6; // Six maps per material (diffuse and five PBR textures)
+  PBR_Stride          = Material_Count;     // Distance between map blocks in the texture array
+  Texture_Count       = PBR_Slots;
+  Textures_Loaded     = 0;
+  Texture_Images      = calloc (PBR_Slots, sizeof (VkImage));
+  Texture_Memories    = calloc (PBR_Slots, sizeof (VkDeviceMemory));
+  Texture_Views       = calloc (PBR_Slots, sizeof (VkImageView));
 
-  // PBR map suffixes: [0]=diffuse (no suffix), [1]=normal, [2]=roughness, [3]=metalness, [4]=emissive, [5]=height
+  // PBR map suffixes: [0] = Diffuse (no suffix), [1] = Normal, [2] = Roughness, [3] = Metalness, [4] = Emissive, [5] = Height
   const char *PBR_Suffixes[] = {"", "_n", "_r", "_m", "_e", "_h"};
 
   // Default fallback pixels for each PBR map type
-  uint8_t Fallback_Normal[4]    = {127, 127, 255, 255};  // flat normal pointing up
-  uint8_t Fallback_Roughness[4] = {180, 180, 180, 255};  // moderate roughness ~0.7 (overridden per-material below)
-  uint8_t Fallback_Metalness[4] = {0,   0,   0,   255};  // non-metallic (overridden per-material below)
-  uint8_t Fallback_Emissive[4]  = {0,   0,   0,   255};  // no emission
-  uint8_t Fallback_Height[4]    = {127, 127, 127, 255};  // mid-height
+  uint8_t Fallback_Roughness[4] = {180, 180, 180, 255}; // Moderate roughness ~0.7 (overridden per-material below)
+  uint8_t Fallback_Metalness[4] = {0,   0,   0,   255}; // Non-metallic (overridden per-material below)
+  uint8_t Fallback_Emissive[4]  = {0,   0,   0,   255}; // No emission
+  uint8_t Fallback_Height[4]    = {127, 127, 127, 255}; // Mid-height
+  uint8_t Fallback_Normal[4]    = {127, 127, 255, 255}; // Flat normal pointing up
   uint8_t *PBR_Fallbacks[]      = {NULL, Fallback_Normal, Fallback_Roughness, Fallback_Metalness, Fallback_Emissive, Fallback_Height};
 
-  // Per-material PBR classification: hand-tuned roughness and metalness for each BSP texture based on real-world material properties.
-  // These override the uniform fallback when no explicit PBR map exists. Values are [roughness_byte, metalness_byte] (0-255 > 0.0-1.0).
-  // Stored as a parallel array: Material_PBR[material_index] = {R, M}.
+  // Per-material PBR classification: Roughness and metalness defaults for each BSP texture when no explicit PBR map exists
   uint8_t (*Material_PBR)[2] = calloc (Material_Count, sizeof (uint8_t[2]));
+
   for (uint I = 0; I < Material_Count; I++) {
-    // Default: moderate stone (R=0.75, M=0.0)
+
+    // Default: moderate stone (R = 0.75, M=0.0)
     Material_PBR[I][0] = 191;  Material_PBR[I][1] = 0;
     if (not Scene_Data->Texture_Names) continue;
     const char *N = Scene_Data->Texture_Names[I];
 
     // Stone / brick / block: rough, non-metallic
     if (strstr (N, "gothic_block") or strstr (N, "gothic_wall/street"))
-      { Material_PBR[I][0] = 204; Material_PBR[I][1] = 0; }     // R=0.80, M=0.00 - rough stone
+      {Material_PBR[I][0] = 204; Material_PBR[I][1] = 0;} // R = 0.80, M = 0.00 - Rough stone
     else if (strstr (N, "proto_brik"))
-      { Material_PBR[I][0] = 209; Material_PBR[I][1] = 0; }     // R=0.82, M=0.00 - brick
+      {Material_PBR[I][0] = 209; Material_PBR[I][1] = 0;} // R = 0.82, M = 0.00 - Brick
     else if (strstr (N, "gothic_wall"))
-      { Material_PBR[I][0] = 191; Material_PBR[I][1] = 0; }     // R=0.75, M=0.00 - generic wall
+      {Material_PBR[I][0] = 191; Material_PBR[I][1] = 0;} // R = 0.75, M = 0.00 - Generic wall
 
     // Metal trim / rust
     else if (strstr (N, "pitted_rust"))
-      { Material_PBR[I][0] = 166; Material_PBR[I][1] = 153; }   // R=0.65, M=0.60 - corroded metal
+      {Material_PBR[I][0] = 166; Material_PBR[I][1] = 153;} // R = 0.65, M = 0.60 - Corroded metal
     else if (strstr (N, "deeprust"))
-      { Material_PBR[I][0] = 191; Material_PBR[I][1] = 128; }   // R=0.75, M=0.50 - heavy rust
+      {Material_PBR[I][0] = 191; Material_PBR[I][1] = 128;} // R = 0.75, M = 0.50 - Heavy rust
     else if (strstr (N, "pewter"))
-      { Material_PBR[I][0] = strstr(N,"dirty") ? 140 : 102;     // dirty=0.55, clean=0.40
-        Material_PBR[I][1] = strstr(N,"dirty") ? 166 : 179; }   // dirty=0.65, clean=0.70
+      {Material_PBR[I][0] = strstr(N,"dirty") ? 140 : 102;  
+       Material_PBR[I][1] = strstr(N,"dirty") ? 166 : 179;} 
     else if (strstr (N, "border7") or strstr (N, "baseboard"))
-      { Material_PBR[I][0] = 153; Material_PBR[I][1] = 89; }    // R=0.60, M=0.35 - mixed trim
+      {Material_PBR[I][0] = 153; Material_PBR[I][1] = 89;}    // R = 0.60, M = 0.35 - Mixed trim
 
     // Tech walls
     else if (strstr (N, "atech"))
-      { Material_PBR[I][0] = 115; Material_PBR[I][1] = 128; }   // R=0.45, M=0.50 - brushed metal panels
+      {Material_PBR[I][0] = 115; Material_PBR[I][1] = 128;} // R = 0.45, M = 0.50 - Brushed metal panels
     else if (strstr (N, "ceilingtech"))
-      { Material_PBR[I][0] = 140; Material_PBR[I][1] = 77; }    // R=0.55, M=0.30 - ceiling panel
+      {Material_PBR[I][0] = 140; Material_PBR[I][1] = 77;} // R = 0.55, M = 0.30 - Ceiling panel
 
     // Wood
     else if (strstr (N, "wood"))
-      { Material_PBR[I][0] = 204; Material_PBR[I][1] = 0; }     // R=0.80, M=0.00 - dry wood
+      {Material_PBR[I][0] = 204; Material_PBR[I][1] = 0;} // R = 0.80, M = 0.00 - Dry wood
 
     // Floor
-    else if (strstr (N, "gothic_floor") or strstr (N, "floor"))
-      { Material_PBR[I][0] = 166; Material_PBR[I][1] = 0; }     // R=0.65, M=0.00 - worn floor stone
+    else if (strstr (N, "gothic_floor")
+         or strstr (N, "floor"))
+      {Material_PBR[I][0] = 166; Material_PBR[I][1] = 0;} // R = 0.65, M = 0.00 - Worn floor stone
 
     // Light panels (EMISSIVE - PBR values less important)
-    else if (strstr (N, "light") or strstr (N, "xlight"))
-      { Material_PBR[I][0] = 77;  Material_PBR[I][1] = 0; }     // R=0.30, M=0.00 - smooth glass cover
+    else if (strstr (N, "light")
+         or strstr (N, "xlight"))
+      {Material_PBR[I][0] = 77;  Material_PBR[I][1] = 0;} // R = 0.30, M = 0.00 - Smooth glass cover
 
     // Skull / bone decorations
     else if (strstr (N, "skull"))
-      { Material_PBR[I][0] = 191; Material_PBR[I][1] = 13; }    // R=0.75, M=0.05 - bone
+      {Material_PBR[I][0] = 191; Material_PBR[I][1] = 13;} // R = 0.75, M = 0.05 - Bone
 
     // Lava
     else if (strstr (N, "lava"))
-      { Material_PBR[I][0] = 26;  Material_PBR[I][1] = 0; }     // R=0.10, M=0.00 - molten liquid
+      {Material_PBR[I][0] = 26;  Material_PBR[I][1] = 0;} // R = 0.10, M = 0.00 - Molten liquid
 
     // SFX (flames, beams, flares)
-    else if (strstr (N, "sfx/flame") or strstr (N, "sfx/beam") or strstr (N, "flameflare"))
-      { Material_PBR[I][0] = 26;  Material_PBR[I][1] = 0; }     // R=0.10, M=0.00 - emissive effect
+    else if (strstr (N, "sfx/flame")
+          or strstr (N, "sfx/beam")
+          or strstr (N, "flameflare"))
+      {Material_PBR[I][0] = 26;  Material_PBR[I][1] = 0;} // R = 0.10, M = 0.00 - Emissive effect
 
     // Window / glass
     else if (strstr (N, "window"))
-      { Material_PBR[I][0] = 51;  Material_PBR[I][1] = 26; }    // R=0.20, M=0.10 - smooth glass
+      {Material_PBR[I][0] = 51;  Material_PBR[I][1] = 26;} // R = 0.20, M = 0.10 - Smooth glass
 
     // Torch model
     else if (strstr (N, "torch"))
-      { Material_PBR[I][0] = 153; Material_PBR[I][1] = 77; }    // R=0.60, M=0.30 - metal + wood
+      {Material_PBR[I][0] = 153; Material_PBR[I][1] = 77;} // R = 0.60, M = 0.30 - Metal + wood
 
     // Player skin (cloth + leather + armor plates)
     else if (strstr (N, "players/"))
-      { Material_PBR[I][0] = 179; Material_PBR[I][1] = 20; }    // R=0.70, M=0.08 - mostly cloth, hint of metal
+      {Material_PBR[I][0] = 179; Material_PBR[I][1] = 20;} // R = 0.70, M = 0.08 - Mostly cloth, hint of metal
 
     // Weapon metal
     else if (strstr (N, "weapons"))
-      { Material_PBR[I][0] = 77;  Material_PBR[I][1] = 217; }   // R=0.30, M=0.85 - gun steel
+      {Material_PBR[I][0] = 77;  Material_PBR[I][1] = 217;} // R = 0.30, M = 0.85 - Gun steel
 
-    // ─── Source / CSPromod material classification ───
     // Stone walls and floors (rough, non-metallic)
-    else if (strcasestr (N, "stonewall") or strcasestr (N, "stone3"))
-      { Material_PBR[I][0] = 210; Material_PBR[I][1] = 0; }     // R=0.82, M=0.00 - rough stone wall
-    else if (strcasestr (N, "stonefloor") or strcasestr (N, "stonestep"))
-      { Material_PBR[I][0] = 178; Material_PBR[I][1] = 0; }     // R=0.70, M=0.00 - worn stone floor
-    else if (strcasestr (N, "stonetrim") or strcasestr (N, "column"))
-      { Material_PBR[I][0] = 166; Material_PBR[I][1] = 0; }     // R=0.65, M=0.00 - carved stone trim
+    else if (strcasestr (N, "stonewall")
+          or strcasestr (N, "stone3"))
+      {Material_PBR[I][0] = 210; Material_PBR[I][1] = 0;}; // R = 0.82, M = 0.00 - Rough stone wall
+    else if (strcasestr (N, "stonefloor")
+          or strcasestr (N, "stonestep"))
+      {Material_PBR[I][0] = 178; Material_PBR[I][1] = 0;} // R = 0.70, M = 0.00 - Worn stone floor
+    else if (strcasestr (N, "stonetrim")
+          or strcasestr (N, "column"))
+      {Material_PBR[I][0] = 166; Material_PBR[I][1] = 0;} // R = 0.65, M = 0.00 - Carved stone trim
     else if (strcasestr (N, "carving"))
-      { Material_PBR[I][0] = 153; Material_PBR[I][1] = 0; }     // R=0.60, M=0.00 - smooth carved stone
+      {Material_PBR[I][0] = 153; Material_PBR[I][1] = 0;} // R = 0.60, M = 0.00 - Smooth carved stone
 
     // Grass, dirt, sand (very rough, non-metallic)
-    else if (strcasestr (N, "grass") or strcasestr (N, "foliage"))
-      { Material_PBR[I][0] = 230; Material_PBR[I][1] = 0; }     // R=0.90, M=0.00 - vegetation
-    else if (strcasestr (N, "dirt") or strcasestr (N, "mud"))
-      { Material_PBR[I][0] = 217; Material_PBR[I][1] = 0; }     // R=0.85, M=0.00 - loose ground
+    else if (strcasestr (N, "grass")
+          or strcasestr (N, "foliage"))
+      {Material_PBR[I][0] = 230; Material_PBR[I][1] = 0;} // R = 0.90, M = 0.00 - Vegetation
+    else if (strcasestr (N, "dirt")
+          or strcasestr (N, "mud"))
+      {Material_PBR[I][0] = 217; Material_PBR[I][1] = 0;} // R = 0.85, M = 0.00 - Loose ground
     else if (strcasestr (N, "sand"))
-      { Material_PBR[I][0] = 204; Material_PBR[I][1] = 0; }     // R=0.80, M=0.00 - sandy ground
+      {Material_PBR[I][0] = 204; Material_PBR[I][1] = 0;} // R = 0.80, M = 0.00 - Sandy ground
 
     // Wood (moderate rough, non-metallic)
-    else if (strcasestr (N, "wood") or strcasestr (N, "plank"))
-      { Material_PBR[I][0] = 204; Material_PBR[I][1] = 0; }     // R=0.80, M=0.00 - dry wood
-    else if (strcasestr (N, "crate") or strcasestr (N, "box"))
-      { Material_PBR[I][0] = 191; Material_PBR[I][1] = 0; }     // R=0.75, M=0.00 - wooden crate
+    else if (strcasestr (N, "wood")
+          or strcasestr (N, "plank"))
+      {Material_PBR[I][0] = 204; Material_PBR[I][1] = 0;} // R = 0.80, M = 0.00 - Dry wood
+    else if (strcasestr (N, "crate")
+           or strcasestr (N, "box"))
+      {Material_PBR[I][0] = 191; Material_PBR[I][1] = 0;} // R = 0.75, M = 0.00 - Wooden crate
     else if (strcasestr (N, "door"))
-      { Material_PBR[I][0] = 178; Material_PBR[I][1] = 13; }    // R=0.70, M=0.05 - wood + metal hardware
+      {Material_PBR[I][0] = 178; Material_PBR[I][1] = 13;} // R = 0.70, M = 0.05 - Wood + metal hardware
 
     // Metal (Source maps - pipes, grates, etc.)
-    else if (strcasestr (N, "metal") or strcasestr (N, "steel") or strcasestr (N, "iron"))
-      { Material_PBR[I][0] = 102; Material_PBR[I][1] = 204; }   // R=0.40, M=0.80 - brushed metal
-    else if (strcasestr (N, "grate") or strcasestr (N, "chain") or strcasestr (N, "fence"))
-      { Material_PBR[I][0] = 128; Material_PBR[I][1] = 179; }   // R=0.50, M=0.70 - industrial metal
+    else if (strcasestr (N, "metal")
+          or strcasestr (N, "steel")
+          or strcasestr (N, "iron"))
+      {Material_PBR[I][0] = 102; Material_PBR[I][1] = 204;} // R = 0.40, M = 0.80 - Brushed metal
+    else if (strcasestr (N, "grate")
+         or strcasestr (N, "chain")
+         or strcasestr (N, "fence"))
+      {Material_PBR[I][0] = 128; Material_PBR[I][1] = 179;} // R = 0.50, M = 0.70 - Industrial metal
     else if (strcasestr (N, "rust"))
-      { Material_PBR[I][0] = 191; Material_PBR[I][1] = 128; }   // R=0.75, M=0.50 - corroded
+      {Material_PBR[I][0] = 191; Material_PBR[I][1] = 128;} // R = 0.75, M = 0.50 - Corroded
 
     // Concrete / brick / tile / plaster (moderate rough, non-metallic)
-    else if (strcasestr (N, "concrete") or strcasestr (N, "cement"))
-      { Material_PBR[I][0] = 191; Material_PBR[I][1] = 0; }     // R=0.75, M=0.00 - concrete
+    else if (strcasestr (N, "concrete")
+          or strcasestr (N, "cement"))
+      {Material_PBR[I][0] = 191; Material_PBR[I][1] = 0;} // R = 0.75, M = 0.00 - Concrete
     else if (strcasestr (N, "brick"))
-      { Material_PBR[I][0] = 204; Material_PBR[I][1] = 0; }     // R=0.80, M=0.00 - brick
+      {Material_PBR[I][0] = 204; Material_PBR[I][1] = 0;} // R = 0.80, M = 0.00 - Brick
     else if (strcasestr (N, "tile"))
-      { Material_PBR[I][0] = 140; Material_PBR[I][1] = 0; }     // R=0.55, M=0.00 - smooth tile
-    else if (strcasestr (N, "plaster") or strcasestr (N, "stucco"))
-      { Material_PBR[I][0] = 166; Material_PBR[I][1] = 0; }     // R=0.65, M=0.00 - wall plaster
+      {Material_PBR[I][0] = 140; Material_PBR[I][1] = 0;} // R = 0.55, M = 0.00 - Smooth tile
+    else if (strcasestr (N, "plaster")
+          or strcasestr (N, "stucco"))
+      {Material_PBR[I][0] = 166; Material_PBR[I][1] = 0;} // R = 0.65, M = 0.00 - Wall plaster
 
     // Glass / water
-    else if (strcasestr (N, "glass") or strcasestr (N, "window"))
-      { Material_PBR[I][0] = 38;  Material_PBR[I][1] = 26; }    // R=0.15, M=0.10 - smooth glass
+    else if (strcasestr (N, "glass")
+          or strcasestr (N, "window"))
+      {Material_PBR[I][0] = 38;  Material_PBR[I][1] = 26;} // R = 0.15, M = 0.10 - Smooth glass
     else if (strcasestr (N, "water"))
-      { Material_PBR[I][0] = 13;  Material_PBR[I][1] = 0; }     // R=0.05, M=0.00 - water surface
+      {Material_PBR[I][0] = 13;  Material_PBR[I][1] = 0;} // R = 0.05, M = 0.00 - Water surface
 
     // Backdrop / sky (non-physical, doesn't matter much)
-    else if (strcasestr (N, "backdrop") or strcasestr (N, "sky"))
-      { Material_PBR[I][0] = 255; Material_PBR[I][1] = 0; }     // R=1.00, M=0.00 - diffuse sky
+    else if (strcasestr (N, "backdrop")
+          or strcasestr (N, "sky"))
+      {Material_PBR[I][0] = 255; Material_PBR[I][1] = 0;} // R = 1.00, M = 0.00 - Diffuse sky
   }
 
   // Initialize PBR loading counters
@@ -5813,8 +7076,8 @@ void Scene_Load_Textures (const Scene *Scene_Data) {
 
   // Pass 1: Load diffuse textures, retaining pixel data for PBR derivation
   uint8_t **Diffuse_Pixels = calloc (Material_Count, sizeof (uint8_t *));
-  uint    *Diffuse_W       = calloc (Material_Count, sizeof (uint));
-  uint    *Diffuse_H       = calloc (Material_Count, sizeof (uint));
+  uint     *Diffuse_W      = calloc (Material_Count, sizeof (uint));
+  uint     *Diffuse_H      = calloc (Material_Count, sizeof (uint));
 
   for (uint Index = 0; Index < Material_Count; Index++) {
     uint Slot = Index;  // diffuse = Map_Type 0
@@ -5822,17 +7085,20 @@ void Scene_Load_Textures (const Scene *Scene_Data) {
     uint8_t *Pixels = NULL;
     if (Scene_Data->Texture_Names) {
       char Path[256];
-      // Try TGA first (Q3 assets)
+
+      // Try TGA first 
       snprintf (Path, sizeof (Path), "assets/%s.tga", Scene_Data->Texture_Names[Index]);
       Pixels = TGA_Load (Path, &W, &H);
+
       // Fallback: try VTF from cspromod materials directory (Source engine textures)
       if (not Pixels) {
         char Vtf_Path[512]; char Lower[256];
         const char *N = Scene_Data->Texture_Names[Index];
         for (int C=0; N[C] and C<255; C++) Lower[C] = (N[C]>='A' and N[C]<='Z') ? N[C]+32 : N[C];
         Lower[strlen(N)<255?strlen(N):255] = 0;
+
         // Try cspromod materials path
-        static const char *VTF_Search_Dirs[] = {
+        const char *VTF_Search_Dirs[] = {
           "/tmp/cspromod_new/cspromod_b105/cspromod/materials",
           "/tmp/cspromod_new/cspromod_b105/cspromod/materials/models",
           "/tmp/v_m4_new/materials",
@@ -5842,7 +7108,7 @@ void Scene_Load_Textures (const Scene *Scene_Data) {
         for (const char **Dir = VTF_Search_Dirs; *Dir and not Pixels; Dir++) {
           snprintf (Vtf_Path, sizeof Vtf_Path, "%s/%s.vtf", *Dir, Lower);
           int Vw=0, Vh=0; uint8_t *Vp = NULL;
-          if (VTF_Load(Vtf_Path, &Vp, &Vw, &Vh) and Vp) { Pixels=Vp; W=(uint)Vw; H=(uint)Vh; }
+          if (VTF_Load(Vtf_Path, &Vp, &Vw, &Vh) and Vp) { Pixels=Vp; W=(uint)Vw; H=(uint)Vh;}
         }
       }
     }
@@ -5862,53 +7128,56 @@ void Scene_Load_Textures (const Scene *Scene_Data) {
       Textures_Loaded++;
     } else {
       free (Pixels);
+
       // Generate stand-in diffuse color from material name keywords
       uint8_t Stand_In[4] = {180, 180, 180, 255}; // default: neutral gray
       if (Scene_Data->Texture_Names) {
         const char *Material_Name = Scene_Data->Texture_Names[Index];
+
         // Use case-insensitive keyword matching to assign plausible colors
         if      (strcasestr(Material_Name,"concrete") or strcasestr(Material_Name,"cement"))
-          { Stand_In[0]=175; Stand_In[1]=170; Stand_In[2]=165; }
+          { Stand_In[0]=175; Stand_In[1]=170; Stand_In[2]=165;}
         else if (strcasestr(Material_Name,"metal") or strcasestr(Material_Name,"steel"))
-          { Stand_In[0]=140; Stand_In[1]=140; Stand_In[2]=145; }
+          { Stand_In[0]=140; Stand_In[1]=140; Stand_In[2]=145;}
         else if (strcasestr(Material_Name,"wood") or strcasestr(Material_Name,"plank") or strcasestr(Material_Name,"timber"))
-          { Stand_In[0]=160; Stand_In[1]=120; Stand_In[2]=80; }
+          { Stand_In[0]=160; Stand_In[1]=120; Stand_In[2]=80;}
         else if (strcasestr(Material_Name,"brick"))
-          { Stand_In[0]=160; Stand_In[1]=100; Stand_In[2]=80; }
+          { Stand_In[0]=160; Stand_In[1]=100; Stand_In[2]=80;}
         else if (strcasestr(Material_Name,"grass") or strcasestr(Material_Name,"foliage") or strcasestr(Material_Name,"leaf"))
-          { Stand_In[0]=90;  Stand_In[1]=140; Stand_In[2]=70; }
+          { Stand_In[0]=90;  Stand_In[1]=140; Stand_In[2]=70;}
         else if (strcasestr(Material_Name,"dirt") or strcasestr(Material_Name,"ground") or strcasestr(Material_Name,"mud"))
-          { Stand_In[0]=140; Stand_In[1]=115; Stand_In[2]=85; }
+          { Stand_In[0]=140; Stand_In[1]=115; Stand_In[2]=85;}
         else if (strcasestr(Material_Name,"sand"))
-          { Stand_In[0]=200; Stand_In[1]=185; Stand_In[2]=145; }
+          { Stand_In[0]=200; Stand_In[1]=185; Stand_In[2]=145;}
         else if (strcasestr(Material_Name,"rock") or strcasestr(Material_Name,"cliff") or strcasestr(Material_Name,"stone"))
-          { Stand_In[0]=145; Stand_In[1]=140; Stand_In[2]=135; }
+          { Stand_In[0]=145; Stand_In[1]=140; Stand_In[2]=135;}
         else if (strcasestr(Material_Name,"plaster") or strcasestr(Material_Name,"stucco"))
-          { Stand_In[0]=210; Stand_In[1]=200; Stand_In[2]=185; }
+          { Stand_In[0]=210; Stand_In[1]=200; Stand_In[2]=185;}
         else if (strcasestr(Material_Name,"glass") or strcasestr(Material_Name,"window"))
-          { Stand_In[0]=160; Stand_In[1]=185; Stand_In[2]=200; }
+          { Stand_In[0]=160; Stand_In[1]=185; Stand_In[2]=200;}
         else if (strcasestr(Material_Name,"water"))
-          { Stand_In[0]=60;  Stand_In[1]=100; Stand_In[2]=140; }
+          { Stand_In[0]=60;  Stand_In[1]=100; Stand_In[2]=140;}
         else if (strcasestr(Material_Name,"tile") or strcasestr(Material_Name,"floor"))
-          { Stand_In[0]=170; Stand_In[1]=165; Stand_In[2]=160; }
+          { Stand_In[0]=170; Stand_In[1]=165; Stand_In[2]=160;}
         else if (strcasestr(Material_Name,"roof") or strcasestr(Material_Name,"shingle"))
-          { Stand_In[0]=130; Stand_In[1]=90;  Stand_In[2]=70; }
+          { Stand_In[0]=130; Stand_In[1]=90;  Stand_In[2]=70;}
         else if (strcasestr(Material_Name,"paint") or strcasestr(Material_Name,"decal"))
-          { Stand_In[0]=190; Stand_In[1]=185; Stand_In[2]=175; }
+          { Stand_In[0]=190; Stand_In[1]=185; Stand_In[2]=175;}
         else if (strcasestr(Material_Name,"asphalt") or strcasestr(Material_Name,"road"))
-          { Stand_In[0]=85;  Stand_In[1]=85;  Stand_In[2]=85; }
+          { Stand_In[0]=85;  Stand_In[1]=85;  Stand_In[2]=85;}
         else if (strcasestr(Material_Name,"door"))
-          { Stand_In[0]=130; Stand_In[1]=100; Stand_In[2]=75; }
+          { Stand_In[0]=130; Stand_In[1]=100; Stand_In[2]=75;}
         else if (strcasestr(Material_Name,"fence") or strcasestr(Material_Name,"chain") or strcasestr(Material_Name,"wire"))
-          { Stand_In[0]=120; Stand_In[1]=120; Stand_In[2]=120; }
+          { Stand_In[0]=120; Stand_In[1]=120; Stand_In[2]=120;}
         else if (strcasestr(Material_Name,"pipe") or strcasestr(Material_Name,"duct") or strcasestr(Material_Name,"vent"))
-          { Stand_In[0]=110; Stand_In[1]=115; Stand_In[2]=120; }
+          { Stand_In[0]=110; Stand_In[1]=115; Stand_In[2]=120;}
         else if (strcasestr(Material_Name,"crate") or strcasestr(Material_Name,"box"))
-          { Stand_In[0]=155; Stand_In[1]=130; Stand_In[2]=90; }
+          { Stand_In[0]=155; Stand_In[1]=130; Stand_In[2]=90;}
         else if (strcasestr(Material_Name,"rust"))
-          { Stand_In[0]=150; Stand_In[1]=90;  Stand_In[2]=60; }
-        else {
-          // Hash-based fallback: deterministic neutral color from material name
+          { Stand_In[0]=150; Stand_In[1]=90;  Stand_In[2]=60;}
+
+        // Hash-based fallback: deterministic neutral color from material name
+        else {          
           uint Hash = 5381;
           for (const char *C = Material_Name; *C; C++) Hash = Hash * 33 + (uint8_t)*C;
           Stand_In[0] = 120 + (Hash & 63);        // 120-183 range
@@ -5934,15 +7203,12 @@ void Scene_Load_Textures (const Scene *Scene_Data) {
       uint Slot = Map_Type * Material_Count + Index;
       uint W = 0, H = 0;
       uint8_t *Pixels = NULL;
-
       if (Scene_Data->Texture_Names) {
         char Path[256];
         snprintf (Path, sizeof (Path), "assets/%s%s.tga", Scene_Data->Texture_Names[Index], PBR_Suffixes[Map_Type]);
         Pixels = TGA_Load (Path, &W, &H);
       }
-
       VkFormat Fmt = VK_FORMAT_R8G8B8A8_UNORM;
-
       if (Pixels and W and H) {
         Texture_Upload_With_Format (/*Command_Buffer =>*/ Command_Buffer,
                                     /*Queue          =>*/ Queue,
@@ -5964,16 +7230,16 @@ void Scene_Load_Textures (const Scene *Scene_Data) {
         uint8_t Base_R = Material_PBR[Index][0];
         uint8_t Base_M = Material_PBR[Index][1];
 
+        // We have real diffuse pixels - generate a full-resolution PBR map
         if (Diff and DW > 1 and DH > 1) {
-          // We have real diffuse pixels - generate a full-resolution PBR map
           uint Pixel_Count = DW * DH;
           uint8_t *Gen = malloc (Pixel_Count * 4);
 
-          if (Map_Type == 1) {
-            // Normal map: Sobel filter on diffuse luminance. Produces tangent-space normals: cracks and mortar joints in stone become
-            // visible geometric detail under directional lighting.
+          // Normal map: Sobel filter on diffuse luminance. Produces tangent-space normals
+          if (Map_Type == 1) {            
             for (uint Y = 0; Y < DH; Y++) {
               for (uint X = 0; X < DW; X++) {
+
                 // Wrap-safe sampling (textures tile)
                 #define LUM(px, py) ({ \
                   uint sx = ((px) % DW), sy = ((py) % DH); \
@@ -5981,7 +7247,7 @@ void Scene_Load_Textures (const Scene *Scene_Data) {
                   (float)P[0] * 0.2126f + (float)P[1] * 0.7152f + (float)P[2] * 0.0722f; \
                 })
 
-                // Sobel 3×3
+                // Sobel 3 by 3
                 float TL = LUM(X-1,Y-1), TC = LUM(X,Y-1), TR = LUM(X+1,Y-1);
                 float ML = LUM(X-1,Y),                      MR = LUM(X+1,Y);
                 float BL = LUM(X-1,Y+1), BC = LUM(X,Y+1), BR = LUM(X+1,Y+1);
@@ -6004,8 +7270,7 @@ void Scene_Load_Textures (const Scene *Scene_Data) {
               }
             }
 
-          // Roughness map: base ~ luminance variation. Darker cracks in stone = rougher; bright polished areas = smoother. Metal: dark
-          // oxidation = rougher; bright highlights = smoother.
+          // Roughness map: base ~ luminance variation. Darker cracks in stone = rougher; bright polished areas = smoother
           } else if (Map_Type == 2) {
             for (uint I = 0; I < Pixel_Count; I++) {
               uint8_t *P = &Diff[I * 4];
@@ -6020,8 +7285,7 @@ void Scene_Load_Textures (const Scene *Scene_Data) {
               Gen[I*4+0] = V; Gen[I*4+1] = V; Gen[I*4+2] = V; Gen[I*4+3] = 255;
             }
 
-          // Metalness map: base ~ saturation/brightness detection. For metallic materials: desaturated bright pixels > more metallic.
-          // For non-metallic: stay near zero with slight variation.
+          // Metalness map: base ~ saturation/brightness detection. For metallic materials: desaturated bright pixels > more metallic
           } else if (Map_Type == 3) {
             for (uint I = 0; I < Pixel_Count; I++) {
               uint8_t *P = &Diff[I * 4];
@@ -6067,8 +7331,7 @@ void Scene_Load_Textures (const Scene *Scene_Data) {
               Gen[I*4+3] = 255;
             }
 
-          // Height map: luminance-based. Stone/brick: inverted luminance (dark cracks = deeper). Metal: direct luminance (bright
-          // highlights = raised)
+          // Height map: luminance-based. Stone/brick: inverted luminance (dark cracks = deeper)
           } else {
             bool Invert = (Base_M < 80);  // non-metallic > invert
             for (uint I = 0; I < Pixel_Count; I++) {
@@ -6096,7 +7359,7 @@ void Scene_Load_Textures (const Scene *Scene_Data) {
           free (Gen);
           PBR_Generated++;
 
-        // No diffuse data - use 1×1 classified fallback
+        // No diffuse data - use 1 by 1 classified fallback
         } else {
           if (Map_Type == 2) {
             uint8_t R_Pixel[4] = {Base_R, Base_R, Base_R, 255};
@@ -6156,7 +7419,7 @@ void Scene_Load_Textures (const Scene *Scene_Data) {
   for (uint I = 0; I < Material_Count and Scene_Data->Texture_Names; I++)
     printf ("[material %2u] %s\n", I, Scene_Data->Texture_Names[I]);
 
-  // Upload the lightmap atlas (or a 1x1 white fallback if no lightmaps exist)
+  // Upload the lightmap atlas (or a 1 by 1 white fallback if no lightmaps exist)
   Lightmap_Sampler = Sampler_Create_Clamping ();
   if (Scene_Data->Lightmap_Atlas and Scene_Data->Lightmap_Width and Scene_Data->Lightmap_Height) {
     Texture_Upload_With_Format (/*Command_Buffer =>*/ Command_Buffer,
@@ -6168,7 +7431,9 @@ void Scene_Load_Textures (const Scene *Scene_Data) {
                                 /*Out_Image      =>*/ &Lightmap_Image,
                                 /*Out_Memory     =>*/ &Lightmap_Memory,
                                 /*Out_View       =>*/ &Lightmap_View);
-    printf ("[lightmap] uploaded %ux%u atlas (SRGB - auto-linearized on sample)\n", Scene_Data->Lightmap_Width, Scene_Data->Lightmap_Height);
+    printf ("[lightmap] uploaded %ux%u atlas (SRGB - auto-linearized on sample)\n",
+            Scene_Data->Lightmap_Width,
+            Scene_Data->Lightmap_Height);
   } else {
     uint8_t White[4] = {255, 255, 255, 255};
     Texture_Upload_With_Format (/*Command_Buffer =>*/ Command_Buffer,
@@ -6192,16 +7457,15 @@ void Weapon_Load_Textures (Weapon_Instance *Weapon) {
   // Record the starting index in the global texture array for this weapon's textures
   Weapon->Texture_Base_Index = Texture_Count;
 
-  // 6 map types per weapon texture: diffuse, normal, roughness, metalness, emissive, height
+  // Six map types per weapon texture: diffuse, normal, roughness, metalness, emissive, height
   const char *Weapon_PBR_Suffixes[] = {"", "_n", "_r", "_m", "_e", "_h"};
   const uint8_t Weapon_PBR_Fallbacks[][4] = {
-    {180, 180, 180, 255},   // diffuse: grey
-    {128, 128, 255, 255},   // normal: flat (0,0,1) encoded as (128,128,255)
-    {180, 180, 180, 255},   // roughness: moderate (0.70) — mix of skin and painted metal
-    { 25,  25,  25, 255},   // metalness: low (0.10) — mostly non-metallic (hands, polymer)
-    {  0,   0,   0, 255},   // emissive: none
-    {128, 128, 128, 255},   // height: mid-level
-  };
+    {180, 180, 180, 255},  // Diffuse: grey
+    {128, 128, 255, 255},  // Normal: flat (0,0,1) encoded as (128,128,255)
+    {180, 180, 180, 255},  // Roughness: moderate (0.70) - mix of skin and painted metal
+    { 25,  25,  25, 255},  // Metalness: low (0.10) - mostly non-metallic (hands, polymer)
+    {  0,   0,   0, 255},  // Emissive: none
+    {128, 128, 128, 255}}; // Height: mid-level
 
   // Use the actual surface count from the weapon model (Source weapons may have many materials)
   uint Weapon_Tex_Count = Weapon->Model.Surface_Count > 0 ? Weapon->Model.Surface_Count : WEAPON_TEXTURE_COUNT;
@@ -6214,7 +7478,7 @@ void Weapon_Load_Textures (Weapon_Instance *Weapon) {
   Texture_Memories = realloc (Texture_Memories,  sizeof (VkDeviceMemory) * New_Total);
   Texture_Views    = realloc (Texture_Views,     sizeof (VkImageView)    * New_Total);
 
-  // Load weapon textures: 6 PBR map types × Weapon_Tex_Count textures
+  // Load weapon textures: 6 PBR map types  by  Weapon_Tex_Count textures
   uint Weapon_PBR_Loaded = 0;
   for (uint Map_Type = 0; Map_Type < 6; Map_Type++) {
     for (uint Index = 0; Index < Weapon_Tex_Count; Index++) {
@@ -6230,7 +7494,7 @@ void Weapon_Load_Textures (Weapon_Instance *Weapon) {
         Lower[Li]=0;
 
         // Try VTF from weapon materials directories and cspromod directories
-        static const char *VTF_Dirs[] = {
+        const char *VTF_Dirs[] = {
           "/tmp/v_m4_new/materials",
           "/tmp/cspromod_new/cspromod_b105/cspromod/materials",
           "/tmp/cspromod_new/cspromod_b105/cspromod/materials/models/weapons/v_models/sas.m4",
@@ -6385,7 +7649,7 @@ Acceleration_Structure Build_World_Bottom_Level (const Scene *Scene_Data) {
                                            /*pStructure  =>*/ &Result.Handle));
 
   // Allocate temporary scratch memory for the build operation (freed after the build completes)
-  Gpu_Buffer Scratch = Buffer_Allocate (/*Size         =>*/ Build_Sizes.buildScratchSize,
+  GPU_Buffer Scratch = Buffer_Allocate (/*Size         =>*/ Build_Sizes.buildScratchSize,
                                         /*Usage        =>*/ VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
                                                           | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
                                         /*Memory_Flags =>*/ VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
@@ -6458,7 +7722,7 @@ void Weapon_Bottom_Level_Initialize (Weapon_Instance *Weapon) {
   // Upload the initial vertex positions
   Buffer_Upload (Weapon->Vertex_Buffer, Weapon->Transformed_Vertices, sizeof (Vertex) * Weapon->Model.Vertex_Count);
 
-  // Upload index and texture-id data (static, device-local — these never change after the initial upload)
+  // Upload index and texture-id data (static, device-local - these never change after the initial upload)
   Weapon->Index_Buffer      = Buffer_Stage_Upload (/*Command_Buffer =>*/ Command_Buffer,
                                                    /*Queue          =>*/ Queue,
                                                    /*Data           =>*/ Weapon->Model.Indices,
@@ -6587,9 +7851,7 @@ void Weapon_Bottom_Level_Rebuild (Weapon_Instance *Weapon) {
       .indexType                = VK_INDEX_TYPE_UINT32,
       .indexData.deviceAddress  = Weapon->Index_Buffer.Address}};
 
-  // BLAS refit (MODE_UPDATE) instead of full rebuild. The weapon mesh topology never changes - only vertex positions move.
-  // MODE_UPDATE re-computes AABBs in-place without rebuilding the BVH tree, which is 5-10× faster than a full build on NVIDIA RT cores.
-  // srcAccelerationStructure = dst for in-place update.
+  // BLAS refit (MODE_UPDATE) instead of full rebuild. The weapon mesh topology never changes - only vertex positions move...
   VkAccelerationStructureBuildGeometryInfoKHR Build_Info = {
     .sType                     = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR,
     .type                      = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR,
@@ -6648,7 +7910,7 @@ void Entity_Bottom_Level_Initialize (Entity *Enemy) {
                                                             | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
   Buffer_Upload (Enemy->Vertex_Buffer, Enemy->Current_Vertices, sizeof (Vertex) * Enemy->Vertex_Count);
 
-  // Static index and texture-id buffers (device-local — these never change after the initial upload)
+  // index and texture-id buffers (device-local - these never change after the initial upload)
   Enemy->Index_Buffer      = Buffer_Stage_Upload (/*Command_Buffer =>*/ Command_Buffer,
                                                   /*Queue          =>*/ Queue,
                                                   /*Data           =>*/ Enemy->Indices,
@@ -6830,9 +8092,7 @@ void Top_Level_Initialize (uint Maximum_Instances) {
       .data.deviceAddress = Top_Level_Instance_Buffer.Address}};
 
   // Query TLAS build sizes from the driver. ALLOW_UPDATE_BIT: requesting update capability at creation time tells the driver to build
-  // the BVH in a format amenable to in-place refitting. On NVIDIA, this selects a "refit-friendly" BVH2 layout; on AMD, it avoids the
-  // compact PLOC builder. Per-frame, we then use MODE_UPDATE (refit) instead of full MODE_BUILD, which only touches BVH nodes whose
-  // child AABBs changed - typically O(log N) instead of O(N log N) for a full SAH rebuild.
+  // the BVH in a format amenable to in-place refitting.
   VkAccelerationStructureBuildGeometryInfoKHR Build_Info = {
     .sType         = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR,
     .type          = VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR,
@@ -7005,11 +8265,10 @@ void Postprocess_Pipeline_Create () {
 
   // Storage image bindings: color (raw RT), depth, history (TAA), display output
   VkDescriptorSetLayoutBinding Bindings[] = {
-    {0, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, NULL}, // Color (raw RT, read-only)
-    {1, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, NULL}, // Depth
-    {2, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, NULL}, // History (previous frame TAA)
-    {3, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, NULL}, // Display output (tonemapped)
-  };
+    {0, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, NULL},  // Color (Raw RT, read-only)
+    {1, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, NULL},  // Depth
+    {2, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, NULL},  // History (Previous frame TAA)
+    {3, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, NULL}}; // Display output (Tonemapped)
 
   VK_CHECK (vkCreateDescriptorSetLayout (/*device      =>*/ Device,
                                          /*pCreateInfo =>*/ &(VkDescriptorSetLayoutCreateInfo){
@@ -7020,7 +8279,7 @@ void Postprocess_Pipeline_Create () {
                                          /*pSetLayout  =>*/ &Postprocess_Descriptor_Layout));
 
   // Create the pipeline layout with push constants for postprocess parameters
-  VkPushConstantRange Push_Range = {VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof (Gpu_Postprocess_Push)};
+  VkPushConstantRange Push_Range = {VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof (GPU_Postprocess_Push)};
   VK_CHECK (vkCreatePipelineLayout (/*device          =>*/ Device,
                                     /*pCreateInfo     =>*/ &(VkPipelineLayoutCreateInfo){
                                       .sType                  = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
@@ -7069,8 +8328,7 @@ void Postprocess_Pipeline_Create () {
   VkDescriptorImageInfo Depth_Info   = {.imageView = Depth_Image.View,               .imageLayout = VK_IMAGE_LAYOUT_GENERAL};
   VkDescriptorImageInfo History_Info = {.imageView = History_Image.View,              .imageLayout = VK_IMAGE_LAYOUT_GENERAL};
   VkDescriptorImageInfo Display_Info = {.imageView = Postprocess_Output_Image.View,  .imageLayout = VK_IMAGE_LAYOUT_GENERAL};
-
-  VkWriteDescriptorSet Writes[] = {
+  VkWriteDescriptorSet  Writes[]     = {
     {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, Postprocess_Descriptor_Set, 0, 0, 1, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, &Color_Info,   NULL, NULL},
     {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, Postprocess_Descriptor_Set, 1, 0, 1, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, &Depth_Info,   NULL, NULL},
     {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, Postprocess_Descriptor_Set, 2, 0, 1, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, &History_Info, NULL, NULL},
@@ -7127,7 +8385,7 @@ void Denoise_Pipeline_Create () {
                                       /*pPipelines      =>*/ &Denoise_Pipeline));
   vkDestroyShaderModule (Device, Module, NULL);
 
-  // Descriptor pool: 2 sets × 3 images each = 6 image descriptors
+  // Descriptor pool: 2 sets  by  3 images each = 6 image descriptors
   VkDescriptorPoolSize Pool_Size = {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 6};
   VK_CHECK (vkCreateDescriptorPool (/*device          =>*/ Device,
                                     /*pCreateInfo     =>*/ &(VkDescriptorPoolCreateInfo){
@@ -7148,7 +8406,7 @@ void Denoise_Pipeline_Create () {
                                         .pSetLayouts        = Layouts},
                                       /*pDescriptorSets =>*/ Denoise_Descriptor_Sets));
 
-  // Set[0]: reads Storage_Image > writes Denoise_Ping_Image
+  // Set [0]: reads Storage_Image > writes Denoise_Ping_Image
   VkDescriptorImageInfo Storage_Info = {.imageView = Raytracing_Storage_Image.View, .imageLayout = VK_IMAGE_LAYOUT_GENERAL};
   VkDescriptorImageInfo Ping_Info    = {.imageView = Denoise_Ping_Image.View,       .imageLayout = VK_IMAGE_LAYOUT_GENERAL};
   VkDescriptorImageInfo Depth_Info   = {.imageView = Depth_Image.View,              .imageLayout = VK_IMAGE_LAYOUT_GENERAL};
@@ -7161,7 +8419,7 @@ void Denoise_Pipeline_Create () {
   };
   vkUpdateDescriptorSets (Device, 3, Writes_0, 0, NULL);
 
-  // Set[1]: reads Denoise_Ping_Image > writes Storage_Image
+  // Set [1]: reads Denoise_Ping_Image > writes Storage_Image
   VkWriteDescriptorSet Writes_1[] = {
     {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, Denoise_Descriptor_Sets[1], 0, 0, 1, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, &Ping_Info,    NULL, NULL},
     {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, Denoise_Descriptor_Sets[1], 1, 0, 1, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, &Storage_Info, NULL, NULL},
@@ -7177,8 +8435,8 @@ void Denoise_Pipeline_Create () {
 
 void Raytracing_Pipeline_Create () {
 
-  // Define the 16 descriptor bindings for the ray tracing pipeline
-  // Bindings 12-14 are entity geometry; binding 15 is the texture array (must be last for variable count)
+  // Define the 16 descriptor bindings for the ray tracing pipeline. Note: some bindings are entity geometry; with one being the texture
+  // array which must be last for variable count.
   VkDescriptorSetLayoutBinding Bindings[] = {
     {0,  VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, 1, VK_SHADER_STAGE_RAYGEN_BIT_KHR
                                                          | VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR, NULL},
@@ -7198,17 +8456,14 @@ void Raytracing_Pipeline_Create () {
     {12, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,             1, VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR, NULL}, // Entity vertices
     {13, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,             1, VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR, NULL}, // Entity indices
     {14, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,             1, VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR, NULL}, // Entity texture IDs
-    {15, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, DESCRIPTOR_TEXTURE_SLOTS, VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR, NULL},
-    // Textures: must be last binding for variable descriptor count
-  };
+    {15, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, DESCRIPTOR_TEXTURE_SLOTS, VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR, NULL}};
 
   // The texture array binding uses partially-bound and variable-count flags
-  VkDescriptorBindingFlags Binding_Flags[] =
-    {0, 0, 0, 0, 0,
-     0, 0, 0, 0, 0,
-     0, 0, 0, 0, 0,
-      VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT
-    | VK_DESCRIPTOR_BINDING_VARIABLE_DESCRIPTOR_COUNT_BIT};
+  VkDescriptorBindingFlags Binding_Flags[] = {0, 0, 0, 0, 0,
+                                              0, 0, 0, 0, 0,
+                                              0, 0, 0, 0, 0,
+                                               VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT
+                                             | VK_DESCRIPTOR_BINDING_VARIABLE_DESCRIPTOR_COUNT_BIT};
 
   // Chain the binding flags extension into the descriptor set layout creation
   VkDescriptorSetLayoutBindingFlagsCreateInfo Binding_Flags_Info = {
@@ -7336,10 +8591,10 @@ void Descriptor_Set_Create (Weapon_Instance *Weapon, Entity *Enemy) {
 
   // Allocate a descriptor pool large enough for all binding types
   VkDescriptorPoolSize Pool_Sizes[] = {{VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, 1},
-                                       {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,              2},  // Color + Depth
+                                       {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,              2}, // Color + Depth
                                        {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,             1},
-                                       {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,             10}, // 7 world/weapon + 3 entity
-                                       {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,     DESCRIPTOR_TEXTURE_SLOTS + 1}}; // +1 for lightmap
+                                       {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,             10}, // World/weapon + entities
+                                       {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,     DESCRIPTOR_TEXTURE_SLOTS + 1}}; // One added for lightmap
   VK_CHECK (vkCreateDescriptorPool (/*device          =>*/ Device,
                                     /*pCreateInfo     =>*/ &(VkDescriptorPoolCreateInfo){
                                       .sType         = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
@@ -7448,14 +8703,14 @@ void Camera_Upload (Camera *State, float Field_Of_View, uint Weapon_Texture_Base
     uint  PBR_Stride;
     uint  Active_SPP;
 
-    // Environment parameters (std140 aligned)
-    float Sun_Dir      [4]; // xyz = direction, w = angular_radius
-    float Sun_Color    [4]; // xyz = color, w = intensity
-    float Sky_Zenith   [4]; // xyz = zenith color, w = sky_intensity
-    float Sky_Horizon  [4]; // xyz = horizon color, w = sun_disc_size
-    float Ambient_Up   [4]; // xyz = ambient up, w = sun_disc_intensity
-    float Ambient_Down [4]; // xyz = ambient down, w = fog_density
-    float Fog_Color    [4]; // xyz = fog color, w = lightmap_mult
+    // Environment parameters
+    float Sun_Dir      [4]; // xyz = Direction,     w = Angular_Radius
+    float Sun_Color    [4]; // xyz = Color,         w = Intensity
+    float Sky_Zenith   [4]; // xyz = Zenith color,  w = Sky_Intensity
+    float Sky_Horizon  [4]; // xyz = Horizon color, w = Sun_Disc_Size
+    float Ambient_Up   [4]; // xyz = Ambient up,    w = Sun_Disc_Intensity
+    float Ambient_Down [4]; // xyz = Ambient down,  w = Fog_Density
+    float Fog_Color    [4]; // xyz = Fog color,     w = Lightmap_Mult
   } Uniform;
 
   // Compute the inverse matrices for reconstructing world-space rays from screen coordinates
@@ -7466,7 +8721,7 @@ void Camera_Upload (Camera *State, float Field_Of_View, uint Weapon_Texture_Base
   Uniform.PBR_Stride          = PBR_Stride_Value;
   Uniform.Active_SPP          = Active_SPP;
 
-  // Pack environment parameters into the uniform (vec4-aligned for std140)
+  // Pack environment parameters into the uniform 
   Scene_Environment *E = &Active_Environment;
   vec3 Nd = Normalize (E->Sun_Direction);
   Uniform.Sun_Dir     [3] = E->Sun_Angular_Radius;
@@ -7532,12 +8787,7 @@ void Weapon_Update (Weapon_Instance *Weapon, const Camera *Camera_Data, float De
   float Bob_Horizontal = cosf (Weapon->Bob_Time * 1.7f) * 0.04f;
   float Recoil         = Weapon->Is_Firing ? -0.5f * expf (-Weapon->Fire_Time * 5.f) : 0.f;
 
-  // Final weapon position: camera origin + forward/right/up offsets with bob and recoil.
-  // Source viewmodel positioning: viewmodel_fov=54° in world FOV=90° means the weapon appears ~2x larger.
-  // In the CSPromod reference, the weapon fills the entire bottom-right quadrant (~40% of screen).
-  // Place very close to camera so it fills the screen like the reference screenshot.
-  // Source viewmodels: origin = camera eye, weapon extends forward/down.
-  // Scale ~0.45 compensates for viewmodel_fov(54) → scene_fov(90) difference.
+  // Final weapon position: camera origin + forward/right/up offsets with bob and recoil ???
   float Fwd_Offset   = Weapon->Model.Is_Source ? 3.f  : 5.f;
   float Right_Offset = Weapon->Model.Is_Source ? 0.5f : 4.f;
   float Up_Offset    = Weapon->Model.Is_Source ? -0.5f: -3.5f;
@@ -7564,7 +8814,7 @@ void Weapon_Update (Weapon_Instance *Weapon, const Camera *Camera_Data, float De
   vec3 Axis_1 = (vec3){Tag[6],  Tag[8],  -Tag[7]};
   vec3 Axis_2 = (vec3){Tag[9],  Tag[11], -Tag[10]};
 
-  // Build the Y-up tag rotation matrix: columns = [forward | up | -left]
+  // Build the Y-up tag rotation matrix column (forward, up or -left)
   float Tag_Y_Up[9] = {Axis_0.x, Axis_2.x, -Axis_1.x,
                        Axis_0.y, Axis_2.y, -Axis_1.y,
                        Axis_0.z, Axis_2.z, -Axis_1.z};
@@ -7582,22 +8832,15 @@ void Weapon_Update (Weapon_Instance *Weapon, const Camera *Camera_Data, float De
                                  + Camera_Basis[Row * 3 + 1] * Tag_Y_Up[1 * 3 + Column]
                                  + Camera_Basis[Row * 3 + 2] * Tag_Y_Up[2 * 3 + Column];
 
-  // Scale the viewmodel down - no depth hack, so we shrink the model in world space
-  // Source viewmodel: scale to fill bottom-right quadrant like CSPromod reference screenshot.
-  // Close to camera (3 units) + 0.40 scale = weapon fills ~40% of screen like reference.
+  // Scale the viewmodel down - no depth hack, so we shrink the model in world space ???
   float Model_Scale = Weapon->Model.Is_Source ? 0.45f : WEAPON_MODEL_SCALE;
 
-  // Viewmodel FOV correction for Source weapons.
-  // Source renders viewmodels at ~54° FOV within a 90° scene FOV.
-  // To simulate: scale the forward (barrel) distance so the weapon appears
-  // as if rendered with the narrower FOV. Factor = tan(27°)/tan(45°) ≈ 0.51
+  // Viewmodel FOV correction for Source weapons ???
   float VM_Fov_Scale = Weapon->Model.Is_Source ? 0.51f : 1.f;
 
-  // Transform each vertex from model space to world space.
-  // Vertices are already stored as (barrel, up, right) by the Y-up swizzle in MD3_Parse_Surface
-  // and Source_Weapon_Model_Load, so no additional swizzle is needed here.
+  // Transform each vertex from model space to world space
   for (uint Index = 0; Index < Weapon->Model.Vertex_Count; Index++) {
-    float Source_X = Weapon->Model.Vertices[Index].Position[0] * Model_Scale * VM_Fov_Scale; // barrel (forward) — compressed by VM FOV
+    float Source_X = Weapon->Model.Vertices[Index].Position[0] * Model_Scale * VM_Fov_Scale;
     float Source_Y = Weapon->Model.Vertices[Index].Position[1] * Model_Scale; // up
     float Source_Z = Weapon->Model.Vertices[Index].Position[2] * Model_Scale; // right
 
@@ -7615,8 +8858,8 @@ void Weapon_Update (Weapon_Instance *Weapon, const Camera *Camera_Data, float De
     Weapon->Transformed_Vertices[Index].Normal[2] = Rotation[6] * Normal_X + Rotation[7] * Normal_Y + Rotation[8] * Normal_Z;
 
     // Pass texture coordinates through unchanged
-    Weapon->Transformed_Vertices[Index].Texture_Uv[0] = Weapon->Model.Vertices[Index].Texture_Uv[0];
-    Weapon->Transformed_Vertices[Index].Texture_Uv[1] = Weapon->Model.Vertices[Index].Texture_Uv[1];
+    Weapon->Transformed_Vertices[Index].Texture_UV[0] = Weapon->Model.Vertices[Index].Texture_UV[0];
+    Weapon->Transformed_Vertices[Index].Texture_UV[1] = Weapon->Model.Vertices[Index].Texture_UV[1];
   }
 } // Weapon_Update
 
@@ -7624,7 +8867,7 @@ void Weapon_Update (Weapon_Instance *Weapon, const Camera *Camera_Data, float De
 //   Raytracing_Frame
 // ════════════════════
 
-void Raytracing_Frame (Gpu_Postprocess_Push Postprocess) {
+void Raytracing_Frame (GPU_Postprocess_Push Postprocess) {
 
   // Wait for the previous frame's GPU work to complete
   VK_CHECK (vkWaitForFences (Device, 1, &Fence, VK_TRUE, UINT64_MAX));
@@ -7637,7 +8880,7 @@ void Raytracing_Frame (Gpu_Postprocess_Push Postprocess) {
                                         /*semaphore   =>*/ Semaphore_Image_Available,
                                         /*fence       =>*/ VK_NULL_HANDLE,
                                         /*pImageIndex =>*/ &Image_Index);
-    if (R == VK_ERROR_OUT_OF_DATE_KHR) { Swapchain_Dirty = 1; return; }
+    if (R == VK_ERROR_OUT_OF_DATE_KHR) { Swapchain_Dirty = 1; return;}
     if (R != VK_SUCCESS and R != VK_SUBOPTIMAL_KHR) {
       fprintf (stderr, "[vulkan] acquire error %d at %s:%d\n", R, __FILE__, __LINE__); exit (1);
     }
@@ -7661,9 +8904,8 @@ void Raytracing_Frame (Gpu_Postprocess_Push Postprocess) {
                            /*dynamicOffsetCount  =>*/ 0,
                            /*pDynamicOffsets     =>*/ NULL);
 
-  // Checkerboard: dispatch at half width, each thread remaps to a
-  // checkerboard pixel. Untouched pixels keep their previous value; the postprocess
-  // reconstructs them from traced neighbors before TAA. On lavapipe (CPU) this halves actual thread count, saving ~35% frame time.
+  // Checkerboard - Dispatch at half width, each thread remaps to a checkerboard pixel. Untouched pixels keep their previous value; the
+  // postprocess reconstructs them from traced neighbors before TAA.
   int RT_Dispatch_W = Active_Checkerboard ? (Render_Width + 1) / 2 : Render_Width;
   vkCmdTraceRays (/*commandBuffer                  =>*/ Command_Buffer,
                   /*pRaygenShaderBindingTable      =>*/ &Shader_Binding_Ray_Generation,
@@ -7676,7 +8918,8 @@ void Raytracing_Frame (Gpu_Postprocess_Push Postprocess) {
 
   // Dispatch postprocess compute shader (unless bypassed for raw PBR output)
   if (not Skip_Postprocess) {
-    // Barrier: RT writes > compute reads
+
+    // Barrier: Ray tracing writes then compute reads
     VkImageMemoryBarrier RT_To_Compute_Barriers[] = {
       {.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER, .srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT,
        .dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT,
@@ -7699,8 +8942,7 @@ void Raytracing_Frame (Gpu_Postprocess_Push Postprocess) {
                           /*imageMemoryBarrierCount  =>*/ 2,
                           /*pImageMemoryBarriers     =>*/ RT_To_Compute_Barriers);
 
-    // Iteration count controlled by quality preset (Potato=0, Low=1, Medium+=2).
-    // Passes Budget to the shader - at high budget (cheap path), denoiser is a passthrough.
+    // Iteration count controlled by quality preset. Passes Budget to the shader - at high budget (cheap path), denoiser is a passthrough.
     int Steps[] = {1, 3, 8, 16}; // Progressive A-trous: 3x3, 7x7, 17x17, 33x33
     int Denoise_Passes = Active_Denoise_Passes;
     if (Denoise_Passes > 0) {
@@ -7761,9 +9003,10 @@ void Raytracing_Frame (Gpu_Postprocess_Push Postprocess) {
   }
 
   // Select blit source: postprocess writes to Display_Image, raw RT to Storage_Image
-  VkImage Blit_Source = Skip_Postprocess ? Raytracing_Storage_Image.Image : Postprocess_Output_Image.Image;
-  VkPipelineStageFlags Pre_Blit = Skip_Postprocess
-    ? VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR : VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
+  VkImage Blit_Source = Skip_Postprocess ? Raytracing_Storage_Image.Image
+                                         : Postprocess_Output_Image.Image;
+  VkPipelineStageFlags Pre_Blit = Skip_Postprocess ? VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR
+                                                   : VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
 
   // Barrier: writes complete before blit reads
   vkCmdPipelineBarrier (/*commandBuffer            =>*/ Command_Buffer,
@@ -7921,14 +9164,14 @@ Convex_Hull Quickhull (const vec3 *Points, uint Count) {
     for (int J = I + 1; J < 6; J++) {
       float Distance = Dot (Subtract (Points[Extremals[I]], Points[Extremals[J]]),
                             Subtract (Points[Extremals[I]], Points[Extremals[J]]));
-      if (Distance > Best_Distance) { Best_Distance = Distance; Point_0 = Extremals[I]; Point_1 = Extremals[J]; }
+      if (Distance > Best_Distance) { Best_Distance = Distance; Point_0 = Extremals[I]; Point_1 = Extremals[J];}
     }
 
   // Find the third point: most distant from the initial edge
-  vec3  Edge        = Subtract (Points[Point_1], Points[Point_0]);
+  vec3  Edge         = Subtract (Points[Point_1], Points[Point_0]);
   float Edge_Length2 = Dot (Edge, Edge);
-  int   Point_2     = -1;
-  Best_Distance     = 0;
+  int   Point_2      = -1;
+  Best_Distance      = 0;
 
   // Search all points for the most distant from the edge
   for (uint Index = 0; Index < Count; Index++) {
@@ -7937,7 +9180,7 @@ Convex_Hull Quickhull (const vec3 *Points, uint Count) {
     float Parameter = Dot (Vector, Edge) / Edge_Length2;
     float Distance  = Dot (Subtract (Vector, Scale (Edge, Parameter)),
                            Subtract (Vector, Scale (Edge, Parameter)));
-    if (Distance > Best_Distance) { Best_Distance = Distance; Point_2 = Index; }
+    if (Distance > Best_Distance) { Best_Distance = Distance; Point_2 = Index;}
   }
   if (Point_2 < 0) Point_2 = (Point_0 + 1) % Count;
 
@@ -7947,7 +9190,7 @@ Convex_Hull Quickhull (const vec3 *Points, uint Count) {
   for (uint Index = 0; Index < Count; Index++) {
     if ((int)Index == Point_0 or (int)Index == Point_1 or (int)Index == Point_2) continue;
     float Distance = fabsf (Quickhull_Dist (Points[Index], Points[Point_0], Points[Point_1], Points[Point_2]));
-    if (Distance > Best_Distance) { Best_Distance = Distance; Point_3 = Index; }
+    if (Distance > Best_Distance) { Best_Distance = Distance; Point_3 = Index;}
   }
   if (Point_3 < 0) Point_3 = (Point_2 + 1) % Count;
 
@@ -8025,8 +9268,8 @@ Convex_Hull Quickhull (const vec3 *Points, uint Count) {
           int Other = Visible[Vj];
           int Face_Vertices[3] = {Faces[Other].A, Faces[Other].B, Faces[Other].C};
           int Has_0 = 0, Has_1 = 0;
-          for (int K = 0; K < 3; K++) { Has_0 |= (Face_Vertices[K] == Triangle[Edge][0]); Has_1 |= (Face_Vertices[K] == Triangle[Edge][1]); }
-          if (Has_0 and Has_1) { Shared = 1; break; }
+          for (int K = 0; K < 3; K++) { Has_0 |= (Face_Vertices[K] == Triangle[Edge][0]); Has_1 |= (Face_Vertices[K] == Triangle[Edge][1]);}
+          if (Has_0 and Has_1) { Shared = 1; break;}
         }
         if (not Shared) Horizon[Horizon_Count++] = (Quickhull_Edge){Triangle[Edge][0], Triangle[Edge][1], Face_Index};
       }
@@ -8049,7 +9292,7 @@ Convex_Hull Quickhull (const vec3 *Points, uint Count) {
       float Best = 0;
       for (int Face = New_Start; Face < Face_Count; Face++) {
         float Distance = Quickhull_Dist (Points[Index], Points[Faces[Face].A], Points[Faces[Face].B], Points[Faces[Face].C]);
-        if (Distance > Best) { Best = Distance; Assignments[Index] = Face; }
+        if (Distance > Best) { Best = Distance; Assignments[Index] = Face;}
       }
     }
   }
@@ -8080,11 +9323,11 @@ Convex_Hull Quickhull (const vec3 *Points, uint Count) {
       if (Vertex_0 < 0 or Vertex_1 < 0) continue;
       for (int Slot = 0; Slot < HULL_MAX_ADJ; Slot++) {
         if (Result.Adjacency[Vertex_0][Slot] == Vertex_1) break;
-        if (Result.Adjacency[Vertex_0][Slot] == -1) { Result.Adjacency[Vertex_0][Slot] = Vertex_1; break; }
+        if (Result.Adjacency[Vertex_0][Slot] == -1) { Result.Adjacency[Vertex_0][Slot] = Vertex_1; break;}
       }
       for (int Slot = 0; Slot < HULL_MAX_ADJ; Slot++) {
         if (Result.Adjacency[Vertex_1][Slot] == Vertex_0) break;
-        if (Result.Adjacency[Vertex_1][Slot] == -1) { Result.Adjacency[Vertex_1][Slot] = Vertex_0; break; }
+        if (Result.Adjacency[Vertex_1][Slot] == -1) { Result.Adjacency[Vertex_1][Slot] = Vertex_0; break;}
       }
     }
   }
@@ -8133,7 +9376,7 @@ Convex_Hull Hull_From_Vertices (const Vertex *Vertices, uint Count) {
 void Hull_Upload (const Convex_Hull *Hull) {
 
   // Pack the CPU-side hull into the GPU-compatible layout
-  Gpu_Hull Packed = {0};
+  GPU_Hull Packed = {0};
   Packed.Count  = (int)Hull->Vertex_Count;
   Packed.Radius = Hull->Bounding_Radius;
   Packed.Centroid[0] = Hull->Centroid.x;
@@ -8151,7 +9394,7 @@ void Hull_Upload (const Convex_Hull *Hull) {
 
   // Allocate the hull storage buffer on first use, then upload the packed data
   if (not Hull_Storage_Buffer.Buffer)
-    Hull_Storage_Buffer = Buffer_Allocate (/*Size         =>*/ sizeof (Gpu_Hull),
+    Hull_Storage_Buffer = Buffer_Allocate (/*Size         =>*/ sizeof (GPU_Hull),
                                            /*Usage        =>*/ VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
                                                              | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
                                            /*Memory_Flags =>*/ VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT
@@ -8165,7 +9408,7 @@ void Hull_Upload (const Convex_Hull *Hull) {
 
 void Physics_Pipeline_Create () {
 
-  // Define the 6 descriptor bindings for the physics compute pipeline
+  // Define the descriptor bindings for the physics compute pipeline
   VkDescriptorSetLayoutBinding Bindings[] = {
     {0, VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, 1, VK_SHADER_STAGE_COMPUTE_BIT, NULL}, // TLAS
     {1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,             1, VK_SHADER_STAGE_COMPUTE_BIT, NULL}, // Vertex buffer
@@ -8184,8 +9427,8 @@ void Physics_Pipeline_Create () {
                                          /*pAllocator  =>*/ NULL,
                                          /*pSetLayout  =>*/ &Physics_Descriptor_Layout));
 
-  // Create the pipeline layout with push constants for per-frame Gpu_Input delivery
-  VkPushConstantRange Push_Range = {VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof (Gpu_Input)};
+  // Create the pipeline layout with push constants for per-frame GPU_Input delivery
+  VkPushConstantRange Push_Range = {VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof (GPU_Input)};
   VK_CHECK (vkCreatePipelineLayout (/*device          =>*/ Device,
                                     /*pCreateInfo     =>*/ &(VkPipelineLayoutCreateInfo){
                                       .sType                  = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
@@ -8218,14 +9461,14 @@ void Physics_Pipeline_Create () {
 void Physics_Resources_Create (const Player *Initial_State) {
 
   // Allocate the host-visible player state buffer for GPU read-write access each frame
-  Player_State_Buffer = Buffer_Allocate (/*Size         =>*/ sizeof (Gpu_Player),
+  Player_State_Buffer = Buffer_Allocate (/*Size         =>*/ sizeof (GPU_Player),
                                          /*Usage        =>*/ VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
                                                            | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
                                          /*Memory_Flags =>*/ VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT
                                                            | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
 
   // Initialize the GPU player state from the spawn point with a capsule collider
-  Gpu_Player Initial_GPU_State = {
+  GPU_Player Initial_GPU_State = {
     .Position    = {Initial_State->Position.x, Initial_State->Position.y, Initial_State->Position.z},
     .Yaw         = Initial_State->Yaw,
     .Pitch       = Initial_State->Pitch,
@@ -8237,29 +9480,28 @@ void Physics_Resources_Create (const Player *Initial_State) {
 
   // Initialize the hull storage buffer with a 1-vertex dummy (replaced when a real hull is loaded)
   if (not Hull_Storage_Buffer.Buffer) {
-    Hull_Storage_Buffer = Buffer_Allocate (/*Size         =>*/ sizeof (Gpu_Hull),
+    Hull_Storage_Buffer = Buffer_Allocate (/*Size         =>*/ sizeof (GPU_Hull),
                                            /*Usage        =>*/ VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
                                                              | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
                                            /*Memory_Flags =>*/ VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT
                                                              | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
-    Gpu_Hull Empty = {0};
+    GPU_Hull Empty = {0};
     Empty.Count = 1;
     Buffer_Upload (Hull_Storage_Buffer, &Empty, sizeof Empty);
   }
 
   // Allocate the projectile pool buffer (binding 5)
-  Projectile_Buffer = Buffer_Allocate (/*Size         =>*/ sizeof (Gpu_Projectile_Pool),
+  Projectile_Buffer = Buffer_Allocate (/*Size         =>*/ sizeof (GPU_Projectile_Pool),
                                        /*Usage        =>*/ VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
                                                          | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
                                        /*Memory_Flags =>*/ VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT
                                                          | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
-  Gpu_Projectile_Pool Empty_Pool = {0};
+  GPU_Projectile_Pool Empty_Pool = {0};
   Buffer_Upload (Projectile_Buffer, &Empty_Pool, sizeof Empty_Pool);
 
   // Allocate the physics descriptor pool and set
-  VkDescriptorPoolSize Pool_Sizes[] = {
-    {VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, 1},
-    {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,             5}}; // 5 storage buffers: vertex, index, player, hull, projectiles
+  VkDescriptorPoolSize Pool_Sizes[] = {{VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, 1},
+                                       {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,             5}};
   VK_CHECK (vkCreateDescriptorPool (/*device          =>*/ Device,
                                     /*pCreateInfo     =>*/ &(VkDescriptorPoolCreateInfo){
                                       .sType         = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
@@ -8308,7 +9550,7 @@ void Physics_Resources_Create (const Player *Initial_State) {
 Player Physics_Dispatch (Input In, float Dt) {
 
   // Pack the CPU input into the GPU push constant structure
-  Gpu_Input GPU_Input = {
+  GPU_Input GPU_Input = {
     In.Forward, In.Back, In.Left, In.Right,
     In.Jump, In.Fire, In.Crouch, Active_Movement,
     In.Delta_X, In.Delta_Y, Dt, 0};
@@ -8365,8 +9607,8 @@ Player Physics_Dispatch (Input In, float Dt) {
   VK_CHECK (vkQueueWaitIdle (Queue));
 
   // Read back the updated player state from the GPU buffer
-  Gpu_Player *Mapped;
-  vkMapMemory (Device, Player_State_Buffer.Memory, 0, sizeof (Gpu_Player), 0, (void **)&Mapped);
+  GPU_Player *Mapped;
+  vkMapMemory (Device, Player_State_Buffer.Memory, 0, sizeof (GPU_Player), 0, (void **)&Mapped);
   Player Result = {
     .Position    = Make (Mapped->Position[0], Mapped->Position[1], Mapped->Position[2]),
     .Velocity    = Make (Mapped->Velocity[0], Mapped->Velocity[1], Mapped->Velocity[2]),
@@ -8412,12 +9654,12 @@ void Projectile_Spawn (vec3 Origin, vec3 Direction) {
 // ══════════════════════════
 
 void Projectile_Pool_Upload () {
-  Gpu_Projectile_Pool GPU_Pool = {0};
+  GPU_Projectile_Pool GPU_Pool = {0};
   GPU_Pool.Count         = Projectiles.Count;
   GPU_Pool.Fire_Cooldown = Projectiles.Fire_Cooldown;
   for (int I = 0; I < Projectiles.Count; I++) {
     Projectile *P = &Projectiles.Slots[I];
-    GPU_Pool.Slots[I] = (Gpu_Projectile){
+    GPU_Pool.Slots[I] = (GPU_Projectile){
       {P->Position.x, P->Position.y, P->Position.z}, 0,
       {P->Velocity.x, P->Velocity.y, P->Velocity.z}, P->Lifetime,
       P->Active, P->Material_Hit, P->Radius, P->Damage,
@@ -8431,12 +9673,12 @@ void Projectile_Pool_Upload () {
 // ════════════════════════════
 
 void Projectile_Pool_Readback () {
-  Gpu_Projectile_Pool *Mapped;
-  vkMapMemory (Device, Projectile_Buffer.Memory, 0, sizeof (Gpu_Projectile_Pool), 0, (void **)&Mapped);
+  GPU_Projectile_Pool *Mapped;
+  vkMapMemory (Device, Projectile_Buffer.Memory, 0, sizeof (GPU_Projectile_Pool), 0, (void **)&Mapped);
   Projectiles.Count         = Mapped->Count;
   Projectiles.Fire_Cooldown = Mapped->Fire_Cooldown;
   for (int I = 0; I < Projectiles.Count; I++) {
-    Gpu_Projectile *G = &Mapped->Slots[I];
+    GPU_Projectile *G = &Mapped->Slots[I];
     Projectiles.Slots[I] = (Projectile){
       .Position     = {G->Position[0], G->Position[1], G->Position[2]},
       .Velocity     = {G->Velocity[0], G->Velocity[1], G->Velocity[2]},
@@ -8451,7 +9693,7 @@ void Projectile_Pool_Readback () {
   }
   vkUnmapMemory (Device, Projectile_Buffer.Memory);
 
-  // Compact: remove dead projectiles, play explosion sound on impact
+  // Remove dead projectiles, play explosion sound on impact
   int Write = 0;
   for (int I = 0; I < Projectiles.Count; I++) {
     if (Projectiles.Slots[I].Active) {
@@ -8512,7 +9754,7 @@ ALuint Audio_Generate_Modal_Impact (int Material, float Impulse_Strength, float 
     Mode_Init (&Bank[I], Specs[I].Freq, Specs[I].T60, Specs[I].Gain * Impulse_Strength);
 
   // Generate excitation: short impulse pulse (1-5ms) shaped by contact force profile
-  int Impulse_Len = (int)(MODAL_SAMPLE_RATE * 0.003f); // 3ms impulse
+  int Impulse_Len = (int)(MODAL_SAMPLE_RATE * 0.003f);
   if (Impulse_Len < 1) Impulse_Len = 1;
 
   // LCG for acceleration noise
@@ -8520,6 +9762,7 @@ ALuint Audio_Generate_Modal_Impact (int Material, float Impulse_Strength, float 
 
   // Synthesize audio samples from the resonator bank
   for (int I = 0; I < Samples; I++) {
+
     // Excitation: raised-cosine impulse for the first few ms
     float Excitation = 0;
     if (I < Impulse_Len) {
@@ -8696,10 +9939,10 @@ ALuint Audio_Load_WAV (const char *Path) {
 
   // Read WAV header (44 bytes minimum)
   unsigned char Header[44];
-  if (fread (Header, 1, 44, F) < 44) { fclose (F); return 0; }
+  if (fread (Header, 1, 44, F) < 44) { fclose (F); return 0;}
 
   // Verify RIFF/WAVE signature
-  if (memcmp (Header, "RIFF", 4) != 0 or memcmp (Header + 8, "WAVE", 4) != 0) { fclose (F); return 0; }
+  if (memcmp (Header, "RIFF", 4) != 0 or memcmp (Header + 8, "WAVE", 4) != 0) { fclose (F); return 0;}
 
   // Parse format chunk
   int Channels    = Header[22] | (Header[23] << 8);
@@ -8719,7 +9962,7 @@ ALuint Audio_Load_WAV (const char *Path) {
   else if (Channels == 1 and Bits == 16) Format = AL_FORMAT_MONO16;
   else if (Channels == 2 and Bits == 8)  Format = AL_FORMAT_STEREO8;
   else if (Channels == 2 and Bits == 16) Format = AL_FORMAT_STEREO16;
-  else { free (Data); return 0; }
+  else { free (Data); return 0;}
 
   // Create OpenAL buffer and upload PCM data
   ALuint Buffer;
@@ -8735,7 +9978,7 @@ ALuint Audio_Load_WAV (const char *Path) {
 
 ALuint Audio_Load_WAV_Or_Modal (const char *Path, int Material, float Impulse, float Duration, float Volume) {
   ALuint Buf = Audio_Load_WAV (Path);
-  if (Buf) { printf ("[audio] loaded %s\n", Path); return Buf; }
+  if (Buf) { printf ("[audio] loaded %s\n", Path); return Buf;}
   printf ("[audio] synthesizing fallback for %s\n", Path);
   return Audio_Generate_Modal_Impact (Material, Impulse, Duration, Volume);
 }
@@ -8749,7 +9992,7 @@ void Audio_Init () {
 
   // Open audio device
   Audio.Device = alcOpenDevice (NULL);
-  if (not Audio.Device) { fprintf (stderr, "[audio] failed to open device\n"); return; }
+  if (not Audio.Device) { fprintf (stderr, "[audio] failed to open device\n"); return;}
 
   // Create and activate audio context
   Audio.Context = alcCreateContext (Audio.Device, NULL);
@@ -8905,7 +10148,7 @@ VkShaderModule Shader_Module_Load (const char *Path) {
 
   // Open the SPIR-V binary file
   FILE *File = fopen (Path, "rb");
-  if (not File) {fprintf (stderr, "Cannot open shader %s\n", Path); exit (1); }
+  if (not File) {fprintf (stderr, "Cannot open shader %s\n", Path); exit (1);}
 
   // Read the file size and allocate a buffer for the SPIR-V bytecode
   fseek (File, 0, SEEK_END);
@@ -8943,17 +10186,17 @@ glsl rgen Ray_Generation {
   layout(binding = 2) uniform Camera_Uniform {
     mat4  Inverse_View; mat4 Inverse_Projection;
     uint  Frame; uint Weapon_Texture_Base; uint PBR_Stride; uint Active_SPP;
-    vec4  Env_Sun_Dir;      // xyz = direction, w = angular_radius
-    vec4  Env_Sun_Color;    // xyz = color, w = intensity
-    vec4  Env_Sky_Zenith;   // xyz = zenith color, w = sky_intensity
-    vec4  Env_Sky_Horizon;  // xyz = horizon color, w = cos(sun_disc_size)
-    vec4  Env_Ambient_Up;   // xyz = ambient up, w = sun_disc_intensity
-    vec4  Env_Ambient_Down; // xyz = ambient down, w = fog_density
-    vec4  Env_Fog_Color;    // xyz = fog color, w = lightmap_mult
+    vec4  Env_Sun_Dir;      // xyz = Direction,     w = Angular_Radius
+    vec4  Env_Sun_Color;    // xyz = Color,         w = Intensity
+    vec4  Env_Sky_Zenith;   // xyz = Zenith color,  w = Sky_Intensity
+    vec4  Env_Sky_Horizon;  // xyz = Horizon color, w = cos (Sun_Disc_Size)
+    vec4  Env_Ambient_Up;   // xyz = Ambient up,    w = Sun_Disc_Intensity
+    vec4  Env_Ambient_Down; // xyz = Ambient down,  w = Fog_Density
+    vec4  Env_Fog_Color;    // xyz = Fog color,     w = Lightmap_Mult
   };
   layout(binding = 11, r32f) uniform image2D             Depth_Output;
   
-  layout(location = 0) rayPayloadEXT vec4 Payload;  // rgb = color, a = hit distance
+  layout(location = 0) rayPayloadEXT vec4 Payload; // rgb = Color, a = Hit distance
   
   // Stratified sub-pixel jitter for multi-sample anti-aliasing
   uint PCG (uint V) {
@@ -8976,15 +10219,14 @@ glsl rgen Ray_Generation {
     } else {
       Px = ivec2 (gl_LaunchIDEXT.xy);
     }
-
     vec3  Origin     = (Inverse_View * vec4 (0, 0, 0, 1)).xyz;
     vec3  Color_Sum  = vec3 (0.0);
     float Depth_Sum  = 0.0;
 
     // Ray direction from pixel position (use full image size for correct UV mapping)
-    vec2  Pixel  = vec2 (Px) + 0.5;
-    vec2  Uv     = Pixel / vec2 (Img_Size);
-    vec2  Ndc    = fma (Uv, vec2 (2.0), vec2 (-1.0));
+    vec2  Pixel     = vec2 (Px) + 0.5;
+    vec2  Uv        = Pixel / vec2 (Img_Size);
+    vec2  Ndc       = fma (Uv, vec2 (2.0), vec2 (-1.0));
     vec4  Target    = Inverse_Projection * vec4 (Ndc.x, Ndc.y, 0.0, 1.0);
     vec4  Direction = Inverse_View * vec4 (normalize (Target.xyz / Target.w), 0.0);
   
@@ -8992,7 +10234,7 @@ glsl rgen Ray_Generation {
     for (int S = 0; S < SPP; S++) {
       Payload = vec4 (0.0, 0.0, 0.0, 10000.0);
 
-      // Mask 0xFD: primary rays see everything EXCEPT player body (bit 1 = 0x02).
+      // Mask 0xFD: primary rays see everything EXCEPT player body (bit 1 = 0x02)
       traceRayEXT (Top_Level, gl_RayFlagsOpaqueEXT, 0xFD, 0, 0, 0,
                    Origin, 0.001, Direction.xyz, 10000.0, 0);
   
@@ -9025,36 +10267,37 @@ glsl rchit Closest_Hit {
   layout(binding = 2) uniform Camera_Uniform {
     mat4  Inverse_View; mat4 Inverse_Projection;
     uint  Frame; uint Weapon_Texture_Base; uint PBR_Stride; uint Active_SPP;
-    vec4  Env_Sun_Dir;      // xyz = direction, w = angular_radius
-    vec4  Env_Sun_Color;    // xyz = color, w = intensity
-    vec4  Env_Sky_Zenith;   // xyz = zenith color, w = sky_intensity
-    vec4  Env_Sky_Horizon;  // xyz = horizon color, w = cos(sun_disc_size)
-    vec4  Env_Ambient_Up;   // xyz = ambient up, w = sun_disc_intensity
-    vec4  Env_Ambient_Down; // xyz = ambient down, w = fog_density
-    vec4  Env_Fog_Color;    // xyz = fog color, w = lightmap_mult
+    vec4  Env_Sun_Dir;      // xyz = Direction,     w = Angular_Radius
+    vec4  Env_Sun_Color;    // xyz = Color,         w = Intensity
+    vec4  Env_Sky_Zenith;   // xyz = Zenith color,  w = Sky_Intensity
+    vec4  Env_Sky_Horizon;  // xyz = Horizon color, w = cos (Sun_disc_size)
+    vec4  Env_Ambient_Up;   // xyz = Ambient up,    w = Sun_Disc_Intensity
+    vec4  Env_Ambient_Down; // xyz = Ambient down,  w = Fog_Density
+    vec4  Env_Fog_Color;    // xyz = Fog color,     w = Lightmap_Mult
   };
   
   // Scene geometry
-  layout(binding = 3, std430) readonly buffer Vertex_Data   { vec4 Data[]; } Vertices;
-  layout(binding = 4, std430) readonly buffer Index_Data    { uint Data[]; } Indices;
-  layout(binding = 5, std430) readonly buffer Material_Data { vec4 Data[]; } Materials;
-  layout(binding = 6, std430) readonly buffer Tex_Id_Data   { uint Data[]; } Texture_Ids;
+  layout(binding = 3, std430) readonly buffer Vertex_Data   {vec4 Data[];} Vertices;
+  layout(binding = 4, std430) readonly buffer Index_Data    {uint Data[];} Indices;
+  layout(binding = 5, std430) readonly buffer Material_Data {vec4 Data[];} Materials;
+  layout(binding = 6, std430) readonly buffer Tex_Id_Data   {uint Data[];} Texture_Ids;
   layout(binding = 7)         uniform sampler2D              Lightmap;
   
   // Weapon geometry
-  layout(binding = 8,  std430) readonly buffer Weapon_Vertex_Data { vec4 Data[]; } Weapon_Vertices;
-  layout(binding = 9,  std430) readonly buffer Weapon_Index_Data  { uint Data[]; } Weapon_Indices;
-  layout(binding = 10, std430) readonly buffer Weapon_Tex_Id_Data { uint Data[]; } Weapon_Tex_Ids;
+  layout(binding = 8,  std430) readonly buffer Weapon_Vertex_Data {vec4 Data[];} Weapon_Vertices;
+  layout(binding = 9,  std430) readonly buffer Weapon_Index_Data  {uint Data[];} Weapon_Indices;
+  layout(binding = 10, std430) readonly buffer Weapon_Tex_Id_Data {uint Data[];} Weapon_Tex_Ids;
   
   // Entity geometry
-  layout(binding = 12, std430) readonly buffer Entity_Vertex_Data { vec4 Data[]; } Entity_Vertices;
-  layout(binding = 13, std430) readonly buffer Entity_Index_Data  { uint Data[]; } Entity_Indices;
-  layout(binding = 14, std430) readonly buffer Entity_Tex_Id_Data { uint Data[]; } Entity_Tex_Ids;
+  layout(binding = 12, std430) readonly buffer Entity_Vertex_Data {vec4 Data[];} Entity_Vertices;
+  layout(binding = 13, std430) readonly buffer Entity_Index_Data  {uint Data[];} Entity_Indices;
+  layout(binding = 14, std430) readonly buffer Entity_Tex_Id_Data {uint Data[];} Entity_Tex_Ids;
   
   // Bindless texture array (binding 15: must be highest for variable descriptor count)
   layout(binding = 15) uniform sampler2D Textures[];
-  
-  layout(location = 0) rayPayloadInEXT vec4 Payload;  // rgb = color, a = hit distance
+
+  // Comment here !!! 
+  layout(location = 0) rayPayloadInEXT vec4 Payload; // rgb = color, a = hit distance
 
   // Shadow rays now use inline rayQueryEXT - no payload needed (saves continuation stack)
   hitAttributeEXT vec2 Barycentrics;
@@ -9066,17 +10309,12 @@ glsl rchit Closest_Hit {
     return (W >> 22u) ^ W;
   }
 
-  // Interleaved Gradient Noise (Jimenez 2014, SIGGRAPH) — produces a
-  // blue-noise-like spatial distribution.  Neighboring pixels get well-separated
-  // values, making error high-frequency and easy for the denoiser to smooth.
+  // Interleaved Gradient Noise - produces a blue-noise-like spatial distribution
   float IGN (vec2 Pos) {
     return fract (52.9829189 * fract (0.06711056 * Pos.x + 0.00583715 * Pos.y));
   }
 
-  // Sampling Visible GGX Normals with Spherical Caps (Dupuy & Benyoub 2023).
-  // Simpler and more numerically stable than Heitz 2018.  Samples the visible
-  // normal distribution by projecting onto a spherical cap centered on the
-  // stretched view direction — no tangent-frame construction needed.
+  // Sampling Visible GGX Normals with Spherical Caps
   vec3 Sample_GGX_VNDF (vec3 Ve, float Alpha, float U1, float U2) {
     vec3  Vh        = normalize (vec3 (Alpha * Ve.x, Alpha * Ve.y, Ve.z));
     float Phi       = 6.28318530 * U1;
@@ -9087,22 +10325,20 @@ glsl rchit Closest_Hit {
     return normalize (vec3 (Alpha * Nh.x, Alpha * Nh.y, max (0.0, Nh.z)));
   }
   
-  // Soft shadow ray direction — blue-noise spatial + golden-ratio temporal.
-  // IGN gives blue-noise-like spatial distribution (denoiser-friendly),
-  // concentric disk mapping (Shirley & Chiu 1997) gives better disk
-  // stratification than polar sqrt(u)*cos/sin.
+  // Soft shadow ray direction - blue-noise spatial + golden-ratio temporal
   vec3 Soft_Shadow_Dir (vec3 Ld, uint Prim, uint Inst, uint Frame, float Disk_Radius) {
     vec2  Px = vec2 (gl_LaunchIDEXT.xy);
     float N1 = fract (IGN (Px) + float (Frame) * 0.7548776662);
     float N2 = fract (IGN (Px + 17.0) + float (Frame) * 0.5698402910);
-    // Concentric disk mapping (Shirley & Chiu 1997, SIGGRAPH)
+
+    // Concentric disk mapping
     float A = 2.0 * N1 - 1.0, B = 2.0 * N2 - 1.0;
     float Rad, Phi;
-    if (A * A > B * B) { Rad = A; Phi = 0.785398 * (B / max (abs (A), 1e-6)); }
-    else               { Rad = B; Phi = 1.5708  - 0.785398 * (A / max (abs (B), 1e-6)); }
+    if (A * A > B * B) {Rad = A; Phi = 0.785398          * (B / max (abs (A), 1e-6));}
+    else               {Rad = B; Phi = 1.5708 - 0.785398 * (A / max (abs (B), 1e-6));}
     Rad *= Disk_Radius;
-    vec3 Light_Tangent   = (abs (Ld.y) < 0.99) ? normalize (cross (Ld, vec3 (0, 1, 0)))
-                                               : normalize (cross (Ld, vec3 (1, 0, 0)));
+    vec3 Light_Tangent = (abs (Ld.y) < 0.99) ? normalize (cross (Ld, vec3 (0, 1, 0)))
+                                             : normalize (cross (Ld, vec3 (1, 0, 0)));
     vec3 Light_Bitangent = cross (Ld, Light_Tangent);
     return normalize (Ld + Light_Tangent * (cos (Phi) * Rad) + Light_Bitangent * (sin (Phi) * Rad));
   }
@@ -9125,17 +10361,19 @@ glsl rchit Closest_Hit {
     if (Instance == 1u) return Weapon_Vertices.Data[I * 3 + Slot];
     return Vertices.Data[I * 3 + Slot];
   }
-  vec3 Read_Position   (uint I, uint Inst) { return Read_Raw (I, 0, Inst).xyz; }
-  vec2 Read_Tex_Uv     (uint I, uint Inst) { return Read_Raw (I, 1, Inst).xy;  }
-  vec2 Read_Lightmap_Uv(uint I, uint Inst) { return Read_Raw (I, 1, Inst).zw;  }
-  vec3 Read_Normal     (uint I, uint Inst) { return Read_Raw (I, 2, Inst).xyz; }
+  vec3 Read_Position    (uint I, uint Inst) {return Read_Raw (I, 0, Inst).xyz;}
+  vec2 Read_Lightmap_UV (uint I, uint Inst) {return Read_Raw (I, 1, Inst).zw;}
+  vec2 Read_Tex_UV      (uint I, uint Inst) {return Read_Raw (I, 1, Inst).xy;}
+  vec3 Read_Normal      (uint I, uint Inst) {return Read_Raw (I, 2, Inst).xyz;}
   
+  // Closest_Hit shader main
   void main () {
+
     // Determine which instance we hit: 0 = world, 1 = weapon, 2 = entity
-    uint  Instance     = gl_InstanceCustomIndexEXT;
-    bool  Is_Weapon    = (Instance == 1u);
-    bool  Is_Entity     = (Instance == 2u);
-    uint  Primitive    = gl_PrimitiveID;
+    uint  Instance  = gl_InstanceCustomIndexEXT;
+    uint  Primitive = gl_PrimitiveID;
+    bool  Is_Weapon = (Instance == 1u);
+    bool  Is_Entity = (Instance == 2u);
   
     // Adaptive quality budget: 0.0 = full quality (60fps+), 1.0 = minimal work (< 5fps)
     float Budget = float ((Active_SPP >> 8u) & 0xFFu) / 255.0;
@@ -9143,36 +10381,38 @@ glsl rchit Closest_Hit {
     // Fetch triangle vertex indices from the appropriate buffer
     uint I0, I1, I2;
     if (Is_Entity) {
-      I0 = Entity_Indices.Data[Primitive * 3 + 0];
-      I1 = Entity_Indices.Data[Primitive * 3 + 1];
-      I2 = Entity_Indices.Data[Primitive * 3 + 2];
+      I0 = Entity_Indices.Data [Primitive * 3 + 0];
+      I1 = Entity_Indices.Data [Primitive * 3 + 1];
+      I2 = Entity_Indices.Data [Primitive * 3 + 2];
     } else if (Is_Weapon) {
-      I0 = Weapon_Indices.Data[Primitive * 3 + 0];
-      I1 = Weapon_Indices.Data[Primitive * 3 + 1];
-      I2 = Weapon_Indices.Data[Primitive * 3 + 2];
+      I0 = Weapon_Indices.Data [Primitive * 3 + 0];
+      I1 = Weapon_Indices.Data [Primitive * 3 + 1];
+      I2 = Weapon_Indices.Data [Primitive * 3 + 2];
     } else {
-      I0 = Indices.Data[Primitive * 3 + 0];
-      I1 = Indices.Data[Primitive * 3 + 1];
-      I2 = Indices.Data[Primitive * 3 + 2];
+      I0 = Indices.Data [Primitive * 3 + 0];
+      I1 = Indices.Data [Primitive * 3 + 1];
+      I2 = Indices.Data [Primitive * 3 + 2];
     }
   
     // Batched vertex attribute reads
-    vec3 Bary   = vec3 (1.0 - Barycentrics.x - Barycentrics.y, Barycentrics.x, Barycentrics.y);
-    vec4 V0_S0  = Read_Raw (I0, 0, Instance), V0_S1 = Read_Raw (I0, 1, Instance), V0_S2 = Read_Raw (I0, 2, Instance);
-    vec4 V1_S0  = Read_Raw (I1, 0, Instance), V1_S1 = Read_Raw (I1, 1, Instance), V1_S2 = Read_Raw (I1, 2, Instance);
-    vec4 V2_S0  = Read_Raw (I2, 0, Instance), V2_S1 = Read_Raw (I2, 1, Instance), V2_S2 = Read_Raw (I2, 2, Instance);
-    vec3 Position  = V0_S0.xyz * Bary.x + V1_S0.xyz * Bary.y + V2_S0.xyz * Bary.z;
-    vec2 Tex_Coord = V0_S1.xy  * Bary.x + V1_S1.xy  * Bary.y + V2_S1.xy  * Bary.z;
-    vec2 Lightmap_Coordinate  = V0_S1.zw  * Bary.x + V1_S1.zw  * Bary.y + V2_S1.zw  * Bary.z;
-    vec3 Normal    = normalize (V0_S2.xyz * Bary.x + V1_S2.xyz * Bary.y + V2_S2.xyz * Bary.z);
+    vec3 Bary  = vec3 (1.0 - Barycentrics.x - Barycentrics.y, Barycentrics.x, Barycentrics.y);
+    vec4 V0_S0 = Read_Raw (I0, 0, Instance), V0_S1 = Read_Raw (I0, 1, Instance), V0_S2 = Read_Raw (I0, 2, Instance);
+    vec4 V1_S0 = Read_Raw (I1, 0, Instance), V1_S1 = Read_Raw (I1, 1, Instance), V1_S2 = Read_Raw (I1, 2, Instance);
+    vec4 V2_S0 = Read_Raw (I2, 0, Instance), V2_S1 = Read_Raw (I2, 1, Instance), V2_S2 = Read_Raw (I2, 2, Instance);
+
+    // Comment here !!!
+    vec3 Position            = V0_S0.xyz * Bary.x + V1_S0.xyz * Bary.y + V2_S0.xyz * Bary.z;
+    vec2 Tex_Coord           = V0_S1.xy  * Bary.x + V1_S1.xy  * Bary.y + V2_S1.xy  * Bary.z;
+    vec2 Lightmap_Coordinate = V0_S1.zw  * Bary.x + V1_S1.zw  * Bary.y + V2_S1.zw  * Bary.z;
+    vec3 Normal = normalize   (V0_S2.xyz * Bary.x + V1_S2.xyz * Bary.y + V2_S2.xyz * Bary.z);
   
     // Fetch the texture ID for this triangle and sample the albedo
     uint Tex_Id;
     uint Weapon_Base   = Weapon_Texture_Base & 0xFFFFu;
     uint Weapon_Stride = Weapon_Texture_Base >> 16u;
-    if (Is_Entity) Tex_Id = Entity_Tex_Ids.Data[Primitive];
-    else if (Is_Weapon) Tex_Id = Weapon_Tex_Ids.Data[Primitive] + Weapon_Base;
-    else Tex_Id = Texture_Ids.Data[Primitive];
+    if      (Is_Entity) Tex_Id = Entity_Tex_Ids.Data [Primitive];
+    else if (Is_Weapon) Tex_Id = Weapon_Tex_Ids.Data [Primitive] + Weapon_Base;
+    else                Tex_Id = Texture_Ids.Data    [Primitive];
   
     // Build tangent frame (Frisvad method) for normal mapping and parallax
     vec3 Geo_Normal = Normal; // Preserve geometric normal for parallax
@@ -9182,8 +10422,8 @@ glsl rchit Closest_Hit {
       B_Axis = vec3 (-1.0, 0.0, 0.0);
     } else {
       float Inv = 1.0 / (1.0 + Geo_Normal.z);
-      T_Axis = vec3 (1.0 - Geo_Normal.x * Geo_Normal.x * Inv, -Geo_Normal.x * Geo_Normal.y * Inv, -Geo_Normal.x);
-      B_Axis = vec3 (-Geo_Normal.x * Geo_Normal.y * Inv, 1.0 - Geo_Normal.y * Geo_Normal.y * Inv, -Geo_Normal.y);
+      T_Axis = vec3 (1.0 - Geo_Normal.x * Geo_Normal.x * Inv,      -Geo_Normal.x * Geo_Normal.y * Inv, -Geo_Normal.x);
+      B_Axis = vec3      (-Geo_Normal.x * Geo_Normal.y * Inv, 1.0 - Geo_Normal.y * Geo_Normal.y * Inv, -Geo_Normal.y);
     }
   
     // Parallax occlusion mapping from height map
@@ -9201,31 +10441,31 @@ glsl rchit Closest_Hit {
       vec2 Parallax_Dir = V_Tangent.xy / max (V_Tangent.z, 0.1) * 0.03;
   
       // Hybrid linear-binary parallax 
-      uint Height_Tex = nonuniformEXT(Tex_Id + PBR_Stride * 5u);
-      float Layer_Depth = 1.0 / 4.0;  // 4 coarse steps
+      uint  Height_Tex    = nonuniformEXT(Tex_Id + PBR_Stride * 5u);
+      float Layer_Depth   = 1.0 / 4.0; // Four coarse steps
       float Current_Depth = 0.0;
-      vec2  Current_Uv = Tex_Coord;
-      vec2  Uv_Step = -Parallax_Dir * Layer_Depth;
-      float H_Sample = textureLod (Textures[Height_Tex], Current_Uv, 0.0).r;
+      vec2  Current_UV    = Tex_Coord;
+      vec2  Uv_Step       = -Parallax_Dir * Layer_Depth;
+      float H_Sample      = textureLod (Textures[Height_Tex], Current_UV, 0.0).r;
   
       // Phase 1: 4 coarse linear steps to find the crossing interval
       for (int Step = 0; Step < 4; Step++) {
-        Current_Uv += Uv_Step;
-        H_Sample = textureLod (Textures[Height_Tex], Current_Uv, 0.0).r;
+        Current_UV += Uv_Step;
+        H_Sample = textureLod (Textures[Height_Tex], Current_UV, 0.0).r;
         Current_Depth += Layer_Depth;
       }
   
       // Phase 2: 3 binary search steps to refine within the crossing interval
-      vec2 Lo_Uv = Current_Uv - Uv_Step;  float Lo_D = Current_Depth - Layer_Depth;
-      vec2 Hi_Uv = Current_Uv;             float Hi_D = Current_Depth;
+      vec2 Lo_UV = Current_UV - Uv_Step;  float Lo_D = Current_Depth - Layer_Depth;
+      vec2 Hi_UV = Current_UV;            float Hi_D = Current_Depth;
       for (int B = 0; B < 3; B++) {
-        vec2  Mid_Uv = (Lo_Uv + Hi_Uv) * 0.5;
-        float Mid_D  = (Lo_D + Hi_D) * 0.5;
-        float Mid_H  = textureLod (Textures[Height_Tex], Mid_Uv, 0.0).r;
-        if (Mid_D < Mid_H) { Lo_Uv = Mid_Uv; Lo_D = Mid_D; }
-        else                { Hi_Uv = Mid_Uv; Hi_D = Mid_D; }
+        vec2  Mid_UV = (Lo_UV + Hi_UV) * 0.5;
+        float Mid_D  = (Lo_D  + Hi_D)  * 0.5;
+        float Mid_H  = textureLod (Textures[Height_Tex], Mid_UV, 0.0).r;
+        if (Mid_D < Mid_H) {Lo_UV = Mid_UV; Lo_D = Mid_D;}
+        else               {Hi_UV = Mid_UV; Hi_D = Mid_D;}
       }
-      Tex_Coord = Hi_Uv;
+      Tex_Coord = Hi_UV;
     }
   
     // Sample PBR texture maps
@@ -9241,18 +10481,18 @@ glsl rchit Closest_Hit {
 
       // World / Entity PBR: maps laid out at [diffuse_0..N, normal_0..N, roughness_0..N, ...]
       if (Hit_Dist < PBR_Dist) {
-        Normal_Map = textureLod (Textures[nonuniformEXT(Tex_Id + PBR_Stride)],      Tex_Coord, 0.0).rgb * 2.0 - 1.0;
-        R          = textureLod (Textures[nonuniformEXT(Tex_Id + PBR_Stride * 2u)], Tex_Coord, 0.0).r;
-        M          = textureLod (Textures[nonuniformEXT(Tex_Id + PBR_Stride * 3u)], Tex_Coord, 0.0).r;
+        Normal_Map = textureLod (Textures [nonuniformEXT (Tex_Id + PBR_Stride)],      Tex_Coord, 0.0).rgb * 2.0 - 1.0;
+        R          = textureLod (Textures [nonuniformEXT (Tex_Id + PBR_Stride * 2u)], Tex_Coord, 0.0).r;
+        M          = textureLod (Textures [nonuniformEXT (Tex_Id + PBR_Stride * 3u)], Tex_Coord, 0.0).r;
       }
       Emissive   = textureLod (Textures[nonuniformEXT(Tex_Id + PBR_Stride * 4u)], Tex_Coord, 0.0).rgb;
 
-    // Weapon PBR: 6 map types × N surfaces, stride = Weapon_Stride
+    // Weapon PBR: 6 map types  by  N surfaces, stride = Weapon_Stride
     } else if (Is_Weapon) {
-      Normal_Map = textureLod (Textures[nonuniformEXT(Tex_Id + Weapon_Stride)],      Tex_Coord, 0.0).rgb * 2.0 - 1.0;
-      R          = textureLod (Textures[nonuniformEXT(Tex_Id + Weapon_Stride * 2u)], Tex_Coord, 0.0).r;
-      M          = textureLod (Textures[nonuniformEXT(Tex_Id + Weapon_Stride * 3u)], Tex_Coord, 0.0).r;
-      Emissive   = textureLod (Textures[nonuniformEXT(Tex_Id + Weapon_Stride * 4u)], Tex_Coord, 0.0).rgb;
+      Normal_Map = textureLod (Textures [nonuniformEXT (Tex_Id + Weapon_Stride)],      Tex_Coord, 0.0).rgb * 2.0 - 1.0;
+      R          = textureLod (Textures [nonuniformEXT (Tex_Id + Weapon_Stride * 2u)], Tex_Coord, 0.0).r;
+      M          = textureLod (Textures [nonuniformEXT (Tex_Id + Weapon_Stride * 3u)], Tex_Coord, 0.0).r;
+      Emissive   = textureLod (Textures [nonuniformEXT (Tex_Id + Weapon_Stride * 4u)], Tex_Coord, 0.0).rgb;
 
     // Fallback for textures outside the PBR material range: derive from albedo statistics
     } else {
@@ -9272,7 +10512,7 @@ glsl rchit Closest_Hit {
   
     // Direct lighting: Cook-Torrance microfacet BRDF
     vec3  Ld = normalize (Env_Sun_Dir.xyz);         // Per-scene sun direction
-    vec3  Lr = Env_Sun_Color.xyz * Env_Sun_Color.w; // Per-scene sun radiance (color × intensity)
+    vec3  Lr = Env_Sun_Color.xyz * Env_Sun_Color.w; // Per-scene sun radiance (color  by  intensity)
     float NL  = max (dot (Normal, Ld), 0.0);
   
     // Skip full BRDF when surface faces away from sun
@@ -9280,8 +10520,8 @@ glsl rchit Closest_Hit {
     vec3  Diffuse  = vec3 (0.0);
     if (NL > 0.0) {
       vec3  H   = normalize (V + Ld);
-      float NH  = max (dot (Normal, H),  0.0);
-      float VH  = max (dot (V, H),       0.0);
+      float NH  = max (dot (Normal, H), 0.0);
+      float VH  = max (dot (V, H),      0.0);
       float a   = R * R,  a2 = max (a * a, 1e-4); // Clamp to avoid NaN at R=0
       float k   = (R + 1.0) * (R + 1.0) * 0.125;
   
@@ -9298,12 +10538,12 @@ glsl rchit Closest_Hit {
       float FT  = 1.0 - VH;  float T5 = FT * FT; T5 *= T5 * FT;
       vec3  F   = F0 + (1.0 - F0) * T5;
   
-      // Final specular — roughness-biased D prevents the razor-sharp GGX peak
-      // that causes fireflies at 1 SPP.  The bias widens the highlight on very
-      // smooth metals without affecting rough surfaces.
+      // Final specular - roughness-biased D prevents the razor-sharp GGX peak that causes fireflies at 1 SPP
       float D_Bias  = max (a2, SPECULAR_D_BIAS);  // Floor: R≈0.32 minimum for D evaluation
       float D_Denom = NH * NH * (D_Bias - 1.0) + 1.0;
       float D_Safe  = D_Bias / (3.14159 * D_Denom * D_Denom);
+
+      // Comment here !!!
       Specular = D_Safe * Vis * F;
       Diffuse  = (1.0 - F) * (1.0 - M) * Albedo * 0.31831;  // 1/π
     }
@@ -9314,11 +10554,10 @@ glsl rchit Closest_Hit {
     float Hemisphere   = Normal.y * 0.5 + 0.5; // Zero is down, one up
     vec3  Ambient_Irradiance = mix (Ground_Color, Sky_Color, Hemisphere);
   
-    // Ambient specular: pre-integrated split-sum approximation (Karis 2013)
-    // Approximates ∫(BRDF * Li) with env BRDF LUT replaced by analytic fit
+    // Ambient specular: pre-integrated split-sum approximation
     float Env_FT   = 1.0 - NV;  float Env_T5 = Env_FT * Env_FT; Env_T5 *= Env_T5 * Env_FT;
-    vec3  Env_F    = F0 + (max (vec3 (1.0 - R), F0) - F0) * Env_T5;     // Roughness-aware Fresnel
-    vec2  Env_BRDF = vec2 (1.0 - R * 0.5, R * 0.08);  // Analytic fit to DFG LUT
+    vec3  Env_F    = F0 + (max (vec3 (1.0 - R), F0) - F0) * Env_T5; // Roughness-aware Fresnel
+    vec2  Env_BRDF = vec2 (1.0 - R * 0.5, R * 0.08); // Analytic fit to DFG LUT
     vec3  Ambient_Specular = Env_F * Env_BRDF.x + Env_BRDF.y;
   
     // Reflect the view vector off the surface to tint specular with sky direction
@@ -9333,8 +10572,8 @@ glsl rchit Closest_Hit {
     // Reflection-bounce hits detect this and skip tracing another reflection to limit recursion to exactly one bounce
     bool Is_Reflection_Bounce = (gl_RayTminEXT > 0.005);
 
-    // Dynamic reflection culling — Budget-aware: save rays on barely-reflective
-    // surfaces, focus them on metals/smooth where reflections are clearly visible.
+    // Dynamic reflection culling - Budget-aware: save rays on barely-reflective surfaces, focus them on metals/smooth where
+    // reflections are clearly visible.
     float Refl_Roughness_Gate = mix (REFL_GATE_LO, REFL_GATE_HI, Budget);
     bool  Refl_Active = not Is_Reflection_Bounce and not Is_Weapon and (R < Refl_Roughness_Gate);
     float Refl_Dist = mix (800.0, SHADOW_DIST_HI, Budget);
@@ -9346,27 +10585,28 @@ glsl rchit Closest_Hit {
     // Dynamic threshold: skip marginal reflections at high Budget
     float Refl_Threshold = mix (REFL_THRESH_LO, REFL_THRESH_HI, Budget);
     if (Reflection_Weight > Refl_Threshold) {
-      // VNDF importance-sampled reflection (Dupuy & Benyoub 2023) with
-      // IGN blue noise spatial base + golden ratio temporal rotation.
-      // IGN provides denoiser-friendly high-frequency spatial error
-      // distribution; golden ratio ensures optimal [0,1]^2 coverage
-      // across frames for smooth TAA convergence.
+
+      // VNDF importance-sampled reflection with IGN blue noise spatial base + golden ratio temporal rotation.
       vec2  Px = vec2 (gl_LaunchIDEXT.xy);
       float U1 = fract (IGN (Px) + float (Frame) * 0.7548776662);
       float U2 = fract (IGN (Px + 17.0) + float (Frame) * 0.5698402910);
       float Alpha   = max (R * R, VNDF_ALPHA_FLOOR);
+
       // Build tangent frame around surface normal
       vec3 T = (abs (Normal.y) < 0.99) ? normalize (cross (Normal, vec3 (0, 1, 0)))
                                         : normalize (cross (Normal, vec3 (1, 0, 0)));
       vec3 B = cross (Normal, T);
+
       // Transform view to tangent space, sample VNDF, transform back
       vec3 V_Tangent  = vec3 (dot (V, T), dot (V, B), dot (V, Normal));
       vec3 H_Tangent  = Sample_GGX_VNDF (V_Tangent, Alpha, U1, U2);
       vec3 H          = T * H_Tangent.x + B * H_Tangent.y + Normal * H_Tangent.z;
       vec3 Refl_Dir   = reflect (-V, H);
+
       // Ensure reflection doesn't go into the surface
       if (dot (Refl_Dir, Normal) <= 0.0) Refl_Dir = reflect (-V, Normal);
 
+      // Comment here !!!
       Payload = vec4 (0.0, 0.0, 0.0, -1.0);
       traceRayEXT (Top_Level, gl_RayFlagsOpaqueEXT,
                    0xFF,
@@ -9376,6 +10616,7 @@ glsl rchit Closest_Hit {
                    Refl_Dir,
                    mix (REFL_TRACE_LO, REFL_TRACE_HI, Budget),
                    0);
+
       // Scene-relative luminance clamp: soft proportional limit
       vec3  Rc      = Payload.rgb;
       float Rc_Lum  = dot (Rc, vec3 (0.2126, 0.7152, 0.0722));
@@ -9384,14 +10625,12 @@ glsl rchit Closest_Hit {
       Reflection_Color = Rc_Lum > Max_Lum ? Rc * (Max_Lum / Rc_Lum) : Rc;
     }
 
-    // Gentle reflection damping at high Budget (frame-time pressure).
-    // Soft fade near threshold prevents binary on/off flicker on metals.
+    // Gentle reflection damping at high Budget (frame-time pressure)
     float Refl_Strength = 1.0 - Budget * REFL_DAMPING;
     float Soft_Weight = Reflection_Weight * Refl_Strength;
     Soft_Weight *= clamp ((Reflection_Weight - Refl_Threshold) * REFL_SOFT_EDGE, 0.0, 1.0);
 
-    // Blend reflection into indirect specular: replace the hemisphere approximation
-    // with actual traced reflection, weighted by the Fresnel term.
+    // Blend reflection into indirect specular: replace the hemisphere approximation with actual reflection, weighted by the Fresnel
     vec3 Traced_Specular = Env_F * mix (Indirect_Specular / max (Env_F, vec3(0.01)),
                                          Reflection_Color,
                                          vec3 (Soft_Weight));
@@ -9407,7 +10646,7 @@ glsl rchit Closest_Hit {
       vec3 Weapon_Cheap = Ambient_Irradiance * Albedo * 2.5 + Albedo * max(NL, 0.3);
       Color = mix (Weapon_Full, Weapon_Cheap, Budget);
 
-    // Entity: direct sun + shadows + hemisphere ambient, no lightmap (MD3 models have no LM UVs)
+    // Entity: direct sun + shadows + hemisphere ambient, no lightmap
     } else if (Is_Entity) {
       float Shadow_Factor = (NL > 0.0 and not Is_Reflection_Bounce and Hit_Dist < Shadow_Dist)
                               ? Trace_Shadow (Position, Normal, Ld, Primitive, Instance, Frame, Env_Sun_Dir.w)
@@ -9421,9 +10660,11 @@ glsl rchit Closest_Hit {
 
       // Subtle saturation boost for entities - counteracts ambient washout on character models
       float Entity_Luminance = dot (Color, vec3 (0.2126, 0.7152, 0.0722));
-      Color = mix (vec3 (Entity_Luminance), Color, 1.15);  // 15% saturation increase
+      Color = mix (vec3 (Entity_Luminance), Color, 1.15); // 15% saturation increase
+
+    // Otherwise, comment here !!!
     } else {
-      vec3 Lightmap_Color = textureLod (Lightmap, Lightmap_Coordinate, 0.0).rgb * Env_Fog_Color.w;  // Lightmap multiplier: Q3=4.0, Source=1.5
+      vec3 Lightmap_Color = textureLod (Lightmap, Lightmap_Coordinate, 0.0).rgb * Env_Fog_Color.w; // Lightmap multiplier
   
       // Inline ray query for shadows
       float Shadow_Factor = (NL > 0.0 and not Is_Reflection_Bounce and Hit_Dist < Shadow_Dist)
@@ -9542,86 +10783,92 @@ glsl comp Physics {
   
   // Descriptor bindings
   layout(binding = 0) uniform accelerationStructureEXT Top_Level;
-  layout(binding = 1, std430) readonly buffer Vertex_Data { vec4 Data[]; } Vertices;
-  layout(binding = 2, std430) readonly buffer Index_Data  { uint Data[]; } Indices;
+  layout(binding = 1, std430) readonly buffer Vertex_Data {vec4 Data[];} Vertices;
+  layout(binding = 2, std430) readonly buffer Index_Data  {uint Data[];} Indices;
   
   layout(binding = 3, std430) buffer Player_Buffer {
-    vec3  Position;     float Pad_A;
-    vec3  Velocity;     float Pad_B;
-    float Yaw, Pitch;
-    int   On_Ground, Jump_Held;
+    vec3  Position; float Pad_A;
+    vec3  Velocity; float Pad_B;
+    float Yaw;
+    float Pitch;
+    int   On_Ground; 
+    int   Jump_Held;
     vec3  Ground_Normal; float Pad_C;
-    int   Ground_Plane, Ducked;
-    float View_Height, Stuck_Time;
-    float Speed_Last;  int Shape;
-    vec3  Extents;     float Pad_D;
-    float Spine;       float Pad_E1, Pad_E2, Pad_E3;
+    int   Ground_Plane;
+    int   Ducked;
+    float View_Height; 
+    float Stuck_Time;
+    float Speed_Last;  
+    int   Shape;
+    vec3  Extents; float Pad_D;
+    float Spine;   float Pad_E1, Pad_E2, Pad_E3;
   } Player;
   
   layout(binding = 4, std430) readonly buffer Hull_Buffer {
-    vec4  Hull_Vertices [256];
-    int   Hull_Adjacency[256][16];
+    vec4  Hull_Vertices  [256];
+    int   Hull_Adjacency [256][16];
     int   Hull_Count;
     float Hull_Radius;
-    vec3  Hull_Centroid;
-    int   Hull_Pad;
+    vec3  Hull_Centroid; int Hull_Pad;
   };
   
-  struct Gpu_Projectile {
-    vec3  Position;      float Pad_A;
-    vec3  Velocity;      float Lifetime;
-    int   Active;        int   Material_Hit;
-    float Radius;        float Damage;
-    float Hit_U, Hit_V;  // UV at impact point (for CPU-side damage map lookup)
-    int   Instance_Hit;  // TLAS instance index of the object hit (-1 = none)
-    int   Pad_B;
+  struct GPU_Projectile {
+    vec3  Position; float Pad_A;
+    vec3  Velocity;
+    float Lifetime;
+    int   Active;   
+    int   Material_Hit;
+    float Radius;  
+    float Damage;
+    float Hit_U,
+    float Hit_V;                   // UV at impact point (for CPU-side damage map lookup)
+    int   Instance_Hit; int Pad_B; // TLAS instance index of the object hit (-1 = none)
   };
   
   layout(binding = 5, std430) buffer Projectile_Buffer {
-    Gpu_Projectile Projectiles[64];
+    GPU_Projectile Projectiles[64];
     int   Projectile_Count;
-    float Fire_Cooldown;
-    float Proj_Pad[2];
+    float Fire_Cooldown; float Proj_Pad[2];
   };
   
   layout(push_constant) uniform Push {
     int   Forward, Back, Left, Right;
-    int   Jump, Fire, Crouch, Movement_Style; // Movement_Style: 0=Q3, 1=Source
+    int   Jump, Fire, Crouch, Movement_Style;
     float Delta_X, Delta_Y, Dt, Pad2;
   } Input;
 
   layout(local_size_x = 1) in;
 
-  // Physics constants — Quake 3
-  const float Q3_GRAVITY           = 800.0;
-  const float Q3_GROUND_FRICTION   = 6.0;
-  const float Q3_STOP_SPEED        = 100.0;
-  const float Q3_GROUND_ACCEL      = 10.0;
-  const float Q3_AIR_ACCEL         = 1.0;
-  const float Q3_MAX_SPEED         = 320.0;
-  const float Q3_JUMP_VEL          = 270.0;
-  const float Q3_OVERBOUNCE        = 1.001;
+  // Physics constants - Id's Quake Engine
+  const float Q3_GRAVITY         = 800.0;
+  const float Q3_GROUND_FRICTION = 6.0;
+  const float Q3_STOP_SPEED      = 100.0;
+  const float Q3_GROUND_ACCEL    = 10.0;
+  const float Q3_AIR_ACCEL       = 1.0;
+  const float Q3_MAX_SPEED       = 320.0;
+  const float Q3_JUMP_VEL        = 270.0;
+  const float Q3_OVERBOUNCE      = 1.001;
 
-  // Physics constants — Source (CS:Source / CSPromod competitive)
-  const float SRC_GRAVITY          = 800.0;
-  const float SRC_GROUND_FRICTION  = 4.0;
-  const float SRC_STOP_SPEED       = 100.0;
-  const float SRC_GROUND_ACCEL     = 5.5;
-  const float SRC_AIR_ACCEL        = 10.0;  // Source air-strafe: much higher than Q3
-  const float SRC_MAX_SPEED        = 250.0; // CS:Source knife run speed
-  const float SRC_JUMP_VEL         = 301.993377; // sqrt(2·800·57) — 57 unit jump height
-  const float SRC_OVERBOUNCE       = 1.0;   // Source clips exactly to plane
+  // Physics constants - Valve's Source Engine
+  const float SRC_GRAVITY         = 800.0;
+  const float SRC_GROUND_FRICTION = 4.0;
+  const float SRC_STOP_SPEED      = 100.0;
+  const float SRC_GROUND_ACCEL    = 5.5;
+  const float SRC_AIR_ACCEL       = 10.0;  
+  const float SRC_MAX_SPEED       = 250.0;     
+  const float SRC_JUMP_VEL        = 301.993377; 
+  const float SRC_OVERBOUNCE      = 1.0; 
 
-  // Runtime-selected constants (branched once per frame — no divergence cost on single-invocation dispatch)
+  // Runtime-selected constants (branched once per frame - no divergence cost on single-invocation dispatch)
   float GRAVITY, GROUND_FRICTION, STOP_SPEED, GROUND_ACCELERATE, AIR_ACCELERATE;
   float MAXIMUM_SPEED, JUMP_VELOCITY, OVERBOUNCE;
 
-  const float STEP_SIZE            = 18.0;
-  const float MINIMUM_WALK_NORMAL  = 0.7;
-  const int   MAXIMUM_CLIP_PLANES  = 5;
-  const float DEFAULT_VIEW_HEIGHT  = 22.0;
-  const float CROUCH_VIEW_HEIGHT   = 8.0;
-  const float MOUSE_SENSITIVITY    = 0.003;
+  const float STEP_SIZE           = 18.0;
+  const float MINIMUM_WALK_NORMAL = 0.7;
+  const int   MAXIMUM_CLIP_PLANES = 5;
+  const float DEFAULT_VIEW_HEIGHT = 22.0;
+  const float CROUCH_VIEW_HEIGHT  = 8.0;
+  const float MOUSE_SENSITIVITY   = 0.003;
   
   // Collider shape constants
   const int SHAPE_SPHERE    = 0;
@@ -9631,15 +10878,13 @@ glsl comp Physics {
   const int SHAPE_ELLIPSOID = 4;
   const int SHAPE_HULL      = 5;
   
-  // Convex hull support functions
-  
   // Brute-force: O(n) linear scan over all hull vertices. Best for small hulls (< 64 verts)
   vec3 hull_support_brute (vec3 direction) {
     float best_dot = -1e30;
     int   best_idx = 0;
     for (int i = 0; i < Hull_Count; i++) {
       float d = dot (Hull_Vertices[i].xyz, direction);
-      if (d > best_dot) { best_dot = d; best_idx = i; }
+      if (d > best_dot) { best_dot = d; best_idx = i;}
     }
     return Hull_Vertices[best_idx].xyz;
   }
@@ -9659,7 +10904,7 @@ glsl comp Physics {
         int neighbor = Hull_Adjacency[current][slot];
         if (neighbor < 0) break;
         float d = dot (Hull_Vertices[neighbor].xyz, direction);
-        if (d > best_dot) { best_dot = d; best_neighbor = neighbor; }
+        if (d > best_dot) { best_dot = d; best_neighbor = neighbor;}
       }
   
       // If no neighbor improves the dot product, we've found the support point
@@ -9679,15 +10924,12 @@ glsl comp Physics {
   // Map a unit direction to the shape's surface offset (Minkowski support mapping)
   vec3 shape_offset (vec3 d) {
     switch (Player.Shape) {
-      case SHAPE_SPHERE:
-        return d * Player.Extents.x;
+      case SHAPE_SPHERE:  return d * Player.Extents.x;
+      case SHAPE_CAPSULE: return d * Player.Extents.x + vec3 (0.0, sign(d.y) * Player.Spine, 0.0);
+      case SHAPE_AABB:    return sign(d) * Player.Extents;
+      case SHAPE_HULL:    return hull_support (d);
   
-      case SHAPE_CAPSULE:
-        return d * Player.Extents.x + vec3 (0.0, sign(d.y) * Player.Spine, 0.0);
-  
-      case SHAPE_AABB:
-        return sign(d) * Player.Extents;
-  
+      // Comment here !!!
       case SHAPE_CYLINDER: {
         vec2  xz    = d.xz;
         float len   = length (xz);
@@ -9695,17 +10937,15 @@ glsl comp Physics {
         return vec3 (disc.x, sign(d.y) * Player.Extents.y, disc.y);
       }
   
+      // Comment here !!!
       case SHAPE_ELLIPSOID: {
         vec3 scaled = d / Player.Extents;
         float len   = length (scaled);
         return (len > 1e-6) ? normalize(scaled) * Player.Extents : vec3(0.0);
       }
-  
-      case SHAPE_HULL:
-        return hull_support (d);
-  
-      default:
-        return d * Player.Extents.x;
+
+      // Otherwise, comment here !!!
+      default: return d * Player.Extents.x;
     }
   }
   
@@ -9727,7 +10967,7 @@ glsl comp Physics {
     if (Distance < 1e-6) return result;
     vec3 dir_norm = normalize (Direction);
   
-    // 7 probe directions: 6 cardinal axes + movement direction (optimized from 28 for performance)
+    // Use 7 probe directions: 6 cardinal axes + movement direction
     vec3 probes[7] = vec3[7](
       vec3( 1, 0, 0), vec3(-1, 0, 0), vec3(0, 1, 0), vec3(0,-1, 0), vec3(0, 0, 1), vec3(0, 0,-1),
       dir_norm
@@ -9750,6 +10990,7 @@ glsl comp Physics {
       if (rayQueryGetIntersectionTypeEXT (rq, true) == gl_RayQueryCommittedIntersectionTriangleEXT) {
         float t = rayQueryGetIntersectionTEXT (rq, true);
         if (t < result.Fraction * Distance) {
+
           // Reconstruct the triangle normal from vertices
           uint prim = rayQueryGetIntersectionPrimitiveIndexEXT (rq, true);
           uint i0 = Indices.Data[prim * 3 + 0];
@@ -9856,7 +11097,7 @@ glsl comp Physics {
       // Avoid duplicating a plane we've already clipped against
       bool duplicate = false;
       for (int p = 0; p < plane_count; p++)
-        if (dot (trace.Normal, planes[p]) > 0.99) { duplicate = true; break; }
+        if (dot (trace.Normal, planes[p]) > 0.99) { duplicate = true; break;}
       if (duplicate) continue;
 
       // Add new plane to the clip set
@@ -9932,6 +11173,7 @@ glsl comp Physics {
   
   // Stuck recovery
   void recover () {
+
     // Cast rays in 6 cardinal directions and nudge the player away from walls
     vec3 dirs[6] = vec3[6](
       vec3(1,0,0), vec3(-1,0,0), vec3(0,1,0), vec3(0,-1,0), vec3(0,0,1), vec3(0,0,-1));
@@ -10088,6 +11330,8 @@ glsl comp Physics {
       Projectiles[idx].Hit_U        = 0.0;
       Projectiles[idx].Hit_V        = 0.0;
       Projectiles[idx].Instance_Hit = -1;
+
+      // Other book-keeping
       Projectile_Count = idx + 1;
       Fire_Cooldown = 0.8;
     }
@@ -10098,7 +11342,7 @@ glsl comp Physics {
 
       // Decrement lifetime and kill expired projectiles
       Projectiles[i].Lifetime -= Input.Dt;
-      if (Projectiles[i].Lifetime <= 0.0) { Projectiles[i].Active = 0; continue; }
+      if (Projectiles[i].Lifetime <= 0.0) { Projectiles[i].Active = 0; continue;}
 
       // Compute movement direction and distance for this timestep
       vec3 dir = normalize (Projectiles[i].Velocity);
@@ -10162,12 +11406,12 @@ glsl comp Denoise {
   
   layout(push_constant) uniform Denoise_Push {
     int Step_Size;  // A-trous step size: 1, 2, 4 for iterations
-    int Budget_256; // Budget × 256 (0 = full quality, 256 = cheap path)
+    int Budget_256; // Budget  by  256 (0 = full quality, 256 = cheap path)
   };
   
   layout(local_size_x = 8, local_size_y = 8) in;
   
-  // A 3×3 a-trous kernel weights (Gaussian-like, symmetric)
+  // A 3 by 3 a-trous kernel weights (Gaussian-like, symmetric)
   const float Kernel[3] = float[3](1.0, 2.0 / 3.0, 1.0 / 6.0);
   
   // Depth-based normal from 3 cached depth values
@@ -10175,7 +11419,7 @@ glsl comp Denoise {
     return normalize (vec3 (D_C - D_R, D_C - D_U, 1.0));
   }
   
-  // Denoise main
+  // Denoise shader main
   void main () {
     ivec2 Pixel = ivec2 (gl_GlobalInvocationID.xy);
     ivec2 Size  = imageSize (Input_Image);
@@ -10184,14 +11428,10 @@ glsl comp Denoise {
     // Load center pixel color
     vec3  Center_Color = imageLoad (Input_Image, Pixel).rgb;
   
-    // Motion-adaptive denoiser: Budget correlates with frame-time pressure
-    // and motion.  During motion, relax edge-stopping for smoother frames
-    // (trades sharpness for noise reduction — the right call during motion).
+    // Motion-adaptive denoiser: Budget correlates with frame-time pressure and motion -relax edge-stopping for smoother frames
     float Motion = clamp (float (Budget_256) / 256.0, 0.0, 1.0);
   
-    // Batch-load all depth values for the 3×3 kernel in one shot
-    // Preload 9 depth values - center normal uses Depths[5] (right) and Depths[7] (up).
-    // Combined with 9 color loads = 18 total, vs. original 45 = 60% fewer memory ops.
+    // Batch-load all depth values for the 3 by 3 kernel in one shot
     float Depths[9];
     ivec2 Sample_Positions[9];
     int Idx = 0;
@@ -10202,10 +11442,10 @@ glsl comp Denoise {
         Idx++;
       }
     }
-    float Center_Depth = Depths[4];  // Center of 3×3 = index 4
+    float Center_Depth = Depths[4]; // Center of 3 by 3 = index 4
   
-    // Center normal from preloaded batch: Depths[5] = right, Depths[7] = up (at Step_Size offset).
-    // At larger step sizes, kernel-spaced gradients are more appropriate for the a-trous edge stopping.
+    // Center normal from preloaded batch: Depths[5] = right, Depths[7] = up (at Step_Size offset). At larger step sizes, kernel-spaced
+    // gradients are more appropriate for the a-trous edge stopping.
     vec3  Center_Normal = Normal_From_Depths (Center_Depth, Depths[5], Depths[7]);
 
     // Compute center pixel luminance for edge stopping
@@ -10215,7 +11455,7 @@ glsl comp Denoise {
     vec3  Sum    = vec3 (0.0);
     float Weight = 0.0;
   
-    // A 3×3 sparse kernel at current step size - depths already cached
+    // A 3 by 3 sparse kernel at current step size - depths already cached
     for (int I = 0; I < 9; I++) {
       vec3  S_Color = imageLoad (Input_Image, Sample_Positions[I]).rgb;
       float S_Depth = Depths[I];
@@ -10225,7 +11465,7 @@ glsl comp Denoise {
       int Dx = (I % 3) - 1, Dy = (I / 3) - 1;
       float W_Spatial = Kernel[abs(Dx)] * Kernel[abs(Dy)];
   
-      // Depth edge stopping — relaxed during motion for smoother frames
+      // Depth edge stopping - relaxed during motion for smoother frames
       float Depth_Diff = abs (Center_Depth - S_Depth) / max (Center_Depth, 0.1);
       float Depth_Sensitivity = mix (DENOISE_DEPTH_LO, DENOISE_DEPTH_HI, Motion);
       float W_Depth = exp (-Depth_Diff * Depth_Sensitivity);
@@ -10235,15 +11475,14 @@ glsl comp Denoise {
       float S_D_Up    = (I < 6) ? Depths[I + 3] : S_Depth;
       vec3  S_Normal  = Normal_From_Depths (S_Depth, S_D_Right, S_D_Up);
 
-      // Normal edge stopping — motion-adaptive power: x^16 when still,
-      // x^4 during motion (lets filter smooth across surface creases).
+      // Normal edge stopping - motion-adaptive power: x^16 when still, x^4 during motion (lets filter smooth across surface creases)
       float Ndot = max (dot (Center_Normal, S_Normal), 0.0);
       Ndot *= Ndot;  // x^2
-      float Ndot4 = Ndot * Ndot;  // x^4
-      float Ndot16 = Ndot4 * Ndot4 * Ndot4 * Ndot4;  // x^16
+      float Ndot4 = Ndot * Ndot; // x^4
+      float Ndot16 = Ndot4 * Ndot4 * Ndot4 * Ndot4; // x^16
       float W_Normal = mix (Ndot16, Ndot4, Motion);
   
-      // Luminance edge stopping — aggressive during motion to smooth noise
+      // Luminance edge stopping - aggressive during motion to smooth noise
       float Luminance_Difference = abs (Center_Luminance - Sample_Luminance);
       float Lum_Sensitivity = mix (DENOISE_LUM_LO, DENOISE_LUM_HI, Motion);
       float Weight_Luminance = exp (-Luminance_Difference * Luminance_Difference * Lum_Sensitivity);
@@ -10275,12 +11514,12 @@ glsl comp Post_Process {
   // Run-length-encoded push constants
   layout(push_constant) uniform Push {
     float Time;           // Full-precision seconds since start
-    uint  Dt_Frame;       // [15:0] = half(Delta_Time), [31:16] = Frame_Count
+    uint  Dt_Frame;       // Range [15:0] = half(Delta_Time), [31:16] = Frame_Count
     uint  Velocity;       // packHalf2x16(Velocity_X, Velocity_Z)
     uint  Speed_Exposure; // packHalf2x16(Speed, Exposure)
     uint  Bloom_Vignette; // packHalf2x16(Bloom_Strength, Vignette_Strength)
-    uint  Reproject[8];   // packHalf2x16-compressed 4×4 reprojection matrix (Proj * Prev_View * Inv_View)
-    uint  Inv_Proj_Diag;  // [15:0] = half(InvProj[0][0]), [31:16] = half(InvProj[1][1])
+    uint  Reproject[8];   // packHalf2x16-compressed 4 by 4 reprojection matrix (Proj * Prev_View * Inv_View)
+    uint  Inv_Proj_Diag;  // Range [15:0] = half(InvProj[0][0]), [31:16] = half(InvProj[1][1])
     uint  Sun_Screen_Pos; // packHalf2x16(Sun_Screen_U, Sun_Screen_V)
     uint  Sun_Params;     // packHalf2x16(God_Ray_Intensity, Sun_On_Screen)
   } Params;
@@ -10337,13 +11576,10 @@ glsl comp Post_Process {
     vec3 Color = imageLoad (Color_Image, Pixel).rgb;
     float Depth = imageLoad (Depth_Image, Pixel).r;
 
-    // Checkerboard spatial reconstruction: pixels not traced this frame
-    // hold stale values from the wrong screen position.  Replace them with
-    // a depth-aware weighted average of all 4 cardinal neighbors (which
-    // WERE traced this frame in checkerboard pattern).
+    // Checkerboard spatial reconstruction: pixels not traced this frame hold stale values from the wrong screen position
     uint Frame = Frame_Count & 0xFFFFu;
     bool Was_Traced = ((Pixel.x + Pixel.y + int(Frame)) & 1) == 0;
-    if (!Was_Traced) {
+    if (not Was_Traced) {
       ivec2 Offsets[4] = ivec2[4](ivec2(-1,0), ivec2(1,0), ivec2(0,-1), ivec2(0,1));
       vec3  Sum = vec3 (0.0);
       float W_Sum = 0.0;
@@ -10358,10 +11594,7 @@ glsl comp Post_Process {
       Color = Sum / max (W_Sum, 1e-6);
     }
 
-    // Combined firefly rejection + motion-adaptive spatial filter.
-    // Reads 3x3 neighborhood once; uses it for both firefly clamping
-    // and a depth-aware bilateral smooth that activates during motion.
-    // When still, adds gentle CAS sharpening instead of blur.
+    // Combined firefly rejection + motion-adaptive spatial filter
     {
       vec3  Nb[8];
       float Nd[8];
@@ -10380,15 +11613,13 @@ glsl comp Post_Process {
       float Max1 = 0.0, Max2 = 0.0;
       for (int i = 0; i < 8; i++) {
         float L = dot (Nb[i], vec3 (0.2126, 0.7152, 0.0722));
-        if (L > Max1) { Max2 = Max1; Max1 = L; }
-        else if (L > Max2) { Max2 = L; }
+        if (L > Max1) { Max2 = Max1; Max1 = L;}
+        else if (L > Max2) { Max2 = L;}
       }
       float Firefly_Limit = Max2 * FIREFLY_HEADROOM + FIREFLY_BIAS;
       if (Lum_C > Firefly_Limit) Color *= Firefly_Limit / Lum_C;
 
-      // Motion-adaptive CAS sharpening — restores edge definition when still,
-      // fades out during fast motion to avoid amplifying 1-SPP noise.
-      // Motion signal from player speed (available early in push constants).
+      // Motion-adaptive CAS sharpening - restores edge definition when still
       {
         float Motion_CAS = clamp (Speed * 0.04, 0.0, 1.0);
         float Cas_Scale  = CAS_AMOUNT * (1.0 - Motion_CAS);
@@ -10434,9 +11665,8 @@ glsl comp Post_Process {
   
         // Luminance-based history rejection
         //
-        // If the clamped history still differs significantly from the current frame,
-        // the surface has changed (new geometry, lighting change, disocclusion).
-        // Boost alpha toward 1.0 to reject stale history aggressively.
+        // If the clamped history still differs significantly from the current frame, the surface has changed (new geometry, lighting
+        // change, disocclusion).
         //
         float Current_Luminance  = dot (Color,   vec3 (0.2126, 0.7152, 0.0722));
         float History_Luminance = dot (History, vec3 (0.2126, 0.7152, 0.0722));
@@ -10448,29 +11678,24 @@ glsl comp Post_Process {
         float Displacement_Length = length (Screen_Displacement);
         float Disocclusion = clamp (Displacement_Length * 30.0, 0.0, 1.0); // Rejected
   
-        // Temporal blend — per-pixel reprojection displacement as motion
-        // signal (Q2RTX-style).  Camera rotation moves every pixel even
-        // when player velocity is zero — use displacement, not Speed.
+        // Temporal blend - per-pixel reprojection displacement as motion
         float Pixel_Motion = clamp (Displacement_Length * 50.0, 0.0, 1.0);
         float Any_Motion   = max (Pixel_Motion, clamp (Speed * 0.04, 0.0, 1.0));
 
-        // Static only if BOTH player and pixel are truly still
+        // Only if BOTH player and pixel are truly still
         float Is_Static = step (Any_Motion, 0.01);
 
-        // Static: 1/N convergence floored at 0.25 — more temporal samples
-        // accumulated for smoother, noise-free image when camera is still.
+        // Static: 1/N convergence floored at 0.25 - more temporal samples accumulated for smoother, noise-free image when still.
         float Static_Alpha = max (1.0 / max (float (Frame_Count), 1.0), TAA_STATIC_FLOOR);
 
-        // Moving: almost entirely current-frame to kill ghosting.
-        // At Any_Motion=0.02 (threshold), Base=0.95 → 5% history.
-        // At Any_Motion=1.0 (fast), Base=0.99 → 1% history.
-        float Base        = mix (TAA_MOVE_LO, TAA_MOVE_HI, Any_Motion);
-        float Framerate_Adaptation   = clamp ((Delta_Time - 0.016) * 30.0, 0.0, 1.0);
-        float Moving_Alpha = max (max (max (Base, Framerate_Adaptation), Disocclusion), Anti_Lag);
+        // Moving: almost entirely current-frame to kill ghosting
+        float Base                 = mix (TAA_MOVE_LO, TAA_MOVE_HI, Any_Motion);
+        float Framerate_Adaptation = clamp ((Delta_Time - 0.016) * 30.0, 0.0, 1.0);
+        float Moving_Alpha         = max (max (max (Base, Framerate_Adaptation), Disocclusion), Anti_Lag);
 
         // Blend: pixels that moved use aggressive current-frame dominance
         float Alpha = mix (Moving_Alpha, Static_Alpha, Is_Static);
-        Color = mix (History, Color, Alpha);
+        Color       = mix (History, Color, Alpha);
       }
 
       // Off-screen > keep current frame as-is (no history to blend)
@@ -10482,19 +11707,17 @@ glsl comp Post_Process {
     // Bloom
     //
     // Horizontal + vertical taps create a cross-shaped bloom pattern (fake god rays)
-    // Bloom threshold in linear space (0.4 linear ≈ 0.66 sRGB - bright highlights only)
     //
     vec3 Bloom = max (imageLoad (Color_Image, clamp (Pixel + ivec2 ( 3, 0), ivec2 (0), Size - 1)).rgb - 0.4, vec3 (0.0))
-             + max (imageLoad (Color_Image, clamp (Pixel + ivec2 (-3, 0), ivec2 (0), Size - 1)).rgb - 0.4, vec3 (0.0))
-             + max (imageLoad (Color_Image, clamp (Pixel + ivec2 (0,  3), ivec2 (0), Size - 1)).rgb - 0.4, vec3 (0.0))
-             + max (imageLoad (Color_Image, clamp (Pixel + ivec2 (0, -3), ivec2 (0), Size - 1)).rgb - 0.4, vec3 (0.0));
+               + max (imageLoad (Color_Image, clamp (Pixel + ivec2 (-3, 0), ivec2 (0), Size - 1)).rgb - 0.4, vec3 (0.0))
+               + max (imageLoad (Color_Image, clamp (Pixel + ivec2 (0,  3), ivec2 (0), Size - 1)).rgb - 0.4, vec3 (0.0))
+               + max (imageLoad (Color_Image, clamp (Pixel + ivec2 (0, -3), ivec2 (0), Size - 1)).rgb - 0.4, vec3 (0.0));
     Color += Bloom * Bloom_Strength;
   
     // God rays
     //
-    // When the sun is on screen, march radially from each pixel toward the sun
-    // position, accumulating bright sky samples. This creates volumetric-looking
-    // light shafts streaming from the sun through gaps in geometry.
+    // When the sun is on screen, march radially from each pixel toward the sun position, accumulating bright sky samples. This creates
+    // volumetric-looking light shafts streaming from the sun through gaps in geometry.
     //
     vec2  Sun_UV  = unpackHalf2x16 (Params.Sun_Screen_Pos);
     vec2  Sun_Parameters = unpackHalf2x16 (Params.Sun_Params);
@@ -10508,7 +11731,7 @@ glsl comp Post_Process {
       if (Dist > 0.001) {
         vec2  Dir    = Delta / Dist;
 
-        // Incremental stepping replaces multiply-per-iteration. Saves 8 float casts + 8 vec2 multiplies (replaced with 8 vec2 additions)
+        // Incremental stepping replaces multiply-per-iteration
         vec2  Step_Vec = Dir * (min (Dist, 0.3) / 8.0);
         vec3  Accum  = vec3 (0.0);
         float Falloff = 1.0;
@@ -10551,18 +11774,17 @@ glsl comp Post_Process {
     Color  = clamp (Color * (2.51 * Color + 0.03) / (Color * (2.43 * Color + 0.59) + 0.14), 0.0, 1.0);
   
     // Post-tonemap contrast: shadow deepening for rich, cinematic look
-    Color = pow (max (Color, vec3 (0.0)), vec3 (1.16)); // 1.16 darkens midtones/shadows while keeping highlights readable.
+    Color = pow (max (Color, vec3 (0.0)), vec3 (1.16));
   
     // Blue-noise dithering
     //
-    // Dither by ~0.5/255 in the output before sRGB conversion to prevent banding
-    // in dark gradients. The blit to B8G8R8A8_SRGB swapchain handles sRGB encoding.
+    // Dither by ~0.5/255 in the output before sRGB conversion to prevent banding in dark gradients. The blit to B8G8R8A8_SRGB swapchain
+    // handles sRGB encoding.
     //
     float Dither = hash (vec2 (Pixel) + Params.Time * 1.618) - 0.5;  // [-0.5, 0.5]
     Color += Dither / 255.0;
 
-    // Write final color to the display output image (NOT Color_Image, which must
-    // stay in raw RT space so checkerboard stale pixels remain consistent)
+    // Write final color to the display output image
     imageStore (Display_Image, Pixel, vec4 (clamp (Color, 0.0, 1.0), 1.0));
   }
 } // Denoise
@@ -10570,55 +11792,48 @@ glsl comp Post_Process {
 // ═════════════
 //   Skinning
 // ═════════════
-//
-// GPU skeletal skinning compute shader. Transforms bind-pose vertices by interpolated bone matrices.
-// All skeletal animation evaluation happens here — the CPU only uploads the per-bone 3×4 affine matrices.
-// Each invocation skins one vertex: reads 3 bone influences, blends the weighted transforms, and writes
-// the final position/normal to the output vertex buffer for BLAS consumption.
-//
-// This replaces any CPU skinning path — the GPU handles the entire vertex pipeline from bones to BLAS.
 
 glsl comp Skinning {
   #version 460
 
   layout(local_size_x = 64) in;
 
-  // binding 0: bone matrices — array of mat3x4 in row-major order (3 rows × 4 columns per bone)
+  // Bone matrices - array of mat3x4 in row-major order (3 rows  by  4 columns per bone)
   layout(binding = 0, std430) readonly buffer Bone_Data {
-    mat3x4 Bones[];  // World-space bone matrix composed with inverse bind-pose
+    mat3x4 Bones[]; // World-space bone matrix composed with inverse bind-pose
   };
 
-  // binding 1: bind-pose source vertices (position, normal, uv, bone ids + weights packed)
-  // Vertex layout: [px py pz][nx ny nz][u v][lmu lmv] — 10 floats = 40 bytes per vertex
-  // Bone data is appended after the vertex array as a packed uint8 stream: 3 bone ids + 3 weights per vertex
+  // Bind-pose source vertices (position, normal, uv, bone ids + weights packed)
   layout(binding = 1, std430) readonly buffer Bind_Pose {
-    float Bind_Vertices[];  // Interleaved vertex data
+    float Bind_Vertices[]; // Interleaved vertex data
   };
 
-  // binding 2: output skinned vertices (same layout, overwritten in-place for BLAS)
+  // Output skinned vertices (same layout, overwritten in-place for BLAS)
   layout(binding = 2, std430) writeonly buffer Skinned_Output {
-    float Out_Vertices[];   // Skinned vertex data
+    float Out_Vertices[]; // Skinned vertex data
   };
 
-  // push constants: vertex count and bone count
+  // Vertex count and bone count
   layout(push_constant) uniform Skinning_Push {
     uint Vertex_Count;
     uint Bone_Count;
   };
 
-  // Transform a vec3 by a 3×4 affine matrix (row-major): result = M * [v, 1]
+  // Transform a vec3 by a 3 by 4 affine matrix (row-major)
   vec3 Xform_Pos (mat3x4 M, vec3 V) {
     return vec3 (dot (M[0], vec4 (V, 1.0)),
                  dot (M[1], vec4 (V, 1.0)),
                  dot (M[2], vec4 (V, 1.0)));
   }
-  // Transform direction (no translation): result = M * [v, 0]
+
+  // Transform direction (no translation)
   vec3 Xform_Dir (mat3x4 M, vec3 V) {
     return vec3 (dot (M[0].xyz, V),
                  dot (M[1].xyz, V),
                  dot (M[2].xyz, V));
   }
 
+  // Skinning shader main
   void main () {
     uint Vi = gl_GlobalInvocationID.x;
     if (Vi >= Vertex_Count) return;
@@ -10632,15 +11847,14 @@ glsl comp Skinning {
     float Lu  = Bind_Vertices[Base+8];
     float Lv  = Bind_Vertices[Base+9];
 
-    // Read bone indices and weights from the packed appendix
-    // (stored after all vertex data: Vertex_Count*10 floats, then Vertex_Count*6 bytes as uint-packed)
+    // Read bone indices and weights from the packed appendix (stored after all vertex data)
     uint Bone_Offset = Vertex_Count * 10u + (Vi * 2u); // 2 uints per vertex = 8 bytes = 3 ids + 3 weights + 2 pad
     uint Pack_A = floatBitsToUint (Bind_Vertices[Bone_Offset]);
     uint Pack_B = floatBitsToUint (Bind_Vertices[Bone_Offset + 1u]);
     uvec3 Bone_Id = uvec3 (Pack_A & 0xFFu, (Pack_A >> 8u) & 0xFFu, (Pack_A >> 16u) & 0xFFu);
     vec3  Bone_Wt = vec3  (float (Pack_B & 0xFFu), float ((Pack_B >> 8u) & 0xFFu), float ((Pack_B >> 16u) & 0xFFu)) / 255.0;
 
-    // Blend bone transforms (3 influences max — driver-friendly, no divergent loops)
+    // Blend bone transforms (3 influences max - driver-friendly, no divergent loops)
     vec3 Skinned_Pos  = vec3 (0.0);
     vec3 Skinned_Norm = vec3 (0.0);
 
@@ -10678,19 +11892,19 @@ glsl comp Skinning {
   }
 } // Skinning
 
-// ══════════════════════════════
+// ════════════════════════════
 //   Skinning_Pipeline_Create
-// ══════════════════════════════
+// ════════════════════════════
 
 void Skinning_Pipeline_Create () {
 
-  // Descriptor set layout: 3 storage buffers (bones, bind vertices, output vertices)
+  // Descriptor set layout
   VkDescriptorSetLayoutBinding Bindings[3] = {
-    {.binding=0, .descriptorType=VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .descriptorCount=1,
+    {.binding = 0, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .descriptorCount = 1,
      .stageFlags=VK_SHADER_STAGE_COMPUTE_BIT},
-    {.binding=1, .descriptorType=VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .descriptorCount=1,
+    {.binding = 1, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .descriptorCount = 1,
      .stageFlags=VK_SHADER_STAGE_COMPUTE_BIT},
-    {.binding=2, .descriptorType=VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .descriptorCount=1,
+    {.binding = 2, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .descriptorCount = 1,
      .stageFlags=VK_SHADER_STAGE_COMPUTE_BIT},
   };
   VK_CHECK (vkCreateDescriptorSetLayout (/*device      =>*/ Device,
@@ -10702,7 +11916,7 @@ void Skinning_Pipeline_Create () {
                                           /*pAllocator  =>*/ NULL,
                                           /*pSetLayout  =>*/ &Skinning_Descriptor_Layout));
 
-  // Push constant range: vertex count + bone count (8 bytes)
+  // Push constant range: vertex count + bone count 
   VkPushConstantRange Push_Range = {.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT, .offset = 0, .size = 8};
 
   VK_CHECK (vkCreatePipelineLayout (/*device      =>*/ Device,
@@ -10736,7 +11950,7 @@ void Skinning_Pipeline_Create () {
 
 // ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 //
-// §14. Main
+// §14. Engine
 //
 // ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 
@@ -10745,18 +11959,20 @@ void Skinning_Pipeline_Create () {
 // ══════════════════════════
 
 void Constrain_Aspect_Ratio (int *W, int *H) {
+
+  // Comment here !!!
   if (*W < MINIMUM_WINDOW_SIZE) *W = MINIMUM_WINDOW_SIZE;
   int Min_H = MINIMUM_WINDOW_SIZE * ASPECT_NARROW_Y / ASPECT_NARROW_X;
   if (*H < Min_H) *H = Min_H;
 
   // Width bounds for the current height
-  int Max_Width = *H * ASPECT_NARROW_X / ASPECT_NARROW_Y;  // Widest allowed (21:9)
-  int Min_Width = *H * ASPECT_WIDE_X   / ASPECT_WIDE_Y;    // Narrowest allowed (4:3)
+  int Max_Width = *H * ASPECT_NARROW_X / ASPECT_NARROW_Y; // Widest allowed 
+  int Min_Width = *H * ASPECT_WIDE_X   / ASPECT_WIDE_Y;   // Narrowest allowed 
   int Fit_W = (*W > Max_Width) ? Max_Width : (*W < Min_Width) ? Min_Width : *W;
 
   // Height bounds for the current width
-  int Max_Height = *W * ASPECT_WIDE_Y   / ASPECT_WIDE_X;   // Tallest allowed (4:3)
-  int Min_Height = *W * ASPECT_NARROW_Y / ASPECT_NARROW_X; // Shortest allowed (21:9)
+  int Max_Height = *W * ASPECT_WIDE_Y   / ASPECT_WIDE_X;   // Tallest allowed 
+  int Min_Height = *W * ASPECT_NARROW_Y / ASPECT_NARROW_X; // Shortest allowed
   int Fit_H = (*H > Max_Height) ? Max_Height : (*H < Min_Height) ? Min_Height : *H;
 
   // Apply the clamped dimensions
@@ -10951,7 +12167,7 @@ Input Poll_Input () {
         if (Event.key.keysym.sym == SDLK_F11)
           Toggle_Fullscreen ();
         if (Event.key.keysym.sym == SDLK_F5) {
-          Active_Movement = (Active_Movement + 1) % MOVEMENT_STYLE_COUNT;
+          Active_Movement = (Active_Movement + 1) % WORLD_COUNT;
           printf("[movement] switched to %s\n", Active_Movement ? "Source" : "Quake 3");
         }
         if (Event.key.keysym.sym == SDLK_F6) {
@@ -11026,1225 +12242,379 @@ Input Poll_Input () {
 
 } // Poll_Input
 
-// ════════
-//   main
-// ════════
+// ══════════════════════════
+//   Vulkan_Create_Instance
+// ══════════════════════════
 
-int main (int Argc, char **Argv) {
+void Vulkan_Create_Instance () {
 
-  // Command-line flags
-  //   --quality LEVEL   Set quality preset (best/great/good/ok/normal/bad/worst)
-  //   --physics-test    Run physics-only test (no rendering), exit after 3s sim
-  //   --benchmark N     Run N frames of automated fly-through, print FPS stats, exit
-  //   --screenshot F    Render one frame from spawn, save as F (TGA), exit
-  //   --no-postprocess  Disable post-processing (raw PBR output)
-  //   --spp N           Override samples-per-pixel (1, 2, 4, 8)
-  //   --res WxH         Override render resolution
-  //   --no-pbr          Disable PBR maps (diffuse + lightmap only, for A/B comparison)
-  //   --no-parallax     Disable parallax occlusion mapping
-  //   --dump-frames D   Save each benchmark frame as D/frame_NNNN.tga
-  //   --validation      Enable Vulkan validation layers (off by default)
-  //   --source          Load Source engine BSP (VBSP) instead of Q3 BSP
-  //   --mdl PATH        Load Source MDL model as enemy entity
-  //   --weapon PATH     Load Source MDL model as held weapon
-  //   --world q3|source Set world coordinate system/physics preset
-  //   mapname.bsp       Load specified BSP map instead of default
+  // Gather the instance extensions required by SDL for Vulkan surface presentation
+  uint Extension_Count;
+  SDL_Vulkan_GetInstanceExtensions (Window, &Extension_Count, NULL);
+  const char **Extensions = malloc (sizeof (char *) * (Extension_Count + 1));
+  SDL_Vulkan_GetInstanceExtensions (Window, &Extension_Count, Extensions);
 
-  // Local variables
-  int         Physics_Test      = 0;
-  int         Benchmark_Frames  = 0;    // 0 = disabled, >0 = run N frames then exit
-  const char *Screenshot_Path   = NULL; // NULL = disabled, otherwise save frame and exit
-  const char *Dump_Frames_Dir   = NULL; // NULL = disabled, otherwise dump each frame
-  int         No_Postprocess    = 0;
-  int         No_PBR            = 0;
-  int         No_Parallax       = 0;
-  int         Force_Cheap       = 0;    // --cheap: force Budget=1.0 (lightmap-only fallback)
-  int         Override_SPP      = 0;    // 0 = use default from quality preset
-  int         Override_Res      = 0;    // 1 if --res was specified (overrides quality preset)
-  int         Source_Mode       = 0;    // 1 = load Source BSP (VBSP) instead of Q3 BSP
-  float       Active_Exposure   = STYLE.Exposure; // May be overridden for Source mode
-  const char *Source_MDL_Path   = NULL; // Optional Source MDL model to load as entity
-  const char *Source_Weapon_Path = NULL; // Optional Source MDL model to load as held weapon
-  const char *Map_Name = DEFAULT_MAP;
+  // Check if the validation layer is available before requesting it
+  uint Layer_Count = 0;
+  vkEnumerateInstanceLayerProperties (&Layer_Count, NULL);
+  VkLayerProperties *Layers = malloc (sizeof (VkLayerProperties) * Layer_Count);
+  vkEnumerateInstanceLayerProperties (&Layer_Count, Layers);
 
-  // Parse command-line arguments
-  for (int I = 1; I < Argc; I++) {
-    if      (strcmp (Argv[I], "--help") == 0 or strcmp (Argv[I], "-h") == 0) {
-      printf ("Usage: %s [options] [mapname.bsp]\n\n", Argv[0]);
-      printf ("Options:\n");
-      printf ("  --source          Load Source engine BSP (VBSP) instead of Q3 BSP\n");
-      printf ("  --mdl PATH        Load Source MDL model as enemy entity\n");
-      printf ("  --weapon PATH     Load Source MDL as held weapon (viewmodel)\n");
-      printf ("  --world q3|source Set world preset (player height, FOV, speed)\n");
-      printf ("  --screenshot FILE Render one frame from spawn, save TGA, exit\n");
-      printf ("  --benchmark N     Run N frames, print FPS stats, exit\n");
-      printf ("  --spp N           Override samples-per-pixel (1, 2, 4, 8)\n");
-      printf ("  --res WxH         Override render resolution (e.g. 1920x1080)\n");
-      printf ("  --quality LEVEL   Set quality preset (ultra/high/medium/low/potato)\n");
-      printf ("  --no-postprocess  Disable tonemapping and post-processing\n");
-      printf ("  --no-pbr          Disable PBR maps (diffuse + lightmap only)\n");
-      printf ("  --no-parallax     Disable parallax occlusion mapping\n");
-      printf ("  --validation      Enable Vulkan validation layers\n");
-      printf ("  --dump-frames DIR Save benchmark frames as DIR/frame_NNNN.tga\n");
-      printf ("  --physics-test    Run physics simulation without rendering\n");
-      printf ("\nEnvironment:\n");
-      printf ("  VK_ICD_FILENAMES  Set Vulkan driver (e.g. /usr/share/vulkan/icd.d/lvp_icd.json)\n");
-      printf ("  DISPLAY           X11 display (use Xvfb for headless rendering)\n");
-      return 0;
-    }
-    else if (strcmp (Argv[I], "--physics-test")   == 0) Physics_Test = 1;
-    else if (strcmp (Argv[I], "--benchmark")      == 0 and I + 1 < Argc) Benchmark_Frames = atoi (Argv[++I]);
-    else if (strcmp (Argv[I], "--screenshot")     == 0 and I + 1 < Argc) Screenshot_Path = Argv[++I];
-    else if (strcmp (Argv[I], "--dump-frames")    == 0 and I + 1 < Argc) Dump_Frames_Dir = Argv[++I];
-    else if (strcmp (Argv[I], "--no-postprocess") == 0) No_Postprocess = 1;
-    else if (strcmp (Argv[I], "--no-pbr")         == 0) No_PBR = 1;
-    else if (strcmp (Argv[I], "--no-parallax")    == 0) No_Parallax = 1;
-    else if (strcmp (Argv[I], "--cheap")          == 0) Force_Cheap = 1;
-    else if (strcmp (Argv[I], "--validation")     == 0) Use_Validation = 1;
-    else if (strcmp (Argv[I], "--source")         == 0) { Source_Mode = 1; Active_Movement = MOVEMENT_SOURCE; Active_World = WORLD_PRESETS[WORLD_SOURCE]; Active_Exposure = 1.0f; }
-    else if (strcmp (Argv[I], "--world")          == 0 and I + 1 < Argc) {
-      const char *W = Argv[++I];
-      if      (strcmp(W,"source")==0) Active_World = WORLD_PRESETS[WORLD_SOURCE];
-      else if (strcmp(W,"q3")==0)     Active_World = WORLD_PRESETS[WORLD_QUAKE3];
-      else printf("[world] unknown world '%s' (q3/source)\n", W);
-    }
-    else if (strcmp (Argv[I], "--movement")       == 0 and I + 1 < Argc) {
-      const char *Mv = Argv[++I];
-      if      (strcmp(Mv,"source")==0) Active_Movement = MOVEMENT_SOURCE;
-      else if (strcmp(Mv,"q3")==0)     Active_Movement = MOVEMENT_QUAKE3;
-    }
-    else if (strcmp (Argv[I], "--mdl")            == 0 and I + 1 < Argc) Source_MDL_Path = Argv[++I];
-    else if (strcmp (Argv[I], "--weapon")         == 0 and I + 1 < Argc) Source_Weapon_Path = Argv[++I];
-    else if (strcmp (Argv[I], "--spp")            == 0 and I + 1 < Argc) Override_SPP = atoi (Argv[++I]);
-    else if (strcmp (Argv[I], "--res")            == 0 and I + 1 < Argc) {
-      sscanf (Argv[++I], "%dx%d", &Width, &Height);
-      Override_Res = 1;
-    }
-    else if (strcmp (Argv[I], "--quality") == 0 and I + 1 < Argc) {
-      const char *Q = Argv[++I];
-      if      (strcasecmp (Q, "ultra")  == 0) Active_Quality = QUALITY_ULTRA;
-      else if (strcasecmp (Q, "high")   == 0) Active_Quality = QUALITY_HIGH;
-      else if (strcasecmp (Q, "medium") == 0) Active_Quality = QUALITY_MEDIUM;
-      else if (strcasecmp (Q, "low")    == 0) Active_Quality = QUALITY_LOW;
-      else if (strcasecmp (Q, "potato") == 0) Active_Quality = QUALITY_POTATO;
-      else printf ("[quality] unknown preset '%s' (ultra/high/medium/low/potato)\n", Q);
-    }
-    else Map_Name = Argv[I];
-  }
-
-  // Apply quality presets
-  const Quality_Preset *Preset = &QUALITY_PRESETS[Active_Quality];
-  if (not Override_Res) { Width = Preset->Width; Height = Preset->Height; }
-  Active_Render_Scale  = Preset->Render_Scale;
-  Active_Denoise_Passes = Preset->Denoise_Passes;
-  Active_Checkerboard   = Preset->Checkerboard;
-  if (not No_Parallax) No_Parallax = not Preset->Parallax;
-  printf ("[quality] preset: %s (%dx%d @ %.0f%% scale, %d SPP)\n",
-          Preset->Name, Width, Height, Active_Render_Scale * 100.f, Override_SPP ? Override_SPP : Preset->SPP);
-  printf ("[world] %s (height %.0f, eye %.0f, fov %.0f, speed %.0f)\n",
-          Active_World.Name, Active_World.Player_Height, Active_World.Eye_Height, Active_World.FOV, Active_World.Max_Speed);
-
-  // ...
-  (void)No_PBR;      // Used after texture loading to zero PBR_Stride
-  (void)No_Parallax; // Handled via PBR_Stride=0 (parallax checks Tex_Id < PBR_Stride)
-  char Map_Path[256];
-  snprintf (Map_Path, sizeof Map_Path, "%smaps/%s", ASSET_ROOT, Map_Name);
-
-  // Verify the map file exists before starting expensive GPU setup
-  {
-    FILE *Map_Test = fopen (Map_Path, "rb");
-    if (not Map_Test) {
-      fprintf (stderr, "[error] map file not found: %s\n", Map_Path);
-      fprintf (stderr, "  Place .bsp files in the assets/maps/ directory.\n");
-      fprintf (stderr, "  Usage: %s [options] <mapname.bsp>\n", Argv[0]);
-      return 1;
-    }
-    fclose (Map_Test);
-  }
-
-  // Initialize SDL2 with video subsystem and create a Vulkan-capable resizable window
-  if (SDL_Init (SDL_INIT_VIDEO) < 0) {
-    fprintf (stderr, "[error] SDL_Init failed: %s\n", SDL_GetError ());
-    fprintf (stderr, "  Ensure a display server (X11/Wayland) is running.\n");
-    fprintf (stderr, "  For headless use: Xvfb :99 -screen 0 1920x1080x24 & export DISPLAY=:99\n");
-    return 1;
-  }
-  Window = SDL_CreateWindow (ENGINE_NAME, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
-                             Width, Height, SDL_WINDOW_VULKAN | SDL_WINDOW_SHOWN | SDL_WINDOW_RESIZABLE);
-  if (not Window) {
-    fprintf (stderr, "[error] SDL_CreateWindow failed: %s\n", SDL_GetError ());
-    fprintf (stderr, "  Ensure Vulkan drivers are installed (apt install mesa-vulkan-drivers).\n");
-    SDL_Quit ();
-    return 1;
-  }
-
-  // Create system cursors for menu mode rollover
-  SDL_Cursor_Arrow     = SDL_CreateSystemCursor (SDL_SYSTEM_CURSOR_ARROW);
-  SDL_Cursor_Hand      = SDL_CreateSystemCursor (SDL_SYSTEM_CURSOR_HAND);
-  SDL_Cursor_Crosshair = SDL_CreateSystemCursor (SDL_SYSTEM_CURSOR_CROSSHAIR);
-
-  // Start in game mode: capture mouse for FPS controls
-  SDL_SetRelativeMouseMode (SDL_TRUE);
-  SDL_SetWindowGrab (Window, SDL_TRUE);
-  Cursor_Centering = 1;
-  Input_Active = 1;
-  Windowed_W = Width;
-  Windowed_H = Height;
-  SDL_GetWindowPosition (Window, &Windowed_X, &Windowed_Y);
-
-  // Create the Vulkan environment
-  Vulkan_Create_Instance ();
-  Vulkan_Pick_Physical_Device ();
-  Vulkan_Create_Logical_Device ();
-  Vulkan_Create_Swapchain ();
-  Vulkan_Create_Synchronization ();
-
-  // Compute internal render resolution
-  Render_Width  = (int)(Width  * Active_Render_Scale);
-  Render_Height = (int)(Height * Active_Render_Scale);
-  Render_Width  = (Render_Width  + 7) & ~7;  // Round up to multiple of 8 (postprocess workgroup size)
-  Render_Height = (Render_Height + 7) & ~7;
-  // Convert horizontal FOV (Q3-style) to vertical for the Perspective matrix
-  float Vertical_FOV = Hfov_To_Vfov (Active_World.FOV, (float)Width / Height);
-  printf ("[render] internal %dx%d > window %dx%d (scale %.0f%%, vFOV %.1f°)\n",
-          Render_Width, Render_Height, Width, Height, Active_Render_Scale * 100.f, Vertical_FOV);
-
-  // Create the ray tracing storage image (render target) and depth image (R32F for postprocess DOF). Storage images use internal render
-  // resolution - bilinear blit upscales to window/swapchain
-  Raytracing_Storage_Image = Image_Storage_Create (Render_Width, Render_Height);
-  Vulkan_Transition_Storage_Image ();
-
-  // Create R32F depth image for postprocessing
-  {
-    Depth_Image.Format = VK_FORMAT_R32_SFLOAT;
-    VK_CHECK (vkCreateImage (/*device      =>*/ Device,
-                             /*pCreateInfo =>*/ &(VkImageCreateInfo){
-                               .sType         = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
-                               .imageType     = VK_IMAGE_TYPE_2D,
-                               .format        = VK_FORMAT_R32_SFLOAT,
-                               .extent        = {Render_Width, Render_Height, 1},
-                               .mipLevels     = 1,
-                               .arrayLayers   = 1,
-                               .samples       = VK_SAMPLE_COUNT_1_BIT,
-                               .tiling        = VK_IMAGE_TILING_OPTIMAL,
-                               .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
-                               .usage         = VK_IMAGE_USAGE_STORAGE_BIT},
-                             /*pAllocator  =>*/ NULL,
-                             /*pImage      =>*/ &Depth_Image.Image));
-    VkMemoryRequirements Mem_Req;
-    vkGetImageMemoryRequirements (Device, Depth_Image.Image, &Mem_Req);
-    VK_CHECK (vkAllocateMemory (/*device       =>*/ Device,
-                                /*pAllocateInfo =>*/ &(VkMemoryAllocateInfo){
-                                  .sType           = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
-                                  .allocationSize  = Mem_Req.size,
-                                  .memoryTypeIndex = Find_Memory_Type (Mem_Req.memoryTypeBits,
-                                                                       VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)},
-                                /*pAllocator    =>*/ NULL,
-                                /*pMemory       =>*/ &Depth_Image.Memory));
-    VK_CHECK (vkBindImageMemory (Device, Depth_Image.Image, Depth_Image.Memory, 0));
-    VK_CHECK (vkCreateImageView (/*device      =>*/ Device,
-                                 /*pCreateInfo =>*/ &(VkImageViewCreateInfo){
-                                   .sType            = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
-                                   .image            = Depth_Image.Image,
-                                   .viewType         = VK_IMAGE_VIEW_TYPE_2D,
-                                   .format           = VK_FORMAT_R32_SFLOAT,
-                                   .subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1}},
-                                 /*pAllocator  =>*/ NULL,
-                                 /*pView       =>*/ &Depth_Image.View));
-
-    // Transition depth image to general layout
-    VkCommandBuffer Cmd;
-    VK_CHECK (vkAllocateCommandBuffers (/*device        =>*/ Device,
-                                        /*pAllocateInfo =>*/ &(VkCommandBufferAllocateInfo){
-                                          .sType              = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
-                                          .commandPool        = Command_Pool,
-                                          .level              = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
-                                          .commandBufferCount = 1},
-                                        /*pCommandBuffers =>*/ &Cmd));
-    VK_CHECK (vkBeginCommandBuffer (/*commandBuffer =>*/ Cmd,
-                                    /*pBeginInfo    =>*/ &(VkCommandBufferBeginInfo){
-                                      .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
-                                      .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT}));
-    Image_Layout_Barrier (/*Command_Buffer     =>*/ Cmd,
-                          /*Image              =>*/ Depth_Image.Image,
-                          /*Old_Layout         =>*/ VK_IMAGE_LAYOUT_UNDEFINED,
-                          /*New_Layout         =>*/ VK_IMAGE_LAYOUT_GENERAL,
-                          /*Source_Access      =>*/ 0,
-                          /*Destination_Access =>*/ VK_ACCESS_SHADER_WRITE_BIT,
-                          /*Source_Stage       =>*/ VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
-                          /*Destination_Stage  =>*/ VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR);
-    VK_CHECK (vkEndCommandBuffer (Cmd));
-    VK_CHECK (vkQueueSubmit (/*queue       =>*/ Queue,
-                             /*submitCount =>*/ 1,
-                             /*pSubmits    =>*/ &(VkSubmitInfo){
-                               .sType              = VK_STRUCTURE_TYPE_SUBMIT_INFO,
-                               .commandBufferCount = 1,
-                               .pCommandBuffers    = &Cmd},
-                             /*fence       =>*/ VK_NULL_HANDLE));
-    vkQueueWaitIdle (Queue);
-    vkFreeCommandBuffers (Device, Command_Pool, 1, &Cmd);
-  }
-
-  // Create history image for temporal accumulation (TAA) - same size as render target
-  History_Image = Image_Storage_Create (Render_Width, Render_Height);
-  {
-    VkCommandBuffer Cmd;
-    VK_CHECK (vkAllocateCommandBuffers (/*device        =>*/ Device,
-                                        /*pAllocateInfo =>*/ &(VkCommandBufferAllocateInfo){
-                                          .sType              = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
-                                          .commandPool        = Command_Pool,
-                                          .level              = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
-                                          .commandBufferCount = 1},
-                                        /*pCommandBuffers =>*/ &Cmd));
-    VK_CHECK (vkBeginCommandBuffer (/*commandBuffer =>*/ Cmd,
-                                    /*pBeginInfo    =>*/ &(VkCommandBufferBeginInfo){
-                                      .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
-                                      .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT}));
-    Image_Layout_Barrier (/*Command_Buffer     =>*/ Cmd,
-                          /*Image              =>*/ History_Image.Image,
-                          /*Old_Layout         =>*/ VK_IMAGE_LAYOUT_UNDEFINED,
-                          /*New_Layout         =>*/ VK_IMAGE_LAYOUT_GENERAL,
-                          /*Source_Access      =>*/ 0,
-                          /*Destination_Access =>*/ VK_ACCESS_SHADER_WRITE_BIT,
-                          /*Source_Stage       =>*/ VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
-                          /*Destination_Stage  =>*/ VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
-    VK_CHECK (vkEndCommandBuffer (Cmd));
-    VK_CHECK (vkQueueSubmit (/*queue       =>*/ Queue,
-                             /*submitCount =>*/ 1,
-                             /*pSubmits    =>*/ &(VkSubmitInfo){
-                               .sType              = VK_STRUCTURE_TYPE_SUBMIT_INFO,
-                               .commandBufferCount = 1,
-                               .pCommandBuffers    = &Cmd},
-                             /*fence       =>*/ VK_NULL_HANDLE));
-    vkQueueWaitIdle (Queue);
-    vkFreeCommandBuffers (Device, Command_Pool, 1, &Cmd);
-  }
-
-  // Create postprocess output image - postprocess writes here instead of back to Color_Image, so that Color_Image (raw RT) stays in a
-  // consistent space across frames. Critical for checkerboard: stale pixels remain raw RT, not tonemapped.
-  Postprocess_Output_Image = Image_Storage_Create (Render_Width, Render_Height);
-  {
-    VkCommandBuffer Cmd;
-    VK_CHECK (vkAllocateCommandBuffers (/*device        =>*/ Device,
-                                        /*pAllocateInfo =>*/ &(VkCommandBufferAllocateInfo){
-                                          .sType              = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
-                                          .commandPool        = Command_Pool,
-                                          .level              = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
-                                          .commandBufferCount = 1},
-                                        /*pCommandBuffers =>*/ &Cmd));
-    VK_CHECK (vkBeginCommandBuffer (/*commandBuffer =>*/ Cmd,
-                                    /*pBeginInfo    =>*/ &(VkCommandBufferBeginInfo){
-                                      .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
-                                      .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT}));
-    Image_Layout_Barrier (/*Command_Buffer     =>*/ Cmd,
-                          /*Image              =>*/ Postprocess_Output_Image.Image,
-                          /*Old_Layout         =>*/ VK_IMAGE_LAYOUT_UNDEFINED,
-                          /*New_Layout         =>*/ VK_IMAGE_LAYOUT_GENERAL,
-                          /*Source_Access      =>*/ 0,
-                          /*Destination_Access =>*/ VK_ACCESS_SHADER_WRITE_BIT,
-                          /*Source_Stage       =>*/ VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
-                          /*Destination_Stage  =>*/ VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
-    VK_CHECK (vkEndCommandBuffer (Cmd));
-    VK_CHECK (vkQueueSubmit (/*queue       =>*/ Queue,
-                             /*submitCount =>*/ 1,
-                             /*pSubmits    =>*/ &(VkSubmitInfo){
-                               .sType              = VK_STRUCTURE_TYPE_SUBMIT_INFO,
-                               .commandBufferCount = 1,
-                               .pCommandBuffers    = &Cmd},
-                             /*fence       =>*/ VK_NULL_HANDLE));
-    vkQueueWaitIdle (Queue);
-    vkFreeCommandBuffers (Device, Command_Pool, 1, &Cmd);
-  }
-
-  // Allocate the camera uniform buffer sizeof(mat4)*2 + 16 (base) + 7*16 (environment vec4s) = 256 bytes
-  Camera_Uniform_Buffer = Buffer_Allocate (/*Size         =>*/ 256,
-                                           /*Usage        =>*/ VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
-                                           /*Memory_Flags =>*/ VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT
-                                                             | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
-
-  // Load the BSP scene and spawn point (no CPU collision map - GPU handles physics via TLAS)
-  Spawn Spawn_Point;
-  Scene Scene_Data = Source_Mode ? Scene_Load_From_VBSP (Map_Path, &Spawn_Point)
-                                : Scene_Load_From_BSP   (Map_Path, &Spawn_Point);
-
-  // Load entity: Source mode defaults to ct_sas, Q3 mode defaults to sarge
-  const char *Entity_MDL_Path = Source_MDL_Path;
-  if (not Entity_MDL_Path and Source_Mode)
-    Entity_MDL_Path = "/tmp/cspromod_new/cspromod_b105/cspromod/models/player/ct_sas.mdl";
-  // Place enemy 120 units forward from spawn (in engine Y-up space: forward = camera's look direction)
-  vec3 Enemy_Origin = Spawn_Point.Origin;
-  if (Entity_MDL_Path) {
-    float Spawn_Yaw = 1.5707963f - Spawn_Point.Angle * 3.14159f / 180.f;
-    float Fwd_X = sinf(Spawn_Yaw), Fwd_Z = -cosf(Spawn_Yaw);
-    Enemy_Origin.x += Fwd_X * 120.f;
-    Enemy_Origin.z += Fwd_Z * 120.f;
-    printf("[enemy] placing at (%.1f, %.1f, %.1f), %.0f units forward from spawn\n",
-           Enemy_Origin.x, Enemy_Origin.y, Enemy_Origin.z, 120.f);
-  }
-  Entity Enemy = Entity_MDL_Path ? MDL_Load (&Scene_Data, Entity_MDL_Path, Enemy_Origin, Spawn_Point.Angle + 180.f)
-                                 : Entity_Load (&Scene_Data, Spawn_Point);
-
-  // Infer per-scene environment settings from BSP data (sky textures, worldspawn)
-  Active_Environment = Environment_Infer_From_Scene (&Scene_Data);
-
-  // Load scene and weapon textures
-  Scene_Load_Textures (&Scene_Data);
-  Weapon_Instance Weapon = {0};
-  const char *Weapon_MDL_Path = Source_Weapon_Path;
-  if (not Weapon_MDL_Path and Source_Mode)
-    Weapon_MDL_Path = "/tmp/v_m4_new/models/v_rif_m4a1.mdl";
-  Weapon.Model = Weapon_MDL_Path ? Source_Weapon_Model_Load (Weapon_MDL_Path)
-                                 : Weapon_Model_Load ();
-  Weapon_Load_Textures (&Weapon);
-
-  // --no-pbr: set PBR_Stride to 0 to force heuristic PBR for all materials.
-  // --no-parallax / Potato quality: disables parallax and reflections via Active_SPP flags
-  // but keeps PBR maps enabled (per-material classification still works).
-  if (No_PBR) {
-    printf ("[mode] PBR maps DISABLED (heuristic fallback)\n");
-    PBR_Stride = 0;
-  }
-  printf ("[mode] PBR maps %s, parallax %s\n",
-          No_PBR ? "DISABLED" : "enabled", No_Parallax ? "DISABLED" : "enabled");
-
-  // Build acceleration structures (BLAS for world + weapon + enemy, then TLAS)
-  Acceleration_Structure World_Bottom_Level = Build_World_Bottom_Level (&Scene_Data);
-  Weapon_Bottom_Level_Initialize (&Weapon);
-  Entity_Bottom_Level_Initialize (&Enemy);
-  Top_Level_Initialize (4);
-  Top_Level_Rebuild (&World_Bottom_Level, &Weapon.Bottom_Level, &Enemy.Bottom_Level, NULL);
-
-  // Create the ray tracing pipeline, shader binding table, and descriptors
-  Raytracing_Pipeline_Create ();
-  Shader_Binding_Table_Create ();
-  Descriptor_Set_Create (&Weapon, &Enemy);
-
-  // Create the post-processing pipeline (reads color + depth, writes color)
-  Postprocess_Pipeline_Create ();
-
-  // Create the a-trous spatial denoiser
-  Denoise_Ping_Image = Image_Storage_Create (Render_Width, Render_Height);
-  {
-    VkCommandBuffer Cmd;
-    VK_CHECK (vkAllocateCommandBuffers (/*device        =>*/ Device,
-                                        /*pAllocateInfo =>*/ &(VkCommandBufferAllocateInfo){
-                                          .sType              = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
-                                          .commandPool        = Command_Pool,
-                                          .level              = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
-                                          .commandBufferCount = 1},
-                                        /*pCommandBuffers =>*/ &Cmd));
-    VK_CHECK (vkBeginCommandBuffer (/*commandBuffer =>*/ Cmd,
-                                    /*pBeginInfo    =>*/ &(VkCommandBufferBeginInfo){
-                                      .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
-                                      .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT}));
-    Image_Layout_Barrier (/*Command_Buffer     =>*/ Cmd,
-                          /*Image              =>*/ Denoise_Ping_Image.Image,
-                          /*Old_Layout         =>*/ VK_IMAGE_LAYOUT_UNDEFINED,
-                          /*New_Layout         =>*/ VK_IMAGE_LAYOUT_GENERAL,
-                          /*Source_Access      =>*/ 0,
-                          /*Destination_Access =>*/ VK_ACCESS_SHADER_WRITE_BIT,
-                          /*Source_Stage       =>*/ VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
-                          /*Destination_Stage  =>*/ VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
-    VK_CHECK (vkEndCommandBuffer (Cmd));
-    VK_CHECK (vkQueueSubmit (/*queue       =>*/ Queue,
-                             /*submitCount =>*/ 1,
-                             /*pSubmits    =>*/ &(VkSubmitInfo){
-                               .sType              = VK_STRUCTURE_TYPE_SUBMIT_INFO,
-                               .commandBufferCount = 1,
-                               .pCommandBuffers    = &Cmd},
-                             /*fence       =>*/ VK_NULL_HANDLE));
-    vkQueueWaitIdle (Queue);
-    vkFreeCommandBuffers (Device, Command_Pool, 1, &Cmd);
-  }
-  Denoise_Pipeline_Create ();
-
-  // Create the GPU skeletal skinning pipeline (used by Source MDL entities)
-  Skinning_Pipeline_Create ();
-
-  // Create the GPU physics pipeline and resources (with hull binding)
-  Physics_Pipeline_Create ();
-
-  // Compute world-relative spawn offset. Q3: spawn origin is 24 above feet, capsule center is half-height above feet.
-  // Source: spawn origin is at feet. The capsule adjustment places the physics origin at capsule center.
-  float Spawn_Feet_Offset = (Active_World.Type == WORLD_SOURCE) ? 0.f : 24.f; // Q3 entity origin vs Source feet origin
-  float Capsule_Y = Active_World.Player_Height * 0.5f - Spawn_Feet_Offset;    // Offset from spawn to capsule center
-  Player Initial_Player = {
-    .Position = {Spawn_Point.Origin.x, Spawn_Point.Origin.y + Capsule_Y, Spawn_Point.Origin.z},
-    .Yaw      = 1.5707963f - Spawn_Point.Angle * 3.14159f / 180.f}; // π/2 - angle: Q3 angle 0 = +X = our yaw π/2
-  Physics_Resources_Create (&Initial_Player);
-
-  // Initialize the audio system (OpenAL with synthesized sounds)
-  Audio_Init ();
-
-  // Apply runtime mode flags
-  Skip_Postprocess = No_Postprocess;
-
-  // Default SPP=1 for maximum speed; override with --spp N
-  uint Active_SPP = Override_SPP ? (uint)Override_SPP : (uint)QUALITY_PRESETS[Active_Quality].SPP;
-
-  // Log diagnostic output
-  printf ("[init] ready - entering game loop\n");
-
-  // Physics-only test mode: run with --physics-test to skip rendering and simulate movement at fixed 60fps.
-  // Exits after ~3 seconds of simulated time with full diagnostic output.
-  if (Physics_Test) {
-    fprintf (stderr, "[physics-test] starting physics-only test (3s simulated, fixed dt=0.016)\n");
-    float Fixed_Dt = 1.f / 60.f;  // 60fps timestep
-
-    // Phase 1: idle for 0.5s (let player settle on ground)
-    for (int I = 0; I < 30; I++) {
-      Input In = {0};
-      Player P = Physics_Dispatch (In, Fixed_Dt);
-      if (I % 10 == 0)
-        fprintf (stderr, "  [idle  %3d] pos=(%.1f,%.1f,%.1f) vel=(%.1f,%.1f,%.1f) gnd=%d\n",
-                 I, P.Position.x, P.Position.y, P.Position.z,
-                 P.Velocity.x, P.Velocity.y, P.Velocity.z, P.On_Ground);
-    }
-
-    // Phase 2: walk forward (W) for 1s
-    for (int I = 0; I < 60; I++) {
-      Input In = {.Forward = 1};
-      Player P = Physics_Dispatch (In, Fixed_Dt);
-      if (I % 15 == 0)
-        fprintf (stderr, "  [walk  %3d] pos=(%.1f,%.1f,%.1f) vel=(%.1f,%.1f,%.1f) gnd=%d\n",
-                 I, P.Position.x, P.Position.y, P.Position.z,
-                 P.Velocity.x, P.Velocity.y, P.Velocity.z, P.On_Ground);
-    }
-
-    // Phase 3: jump for 1s
-    for (int I = 0; I < 60; I++) {
-      Input In = {.Forward = 1, .Jump = (I < 3) ? 1 : 0};  // Tap jump briefly
-      Player P = Physics_Dispatch (In, Fixed_Dt);
-      if (I % 10 == 0)
-        fprintf (stderr, "  [jump  %3d] pos=(%.1f,%.1f,%.1f) vel=(%.1f,%.1f,%.1f) gnd=%d\n",
-                 I, P.Position.x, P.Position.y, P.Position.z,
-                 P.Velocity.x, P.Velocity.y, P.Velocity.z, P.On_Ground);
-    }
-
-    // Phase 4: strafe right for 0.5s
-    for (int I = 0; I < 30; I++) {
-      Input In = {.Right = 1};
-      Player P = Physics_Dispatch (In, Fixed_Dt);
-      if (I % 10 == 0)
-        fprintf (stderr, "  [strafe %2d] pos=(%.1f,%.1f,%.1f) vel=(%.1f,%.1f,%.1f) gnd=%d\n",
-                 I, P.Position.x, P.Position.y, P.Position.z,
-                 P.Velocity.x, P.Velocity.y, P.Velocity.z, P.On_Ground);
-    }
-
-    // Log diagnostic output
-    fprintf (stderr, "[physics-test] done\n");
-    vkDeviceWaitIdle (Device);
-    return 0;
-  }
-
-  // Benchmark mode
-  if (Benchmark_Frames > 0 or Screenshot_Path) {
-    float Eye_Y = Active_World.Eye_Height - Spawn_Feet_Offset; // World-relative eye height above spawn origin
-    Camera Bench_Cam = {.Position = {Spawn_Point.Origin.x, Spawn_Point.Origin.y + Eye_Y, Spawn_Point.Origin.z},
-                         .Yaw = 1.5707963f - Spawn_Point.Angle * 3.14159f / 180.f};
-    int Total_Frames = Screenshot_Path ? 1 : Benchmark_Frames;
-    float Fixed_Dt = 1.f / 60.f;
-
-    // Warm up: render 3 frames to trigger LLVM JIT compilation and fill CPU caches. On lavapipe, the first Raytracing_Frame()
-    // invocation triggers shader compilation (SPIR-V > NIR > LLVM IR > x86 machine code), costing 500-700ms. Running warmup frames
-    // before the timer ensures benchmark numbers reflect steady-state performance.
-    printf ("[benchmark] warming up (5 frames)...\n");
-    {
-      VK_CHECK (vkWaitForFences (Device, 1, &Fence, VK_TRUE, UINT64_MAX));
-      Weapon_Update (&Weapon, &Bench_Cam, Fixed_Dt, 0);
-      Weapon_Bottom_Level_Rebuild (&Weapon);
-      Top_Level_Rebuild (&World_Bottom_Level, &Weapon.Bottom_Level, &Enemy.Bottom_Level, NULL);
-      mat4 Bench_View = View (Bench_Cam.Position, Bench_Cam.Yaw, Bench_Cam.Pitch);
-      mat4 Bench_Proj = Perspective (Vertical_FOV, (float)Width / Height, 0.1f, 10000.f);
-      mat4 Bench_Inv_Proj = Inverse_Projection (Bench_Proj);
-      mat4 Bench_Reproj = Mat4_Mul (Bench_Proj, Mat4_Mul (Bench_View, Inverse_Orthogonal (Bench_View)));
-      Prev_View_Matrix = Bench_View;
-
-      // Alternate frame parity so checkerboard traces both pixel halves during warmup
-      for (int I = 0; I < 5; I++) {
-        Bench_Cam.Frame = (uint)I;
-        Camera_Upload (&Bench_Cam, Vertical_FOV, Weapon.Texture_Base_Index, PBR_Stride, Active_SPP);
-        Gpu_Postprocess_Push Warmup_Postprocess = {.Time = 0,
-          .Dt_Frame       = (uint32_t)Float_To_Half (Fixed_Dt) | ((uint32_t)(Frame_Count & 0xFFFF) << 16),
-          .Velocity       = 0,
-          .Speed_Exposure = Pack_Half2x16 (0.f, Active_Exposure),
-          .Bloom_Vignette = Pack_Half2x16 (STYLE.Bloom_Strength, STYLE.Vignette),
-          .Inv_Proj_Diag  = Pack_Half2x16 (Bench_Inv_Proj.E[0], Bench_Inv_Proj.E[5]),
-          .Sun_Screen_Pos = Pack_Half2x16 (0.5f, 0.5f),
-          .Sun_Params     = Pack_Half2x16 (0.f, 0.f)};
-        Pack_Mat4_Half (&Bench_Reproj, Warmup_Postprocess.Reproject);
-        Raytracing_Frame (Warmup_Postprocess);
-        VK_CHECK (vkWaitForFences (Device, 1, &Fence, VK_TRUE, UINT64_MAX));
-        Frame_Count++;
+  bool Have_Validation = false;
+  if (Use_Validation) {
+    for (uint L = 0; L < Layer_Count; L++) {
+      if (strcmp (Layers[L].layerName, VALIDATION_LAYERS[0]) == 0) {
+        Have_Validation = true;
+        break;
       }
     }
+  }
+  free (Layers);
 
-    // Log diagnostic output
-    printf ("[benchmark] rendering %d frame(s)...\n", Total_Frames);
-    (void)SDL_GetPerformanceCounter ();
-    uint64_t Bench_Freq  = SDL_GetPerformanceFrequency ();
-    float    Frame_Min   = 1e9f, Frame_Max = 0, Frame_Sum = 0;
-    float   *Frame_Times = calloc (Total_Frames, sizeof (float));  // For percentile stats
-    vec3     Prev_Bench_Pos = Bench_Cam.Position;  // Track camera position for speed computation
+  // Add the debug utils extension only when validation is present
+  uint Ext_Count = Extension_Count;
+  if (Have_Validation) Extensions[Ext_Count++] = VK_EXT_DEBUG_UTILS_EXTENSION_NAME;
 
-    // Render each benchmark frame
-    for (int F = 0; F < Total_Frames; F++) {
-      // Wait for the previous frame's RT submission to complete before reusing Command_Buffer
-      VK_CHECK (vkWaitForFences (Device, 1, &Fence, VK_TRUE, UINT64_MAX));
+  // Create the Vulkan instance targeting API version 1.3
+  VK_CHECK (vkCreateInstance (/*pCreateInfo =>*/ &(VkInstanceCreateInfo){
+                                .sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO,
+                                .pApplicationInfo = &(VkApplicationInfo){
+                                  .sType            = VK_STRUCTURE_TYPE_APPLICATION_INFO,
+                                  .pApplicationName = "quake3rt",
+                                  .apiVersion       = VK_API_VERSION_1_3},
+                                .enabledLayerCount       = Have_Validation ? VALIDATION_LAYER_COUNT : 0,
+                                .ppEnabledLayerNames     = VALIDATION_LAYERS,
+                                .enabledExtensionCount   = Ext_Count,
+                                .ppEnabledExtensionNames = Extensions},
+                              /*pAllocator  =>*/ NULL,
+                              /*pInstance   =>*/ &Instance));
 
-      // Time this frame
-      uint64_t Frame_Start = SDL_GetPerformanceCounter ();
+  if (Use_Validation and not Have_Validation) printf ("[vulkan] validation layer not found - running without validation\n");
+  else if (Have_Validation) printf ("[vulkan] validation layers enabled\n");
 
-      // Slowly rotate the camera for visual coverage (full 360 over 600 frames = 10s at 60fps)
-      if (not Screenshot_Path) {
-        // Aggressive movement for ghosting/TAA stress test:
-        //   - Always run forward
-        //   - Smooth sinusoidal yaw sweep (~90° over 2s period)
-        //   - Slight pitch bob
-        float T = F * Fixed_Dt;
-        float Yaw_Speed   = cosf (T * 3.14159f) * 120.f;  // ±120 px/frame mouse sweep
-        float Pitch_Speed = sinf (T * 6.28f) * 5.f;       // Gentle pitch oscillation
-        Input In = {.Forward = 1, .Right = (F % 180 >= 90) ? 1 : 0,
-                    .Delta_X = Yaw_Speed, .Delta_Y = Pitch_Speed};
-        Player P = Physics_Dispatch (In, Fixed_Dt);
-        Bench_Cam.Position = P.Position;
-        Bench_Cam.Position.y += P.View_Height;
-        Bench_Cam.Yaw = P.Yaw;
-        Bench_Cam.Pitch = P.Pitch;
-      } else {
-        Input In = {0};
-        Physics_Dispatch (In, Fixed_Dt);
-      }
+  // Release the temporary extensions array now that the instance owns the data
+  free (Extensions);
 
-      // Update scene state for this frame
-      Bench_Cam.Frame = (uint)F;
-      Weapon_Update (&Weapon, &Bench_Cam, Fixed_Dt, 0);
-      Weapon_Bottom_Level_Rebuild (&Weapon);
-      Enemy.Animation_Time += Fixed_Dt;
-      Enemy.Current_Vertices = Enemy.Frame_Vertices[(int)(Enemy.Animation_Time * Enemy.Frame_FPS) % (int)Enemy.Frame_Count];
-      Entity_Bottom_Level_Rebuild (&Enemy);
-      Top_Level_Rebuild (&World_Bottom_Level, &Weapon.Bottom_Level, &Enemy.Bottom_Level, NULL);
-      Camera_Upload (&Bench_Cam, Vertical_FOV, Weapon.Texture_Base_Index, PBR_Stride, Active_SPP);
+  // Create the platform window surface via SDL's Vulkan integration
+  SDL_Vulkan_CreateSurface (Window, Instance, &Surface);
 
-      // Build view and projection matrices
-      mat4 Bench_View = View (Bench_Cam.Position, Bench_Cam.Yaw, Bench_Cam.Pitch);
-      mat4 Bench_Projection = Perspective (Vertical_FOV, (float)Width / Height, 0.1f, 10000.f);
-      mat4 Bench_Inverse_Projection = Inverse_Projection (Bench_Projection);
-      mat4 Bench_Reproject = Mat4_Mul (Bench_Projection, Mat4_Mul (Prev_View_Matrix, Inverse_Orthogonal (Bench_View)));
+} // Vulkan_Create_Instance
 
-      // Compute actual camera speed from position delta for TAA motion detection
-      float Bench_Speed = 0.f;
-      if (F > 0) {
-        float Dx = Bench_Cam.Position.x - Prev_Bench_Pos.x;
-        float Dy = Bench_Cam.Position.y - Prev_Bench_Pos.y;
-        float Dz = Bench_Cam.Position.z - Prev_Bench_Pos.z;
-        Bench_Speed = sqrtf (Dx*Dx + Dy*Dy + Dz*Dz) / Fixed_Dt;
-      }
-      Prev_Bench_Pos = Bench_Cam.Position;
+// ═══════════════════════════════
+//   Vulkan_Pick_Physical_Device
+// ═══════════════════════════════
 
-      // Configure post-processing push constants
-      Gpu_Postprocess_Push Postprocess = {.Time = F * Fixed_Dt,
-        .Dt_Frame       = (uint32_t)Float_To_Half (Fixed_Dt) | ((uint32_t)(Frame_Count & 0xFFFF) << 16),
-        .Velocity       = 0,
-        .Speed_Exposure = Pack_Half2x16 (Bench_Speed, Active_Exposure),
-        .Bloom_Vignette = Pack_Half2x16 (STYLE.Bloom_Strength, STYLE.Vignette),
-        .Inv_Proj_Diag  = Pack_Half2x16 (Bench_Inverse_Projection.E[0], Bench_Inverse_Projection.E[5]),
-        .Sun_Screen_Pos = Pack_Half2x16 (0.5f, 0.5f),
-        .Sun_Params     = Pack_Half2x16 (0.15f, 0.f)};
-      Pack_Mat4_Half (&Bench_Reproject, Postprocess.Reproject);
-      Raytracing_Frame (Postprocess);
-      Prev_View_Matrix = Bench_View;
-      Frame_Count++;
+void Vulkan_Pick_Physical_Device () {
 
-      // Record frame timing statistics
-      uint64_t Frame_End = SDL_GetPerformanceCounter ();
-      float    Frame_Ms  = (float)(Frame_End - Frame_Start) * 1000.f / (float)Bench_Freq;
-      Frame_Times[F] = Frame_Ms;
-      if (Frame_Ms < Frame_Min) Frame_Min = Frame_Ms;
-      if (Frame_Ms > Frame_Max) Frame_Max = Frame_Ms;
-      Frame_Sum += Frame_Ms;
+  // Pick the first available physical device
+  uint Device_Count = 0;
+  vkEnumeratePhysicalDevices (Instance, &Device_Count, NULL);
+  if (Device_Count == 0) {
+    fprintf (stderr, "[error] no Vulkan-capable GPU found.\n");
+    fprintf (stderr, "  Install Vulkan drivers: apt install mesa-vulkan-drivers\n");
+    fprintf (stderr, "  For software rendering: export VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.json\n");
+    exit (1);
+  }
+  VkPhysicalDevice *Devices = malloc (sizeof (VkPhysicalDevice) * Device_Count);
+  vkEnumeratePhysicalDevices (Instance, &Device_Count, Devices);
+  Physical_Device = Devices[0];
 
-      // Print periodic progress
-      if (F % 50 == 0)
-        printf ("  [frame %4d/%d] %.2f ms (%.1f fps)\n", F, Total_Frames, Frame_Ms, 1000.f / Frame_Ms);
+  // Report which device was selected
+  VkPhysicalDeviceProperties Props;
+  vkGetPhysicalDeviceProperties (Physical_Device, &Props);
+  printf ("[vulkan] device: %s (Vulkan %d.%d.%d)\n",
+          Props.deviceName, VK_API_VERSION_MAJOR (Props.apiVersion),
+          VK_API_VERSION_MINOR (Props.apiVersion), VK_API_VERSION_PATCH (Props.apiVersion));
+  free (Devices);
 
-      // Dump_Frame_To_Disk:
-      if (Dump_Frames_Dir) {
-        VK_CHECK (vkWaitForFences (Device, 1, &Fence, VK_TRUE, UINT64_MAX));
-        uint64_t Pixel_Buffer_Size = (uint64_t)Render_Width * Render_Height * 8;  // R16G16B16A16_SFLOAT = 8 bytes/pixel
+  // Search for a queue family that supports both graphics and surface presentation
+  uint Family_Count;
+  vkGetPhysicalDeviceQueueFamilyProperties (Physical_Device, &Family_Count, NULL);
+  VkQueueFamilyProperties *Families = malloc (sizeof (*Families) * Family_Count);
+  vkGetPhysicalDeviceQueueFamilyProperties (Physical_Device, &Family_Count, Families);
 
-        // Allocate_Readback_Buffer:
-        Gpu_Buffer Readback = Buffer_Allocate (Pixel_Buffer_Size, VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-                                                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
-
-        // Record_Download_Command:
-        VkCommandBuffer Download_Command;
-        VK_CHECK (vkAllocateCommandBuffers (/*device        =>*/ Device,
-                                            /*pAllocateInfo =>*/ &(VkCommandBufferAllocateInfo){
-                                              .sType              = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
-                                              .commandPool        = Command_Pool,
-                                              .level              = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
-                                              .commandBufferCount = 1},
-                                            /*pCommandBuffers =>*/ &Download_Command));
-        VK_CHECK (vkBeginCommandBuffer (/*commandBuffer =>*/ Download_Command,
-                                        /*pBeginInfo    =>*/ &(VkCommandBufferBeginInfo){
-                                          .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
-                                          .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT}));
-
-        // Transition_To_Transfer_Source:
-        Image_Layout_Barrier (/*Command_Buffer     =>*/ Download_Command,
-                              /*Image              =>*/ Postprocess_Output_Image.Image,
-                              /*Old_Layout         =>*/ VK_IMAGE_LAYOUT_GENERAL,
-                              /*New_Layout         =>*/ VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                              /*Source_Access      =>*/ VK_ACCESS_SHADER_WRITE_BIT,
-                              /*Destination_Access =>*/ VK_ACCESS_TRANSFER_READ_BIT,
-                              /*Source_Stage       =>*/ VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                              /*Destination_Stage  =>*/ VK_PIPELINE_STAGE_TRANSFER_BIT);
-
-        // Copy_Image_To_Buffer:
-        vkCmdCopyImageToBuffer (Download_Command, Postprocess_Output_Image.Image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-          Readback.Buffer, 1, &(VkBufferImageCopy){
-            .imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
-            .imageExtent      = {(uint32_t)Render_Width, (uint32_t)Render_Height, 1}});
-
-        // Transition_Back_To_General:
-        Image_Layout_Barrier (/*Command_Buffer     =>*/ Download_Command,
-                              /*Image              =>*/ Postprocess_Output_Image.Image,
-                              /*Old_Layout         =>*/ VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                              /*New_Layout         =>*/ VK_IMAGE_LAYOUT_GENERAL,
-                              /*Source_Access      =>*/ VK_ACCESS_TRANSFER_READ_BIT,
-                              /*Destination_Access =>*/ VK_ACCESS_SHADER_WRITE_BIT,
-                              /*Source_Stage       =>*/ VK_PIPELINE_STAGE_TRANSFER_BIT,
-                              /*Destination_Stage  =>*/ VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
-
-        // Submit_And_Wait:
-        VK_CHECK (vkEndCommandBuffer (Download_Command));
-        VK_CHECK (vkQueueSubmit (/*queue       =>*/ Queue,
-                                 /*submitCount =>*/ 1,
-                                 /*pSubmits    =>*/ &(VkSubmitInfo){
-                                   .sType              = VK_STRUCTURE_TYPE_SUBMIT_INFO,
-                                   .commandBufferCount = 1,
-                                   .pCommandBuffers    = &Download_Command},
-                                 /*fence       =>*/ VK_NULL_HANDLE));
-        vkQueueWaitIdle (Queue);
-
-        // Map_And_Write_TGA:
-        uint16_t *Pixels;
-        vkMapMemory (Device, Readback.Memory, 0, Pixel_Buffer_Size, 0, (void **)&Pixels);
-        char Path[512];
-        snprintf (Path, sizeof (Path), "%s/frame_%04d.tga", Dump_Frames_Dir, F);
-        FILE *Tga_File = fopen (Path, "wb");
-        if (Tga_File) {
-          uint8_t Header[18] = {0};
-          Header[2]  = 2;
-          Header[12] = Render_Width & 0xFF;  Header[13] = (Render_Width >> 8) & 0xFF;
-          Header[14] = Render_Height & 0xFF; Header[15] = (Render_Height >> 8) & 0xFF;
-          Header[16] = 32; Header[17] = 0x20;
-          fwrite (Header, 1, 18, Tga_File);
-          for (int Y = 0; Y < Render_Height; Y++)
-            for (int X = 0; X < Render_Width; X++) {
-              uint16_t *P = Pixels + (Y * Render_Width + X) * 4;
-              uint8_t BGRA[4];
-              for (int C = 0; C < 3; C++) {
-                uint16_t H = P[C]; uint32_t Exp = (H >> 10) & 0x1F; uint32_t Man = H & 0x3FF;
-                float V; if (Exp == 0) V = (float)Man / 1024.0f * (1.0f / 16384.0f);
-                else if (Exp == 31) V = 1.0f;
-                else { uint32_t Fb = ((Exp + 112) << 23) | (Man << 13); memcpy (&V, &Fb, 4); }
-                if (V < 0.0f) V = 0.0f;
-                if (V > 1.0f) V = 1.0f;
-                float S = (V <= 0.0031308f) ? V * 12.92f : 1.055f * powf (V, 1.0f / 2.4f) - 0.055f;
-                BGRA[2 - C] = (uint8_t)(S * 255.0f + 0.5f);
-              }
-              BGRA[3] = 255;
-              fwrite (BGRA, 1, 4, Tga_File);
-            }
-          fclose (Tga_File);
-        }
-        vkUnmapMemory (Device, Readback.Memory);
-        vkDestroyBuffer (Device, Readback.Buffer, NULL);
-        vkFreeMemory (Device, Readback.Memory, NULL);
-        vkFreeCommandBuffers (Device, Command_Pool, 1, &Download_Command);
-      }
+  // Select the first queue family that supports both graphics and presentation
+  Queue_Family_Index = 0;
+  for (uint Index = 0; Index < Family_Count; Index++) {
+    VkBool32 Supports_Present;
+    vkGetPhysicalDeviceSurfaceSupportKHR (Physical_Device, Index, Surface, &Supports_Present);
+    if ((Families[Index].queueFlags & VK_QUEUE_GRAPHICS_BIT) and Supports_Present) {
+      Queue_Family_Index = Index;
+      break;
     }
+  }
+  free (Families);
+}
 
-    // Wait for GPU to finish
-    vkDeviceWaitIdle (Device);
+// ════════════════════════════════
+//   Vulkan_Create_Logical_Device
+// ════════════════════════════════
 
-    // Compute percentiles: sort frame times for P50/P95/P99
-    for (int I = 0; I < Total_Frames - 1; I++)
-      for (int J = I + 1; J < Total_Frames; J++)
-        if (Frame_Times[I] > Frame_Times[J]) { float T = Frame_Times[I]; Frame_Times[I] = Frame_Times[J]; Frame_Times[J] = T; }
-    float P50 = Frame_Times[Total_Frames / 2];
-    float P95 = Frame_Times[(int)(Total_Frames * 0.95f)];
-    float P99 = Frame_Times[(int)(Total_Frames * 0.99f)];
-    free (Frame_Times);
+void Vulkan_Create_Logical_Device () {
 
-    // Print benchmark results
-    float Avg_Ms  = Frame_Sum / Total_Frames;
-    float Avg_Fps = 1000.f / Avg_Ms;
-    printf ("\n[benchmark] ════════════════════════════════════════════════\n");
-    printf ("  Resolution:    %dx%d (render %dx%d, scale %.0f%%)\n",
-            Width, Height, Render_Width, Render_Height, Active_Render_Scale * 100.f);
-    printf ("  Frames:        %d\n", Total_Frames);
-    printf ("  PBR maps:      %s\n", PBR_Stride > 0 ? "ON" : "OFF (heuristic)");
-    printf ("  Post-process:  %s\n", No_Postprocess ? "OFF" : "ON");
-    printf ("  Avg frame:     %.2f ms (%.1f fps)\n", Avg_Ms, Avg_Fps);
-    printf ("  P50 frame:     %.2f ms (%.1f fps)\n", P50, 1000.f / P50);
-    printf ("  P95 frame:     %.2f ms (%.1f fps)\n", P95, 1000.f / P95);
-    printf ("  P99 frame:     %.2f ms (%.1f fps)\n", P99, 1000.f / P99);
-    printf ("  Min frame:     %.2f ms (%.1f fps)\n", Frame_Min, 1000.f / Frame_Min);
-    printf ("  Max frame:     %.2f ms (%.1f fps)\n", Frame_Max, 1000.f / Frame_Max);
-    printf ("  Total time:    %.2f s\n", Frame_Sum / 1000.f);
-    printf ("[benchmark] ════════════════════════════════════════════════\n");
+  // Chain together the feature structures for acceleration structure and ray tracing pipeline
+  VkPhysicalDeviceAccelerationStructureFeaturesKHR Acceleration_Structure_Features = {
+    .sType                  = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR,
+    .accelerationStructure  = VK_TRUE};
 
-    // Screenshot mode: read back the display output image and write a TGA
-    if (Screenshot_Path) {
-      printf ("[screenshot] saving to %s...\n", Screenshot_Path);
+  // Enable ray query features for the physics compute shader's TLAS ray queries
+  VkPhysicalDeviceRayQueryFeaturesKHR Ray_Query_Features = {
+    .sType    = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_QUERY_FEATURES_KHR,
+    .pNext    = &Acceleration_Structure_Features,
+    .rayQuery = VK_TRUE};
 
-      // Allocate_Readback_Buffer: R16G16B16A16_SFLOAT = 8 bytes/pixel
-      uint64_t Pixel_Size = (uint64_t)Render_Width * Render_Height * 8;
-      Gpu_Buffer Readback = Buffer_Allocate (/*Size         =>*/ Pixel_Size,
-                                             /*Usage        =>*/ VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-                                             /*Memory_Flags =>*/ VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT
-                                                               | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+  // Enable ray tracing pipeline features chained to the ray query features
+  VkPhysicalDeviceRayTracingPipelineFeaturesKHR Raytracing_Pipeline_Features = {
+    .sType              = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_PIPELINE_FEATURES_KHR,
+    .pNext              = &Ray_Query_Features,
+    .rayTracingPipeline = VK_TRUE};
 
-      // Record_Download_Command:
-      VkCommandBuffer Cmd;
-      VK_CHECK (vkAllocateCommandBuffers (/*device        =>*/ Device,
-                                          /*pAllocateInfo =>*/ &(VkCommandBufferAllocateInfo){
-                                            .sType              = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
-                                            .commandPool        = Command_Pool,
-                                            .level              = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
-                                            .commandBufferCount = 1},
-                                          /*pCommandBuffers =>*/ &Cmd));
-      VK_CHECK (vkBeginCommandBuffer (/*commandBuffer =>*/ Cmd,
-                                      /*pBeginInfo    =>*/ &(VkCommandBufferBeginInfo){
-                                        .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
-                                        .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT}));
+  // Enable Vulkan 1.2 features: buffer device address, descriptor indexing with runtime arrays
+  VkPhysicalDeviceVulkan12Features Vulkan_12_Features = {
+    .sType                                     = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES,
+    .pNext                                     = &Raytracing_Pipeline_Features,
+    .bufferDeviceAddress                       = VK_TRUE,
+    .descriptorIndexing                        = VK_TRUE,
+    .runtimeDescriptorArray                    = VK_TRUE,
+    .shaderSampledImageArrayNonUniformIndexing = VK_TRUE,
+    .descriptorBindingPartiallyBound           = VK_TRUE,
+    .descriptorBindingVariableDescriptorCount  = VK_TRUE};
 
-      // Transition_To_Transfer_Source:
-      Image_Layout_Barrier (/*Command_Buffer     =>*/ Cmd,
-                            /*Image              =>*/ Postprocess_Output_Image.Image,
-                            /*Old_Layout         =>*/ VK_IMAGE_LAYOUT_GENERAL,
-                            /*New_Layout         =>*/ VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                            /*Source_Access      =>*/ VK_ACCESS_SHADER_WRITE_BIT,
-                            /*Destination_Access =>*/ VK_ACCESS_TRANSFER_READ_BIT,
-                            /*Source_Stage       =>*/ VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                            /*Destination_Stage  =>*/ VK_PIPELINE_STAGE_TRANSFER_BIT);
+  // Enable Vulkan 1.3 features: synchronization2 and dynamic rendering
+  VkPhysicalDeviceVulkan13Features Vulkan_13_Features = {.sType            = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES,
+                                                         .pNext            = &Vulkan_12_Features,
+                                                         .synchronization2 = VK_TRUE,
+                                                         .dynamicRendering = VK_TRUE};
 
-      // Copy_Image_To_Buffer:
-      vkCmdCopyImageToBuffer (Cmd, Postprocess_Output_Image.Image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-        Readback.Buffer, 1, &(VkBufferImageCopy){
-          .imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
-          .imageExtent      = {(uint32_t)Render_Width, (uint32_t)Render_Height, 1}});
+  // Specify device extensions: core RT + Mesa/Intel optimizations
+  const char *Device_Extensions[] = {VK_KHR_SWAPCHAIN_EXTENSION_NAME,
+                                     VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME,
+                                     VK_KHR_RAY_TRACING_PIPELINE_EXTENSION_NAME,
+                                     VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME,
+                                     VK_KHR_RAY_QUERY_EXTENSION_NAME,
+                                     VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME};
 
-      // Transition_Back_To_General:
-      Image_Layout_Barrier (/*Command_Buffer     =>*/ Cmd,
-                            /*Image              =>*/ Postprocess_Output_Image.Image,
-                            /*Old_Layout         =>*/ VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                            /*New_Layout         =>*/ VK_IMAGE_LAYOUT_GENERAL,
-                            /*Source_Access      =>*/ VK_ACCESS_TRANSFER_READ_BIT,
-                            /*Destination_Access =>*/ VK_ACCESS_SHADER_WRITE_BIT,
-                            /*Source_Stage       =>*/ VK_PIPELINE_STAGE_TRANSFER_BIT,
-                            /*Destination_Stage  =>*/ VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+  // Set queue priority to maximum (1.0) for the single graphics queue
+  float Priority = 1.f;
 
-      // Submit_And_Wait:
-      VK_CHECK (vkEndCommandBuffer (Cmd));
-      VK_CHECK (vkQueueSubmit (/*queue       =>*/ Queue,
-                               /*submitCount =>*/ 1,
-                               /*pSubmits    =>*/ &(VkSubmitInfo){
-                                 .sType              = VK_STRUCTURE_TYPE_SUBMIT_INFO,
-                                 .commandBufferCount = 1,
-                                 .pCommandBuffers    = &Cmd},
-                               /*fence       =>*/ VK_NULL_HANDLE));
-      vkQueueWaitIdle (Queue);
+  // Enable core 1.0 features: samplerAnisotropy for 16x anisotropic texture filtering
+  VkPhysicalDeviceFeatures Core_Features = {.samplerAnisotropy = VK_TRUE};
 
-      // Map the readback buffer and write a TGA file. Storage is R16G16B16A16_SFLOAT - convert fp16 to 8-bit sRGB for TGA output
-      uint16_t *Pixels_F16;
-      vkMapMemory (Device, Readback.Memory, 0, Pixel_Size, 0, (void **)&Pixels_F16);
+  // Create the logical device with a single graphics queue and all chained features
+  VK_CHECK (vkCreateDevice (/*physicalDevice =>*/ Physical_Device,
+                            /*pCreateInfo    =>*/ &(VkDeviceCreateInfo){
+                              .sType                = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
+                              .pNext                = &Vulkan_13_Features,
+                              .queueCreateInfoCount = 1,
+                              .pQueueCreateInfos  = &(VkDeviceQueueCreateInfo){
+                                .sType            = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
+                                .queueFamilyIndex = Queue_Family_Index,
+                                .queueCount       = 1,
+                                .pQueuePriorities = &Priority},
+                              .enabledExtensionCount   = 6,
+                              .ppEnabledExtensionNames = Device_Extensions,
+                              .pEnabledFeatures        = &Core_Features},
+                            /*pAllocator     =>*/ NULL,
+                            /*pDevice        =>*/ &Device));
 
-      // Write pixel data to TGA file
-      FILE *TGA = fopen (Screenshot_Path, "wb");
-      if (TGA) {
-        // TGA header (18 bytes)
-        uint8_t Header[18] = {0};
-        Header[2]  = 2;  // Uncompressed true-color
-        Header[12] = Render_Width & 0xFF;  Header[13] = (Render_Width >> 8) & 0xFF;
-        Header[14] = Render_Height & 0xFF; Header[15] = (Render_Height >> 8) & 0xFF;
-        Header[16] = 32;  // 32 bpp (BGRA)
-        Header[17] = 0x20; // Top-left origin
-        fwrite (Header, 1, 18, TGA);
+  // Retrieve the queue handle from the newly created device
+  vkGetDeviceQueue (Device, Queue_Family_Index, 0, &Queue);
 
-        // Write pixels: fp16 linear > clamp > linear-to-sRGB > 8-bit BGRA for TGA
-        for (int Y = 0; Y < Render_Height; Y++) {
-          for (int X = 0; X < Render_Width; X++) {
-            uint16_t *P = Pixels_F16 + (Y * Render_Width + X) * 4;
+  // Query the physical device's ray tracing pipeline properties for SBT layout
+  Raytracing_Properties.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_PIPELINE_PROPERTIES_KHR;
+  VkPhysicalDeviceProperties2 Device_Properties = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2,
+                                                   .pNext = &Raytracing_Properties};
+  vkGetPhysicalDeviceProperties2 (Physical_Device, &Device_Properties);
 
-            // Convert fp16 to float (use half-to-float bit manipulation)
-            uint8_t BGRA[4];
-            for (int C = 0; C < 3; C++) {
-              // IEEE 754 fp16 to fp32 conversion
-              uint16_t H = P[C];
-              uint32_t Sign = (uint32_t)(H >> 15) << 31;
-              uint32_t Exp  = (H >> 10) & 0x1F;
-              uint32_t Man  = H & 0x3FF;
-              float V;
-              if (Exp == 0) V = (Man == 0) ? 0.0f : (float)Man / 1024.0f * (1.0f / 16384.0f);
-              else if (Exp == 31) V = 1.0f;
-              else { uint32_t F = Sign | ((Exp + 112) << 23) | (Man << 13); memcpy (&V, &F, 4); }
+  // Load the ray tracing extension function pointers from the logical device
+  VULKAN_FUNCTIONS (LOAD_VK)
 
-              // Clamp and apply sRGB gamma
-              if (V < 0.0f) V = 0.0f;
-              if (V > 1.0f) V = 1.0f;
-              float S = (V <= 0.0031308f) ? V * 12.92f : 1.055f * powf (V, 1.0f / 2.4f) - 0.055f;
-              BGRA[2 - C] = (uint8_t)(S * 255.0f + 0.5f);  // RGB > BGR for TGA
-            }
-            BGRA[3] = 255;
-            fwrite (BGRA, 1, 4, TGA);
-          }
-        }
-        fclose (TGA);
-        printf ("[screenshot] saved %dx%d to %s\n", Render_Width, Render_Height, Screenshot_Path);
-      }
+} // Vulkan_Create_Logical_Device
 
-      // Clean up readback resources
-      vkUnmapMemory (Device, Readback.Memory);
-      vkDestroyBuffer (Device, Readback.Buffer, NULL);
-      vkFreeMemory (Device, Readback.Memory, NULL);
-      vkFreeCommandBuffers (Device, Command_Pool, 1, &Cmd);
-    }
+// ═══════════════════════════
+//   Vulkan_Create_Swapchain
+// ═══════════════════════════
 
-    // Wait for GPU and exit
-    vkDeviceWaitIdle (Device);
-    return 0;
+void Vulkan_Create_Swapchain () {
+  VkSurfaceCapabilitiesKHR Capabilities;
+  vkGetPhysicalDeviceSurfaceCapabilitiesKHR (Physical_Device, Surface, &Capabilities);
+
+  // When currentExtent is 0xFFFFFFFF the surface size is undefined - use the window size instead
+  if (Capabilities.currentExtent.width == 0xFFFFFFFF) {
+    int W, H;
+    SDL_Vulkan_GetDrawableSize (Window, &W, &H);
+    Swapchain_Extent = (VkExtent2D){(uint)W, (uint)H};
+    if (Swapchain_Extent.width  < Capabilities.minImageExtent.width)  Swapchain_Extent.width  = Capabilities.minImageExtent.width;
+    if (Swapchain_Extent.height < Capabilities.minImageExtent.height) Swapchain_Extent.height = Capabilities.minImageExtent.height;
+    if (Swapchain_Extent.width  > Capabilities.maxImageExtent.width)  Swapchain_Extent.width  = Capabilities.maxImageExtent.width;
+    if (Swapchain_Extent.height > Capabilities.maxImageExtent.height) Swapchain_Extent.height = Capabilities.maxImageExtent.height;
+  } else {
+    Swapchain_Extent = Capabilities.currentExtent;
   }
 
-  // Game loop
-  float Game_Eye_Y = Active_World.Eye_Height - Spawn_Feet_Offset;
-  Camera   Cam   = {.Position = {Spawn_Point.Origin.x, Spawn_Point.Origin.y + Game_Eye_Y, Spawn_Point.Origin.z},
-                     .Yaw = 1.5707963f - Spawn_Point.Angle * 3.14159f / 180.f};
-  Prev_View_Matrix = View (Cam.Position, Cam.Yaw, Cam.Pitch);
-  uint64_t Last  = SDL_GetPerformanceCounter ();
-  uint64_t Freq  = SDL_GetPerformanceFrequency ();
-  uint     Frame = 0;
-  float    Total_Time = 0;
-  Quit = 0;
+  Swapchain_Format = VK_FORMAT_B8G8R8A8_SRGB;
 
-  // Main game loop
-  while (not Quit) {
+  // Request one more image than the minimum to avoid stalling on the driver
+  uint Image_Count = Capabilities.minImageCount + 1;
+  if (Capabilities.maxImageCount and Image_Count > Capabilities.maxImageCount)
+    Image_Count = Capabilities.maxImageCount;
 
-    // Wait for the previous frame's RT submission to complete before reusing Command_Buffer
-    VK_CHECK (vkWaitForFences (Device, 1, &Fence, VK_TRUE, UINT64_MAX));
+  // Create the swapchain with the determined format and present mode
+  VK_CHECK (vkCreateSwapchainKHR (/*device      =>*/ Device,
+                                  /*pCreateInfo =>*/ &(VkSwapchainCreateInfoKHR){
+                                    .sType            = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR,
+                                    .surface          = Surface,
+                                    .minImageCount    = Image_Count,
+                                    .imageFormat      = Swapchain_Format,
+                                    .imageColorSpace  = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR,
+                                    .imageExtent      = Swapchain_Extent,
+                                    .imageArrayLayers = 1,
+                                    .imageUsage       = VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+                                    .imageSharingMode = VK_SHARING_MODE_EXCLUSIVE,
+                                    .preTransform     = Capabilities.currentTransform,
+                                    .compositeAlpha   = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR,
+                                    .presentMode      = VK_PRESENT_MODE_FIFO_KHR,
+                                    .clipped          = VK_TRUE},
+                                  /*pAllocator  =>*/ NULL,
+                                  /*pSwapchain  =>*/ &Swapchain));
 
-    // Compute delta time from the high-resolution performance counter
-    uint64_t Now = SDL_GetPerformanceCounter ();
-    float    Delta_Time = (float)(Now - Last) / (float)Freq;
-    if (Delta_Time > MAX_DELTA_TIME) Delta_Time = MAX_DELTA_TIME;
-    Last = Now;
-    Total_Time += Delta_Time;
+  // Retrieve the swapchain image handles
+  vkGetSwapchainImagesKHR (Device, Swapchain, &Swapchain_Image_Count, NULL);
+  vkGetSwapchainImagesKHR (Device, Swapchain, &Swapchain_Image_Count, Swapchain_Images);
 
-    // Poll input (handles windowing events, mode transitions, resize)
-    Input In = Poll_Input ();
+} // Vulkan_Create_Swapchain
 
-    // Skip rendering when minimized (window may be 0x0, nothing to present)
-    if (Current_Activated == MINIMIZE_DEACTIVATED) {
-      SDL_Delay (16);  // Don't spin-wait when minimized
-      Last = SDL_GetPerformanceCounter ();
-      continue;
-    }
+// ═════════════════════════════
+//   Vulkan_Recreate_Swapchain
+// ═════════════════════════════
 
-    // Recreate swapchain if window was resized or fullscreen was toggled
-    if (Swapchain_Dirty) {
-      Vulkan_Recreate_Swapchain ();
-      Swapchain_Dirty = 0;
-    }
-
-    // Spawn projectile on fire and upload to GPU before physics dispatch
-    if (In.Fire) {
-      float sy = sinf (Cam.Yaw), cy = cosf (Cam.Yaw);
-      float sp = sinf (Cam.Pitch), cp = cosf (Cam.Pitch);
-      vec3 Forward = {sy * cp, -sp, -cy * cp};
-      Projectile_Spawn (Cam.Position, Forward);
-    }
-    Projectiles.Fire_Cooldown -= Delta_Time;
-    if (Projectiles.Fire_Cooldown < 0) Projectiles.Fire_Cooldown = 0;
-    Projectile_Pool_Upload ();
-
-    // Dispatch GPU physics simulation
-    Player Physics   = Physics_Dispatch (In, Delta_Time);
-
-    // Read back projectile state after GPU physics step
-    Projectile_Pool_Readback ();
-
-    // Update audio: footsteps, landing sounds
-    Audio_Update_Footsteps (&Physics, Delta_Time);
-
-    // Update the camera from the physics result - add View_Height to get eye position
-    Cam.Position    = Physics.Position;
-    Cam.Position.y += Physics.View_Height; // Raise camera from feet to eye level (26 units standing)
-    Cam.Yaw         = Physics.Yaw;
-    Cam.Pitch       = Physics.Pitch;
-    Cam.Frame       = Frame;
-
-    // Animate and rebuild the weapon viewmodel
-    Weapon_Update (&Weapon, &Cam, Delta_Time, In.Fire);
-    Weapon_Bottom_Level_Rebuild (&Weapon);
-
-    // Advance enemy idle animation and rebuild BLAS
-    Enemy.Animation_Time += Delta_Time;
-    {
-      int Frame_Index = (int)(Enemy.Animation_Time * Enemy.Frame_FPS) % (int)Enemy.Frame_Count;
-      Enemy.Current_Vertices = Enemy.Frame_Vertices[Frame_Index];
-    }
-    Entity_Bottom_Level_Rebuild (&Enemy);
-
-    // Compute player body TLAS transform
-    float Body_Yaw = -Physics.Yaw;  // GL entity yaw = -Player.Yaw (facing convention)
-    float D_Yaw = Body_Yaw - Enemy.GL_Yaw;
-    float Cosine_Yaw = cosf (D_Yaw), Sine_Yaw = sinf (D_Yaw);
-    vec3  Entity_Origin = Enemy.GL_Origin;
-    float Translation_X = Physics.Position.x - (Cosine_Yaw * Entity_Origin.x + Sine_Yaw * Entity_Origin.z);
-    float Translation_Y = Physics.Position.y - Entity_Origin.y;
-    float Translation_Z = Physics.Position.z - (-Sine_Yaw * Entity_Origin.x + Cosine_Yaw * Entity_Origin.z);
-    float Player_Body_Transform[12] = {
-      Cosine_Yaw,  0.f, Sine_Yaw,  Translation_X,
-      0.f,         1.f, 0.f,       Translation_Y,
-      -Sine_Yaw,   0.f, Cosine_Yaw, Translation_Z};
-
-    // Rebuild the top-level acceleration structure
-    Top_Level_Rebuild (&World_Bottom_Level, &Weapon.Bottom_Level, &Enemy.Bottom_Level, Player_Body_Transform);
-
-    // Adaptive quality budget — target frame time depends on quality tier
-    float Target_Frame_Time;
-    if      (Active_Quality == QUALITY_POTATO) Target_Frame_Time = POTATO_TARGET_MS;
-    else if (Active_Quality == QUALITY_MEDIUM
-          || Active_Quality == QUALITY_LOW)     Target_Frame_Time = MEDIUM_TARGET_MS;
-    else if (Active_Quality == QUALITY_ULTRA)  Target_Frame_Time = ULTRA_TARGET_MS;
-    else                                       Target_Frame_Time = DEFAULT_TARGET_MS;
-    float Budget = 0.0f;
-    if (Force_Cheap) {
-      Budget = 1.0f;
-    } else if (Delta_Time > Target_Frame_Time) {
-      float Budget_Max = fmaxf (Target_Frame_Time * 2.0f, 0.15f);
-      Budget = (Delta_Time - Target_Frame_Time) / (Budget_Max - Target_Frame_Time);
-      if (Budget > 1.0f) Budget = 1.0f;
-    }
-    // Potato budget floor: keeps adaptive savings engaged — reflection
-    // damping, shorter shadow rays, slight cheap-path blend.
-    if (Active_Quality == QUALITY_POTATO && Budget < POTATO_BUDGET_FLOOR) Budget = POTATO_BUDGET_FLOOR;
-    uint Budget_Byte = (uint)(Budget * 255.0f);
-    // Denoise needs more smoothing at 1 SPP — give it a higher floor so the
-    // motion-adaptive edge-stopping relaxes slightly, reducing 1-SPP grain.
-    float Denoise_Budget = Budget;
-    if (Active_SPP <= 1) Denoise_Budget = fmaxf (Denoise_Budget, 0.10f);
-    Current_Budget_Byte = (int)(uint)(fminf (Denoise_Budget, 1.0f) * 255.0f);
-    uint Packed_SPP = (Active_SPP & 0xFF) | (Budget_Byte << 8);
-
-    // Upload the camera and dispatch ray tracing + postprocess
-    Camera_Upload (&Cam, Vertical_FOV, Weapon.Texture_Base_Index, PBR_Stride, Packed_SPP);
-    float Horizontal_Speed = sqrtf (Physics.Velocity.x * Physics.Velocity.x +
-                           Physics.Velocity.z * Physics.Velocity.z);
-
-    // Build reprojection matrix: Proj * Prev_View * Inverse_View (maps current view-space > previous clip-space)
-    mat4 Cur_View = View (Cam.Position, Cam.Yaw, Cam.Pitch);
-    mat4 Cur_Inv_View = Inverse_Orthogonal (Cur_View);
-    mat4 Proj = Perspective (Vertical_FOV, (float)Width / Height, 0.1f, 10000.f);
-    mat4 Reproject = Mat4_Mul (Proj, Mat4_Mul (Prev_View_Matrix, Cur_Inv_View));
-    mat4 Inv_Proj = Inverse_Projection (Proj);
-
-    // Project sun direction to screen space for god rays
-    vec3 Sun_D = Normalize (Active_Environment.Sun_Direction);
-    vec3 Sun_World = Add (Cam.Position, Scale (Sun_D, 1000.f));  // Far point in sun direction
-
-    // Transform through View * Proj to get clip space
-    mat4 View_Projection = Mat4_Mul (Proj, Cur_View);
-    float Clip_X = View_Projection.E[0]*Sun_World.x + View_Projection.E[4]*Sun_World.y + View_Projection.E[8]*Sun_World.z  + View_Projection.E[12];
-    float Clip_Y = View_Projection.E[1]*Sun_World.x + View_Projection.E[5]*Sun_World.y + View_Projection.E[9]*Sun_World.z  + View_Projection.E[13];
-    float Clip_W = View_Projection.E[3]*Sun_World.x + View_Projection.E[7]*Sun_World.y + View_Projection.E[11]*Sun_World.z + View_Projection.E[15];
-    float Sun_U = 0.5f, Sun_V = 0.5f;
-    float Sun_Visible = 0.f;
-    if (Clip_W > 0.01f) {  // Sun is in front of camera
-      Sun_U = (Clip_X / Clip_W) * 0.5f + 0.5f;
-      Sun_V = (Clip_Y / Clip_W) * 0.5f + 0.5f;
-
-      // Check if sun is roughly on screen (with margin for off-screen glow)
-      if (Sun_U > -0.5f and Sun_U < 1.5f and Sun_V > -0.5f and Sun_V < 1.5f)
-        Sun_Visible = 1.f;
-    }
-
-    // Build post-processing push constants and render frame
-    Gpu_Postprocess_Push Postprocess = {
-      .Time           = Total_Time,
-      .Dt_Frame       = (uint32_t)Float_To_Half (Delta_Time) | ((uint32_t)(Frame_Count & 0xFFFF) << 16),
-      .Velocity       = Pack_Half2x16 (Physics.Velocity.x, Physics.Velocity.z),
-      .Speed_Exposure = Pack_Half2x16 (Horizontal_Speed, Active_Exposure),
-      .Bloom_Vignette = Pack_Half2x16 (STYLE.Bloom_Strength, STYLE.Vignette),
-      .Inv_Proj_Diag  = Pack_Half2x16 (Inv_Proj.E[0], Inv_Proj.E[5]),
-      .Sun_Screen_Pos = Pack_Half2x16 (Sun_U, Sun_V),
-      .Sun_Params     = Pack_Half2x16 (0.15f, Sun_Visible)};  // God ray intensity
-    Pack_Mat4_Half (&Reproject, Postprocess.Reproject);
-    Raytracing_Frame (Postprocess);
-    Prev_View_Matrix = Cur_View;
-    Frame++;
-    Frame_Count++;
-  }
-
-  // Cleanup
-  Audio_Shutdown ();
-  Damage_Cache_Free ();
+void Vulkan_Recreate_Swapchain () {
   vkDeviceWaitIdle (Device);
-  printf ("[shutdown] %u frames rendered\n", Frame);
+  VkSwapchainKHR Old = Swapchain;
 
-  // Free SDL cursors
-  if (SDL_Cursor_Arrow)     SDL_FreeCursor (SDL_Cursor_Arrow);
-  if (SDL_Cursor_Hand)      SDL_FreeCursor (SDL_Cursor_Hand);
-  if (SDL_Cursor_Crosshair) SDL_FreeCursor (SDL_Cursor_Crosshair);
+  // Query current surface capabilities for the new swapchain
+  VkSurfaceCapabilitiesKHR Capabilities;
+  vkGetPhysicalDeviceSurfaceCapabilitiesKHR (Physical_Device, Surface, &Capabilities);
 
-  // Free scene data
-  free (Scene_Data.Vertices);
-  free (Scene_Data.Indices);
-  free (Scene_Data.Materials);
-  free (Scene_Data.Texture_Ids);
-  free (Scene_Data.Texture_Names);
-  if (Scene_Data.Lightmap_Atlas) free (Scene_Data.Lightmap_Atlas);
-
-  // Pipelines and layouts
-  vkDestroyPipeline            (Device, Denoise_Pipeline, NULL);
-  vkDestroyPipelineLayout      (Device, Denoise_Pipeline_Layout, NULL);
-  vkDestroyDescriptorPool      (Device, Denoise_Descriptor_Pool, NULL);
-  vkDestroyDescriptorSetLayout (Device, Denoise_Descriptor_Layout, NULL);
-  vkDestroyImageView           (Device, Denoise_Ping_Image.View, NULL);
-  vkDestroyImage               (Device, Denoise_Ping_Image.Image, NULL);
-  vkFreeMemory                 (Device, Denoise_Ping_Image.Memory, NULL);
-  vkDestroyPipeline            (Device, Postprocess_Pipeline, NULL);
-  vkDestroyPipelineLayout      (Device, Postprocess_Pipeline_Layout, NULL);
-  vkDestroyDescriptorPool      (Device, Postprocess_Descriptor_Pool, NULL);
-  vkDestroyDescriptorSetLayout (Device, Postprocess_Descriptor_Layout, NULL);
-  vkDestroyPipeline            (Device, Physics_Pipeline, NULL);
-  vkDestroyPipelineLayout      (Device, Physics_Pipeline_Layout, NULL);
-  vkDestroyDescriptorPool      (Device, Physics_Descriptor_Pool, NULL);
-  vkDestroyDescriptorSetLayout (Device, Physics_Descriptor_Layout, NULL);
-  vkDestroyPipeline            (Device, Pipeline, NULL);
-  vkDestroyPipelineLayout      (Device, Pipeline_Layout, NULL);
-  vkDestroyDescriptorPool      (Device, Descriptor_Pool, NULL);
-  vkDestroyDescriptorSetLayout (Device, Descriptor_Set_Layout, NULL);
-  vkDestroyPipelineCache       (Device, Pipeline_Cache, NULL);
-
-  // Acceleration structures
-  vkDestroyAccelerationStructure (Device, Top_Level.Handle, NULL);
-  vkDestroyBuffer (Device, Top_Level.Buffer.Buffer, NULL);
-  vkFreeMemory    (Device, Top_Level.Buffer.Memory, NULL);
-  vkDestroyBuffer (Device, Top_Level_Instance_Buffer.Buffer, NULL);
-  vkFreeMemory    (Device, Top_Level_Instance_Buffer.Memory, NULL);
-  vkDestroyBuffer (Device, Top_Level_Scratch_Buffer.Buffer, NULL);
-  vkFreeMemory    (Device, Top_Level_Scratch_Buffer.Memory, NULL);
-  vkDestroyAccelerationStructure (Device, Bottom_Level.Handle, NULL);
-  vkDestroyBuffer (Device, Bottom_Level.Buffer.Buffer, NULL);
-  vkFreeMemory    (Device, Bottom_Level.Buffer.Memory, NULL);
-
-  // Weapon resources
-  vkDestroyAccelerationStructure (Device, Weapon.Bottom_Level.Handle, NULL);
-  vkDestroyBuffer (Device, Weapon.Bottom_Level.Buffer.Buffer, NULL);
-  vkFreeMemory    (Device, Weapon.Bottom_Level.Buffer.Memory, NULL);
-  vkDestroyBuffer (Device, Weapon.Bottom_Level_Scratch.Buffer, NULL);
-  vkFreeMemory    (Device, Weapon.Bottom_Level_Scratch.Memory, NULL);
-  vkDestroyBuffer (Device, Weapon.Vertex_Buffer.Buffer, NULL);
-  vkFreeMemory    (Device, Weapon.Vertex_Buffer.Memory, NULL);
-  vkDestroyBuffer (Device, Weapon.Index_Buffer.Buffer, NULL);
-  vkFreeMemory    (Device, Weapon.Index_Buffer.Memory, NULL);
-  vkDestroyBuffer (Device, Weapon.Texture_Id_Buffer.Buffer, NULL);
-  vkFreeMemory    (Device, Weapon.Texture_Id_Buffer.Memory, NULL);
-  free (Weapon.Model.Vertices);
-  free (Weapon.Model.Indices);
-  free (Weapon.Model.Texture_Ids);
-  free (Weapon.Transformed_Vertices);
-
-  // Entity (enemy) resources
-  vkDestroyAccelerationStructure (Device, Enemy.Bottom_Level.Handle, NULL);
-  vkDestroyBuffer (Device, Enemy.Bottom_Level.Buffer.Buffer, NULL);
-  vkFreeMemory    (Device, Enemy.Bottom_Level.Buffer.Memory, NULL);
-  vkDestroyBuffer (Device, Enemy.Bottom_Level_Scratch.Buffer, NULL);
-  vkFreeMemory    (Device, Enemy.Bottom_Level_Scratch.Memory, NULL);
-  vkDestroyBuffer (Device, Enemy.Vertex_Buffer.Buffer, NULL);
-  vkFreeMemory    (Device, Enemy.Vertex_Buffer.Memory, NULL);
-  vkDestroyBuffer (Device, Enemy.Index_Buffer.Buffer, NULL);
-  vkFreeMemory    (Device, Enemy.Index_Buffer.Memory, NULL);
-  vkDestroyBuffer (Device, Enemy.Texture_Id_Buffer.Buffer, NULL);
-  vkFreeMemory    (Device, Enemy.Texture_Id_Buffer.Memory, NULL);
-  for (uint I = 0; I < Enemy.Frame_Count; I++) free (Enemy.Frame_Vertices[I]);
-  free (Enemy.Indices);
-  free (Enemy.Texture_Ids);
-
-  // Shader binding table
-  vkDestroyBuffer (Device, Shader_Binding_Table_Buffer.Buffer, NULL);
-  vkFreeMemory    (Device, Shader_Binding_Table_Buffer.Memory, NULL);
-
-  // GPU storage images
-  vkDestroyImageView (Device, Raytracing_Storage_Image.View, NULL);
-  vkDestroyImage     (Device, Raytracing_Storage_Image.Image, NULL);
-  vkFreeMemory       (Device, Raytracing_Storage_Image.Memory, NULL);
-  vkDestroyImageView (Device, Depth_Image.View, NULL);
-  vkDestroyImage     (Device, Depth_Image.Image, NULL);
-  vkFreeMemory       (Device, Depth_Image.Memory, NULL);
-  vkDestroyImageView (Device, History_Image.View, NULL);
-  vkDestroyImage     (Device, History_Image.Image, NULL);
-  vkFreeMemory       (Device, History_Image.Memory, NULL);
-  vkDestroyImageView (Device, Postprocess_Output_Image.View, NULL);
-  vkDestroyImage     (Device, Postprocess_Output_Image.Image, NULL);
-  vkFreeMemory       (Device, Postprocess_Output_Image.Memory, NULL);
-
-  // Scene buffers
-  vkDestroyBuffer (Device, Camera_Uniform_Buffer.Buffer, NULL);
-  vkFreeMemory    (Device, Camera_Uniform_Buffer.Memory, NULL);
-  vkDestroyBuffer (Device, Vertex_Buffer.Buffer, NULL);
-  vkFreeMemory    (Device, Vertex_Buffer.Memory, NULL);
-  vkDestroyBuffer (Device, Index_Buffer.Buffer, NULL);
-  vkFreeMemory    (Device, Index_Buffer.Memory, NULL);
-  vkDestroyBuffer (Device, Material_Buffer.Buffer, NULL);
-  vkFreeMemory    (Device, Material_Buffer.Memory, NULL);
-  vkDestroyBuffer (Device, Texture_Id_Buffer.Buffer, NULL);
-  vkFreeMemory    (Device, Texture_Id_Buffer.Memory, NULL);
-  vkDestroyBuffer (Device, Player_State_Buffer.Buffer, NULL);
-  vkFreeMemory    (Device, Player_State_Buffer.Memory, NULL);
-  vkDestroyBuffer (Device, Hull_Storage_Buffer.Buffer, NULL);
-  vkFreeMemory    (Device, Hull_Storage_Buffer.Memory, NULL);
-  vkDestroyBuffer (Device, Projectile_Buffer.Buffer, NULL);
-  vkFreeMemory    (Device, Projectile_Buffer.Memory, NULL);
-
-  // Textures
-  for (uint I = 0; I < Texture_Count; I++) {
-    vkDestroyImageView (Device, Texture_Views[I], NULL);
-    vkDestroyImage     (Device, Texture_Images[I], NULL);
-    vkFreeMemory       (Device, Texture_Memories[I], NULL);
+  // When currentExtent is 0xFFFFFFFF the surface size is undefined - use the window size instead
+  if (Capabilities.currentExtent.width == 0xFFFFFFFF) {
+    int W, H;
+    SDL_Vulkan_GetDrawableSize (Window, &W, &H);
+    Swapchain_Extent = (VkExtent2D){(uint)W, (uint)H};
+    if (Swapchain_Extent.width  < Capabilities.minImageExtent.width)  Swapchain_Extent.width  = Capabilities.minImageExtent.width;
+    if (Swapchain_Extent.height < Capabilities.minImageExtent.height) Swapchain_Extent.height = Capabilities.minImageExtent.height;
+    if (Swapchain_Extent.width  > Capabilities.maxImageExtent.width)  Swapchain_Extent.width  = Capabilities.maxImageExtent.width;
+    if (Swapchain_Extent.height > Capabilities.maxImageExtent.height) Swapchain_Extent.height = Capabilities.maxImageExtent.height;
+  } else {
+    Swapchain_Extent = Capabilities.currentExtent;
   }
-  free (Texture_Views);
-  free (Texture_Images);
-  free (Texture_Memories);
-  vkDestroySampler (Device, Texture_Sampler, NULL);
 
-  // Lightmap
-  vkDestroyImageView (Device, Lightmap_View, NULL);
-  vkDestroyImage     (Device, Lightmap_Image, NULL);
-  vkFreeMemory       (Device, Lightmap_Memory, NULL);
-  vkDestroySampler   (Device, Lightmap_Sampler, NULL);
+  // Request one more image than the minimum to avoid stalling
+  uint Image_Count = Capabilities.minImageCount + 1;
+  if (Capabilities.maxImageCount and Image_Count > Capabilities.maxImageCount)
+    Image_Count = Capabilities.maxImageCount;
 
-  // Swapchain image views
-  for (uint I = 0; I < Swapchain_Image_Count; I++)
-    vkDestroyImageView (Device, Swapchain_Views[I], NULL);
+  // Create the new swapchain, chaining from the old one
+  VK_CHECK (vkCreateSwapchainKHR (/*device      =>*/ Device,
+                                  /*pCreateInfo =>*/ &(VkSwapchainCreateInfoKHR){
+                                    .sType            = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR,
+                                    .surface          = Surface,
+                                    .minImageCount    = Image_Count,
+                                    .imageFormat      = Swapchain_Format,
+                                    .imageColorSpace  = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR,
+                                    .imageExtent      = Swapchain_Extent,
+                                    .imageArrayLayers = 1,
+                                    .imageUsage       = VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+                                    .imageSharingMode = VK_SHARING_MODE_EXCLUSIVE,
+                                    .preTransform     = Capabilities.currentTransform,
+                                    .compositeAlpha   = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR,
+                                    .presentMode      = VK_PRESENT_MODE_FIFO_KHR,
+                                    .clipped          = VK_TRUE,
+                                    .oldSwapchain     = Old},
+                                  /*pAllocator  =>*/ NULL,
+                                  /*pSwapchain  =>*/ &Swapchain));
 
-  // Core Vulkan objects
-  vkDestroySemaphore    (Device, Semaphore_Image_Available, NULL);
-  vkDestroySemaphore    (Device, Semaphore_Render_Finished, NULL);
-  vkDestroyFence        (Device, Fence, NULL);
-  vkDestroyCommandPool  (Device, Command_Pool, NULL);
-  vkDestroySwapchainKHR (Device, Swapchain, NULL);
-  vkDestroyDevice       (Device, NULL);
-  vkDestroySurfaceKHR   (Instance, Surface, NULL);
-  vkDestroyInstance     (Instance, NULL);
+  // Destroy the old swapchain and retrieve new image handles
+  vkDestroySwapchainKHR   (Device, Old, NULL);
+  vkGetSwapchainImagesKHR (Device, Swapchain, &Swapchain_Image_Count, NULL);
+  vkGetSwapchainImagesKHR (Device, Swapchain, &Swapchain_Image_Count, Swapchain_Images);
+  printf ("[window] swapchain recreated %ux%u\n", Swapchain_Extent.width, Swapchain_Extent.height);
 
-  // Media layer
-  SDL_DestroyWindow (Window);
-  SDL_Quit ();
-  return 0;
-  
-} // main
+} // Vulkan_Recreate_Swapchain
+
+// ═════════════════════════════════
+//   Vulkan_Create_Synchronization
+// ═════════════════════════════════
+
+void Vulkan_Create_Synchronization () {
+
+  // Create a command pool with per-buffer reset capability for our single reusable command buffer
+  VK_CHECK (vkCreateCommandPool (/*device       =>*/ Device,
+                                 /*pCreateInfo  =>*/ &(VkCommandPoolCreateInfo){
+                                   .sType            = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
+                                   .flags            = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT,
+                                   .queueFamilyIndex = Queue_Family_Index},
+                                 /*pAllocator   =>*/ NULL,
+                                 /*pCommandPool =>*/ &Command_Pool));
+
+  // Allocate a single primary-level command buffer for all GPU work
+  VK_CHECK (vkAllocateCommandBuffers (/*device          =>*/ Device,
+                                      /*pAllocateInfo   =>*/ &(VkCommandBufferAllocateInfo){
+                                        .sType              = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+                                        .commandPool        = Command_Pool,
+                                        .level              = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+                                        .commandBufferCount = 1},
+                                      /*pCommandBuffers =>*/ &Command_Buffer));
+
+  // Create a fence (pre-signaled so the first frame doesn't deadlock on vkWaitForFences)
+  VK_CHECK (vkCreateFence (/*device      =>*/ Device,
+                           /*pCreateInfo =>*/ &(VkFenceCreateInfo){
+                             .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO,
+                             .flags = VK_FENCE_CREATE_SIGNALED_BIT},
+                           /*pAllocator  =>*/ NULL,
+                           /*pFence      =>*/ &Fence));
+
+  // Create semaphores for swapchain image acquisition and render completion signaling
+  VkSemaphoreCreateInfo Semaphore_Info = {.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO };
+  VK_CHECK (vkCreateSemaphore (Device, &Semaphore_Info, NULL, &Semaphore_Image_Available));
+  VK_CHECK (vkCreateSemaphore (Device, &Semaphore_Info, NULL, &Semaphore_Render_Finished));
+
+} // Vulkan_Create_Synchronization
+
+// ═══════════════════════════════════
+//   Vulkan_Transition_Storage_Image
+// ═══════════════════════════════════
+
+void Vulkan_Transition_Storage_Image () {
+
+  // Begin a one-shot command buffer for the initial layout transition
+  VK_CHECK (vkResetCommandBuffer (Command_Buffer, 0));
+  VK_CHECK (vkBeginCommandBuffer (/*commandBuffer =>*/ Command_Buffer,
+                                  /*pBeginInfo    =>*/ &(VkCommandBufferBeginInfo){
+                                    .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+                                    .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT}));
+
+  // Record and submit a layout transition from undefined to general for storage writes
+  Image_Layout_Barrier (/*Command_Buffer     =>*/ Command_Buffer,
+                        /*Image              =>*/ Raytracing_Storage_Image.Image,
+                        /*Old_Layout         =>*/ VK_IMAGE_LAYOUT_UNDEFINED,
+                        /*New_Layout         =>*/ VK_IMAGE_LAYOUT_GENERAL,
+                        /*Source_Access      =>*/ 0,
+                        /*Destination_Access =>*/ VK_ACCESS_SHADER_WRITE_BIT,
+                        /*Source_Stage       =>*/ VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                        /*Destination_Stage  =>*/ VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR);
+
+  // Finalize the command buffer recording
+  VK_CHECK (vkEndCommandBuffer (Command_Buffer));
+
+  // Submit the transition command and wait for completion before proceeding
+  VK_CHECK (vkQueueSubmit (/*queue       =>*/ Queue,
+                           /*submitCount =>*/ 1,
+                           /*pSubmits    =>*/ &(VkSubmitInfo){
+                             .sType              = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+                             .commandBufferCount = 1,
+                             .pCommandBuffers    = &Command_Buffer},
+                           /*fence       =>*/ VK_NULL_HANDLE));
+  VK_CHECK (vkQueueWaitIdle (Queue));
+
+} // Vulkan_Transition_Storage_Image
