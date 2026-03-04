@@ -4034,6 +4034,109 @@ Weapon_Model Source_Weapon_Model_Load (const char *Path) {
     free(Vd);
   }
 
+  // ── Compute skeletal skinning matrices from idle animation (frame 0) ─────
+  // This transforms vertices from bind pose → natural holding position.
+  float Skin_Matrices[128][3][4];
+  int Has_Skinning = 0;
+  if (VVD_Verts and H->Bone_N > 0 and H->Anim_N > 0) {
+    int Bone_N = H->Bone_N < 128 ? H->Bone_N : 128;
+
+    // Parse per-bone local transforms: start with bind pose
+    float Local[128][3][4];
+    for (int I = 0; I < Bone_N; I++) {
+      const MDL_Bone *B = (const MDL_Bone*)(D + H->Bone_O + I * sizeof(MDL_Bone));
+      float Qx=B->Quat[0], Qy=B->Quat[1], Qz=B->Quat[2], Qw=B->Quat[3];
+      float X2=Qx+Qx, Y2=Qy+Qy, Z2=Qz+Qz;
+      float Xx=Qx*X2, Xy=Qx*Y2, Xz=Qx*Z2, Yy=Qy*Y2, Yz=Qy*Z2, Zz=Qz*Z2;
+      float Wx=Qw*X2, Wy=Qw*Y2, Wz=Qw*Z2;
+      Local[I][0][0]=1-(Yy+Zz); Local[I][0][1]=Xy-Wz;     Local[I][0][2]=Xz+Wy;     Local[I][0][3]=B->Pos.x;
+      Local[I][1][0]=Xy+Wz;     Local[I][1][1]=1-(Xx+Zz); Local[I][1][2]=Yz-Wx;     Local[I][1][3]=B->Pos.y;
+      Local[I][2][0]=Xz-Wy;     Local[I][2][1]=Yz+Wx;     Local[I][2][2]=1-(Xx+Yy); Local[I][2][3]=B->Pos.z;
+    }
+
+    // Override with animation 0 (idle) frame 0 data
+    // AnimDesc layout: base_ptr(4), name_o(4), fps(4), flags(4), num_frames(4),
+    //   num_movements(4), movement_o(4), unused(24), anim_block(4), anim_o(4)
+    const uint8_t *Anim_Desc = D + H->Anim_O;
+    int Anim_Off = *(const int*)(Anim_Desc + 40); // anim_o at byte 40
+    const uint8_t *Cur = Anim_Desc + Anim_Off;
+    for (;;) {
+      if (Cur < D or Cur >= D + Sz - 4) break;
+      int Bi = Cur[0], Fl = Cur[1];
+      int16_t Next = *(const int16_t*)(Cur + 2);
+      if (Bi < Bone_N) {
+        const MDL_Bone *B = (const MDL_Bone*)(D + H->Bone_O + Bi * sizeof(MDL_Bone));
+        int Off = 4;
+        if (Fl & 0x02) Off += 6;  // RAWROT
+        if (Fl & 0x20) Off += 8;  // RAWROT2
+        if (Fl & 0x01) Off += 6;  // RAWPOS
+        float Rot[3] = {B->Rot.x, B->Rot.y, B->Rot.z};
+        float Pos[3] = {B->Pos.x, B->Pos.y, B->Pos.z};
+        if (Fl & 0x08) { // ANIMROT
+          const int16_t *Rp = (const int16_t*)(Cur + Off);
+          float Rs[3] = {B->Rot_Scale.x, B->Rot_Scale.y, B->Rot_Scale.z};
+          float Rb[3] = {B->Rot.x, B->Rot.y, B->Rot.z};
+          for (int A=0;A<3;A++) if (Rp[A]) {
+            const uint8_t *Vp = (const uint8_t*)&Rp[A] + Rp[A];
+            Rot[A] = Rb[A] + *(const int16_t*)(Vp+2) * Rs[A];
+          }
+          Off += 6;
+        }
+        if (Fl & 0x04) { // ANIMPOS
+          const int16_t *Pp = (const int16_t*)(Cur + Off);
+          float Ps[3] = {B->Pos_Scale.x, B->Pos_Scale.y, B->Pos_Scale.z};
+          float Pb[3] = {B->Pos.x, B->Pos.y, B->Pos.z};
+          for (int A=0;A<3;A++) if (Pp[A]) {
+            const uint8_t *Vp = (const uint8_t*)&Pp[A] + Pp[A];
+            Pos[A] = Pb[A] + *(const int16_t*)(Vp+2) * Ps[A];
+          }
+          Off += 6;
+        }
+        // Euler → quaternion (XYZ order)
+        float Cx=cosf(Rot[0]*0.5f), Sx=sinf(Rot[0]*0.5f);
+        float Cy=cosf(Rot[1]*0.5f), Sy=sinf(Rot[1]*0.5f);
+        float Cz=cosf(Rot[2]*0.5f), Sz_=sinf(Rot[2]*0.5f);
+        float Aqw=Cx*Cy*Cz+Sx*Sy*Sz_, Aqx=Sx*Cy*Cz-Cx*Sy*Sz_;
+        float Aqy=Cx*Sy*Cz+Sx*Cy*Sz_, Aqz=Cx*Cy*Sz_-Sx*Sy*Cz;
+        float Ql=sqrtf(Aqx*Aqx+Aqy*Aqy+Aqz*Aqz+Aqw*Aqw);
+        if(Ql>1e-6f){Aqx/=Ql;Aqy/=Ql;Aqz/=Ql;Aqw/=Ql;}
+        float AX2=Aqx+Aqx,AY2=Aqy+Aqy,AZ2=Aqz+Aqz;
+        float AXx=Aqx*AX2,AXy=Aqx*AY2,AXz=Aqx*AZ2,AYy=Aqy*AY2,AYz=Aqy*AZ2,AZz=Aqz*AZ2;
+        float AWx=Aqw*AX2,AWy=Aqw*AY2,AWz=Aqw*AZ2;
+        Local[Bi][0][0]=1-(AYy+AZz);Local[Bi][0][1]=AXy-AWz;    Local[Bi][0][2]=AXz+AWy;    Local[Bi][0][3]=Pos[0];
+        Local[Bi][1][0]=AXy+AWz;    Local[Bi][1][1]=1-(AXx+AZz);Local[Bi][1][2]=AYz-AWx;    Local[Bi][1][3]=Pos[1];
+        Local[Bi][2][0]=AXz-AWy;    Local[Bi][2][1]=AYz+AWx;    Local[Bi][2][2]=1-(AXx+AYy);Local[Bi][2][3]=Pos[2];
+      }
+      if (Next == 0) break;
+      Cur += Next;
+    }
+
+    // Walk hierarchy: World[i] = World[parent] * Local[i]
+    float World[128][3][4];
+    for (int I = 0; I < Bone_N; I++) {
+      const MDL_Bone *B = (const MDL_Bone*)(D + H->Bone_O + I * sizeof(MDL_Bone));
+      if (B->Parent >= 0 and B->Parent < I) {
+        for (int R=0;R<3;R++) for (int C=0;C<4;C++)
+          World[I][R][C] = World[B->Parent][R][0]*Local[I][0][C]
+                         + World[B->Parent][R][1]*Local[I][1][C]
+                         + World[B->Parent][R][2]*Local[I][2][C]
+                         + (C==3 ? World[B->Parent][R][3] : 0);
+      } else memcpy(World[I], Local[I], sizeof(float)*12);
+    }
+
+    // Compose: Skin[i] = World[i] * InvBind[i]
+    for (int I = 0; I < Bone_N; I++) {
+      const MDL_Bone *B = (const MDL_Bone*)(D + H->Bone_O + I * sizeof(MDL_Bone));
+      for (int R=0;R<3;R++) for (int C=0;C<4;C++)
+        Skin_Matrices[I][R][C] = World[I][R][0]*B->Pose_To_Bone[0][C]
+                                + World[I][R][1]*B->Pose_To_Bone[1][C]
+                                + World[I][R][2]*B->Pose_To_Bone[2][C]
+                                + (C==3 ? World[I][R][3] : 0);
+    }
+    Has_Skinning = 1;
+    printf("[weapon] skeletal: %d bones, idle animation applied\n", Bone_N);
+  }
+
   // Read VTX and extract geometry
   FILE *Ft = fopen(Vtx_Path, "rb");
   if (Ft and VVD_Verts) {
@@ -4100,11 +4203,31 @@ Weapon_Model Source_Weapon_Model_Load (const char *Path) {
                   int VVD_Index = Mesh_Vert_Offset + (Strip_Vertex < Group_Vertex_Count ? Original_Vertex_Map[Strip_Vertex] : 0);
                   if (VVD_Index < 0 or VVD_Index >= VVD_N) VVD_Index = 0;
                   const VVD_Vertex *Source_Vertex = &VVD_Verts[VVD_Index];
-                  // Store in Q3 Z-up format for Weapon_Update: Source viewmodel barrel is -Y, right is +X, up is +Z
-                  // Q3 weapon: barrel +X, right -Y (negated by Weapon_Update), up +Z
+                  // Apply skeletal skinning: transform bind-pose vertex by weighted bone matrices
+                  float Sp[3] = {Source_Vertex->Position[0], Source_Vertex->Position[1], Source_Vertex->Position[2]};
+                  float Sn[3] = {Source_Vertex->Normal[0], Source_Vertex->Normal[1], Source_Vertex->Normal[2]};
+                  if (Has_Skinning) {
+                    float Pp[3]={0,0,0}, Pn[3]={0,0,0};
+                    for (int Bi=0; Bi < Source_Vertex->Num_Bones and Bi < 3; Bi++) {
+                      int Bone = Source_Vertex->Bone_Ids[Bi];
+                      float W = Source_Vertex->Bone_Weights[Bi];
+                      if (W < 0.001f or Bone >= 128) continue;
+                      for (int R=0;R<3;R++) {
+                        Pp[R] += W * (Skin_Matrices[Bone][R][0]*Sp[0] + Skin_Matrices[Bone][R][1]*Sp[1]
+                                    + Skin_Matrices[Bone][R][2]*Sp[2] + Skin_Matrices[Bone][R][3]);
+                        Pn[R] += W * (Skin_Matrices[Bone][R][0]*Sn[0] + Skin_Matrices[Bone][R][1]*Sn[1]
+                                    + Skin_Matrices[Bone][R][2]*Sn[2]);
+                      }
+                    }
+                    Sp[0]=Pp[0]; Sp[1]=Pp[1]; Sp[2]=Pp[2];
+                    float Nl = sqrtf(Pn[0]*Pn[0]+Pn[1]*Pn[1]+Pn[2]*Pn[2]);
+                    if (Nl>1e-6f) { Sn[0]=Pn[0]/Nl; Sn[1]=Pn[1]/Nl; Sn[2]=Pn[2]/Nl; }
+                    else { Sn[0]=Pn[0]; Sn[1]=Pn[1]; Sn[2]=Pn[2]; }
+                  }
+                  // Swizzle to (barrel, up, right) for Weapon_Update — Option B: barrel=-Y, up=+Z, right=+X
                   Result.Vertices[Result.Vertex_Count] = (Vertex){
-                    .Position = {-Source_Vertex->Position[1], -Source_Vertex->Position[0], Source_Vertex->Position[2]},
-                    .Normal = {-Source_Vertex->Normal[1], -Source_Vertex->Normal[0], Source_Vertex->Normal[2]},
+                    .Position = {-Sp[1], Sp[2], Sp[0]},
+                    .Normal = {-Sn[1], Sn[2], Sn[0]},
                     .Texture_Uv = {Source_Vertex->Tex_Coord[0], Source_Vertex->Tex_Coord[1]}};
                   Result.Indices[Result.Index_Count++] = Vertex_Base+Corner;
                   Result.Vertex_Count++;
@@ -7413,9 +7536,11 @@ void Weapon_Update (Weapon_Instance *Weapon, const Camera *Camera_Data, float De
   // Source viewmodel positioning: viewmodel_fov=54° in world FOV=90° means the weapon appears ~2x larger.
   // In the CSPromod reference, the weapon fills the entire bottom-right quadrant (~40% of screen).
   // Place very close to camera so it fills the screen like the reference screenshot.
-  float Fwd_Offset   = Weapon->Model.Is_Source ? 12.f : 5.f;
-  float Right_Offset = Weapon->Model.Is_Source ? 6.f  : 4.f;
-  float Up_Offset    = Weapon->Model.Is_Source ? 4.f  : -3.5f;
+  // Source viewmodels: origin = camera eye, weapon extends forward/down.
+  // Scale ~0.45 compensates for viewmodel_fov(54) → scene_fov(90) difference.
+  float Fwd_Offset   = Weapon->Model.Is_Source ? 3.f  : 5.f;
+  float Right_Offset = Weapon->Model.Is_Source ? 3.f  : 4.f;
+  float Up_Offset    = Weapon->Model.Is_Source ? -0.5f: -3.5f;
   vec3 Offset = Add (Camera_Data->Position,
                      Add (Scale (Forward, Fwd_Offset + Recoil),
                           Add (Scale (Right, Right_Offset + Bob_Horizontal),
@@ -7460,24 +7585,31 @@ void Weapon_Update (Weapon_Instance *Weapon, const Camera *Camera_Data, float De
   // Scale the viewmodel down - no depth hack, so we shrink the model in world space
   // Source viewmodel: scale to fill bottom-right quadrant like CSPromod reference screenshot.
   // Close to camera (3 units) + 0.40 scale = weapon fills ~40% of screen like reference.
-  float Model_Scale = Weapon->Model.Is_Source ? 1.0f : WEAPON_MODEL_SCALE;
+  float Model_Scale = Weapon->Model.Is_Source ? 0.45f : WEAPON_MODEL_SCALE;
 
-  // Transform each vertex from model space (Q3 Z-up) to world space (Y-up).
-  // Swizzle Q3 coords (X,Y,Z) > Y-up (X,Z,-Y) so barrel>Forward, up>Up, right>Right.
+  // Viewmodel FOV correction for Source weapons.
+  // Source renders viewmodels at ~54° FOV within a 90° scene FOV.
+  // To simulate: scale the forward (barrel) distance so the weapon appears
+  // as if rendered with the narrower FOV. Factor = tan(27°)/tan(45°) ≈ 0.51
+  float VM_Fov_Scale = Weapon->Model.Is_Source ? 0.51f : 1.f;
+
+  // Transform each vertex from model space to world space.
+  // Vertices are already stored as (barrel, up, right) by the Y-up swizzle in MD3_Parse_Surface
+  // and Source_Weapon_Model_Load, so no additional swizzle is needed here.
   for (uint Index = 0; Index < Weapon->Model.Vertex_Count; Index++) {
-    float Source_X =  Weapon->Model.Vertices[Index].Position[0] * Model_Scale; // Q3 X (forward/barrel)
-    float Source_Y =  Weapon->Model.Vertices[Index].Position[2] * Model_Scale; // Q3 Z (up)
-    float Source_Z = -Weapon->Model.Vertices[Index].Position[1] * Model_Scale; // Q3 -Y (right)
+    float Source_X = Weapon->Model.Vertices[Index].Position[0] * Model_Scale * VM_Fov_Scale; // barrel (forward) — compressed by VM FOV
+    float Source_Y = Weapon->Model.Vertices[Index].Position[1] * Model_Scale; // up
+    float Source_Z = Weapon->Model.Vertices[Index].Position[2] * Model_Scale; // right
 
     // Apply the combined rotation and translate by the camera offset
     Weapon->Transformed_Vertices[Index].Position[0] = Rotation[0] * Source_X + Rotation[1] * Source_Y + Rotation[2] * Source_Z + Offset.x;
     Weapon->Transformed_Vertices[Index].Position[1] = Rotation[3] * Source_X + Rotation[4] * Source_Y + Rotation[5] * Source_Z + Offset.y;
     Weapon->Transformed_Vertices[Index].Position[2] = Rotation[6] * Source_X + Rotation[7] * Source_Y + Rotation[8] * Source_Z + Offset.z;
 
-    // Rotate the vertex normal by the same swizzle + rotation (no translation)
-    float Normal_X =  Weapon->Model.Vertices[Index].Normal[0];
-    float Normal_Y =  Weapon->Model.Vertices[Index].Normal[2];
-    float Normal_Z = -Weapon->Model.Vertices[Index].Normal[1];
+    // Rotate the vertex normal by the rotation matrix (no translation)
+    float Normal_X = Weapon->Model.Vertices[Index].Normal[0];
+    float Normal_Y = Weapon->Model.Vertices[Index].Normal[1];
+    float Normal_Z = Weapon->Model.Vertices[Index].Normal[2];
     Weapon->Transformed_Vertices[Index].Normal[0] = Rotation[0] * Normal_X + Rotation[1] * Normal_Y + Rotation[2] * Normal_Z;
     Weapon->Transformed_Vertices[Index].Normal[1] = Rotation[3] * Normal_X + Rotation[4] * Normal_Y + Rotation[5] * Normal_Z;
     Weapon->Transformed_Vertices[Index].Normal[2] = Rotation[6] * Normal_X + Rotation[7] * Normal_Y + Rotation[8] * Normal_Z;
