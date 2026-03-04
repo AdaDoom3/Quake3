@@ -283,7 +283,7 @@ typedef struct {
   float Radius;       // Collision radius
   float Damage;       // Base damage on impact (before body-part multiplier)
   float Hit_U, Hit_V; // UV coordinates at impact point (for damage map sampling)
-  int   Instance_Hit; // TLAS instance index of hit object (-1 = none, 0 = world, 1 = weapon, >=2 = player)
+  int   Instance_Hit; // Packed TLAS instanceCustomIndex of hit object (-1 = none, low 8 bits = figure slot)
   int   Pad_B;        // Alignment padding
 } Projectile;
 
@@ -1706,10 +1706,64 @@ typedef struct {
   vec3                   GL_Origin;            // World-space position in GL Y-up coordinates (for TLAS transform)
   float                  GL_Yaw;               // Yaw angle in GL space (radians)
 
-  // Skeletal runtime (Source MDL; zeroed for MD3 frame-based animation)
-  Bone_Matrix            Pose[FIGURE_MAX_BONES]; // Current world-space pose matrices (computed per-frame)
-  GPU_Buffer             Bone_Buffer;            // GPU SSBO for bone matrices (skinning compute shader input)
+  // Skeletal data — GPU-resident (uploaded once at load time, read by GPU skeleton compute)
+  GPU_Buffer             Bone_Buffer;            // GPU SSBO: bind-pose matrices      [Bone_Count * mat3x4]
+  GPU_Buffer             Inv_Bind_Buffer;        // GPU SSBO: inverse bind-pose        [Bone_Count * mat3x4]
+  GPU_Buffer             Bone_Parent_Buffer;     // GPU SSBO: parent indices           [Bone_Count * int]
+  GPU_Buffer             Bone_Weight_Buffer;     // GPU SSBO: per-vertex bone weights  [Vertex_Count * SKEL_MAX_BONES_PER_VERT]
+  GPU_Buffer             Bone_Id_Buffer;         // GPU SSBO: per-vertex bone ids      [Vertex_Count * SKEL_MAX_BONES_PER_VERT]
+  GPU_Buffer             Pose_Buffer;            // GPU SSBO: output world-space pose  [Bone_Count * mat3x4] (written by compute)
+
+  // Ray mask for TLAS instancing (0xFF = visible to all rays, 0x01 = primary only, 0x02 = shadow only)
+  uint8_t                Ray_Mask;
+
+  // TLAS instance transform (3x4 row-major, written by per-frame update)
+  float                  TLAS_Transform[3][4];
 } Figure_Instance;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Figure_Pool: generational-index slot allocator for Figure_Instance
+//
+// Uses a free-list with generational handles for O(1) alloc / O(1) free / safe lookup.
+// Each slot has a generation counter that increments on free, so stale handles are detected.
+// Industry standard: "slot map" / "generational arena" pattern (used by Bevy ECS, Our Machinery,
+// Rust arenas, Bungie Destiny engine, etc.)
+// ─────────────────────────────────────────────────────────────────────────────
+
+#define FIGURE_POOL_MAX 64  // Maximum concurrent figures (world entities + weapon + props)
+
+// Opaque handle to a figure slot — encodes index + generation for safe ABA-free lookup
+typedef struct {
+  uint Index;       // Slot index into the pool
+  uint Generation;  // Must match pool slot generation for valid access
+} Figure_Handle;
+
+#define FIGURE_HANDLE_NULL ((Figure_Handle){.Index = UINT32_MAX, .Generation = 0})
+
+typedef struct {
+  Figure_Instance Slots[FIGURE_POOL_MAX];          // Fixed-size slot array
+  uint            Generations[FIGURE_POOL_MAX];     // Per-slot generation counter (incremented on free)
+  uint            Free_Stack[FIGURE_POOL_MAX];      // Free-list stack (LIFO for cache warmth)
+  uint            Free_Count;                       // Number of free slots on the stack
+  uint            Active_Count;                     // Number of currently allocated slots
+  int             Active[FIGURE_POOL_MAX];          // 1 = slot is live, 0 = slot is free
+} Figure_Pool;
+
+// Allocate a figure slot. Returns a handle; writes the slot pointer to *Out.
+Figure_Handle  Figure_Pool_Alloc   (Figure_Pool *Pool, Figure_Instance **Out);
+
+// Free a figure slot by handle. Increments generation, pushes to free stack.
+void           Figure_Pool_Free    (Figure_Pool *Pool, Figure_Handle Handle);
+
+// Resolve a handle to a pointer. Returns NULL if the handle is stale or invalid.
+Figure_Instance *Figure_Pool_Get   (Figure_Pool *Pool, Figure_Handle Handle);
+
+// Initialize pool: all slots free, generations zeroed.
+void           Figure_Pool_Init    (Figure_Pool *Pool);
+
+// Iterate all active figures. Callback receives (Figure_Instance *, slot index).
+// Returns the number of active figures visited.
+uint           Figure_Pool_Count   (const Figure_Pool *Pool);
 
 // Player movement state
 typedef struct {
@@ -1770,12 +1824,10 @@ Scene Scene_Load_From_VBSP (const char *Path, Spawn *Out_Spawn);
 // MDL skeletal model loading: parses Source engine .mdl + .vvd + .vtx into an Entity with bone data.
 Figure_Instance MDL_Load (Scene *S, const char *Path, vec3 Origin, float Yaw);
 
-// Skeletal animation: evaluate bone hierarchy at time T, write world-space matrices to Entity.Pose[]
-void Skeleton_Evaluate (Figure_Instance *E, float Time);
-
-// GPU skeletal skinning: dispatch the Skinning compute shader to transform bind-pose vertices by bone matrices. Reads bone matrices and
-// bind-pose vertices from SSBOs, writes skinned vertices to the entity's vertex buffer.
-void Skeleton_Skin_Dispatch (Figure_Instance *E);
+// GPU skeletal animation: uploads bone hierarchy to GPU once at load time. Per-frame: a single compute dispatch evaluates the bone
+// hierarchy (parent chain walk) and skins all vertices in one pass. No CPU-side Skeleton_Evaluate needed.
+void Figure_Upload_Skeleton   (Figure_Instance *E);  // Upload bind pose, inv bind, parents, weights, ids to GPU SSBOs
+void Figure_Skeleton_Dispatch (Figure_Instance *E);  // Single compute: evaluate bones + skin vertices on GPU
 
 // Load a default Quake 3 player model (sarge) as an animated entity placed near the spawn point
 Figure_Instance Entity_Load (Scene *S, Spawn Spawn_Point);
@@ -1796,25 +1848,17 @@ void Movement_Style_Toggle (Player *P);
 // then constructs a single BLAS geometry entry covering all triangles. Uses PREFER_FAST_TRACE since the world is static.
 Acceleration_Structure Build_World_Bottom_Level (const Scene *Scene_Data);
 
-// Initialize the weapon's BLAS with host-visible vertex buffer (for per-frame updates) and ALLOW_UPDATE flag for fast rebuilds. Scratch
-// memory is kept alive for reuse.
-void Weapon_Bottom_Level_Initialize (Figure_Instance *Weapon);
+// Initialize a figure's BLAS: allocate vertex/index/texture-id GPU buffers, build initial BLAS with ALLOW_UPDATE for per-frame refit
+void Figure_BLAS_Initialize (Figure_Instance *F);
 
-// Rebuild the weapon BLAS from scratch after CPU vertex transformation. Re-uploads the vertices and performs a full (non-update) rebuild
-void Weapon_Bottom_Level_Rebuild (Figure_Instance *Weapon);
-
-// Initialize the entity's BLAS with host-visible vertex buffer and ALLOW_UPDATE flag for per-frame animation refit
-void Entity_Bottom_Level_Initialize (Figure_Instance *Enemy);
-
-// Rebuild the entity BLAS from the current animation frame's vertex data
-void Entity_Bottom_Level_Rebuild (Figure_Instance *Enemy);
+// Rebuild a figure's BLAS after vertex data has changed (re-upload vertices, refit BLAS in-place)
+void Figure_BLAS_Rebuild (Figure_Instance *F);
 
 // Pre-allocate the top-level acceleration structure (TLAS) for up to Maximum_Instances instance entries
 void Top_Level_Initialize (uint Maximum_Instances);
 
-// Rebuild the TLAS each frame with the world BLAS 
-void Top_Level_Rebuild (Acceleration_Structure *World, Acceleration_Structure *Weapon, Acceleration_Structure *Enemy,
-                        const float *Player_Body_Transform);
+// Rebuild the TLAS each frame from the world BLAS plus all active figures in the pool
+void Top_Level_Rebuild (Acceleration_Structure *World, Figure_Pool *Pool);
 
 // ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 //
@@ -2189,7 +2233,7 @@ void Vulkan_Transition_Storage_Image ();
 void Vulkan_Recreate_Swapchain ();
 
 // Allocate the descriptor pool and set, then write the descriptor bindings for the ray tracing pipeline 
-void Descriptor_Set_Create (Figure_Instance *Weapon, Figure_Instance *Enemy);
+void Descriptor_Set_Create (Figure_Pool *Pool);
 
 // Upload the camera uniform buffer with the inverse view and projection matrices computed from
 // the current player position, yaw, pitch, field-of-view, and aspect ratio.
@@ -2753,21 +2797,38 @@ int main (int Argc, char **Argv) {
     printf("[enemy] placing at (%.1f, %.1f, %.1f), %.0f units forward from spawn\n",
            Enemy_Origin.x, Enemy_Origin.y, Enemy_Origin.z, 120.f);
   }
-  Figure_Instance Enemy = Entity_MDL_Path ? MDL_Load (&Scene_Data, Entity_MDL_Path, Enemy_Origin, Spawn_Point.Angle + 180.f)
-                                         : Entity_Load (&Scene_Data, Spawn_Point);
+  // Figure pool: generational-index slot allocator for all animated figures
+  Figure_Pool Figures;
+  Figure_Pool_Init (&Figures);
+
+  // Allocate enemy figure from the pool
+  Figure_Instance *Enemy;
+  Figure_Handle Enemy_Handle = Figure_Pool_Alloc (&Figures, &Enemy);
+  *Enemy = Entity_MDL_Path ? MDL_Load (&Scene_Data, Entity_MDL_Path, Enemy_Origin, Spawn_Point.Angle + 180.f)
+                           : Entity_Load (&Scene_Data, Spawn_Point);
+  Enemy->Ray_Mask = 0xFF;  // Visible to all rays (casts shadows)
+  Enemy->TLAS_Transform[0][0] = 1.f; Enemy->TLAS_Transform[1][1] = 1.f; Enemy->TLAS_Transform[2][2] = 1.f;
 
   // Infer per-scene environment settings from BSP data (sky textures, worldspawn)
   Active_Environment = Environment_Infer_From_Scene (&Scene_Data);
 
   // Load scene and weapon textures
   Scene_Load_Textures (&Scene_Data);
-  Figure_Instance Weapon = {0};
+  Figure_Instance *Weapon;
+  Figure_Handle Weapon_Handle = Figure_Pool_Alloc (&Figures, &Weapon);
   const char *Weapon_MDL_Path = Source_Weapon_Path;
   if (not Weapon_MDL_Path and Source_Mode)
     Weapon_MDL_Path = "/tmp/v_m4_new/models/v_rif_m4a1.mdl";
-  Weapon.Figure = Weapon_MDL_Path ? Source_Weapon_Model_Load (Weapon_MDL_Path)
-                                 : Weapon_Model_Load ();
-  Weapon_Load_Textures (&Weapon);
+  Weapon->Figure = Weapon_MDL_Path ? Source_Weapon_Model_Load (Weapon_MDL_Path)
+                                   : Weapon_Model_Load ();
+  Weapon_Load_Textures (Weapon);
+  Weapon->Ray_Mask = 0x01;  // Excluded from shadow rays
+  Weapon->TLAS_Transform[0][0] = 1.f; Weapon->TLAS_Transform[1][1] = 1.f; Weapon->TLAS_Transform[2][2] = 1.f;
+
+  // Allocate a player body slot (shares enemy BLAS, shadow-only)
+  Figure_Instance *Player_Body;
+  Figure_Handle Body_Handle = Figure_Pool_Alloc (&Figures, &Player_Body);
+  Player_Body->Ray_Mask = 0x02;  // Shadow-only (visible to shadow rays, not primary)
 
   // Check quality arguments
   //
@@ -2781,17 +2842,25 @@ int main (int Argc, char **Argv) {
   printf ("[mode] PBR maps %s, parallax %s\n",
           No_PBR ? "DISABLED" : "enabled", No_Parallax ? "DISABLED" : "enabled");
 
-  // Build acceleration structures (BLAS for world + weapon + enemy, then TLAS)
+  // Build acceleration structures (BLAS for world + all figures, then TLAS)
   Acceleration_Structure World_Bottom_Level = Build_World_Bottom_Level (&Scene_Data);
-  Weapon_Bottom_Level_Initialize (&Weapon);
-  Entity_Bottom_Level_Initialize (&Enemy);
-  Top_Level_Initialize (4);
-  Top_Level_Rebuild (&World_Bottom_Level, &Weapon.Bottom_Level, &Enemy.Bottom_Level, NULL);
+  Figure_BLAS_Initialize (Weapon);
+  Figure_BLAS_Initialize (Enemy);
+
+  // Player body shares enemy's BLAS and buffers (same geometry, different transform + ray mask)
+  Player_Body->Bottom_Level      = Enemy->Bottom_Level;
+  Player_Body->Vertex_Buffer     = Enemy->Vertex_Buffer;
+  Player_Body->Index_Buffer      = Enemy->Index_Buffer;
+  Player_Body->Texture_Id_Buffer = Enemy->Texture_Id_Buffer;
+  Player_Body->Texture_Base_Index = Enemy->Texture_Base_Index;
+
+  Top_Level_Initialize (1 + FIGURE_POOL_MAX);
+  Top_Level_Rebuild (&World_Bottom_Level, &Figures);
 
   // Create the ray tracing pipeline, shader binding table, and descriptors
   Raytracing_Pipeline_Create ();
   Shader_Binding_Table_Create ();
-  Descriptor_Set_Create (&Weapon, &Enemy);
+  Descriptor_Set_Create (&Figures);
 
   // Create the post-processing pipeline (reads color + depth, writes color)
   Postprocess_Pipeline_Create ();
@@ -2921,9 +2990,9 @@ int main (int Argc, char **Argv) {
     printf ("[benchmark] warming up (5 frames)...\n");
     {
       VK_CHECK (vkWaitForFences (Device, 1, &Fence, VK_TRUE, UINT64_MAX));
-      Weapon_Update (&Weapon, &Bench_Cam, Fixed_Dt, 0);
-      Weapon_Bottom_Level_Rebuild (&Weapon);
-      Top_Level_Rebuild (&World_Bottom_Level, &Weapon.Bottom_Level, &Enemy.Bottom_Level, NULL);
+      Weapon_Update (Weapon, &Bench_Cam, Fixed_Dt, 0);
+      Figure_BLAS_Rebuild (Weapon);
+      Top_Level_Rebuild (&World_Bottom_Level, &Figures);
       mat4 Bench_View = View (Bench_Cam.Position, Bench_Cam.Yaw, Bench_Cam.Pitch);
       mat4 Bench_Proj = Perspective (Vertical_FOV, (float)Width / Height, 0.1f, 10000.f);
       mat4 Bench_Inv_Proj = Inverse_Projection (Bench_Proj);
@@ -2933,7 +3002,7 @@ int main (int Argc, char **Argv) {
       // Alternate frame parity so checkerboard traces both pixel halves during warmup
       for (int I = 0; I < 5; I++) {
         Bench_Cam.Frame = (uint)I;
-        Camera_Upload (&Bench_Cam, Vertical_FOV, Weapon.Texture_Base_Index, PBR_Stride, Active_SPP);
+        Camera_Upload (&Bench_Cam, Vertical_FOV, Weapon->Texture_Base_Index, PBR_Stride, Active_SPP);
         GPU_Postprocess_Push Warmup_Postprocess = {.Time = 0,
           .Dt_Frame       = (uint32_t)Float_To_Half (Fixed_Dt) | ((uint32_t)(Frame_Count & 0xFFFF) << 16),
           .Velocity       = 0,
@@ -2985,13 +3054,13 @@ int main (int Argc, char **Argv) {
 
       // Update scene state for this frame
       Bench_Cam.Frame = (uint)F;
-      Weapon_Update (&Weapon, &Bench_Cam, Fixed_Dt, 0);
-      Weapon_Bottom_Level_Rebuild (&Weapon);
-      Enemy.Animation_Time += Fixed_Dt;
-      Enemy.Current_Vertices = Enemy.Figure.Frame_Vertices[(int)(Enemy.Animation_Time * Enemy.Figure.Animations[0].FPS) % Enemy.Figure.Animations[0].Frame_Count];
-      Entity_Bottom_Level_Rebuild (&Enemy);
-      Top_Level_Rebuild (&World_Bottom_Level, &Weapon.Bottom_Level, &Enemy.Bottom_Level, NULL);
-      Camera_Upload (&Bench_Cam, Vertical_FOV, Weapon.Texture_Base_Index, PBR_Stride, Active_SPP);
+      Weapon_Update (Weapon, &Bench_Cam, Fixed_Dt, 0);
+      Figure_BLAS_Rebuild (Weapon);
+      Enemy->Animation_Time += Fixed_Dt;
+      Enemy->Current_Vertices = Enemy->Figure.Frame_Vertices[(int)(Enemy->Animation_Time * Enemy->Figure.Animations[0].FPS) % Enemy->Figure.Animations[0].Frame_Count];
+      Figure_BLAS_Rebuild (Enemy);
+      Top_Level_Rebuild (&World_Bottom_Level, &Figures);
+      Camera_Upload (&Bench_Cam, Vertical_FOV, Weapon->Texture_Base_Index, PBR_Stride, Active_SPP);
 
       // Build view and projection matrices
       mat4 Bench_View = View (Bench_Cam.Position, Bench_Cam.Yaw, Bench_Cam.Pitch);
@@ -3361,31 +3430,33 @@ int main (int Argc, char **Argv) {
     Cam.Frame       = Frame;
 
     // Animate and rebuild the weapon viewmodel
-    Weapon_Update (&Weapon, &Cam, Delta_Time, In.Fire);
-    Weapon_Bottom_Level_Rebuild (&Weapon);
+    Weapon_Update (Weapon, &Cam, Delta_Time, In.Fire);
+    Figure_BLAS_Rebuild (Weapon);
 
     // Advance enemy idle animation and rebuild BLAS
-    Enemy.Animation_Time += Delta_Time;
+    Enemy->Animation_Time += Delta_Time;
     {
-      int Frame_Index = (int)(Enemy.Animation_Time * Enemy.Figure.Animations[0].FPS) % Enemy.Figure.Animations[0].Frame_Count;
-      Enemy.Current_Vertices = Enemy.Figure.Frame_Vertices[Frame_Index];
+      int Frame_Index = (int)(Enemy->Animation_Time * Enemy->Figure.Animations[0].FPS) % Enemy->Figure.Animations[0].Frame_Count;
+      Enemy->Current_Vertices = Enemy->Figure.Frame_Vertices[Frame_Index];
     }
-    Entity_Bottom_Level_Rebuild (&Enemy);
+    Figure_BLAS_Rebuild (Enemy);
 
-    // Compute player body TLAS transform
-    vec3  Entity_Origin = Enemy.GL_Origin;
-    float Body_Yaw      = -Physics.Yaw; 
-    float D_Yaw         = Body_Yaw - Enemy.GL_Yaw;
+    // Compute player body TLAS transform and write it to the player body pool slot
+    vec3  Entity_Origin = Enemy->GL_Origin;
+    float Body_Yaw      = -Physics.Yaw;
+    float D_Yaw         = Body_Yaw - Enemy->GL_Yaw;
     float Cosine_Yaw    = cosf (D_Yaw), Sine_Yaw = sinf (D_Yaw);
     float Translation_X = Physics.Position.x - (Cosine_Yaw * Entity_Origin.x + Sine_Yaw * Entity_Origin.z);
     float Translation_Y = Physics.Position.y - Entity_Origin.y;
     float Translation_Z = Physics.Position.z - (-Sine_Yaw * Entity_Origin.x + Cosine_Yaw * Entity_Origin.z);
-    float Player_Body_Transform[12] = {Cosine_Yaw,  0.f, Sine_Yaw,  Translation_X,
-                                       0.f,         1.f, 0.f,       Translation_Y,
-                                       -Sine_Yaw,   0.f, Cosine_Yaw, Translation_Z};
+    float Body_T[3][4] = {{Cosine_Yaw,  0.f, Sine_Yaw,    Translation_X},
+                           {0.f,         1.f, 0.f,         Translation_Y},
+                           {-Sine_Yaw,   0.f, Cosine_Yaw,  Translation_Z}};
+    memcpy (Player_Body->TLAS_Transform, Body_T, sizeof Body_T);
+    Player_Body->Bottom_Level = Enemy->Bottom_Level;  // Share rebuilt BLAS
 
     // Rebuild the top-level acceleration structure
-    Top_Level_Rebuild (&World_Bottom_Level, &Weapon.Bottom_Level, &Enemy.Bottom_Level, Player_Body_Transform);
+    Top_Level_Rebuild (&World_Bottom_Level, &Figures);
 
     // Adaptive quality budget
     float Target_Frame_Time;
@@ -3418,7 +3489,7 @@ int main (int Argc, char **Argv) {
     uint Packed_SPP     = (Active_SPP & 0xFF) | (Budget_Byte << 8);
 
     // Upload the camera and dispatch ray tracing + postprocess
-    Camera_Upload (&Cam, Vertical_FOV, Weapon.Texture_Base_Index, PBR_Stride, Packed_SPP);
+    Camera_Upload (&Cam, Vertical_FOV, Weapon->Texture_Base_Index, PBR_Stride, Packed_SPP);
     float Horizontal_Speed = sqrtf (Physics.Velocity.x * Physics.Velocity.x +
                                     Physics.Velocity.z * Physics.Velocity.z);
 
@@ -3521,38 +3592,40 @@ int main (int Argc, char **Argv) {
   vkDestroyBuffer (Device, Bottom_Level.Buffer.Buffer, NULL);
   vkFreeMemory    (Device, Bottom_Level.Buffer.Memory, NULL);
 
-  // Weapon resources
-  vkDestroyAccelerationStructure (Device, Weapon.Bottom_Level.Handle, NULL);
-  vkDestroyBuffer (Device, Weapon.Bottom_Level.Buffer.Buffer, NULL);
-  vkFreeMemory    (Device, Weapon.Bottom_Level.Buffer.Memory, NULL);
-  vkDestroyBuffer (Device, Weapon.Bottom_Level_Scratch.Buffer, NULL);
-  vkFreeMemory    (Device, Weapon.Bottom_Level_Scratch.Memory, NULL);
-  vkDestroyBuffer (Device, Weapon.Vertex_Buffer.Buffer, NULL);
-  vkFreeMemory    (Device, Weapon.Vertex_Buffer.Memory, NULL);
-  vkDestroyBuffer (Device, Weapon.Index_Buffer.Buffer, NULL);
-  vkFreeMemory    (Device, Weapon.Index_Buffer.Memory, NULL);
-  vkDestroyBuffer (Device, Weapon.Texture_Id_Buffer.Buffer, NULL);
-  vkFreeMemory    (Device, Weapon.Texture_Id_Buffer.Memory, NULL);
-  free (Weapon.Figure.Vertices);
-  free (Weapon.Figure.Indices);
-  free (Weapon.Figure.Texture_Ids);
-  free (Weapon.Transformed_Vertices);
+  // Player body shares enemy's Vulkan resources — clear its handles to prevent double-free
+  memset (Player_Body, 0, sizeof *Player_Body);
 
-  // Entity (enemy) resources
-  for (uint I = 0; I < Enemy.Figure.Total_Frame_Count; I++) free (Enemy.Figure.Frame_Vertices[I]);
-  vkDestroyAccelerationStructure (Device, Enemy.Bottom_Level.Handle, NULL);
-  vkDestroyBuffer (Device, Enemy.Bottom_Level.Buffer.Buffer, NULL);
-  vkFreeMemory    (Device, Enemy.Bottom_Level.Buffer.Memory, NULL);
-  vkDestroyBuffer (Device, Enemy.Bottom_Level_Scratch.Buffer, NULL);
-  vkFreeMemory    (Device, Enemy.Bottom_Level_Scratch.Memory, NULL);
-  vkDestroyBuffer (Device, Enemy.Vertex_Buffer.Buffer, NULL);
-  vkFreeMemory    (Device, Enemy.Vertex_Buffer.Memory, NULL);
-  vkDestroyBuffer (Device, Enemy.Index_Buffer.Buffer, NULL);
-  vkFreeMemory    (Device, Enemy.Index_Buffer.Memory, NULL);
-  vkDestroyBuffer (Device, Enemy.Texture_Id_Buffer.Buffer, NULL);
-  vkFreeMemory    (Device, Enemy.Texture_Id_Buffer.Memory, NULL);
-  free (Enemy.Figure.Indices);
-  free (Enemy.Figure.Texture_Ids);
+  // Free all active figures in the pool
+  for (uint I = 0; I < FIGURE_POOL_MAX; I++) {
+    if (not Figures.Active[I]) continue;
+    Figure_Instance *F = &Figures.Slots[I];
+    if (F->Bottom_Level.Handle) {
+      vkDestroyAccelerationStructure (Device, F->Bottom_Level.Handle, NULL);
+      vkDestroyBuffer (Device, F->Bottom_Level.Buffer.Buffer, NULL);
+      vkFreeMemory    (Device, F->Bottom_Level.Buffer.Memory, NULL);
+    }
+    if (F->Bottom_Level_Scratch.Buffer) {
+      vkDestroyBuffer (Device, F->Bottom_Level_Scratch.Buffer, NULL);
+      vkFreeMemory    (Device, F->Bottom_Level_Scratch.Memory, NULL);
+    }
+    if (F->Vertex_Buffer.Buffer) {
+      vkDestroyBuffer (Device, F->Vertex_Buffer.Buffer, NULL);
+      vkFreeMemory    (Device, F->Vertex_Buffer.Memory, NULL);
+    }
+    if (F->Index_Buffer.Buffer) {
+      vkDestroyBuffer (Device, F->Index_Buffer.Buffer, NULL);
+      vkFreeMemory    (Device, F->Index_Buffer.Memory, NULL);
+    }
+    if (F->Texture_Id_Buffer.Buffer) {
+      vkDestroyBuffer (Device, F->Texture_Id_Buffer.Buffer, NULL);
+      vkFreeMemory    (Device, F->Texture_Id_Buffer.Memory, NULL);
+    }
+    free (F->Figure.Vertices);
+    free (F->Figure.Indices);
+    free (F->Figure.Texture_Ids);
+    free (F->Transformed_Vertices);
+    for (uint J = 0; J < F->Figure.Total_Frame_Count; J++) free (F->Figure.Frame_Vertices[J]);
+  }
 
   // Shader binding table
   vkDestroyBuffer (Device, Shader_Binding_Table_Buffer.Buffer, NULL);
@@ -4030,6 +4103,60 @@ void GPU_Pool_Destroy (GPU_Pool *Pool) {
   }
   *Pool = (GPU_Pool){0};
 }
+
+// ═══════════════════════
+//   Figure_Pool_Init
+// ═══════════════════════
+
+void Figure_Pool_Init (Figure_Pool *Pool) {
+  memset (Pool, 0, sizeof *Pool);
+  Pool->Free_Count = FIGURE_POOL_MAX;
+  for (uint I = 0; I < FIGURE_POOL_MAX; I++) Pool->Free_Stack[I] = FIGURE_POOL_MAX - 1 - I; // LIFO: low indices first
+}
+
+// ════════════════════════
+//   Figure_Pool_Alloc
+// ════════════════════════
+
+Figure_Handle Figure_Pool_Alloc (Figure_Pool *Pool, Figure_Instance **Out) {
+  if (Pool->Free_Count == 0) {printf ("[pool] FULL — %u slots exhausted\n", FIGURE_POOL_MAX); *Out = NULL; return FIGURE_HANDLE_NULL;}
+  uint Index = Pool->Free_Stack[--Pool->Free_Count];
+  memset (&Pool->Slots[Index], 0, sizeof (Figure_Instance));
+  Pool->Active[Index] = 1;
+  Pool->Active_Count++;
+  *Out = &Pool->Slots[Index];
+  return (Figure_Handle){.Index = Index, .Generation = Pool->Generations[Index]};
+}
+
+// ════════════════════════
+//   Figure_Pool_Free
+// ════════════════════════
+
+void Figure_Pool_Free (Figure_Pool *Pool, Figure_Handle Handle) {
+  if (Handle.Index >= FIGURE_POOL_MAX) return;
+  if (Handle.Generation != Pool->Generations[Handle.Index]) return; // stale handle
+  if (not Pool->Active[Handle.Index]) return;
+  Pool->Active[Handle.Index] = 0;
+  Pool->Generations[Handle.Index]++;
+  Pool->Free_Stack[Pool->Free_Count++] = Handle.Index;
+  Pool->Active_Count--;
+}
+
+// ════════════════════════
+//   Figure_Pool_Get
+// ════════════════════════
+
+Figure_Instance *Figure_Pool_Get (Figure_Pool *Pool, Figure_Handle Handle) {
+  if (Handle.Index >= FIGURE_POOL_MAX) return NULL;
+  return (Handle.Generation == Pool->Generations[Handle.Index] and Pool->Active[Handle.Index])
+       ? &Pool->Slots[Handle.Index] : NULL;
+}
+
+// ════════════════════════
+//   Figure_Pool_Count
+// ════════════════════════
+
+uint Figure_Pool_Count (const Figure_Pool *Pool) { return Pool->Active_Count; }
 
 // ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 //
@@ -4640,31 +4767,117 @@ void Movement_Style_Toggle (Player *P) {
 }
 
 // ═════════════════════
-//   Skeleton_Evaluate
-// ═════════════════════
+//   Figure_Upload_Skeleton
+// ═════════════════════════
+//
+// Upload skeletal hierarchy data to GPU SSBOs (called once at load time). After this, all
+// bone evaluation happens on the GPU — no CPU-side Skeleton_Evaluate needed.
 
-void Skeleton_Evaluate (Figure_Instance *E, float Time) {
+void Figure_Upload_Skeleton (Figure_Instance *E) {
   if (E->Figure.Bone_Count <= 0) return;
+  uint BC = (uint)E->Figure.Bone_Count;
 
-  // Build world-space bone matrices from the bind pose hierarchy
-  float Local[FIGURE_MAX_BONES][3][4];
-  for (int I = 0; I < E->Figure.Bone_Count; I++)
-    memcpy (Local[I], E->Figure.Bind_Pose[I], sizeof (float) * 12);
+  // Bind pose matrices (3x4 row-major, BC entries)
+  E->Bone_Buffer = Buffer_Stage_Upload (/*Command_Buffer =>*/ Command_Buffer,
+                                        /*Queue          =>*/ Queue,
+                                        /*Data           =>*/ E->Figure.Bind_Pose,
+                                        /*Size           =>*/ sizeof (float) * 12 * BC,
+                                        /*Usage          =>*/ VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
 
-  // Walk hierarchy: Pose[i] = Parent_World * Local[i]
-  for (int I = 0; I < E->Figure.Bone_Count; I++) {
-    if (E->Figure.Bone_Parents[I] >= 0 and E->Figure.Bone_Parents[I] < I)
-      Mat34_Mul (E->Pose[E->Figure.Bone_Parents[I]].M, Local[I], E->Pose[I].M);
-    else
-      memcpy (E->Pose[I].M, Local[I], sizeof (float) * 12);
-  }
+  // Inverse bind pose matrices
+  E->Inv_Bind_Buffer = Buffer_Stage_Upload (/*Command_Buffer =>*/ Command_Buffer,
+                                            /*Queue          =>*/ Queue,
+                                            /*Data           =>*/ E->Figure.Inv_Bind,
+                                            /*Size           =>*/ sizeof (float) * 12 * BC,
+                                            /*Usage          =>*/ VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
 
-  // Compose with inverse bind-pose: Final[i] = Pose[i] * InvBind[i]
-  for (int I = 0; I < E->Figure.Bone_Count; I++) {
-    float Tmp[3][4];
-    Mat34_Mul (E->Pose[I].M, E->Figure.Inv_Bind[I], Tmp);
-    memcpy (E->Pose[I].M, Tmp, sizeof (float) * 12);
-  }
+  // Parent indices (int per bone)
+  E->Bone_Parent_Buffer = Buffer_Stage_Upload (/*Command_Buffer =>*/ Command_Buffer,
+                                               /*Queue          =>*/ Queue,
+                                               /*Data           =>*/ E->Figure.Bone_Parents,
+                                               /*Size           =>*/ sizeof (int) * BC,
+                                               /*Usage          =>*/ VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+
+  // Pose output buffer (device-local, written by compute shader each frame)
+  E->Pose_Buffer = Buffer_Allocate (/*Size         =>*/ sizeof (float) * 12 * BC,
+                                    /*Usage        =>*/ VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                                    /*Memory_Flags =>*/ VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+
+  printf ("[skeleton] uploaded %u bones to GPU\n", BC);
+}
+
+// ════════════════════════════
+//   Figure_Skeleton_Dispatch
+// ════════════════════════════
+//
+// Single compute dispatch: Pass 0 evaluates the bone hierarchy on GPU (one invocation per bone),
+// Pass 1 skins all vertices using the computed pose matrices. Two dispatches back-to-back in one
+// command buffer with a barrier between them.
+
+void Figure_Skeleton_Dispatch (Figure_Instance *E) {
+  if (E->Figure.Bone_Count <= 0 or E->Figure.Vertex_Count == 0) return;
+
+  VkCommandBuffer Cmd;
+  VK_CHECK (vkAllocateCommandBuffers (/*device          =>*/ Device,
+                                      /*pAllocateInfo   =>*/ &(VkCommandBufferAllocateInfo){
+                                        .sType              = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+                                        .commandPool        = Command_Pool,
+                                        .level              = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+                                        .commandBufferCount = 1},
+                                      /*pCommandBuffers =>*/ &Cmd));
+  VK_CHECK (vkBeginCommandBuffer (/*commandBuffer =>*/ Cmd,
+                                  /*pBeginInfo    =>*/ &(VkCommandBufferBeginInfo){
+                                    .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+                                    .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT}));
+  vkCmdBindPipeline (Cmd, VK_PIPELINE_BIND_POINT_COMPUTE, Skinning_Pipeline);
+
+  // Bind all 6 SSBOs via push descriptors
+  VkDescriptorBufferInfo Infos[6] = {
+    {E->Bone_Buffer.Buffer,        0, VK_WHOLE_SIZE},  // 0: bind pose
+    {E->Inv_Bind_Buffer.Buffer,    0, VK_WHOLE_SIZE},  // 1: inv bind
+    {E->Bone_Parent_Buffer.Buffer, 0, VK_WHOLE_SIZE},  // 2: parents
+    {E->Pose_Buffer.Buffer,        0, VK_WHOLE_SIZE},  // 3: pose output
+    {E->Vertex_Buffer.Buffer,      0, VK_WHOLE_SIZE},  // 4: bind-pose vertices
+    {E->Vertex_Buffer.Buffer,      0, VK_WHOLE_SIZE},  // 5: skinned output (in-place)
+  };
+  VkWriteDescriptorSet Writes[6];
+  for (int I = 0; I < 6; I++)
+    Writes[I] = (VkWriteDescriptorSet){.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstBinding = (uint)I,
+                                        .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                                        .pBufferInfo = &Infos[I]};
+
+  PFN_vkCmdPushDescriptorSetKHR Push_Desc =
+    (PFN_vkCmdPushDescriptorSetKHR)vkGetDeviceProcAddr (Device, "vkCmdPushDescriptorSetKHR");
+  Push_Desc (Cmd, VK_PIPELINE_BIND_POINT_COMPUTE, Skinning_Pipeline_Layout, 0, 6, Writes);
+
+  // Pass 0: bone hierarchy evaluation (one invocation per bone)
+  uint Push_0[3] = {E->Figure.Vertex_Count, (uint)E->Figure.Bone_Count, 0};
+  vkCmdPushConstants (Cmd, Skinning_Pipeline_Layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, 12, Push_0);
+  vkCmdDispatch (Cmd, ((uint)E->Figure.Bone_Count + 63) / 64, 1, 1);
+
+  // Memory barrier: pose buffer written by pass 0, read by pass 1
+  vkCmdPipelineBarrier (/*commandBuffer         =>*/ Cmd,
+                        /*srcStageMask          =>*/ VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                        /*dstStageMask          =>*/ VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                        /*dependencyFlags       =>*/ 0,
+                        /*memoryBarrierCount    =>*/ 1,
+                        /*pMemoryBarriers       =>*/ &(VkMemoryBarrier){
+                          .sType         = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
+                          .srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT,
+                          .dstAccessMask = VK_ACCESS_SHADER_READ_BIT},
+                        /*bufferMemoryBarrierCount =>*/ 0, /*pBufferMemoryBarriers =>*/ NULL,
+                        /*imageMemoryBarrierCount  =>*/ 0, /*pImageMemoryBarriers  =>*/ NULL);
+
+  // Pass 1: vertex skinning (one invocation per vertex)
+  uint Push_1[3] = {E->Figure.Vertex_Count, (uint)E->Figure.Bone_Count, 1};
+  vkCmdPushConstants (Cmd, Skinning_Pipeline_Layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, 12, Push_1);
+  vkCmdDispatch (Cmd, (E->Figure.Vertex_Count + 63) / 64, 1, 1);
+
+  VK_CHECK (vkEndCommandBuffer (Cmd));
+  VK_CHECK (vkQueueSubmit (Queue, 1, &(VkSubmitInfo){.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+                                                      .commandBufferCount = 1, .pCommandBuffers = &Cmd}, VK_NULL_HANDLE));
+  vkQueueWaitIdle (Queue);
+  vkFreeCommandBuffers (Device, Command_Pool, 1, &Cmd);
 }
 
 // ═════════════════════
@@ -6101,86 +6314,7 @@ Articulated_Figure Figure_Load_Weapon (const char *Path) {
   return Figure;
 }
 
-// ══════════════════════════
-//   Skeleton_Skin_Dispatch
-// ══════════════════════════
-
-void Skeleton_Skin_Dispatch (Figure_Instance *Entity_Ptr) {
-  if (Entity_Ptr->Figure.Bone_Count <= 0 or Entity_Ptr->Figure.Vertex_Count == 0) return;
-
-  // Upload the current pose matrices into the entity's bone SSBO
-  void *Mapped_Memory;
-  VK_CHECK (vkMapMemory (/*device  =>*/ Device,
-                         /*memory  =>*/ Entity_Ptr->Bone_Buffer.Memory,
-                         /*offset  =>*/ 0,
-                         /*size    =>*/ sizeof (Bone_Matrix) * Entity_Ptr->Figure.Bone_Count,
-                         /*flags   =>*/ 0,
-                         /*ppData  =>*/ &Mapped_Memory));
-  memcpy (Mapped_Memory, Entity_Ptr->Pose, sizeof (Bone_Matrix) * Entity_Ptr->Figure.Bone_Count);
-  vkUnmapMemory (Device, Entity_Ptr->Bone_Buffer.Memory);
-
-  // Allocate a one-shot command buffer and record the skinning compute dispatch
-  VkCommandBuffer Skinning_Command_Buffer;
-  VK_CHECK (vkAllocateCommandBuffers (/*device          =>*/ Device,
-                                      /*pAllocateInfo   =>*/ &(VkCommandBufferAllocateInfo){
-                                        .sType              = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
-                                        .commandPool        = Command_Pool,
-                                        .level              = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
-                                        .commandBufferCount = 1},
-                                      /*pCommandBuffers =>*/ &Skinning_Command_Buffer));
-  VK_CHECK (vkBeginCommandBuffer (/*commandBuffer =>*/ Skinning_Command_Buffer,
-                                  /*pBeginInfo    =>*/ &(VkCommandBufferBeginInfo){
-                                    .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
-                                    .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT}));
-  vkCmdBindPipeline (Skinning_Command_Buffer, VK_PIPELINE_BIND_POINT_COMPUTE, Skinning_Pipeline);
-
-  // Push vertex count and bone count as a uvec2 push constant
-  uint Push[2] = {Entity_Ptr->Figure.Vertex_Count, (uint)Entity_Ptr->Figure.Bone_Count};
-  vkCmdPushConstants (/*commandBuffer =>*/ Skinning_Command_Buffer,
-                      /*layout        =>*/ Skinning_Pipeline_Layout,
-                      /*stageFlags    =>*/ VK_SHADER_STAGE_COMPUTE_BIT,
-                      /*offset        =>*/ 0,
-                      /*size          =>*/ 8,
-                      /*pValues       =>*/ Push);
-
-  // Bind the bone SSBO (set 0), bind-pose vertex buffer (set 1), and skinned output buffer (set 2)
-  VkDescriptorBufferInfo Bone_Info   = {Entity_Ptr->Bone_Buffer.Buffer,   0, VK_WHOLE_SIZE};
-  VkDescriptorBufferInfo Bind_Info   = {Entity_Ptr->Vertex_Buffer.Buffer, 0, VK_WHOLE_SIZE};
-  VkDescriptorBufferInfo Output_Info = {Entity_Ptr->Vertex_Buffer.Buffer, 0, VK_WHOLE_SIZE};
-  VkWriteDescriptorSet Writes[] = {
-    {.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstBinding = 0, .descriptorCount = 1,
-     .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .pBufferInfo = &Bone_Info},
-    {.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstBinding = 1, .descriptorCount = 1,
-     .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .pBufferInfo = &Bind_Info},
-    {.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstBinding = 2, .descriptorCount = 1,
-     .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .pBufferInfo = &Output_Info}};
-  PFN_vkCmdPushDescriptorSetKHR Push_Desc =
-    (PFN_vkCmdPushDescriptorSetKHR)vkGetDeviceProcAddr (Device, "vkCmdPushDescriptorSetKHR");
-  Push_Desc (/*commandBuffer        =>*/ Skinning_Command_Buffer,
-             /*pipelineBindPoint    =>*/ VK_PIPELINE_BIND_POINT_COMPUTE,
-             /*layout               =>*/ Skinning_Pipeline_Layout,
-             /*set                  =>*/ 0,
-             /*descriptorWriteCount =>*/ 3,
-             /*pDescriptorWrites    =>*/ Writes);
-
-  // Dispatch: one compute invocation per vertex, grouped into workgroups of 64
-  vkCmdDispatch (Skinning_Command_Buffer, (Entity_Ptr->Figure.Vertex_Count + 63) / 64, 1, 1);
-
-  // End recording and submit without a fence; synchronize by blocking on the queue
-  VK_CHECK (vkEndCommandBuffer (Skinning_Command_Buffer));
-  VK_CHECK (vkQueueSubmit (/*queue       =>*/ Queue,
-                            /*submitCount =>*/ 1,
-                            /*pSubmits    =>*/ &(VkSubmitInfo){
-                              .sType              = VK_STRUCTURE_TYPE_SUBMIT_INFO,
-                              .commandBufferCount = 1,
-                              .pCommandBuffers    = &Skinning_Command_Buffer},
-                            /*fence       =>*/ VK_NULL_HANDLE));
-
-  // Block the CPU until the GPU finishes skinning, then release the one-shot command buffer
-  vkQueueWaitIdle (Queue);
-  vkFreeCommandBuffers (Device, Command_Pool, 1, &Skinning_Command_Buffer);
-
-} // Skeleton_Skin_Dispatch
+// (Skeleton_Skin_Dispatch removed — replaced by Figure_Skeleton_Dispatch which does both bone evaluation and skinning on GPU)
 
 // ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 //
@@ -8278,10 +8412,13 @@ Acceleration_Structure Build_World_Bottom_Level (const Scene *Scene_Data) {
 } // Build_World_Bottom_Level
 
 // ══════════════════════════════════
-//   Weapon_Bottom_Level_Initialize
-// ══════════════════════════════════
+//   Figure_BLAS_Initialize
+// ════════════════════════════
+//
+// Unified BLAS initialization for any Figure_Instance (weapon, enemy, prop). Allocates host-visible vertex buffer,
+// device-local index/texture-id buffers, and builds the initial BLAS with FAST_BUILD + ALLOW_UPDATE.
 
-void Weapon_Bottom_Level_Initialize (Figure_Instance *Weapon) {
+void Figure_BLAS_Initialize (Figure_Instance *Weapon) {
   if (not Weapon->Figure.Vertex_Count) return;
 
   // Allocate a host-visible copy of the weapon vertices for per-frame CPU transformation
@@ -8399,23 +8536,27 @@ void Weapon_Bottom_Level_Initialize (Figure_Instance *Weapon) {
                                    /*pInfo  =>*/ &(VkAccelerationStructureDeviceAddressInfoKHR){
                                      .sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_DEVICE_ADDRESS_INFO_KHR,
                                      .accelerationStructure = Weapon->Bottom_Level.Handle});
-  printf ("[weapon] BLAS built: %u triangles\n", Primitive_Count);
+  printf ("[figure] BLAS built: %u triangles\n", Primitive_Count);
 
-} // Weapon_Bottom_Level_Initialize
+} // Figure_BLAS_Initialize
 
-// ═══════════════════════════════
-//   Weapon_Bottom_Level_Rebuild
-// ═══════════════════════════════
+// ════════════════════════════
+//   Figure_BLAS_Rebuild
+// ════════════════════════════
+//
+// Rebuild/refit a figure's BLAS after vertex data has changed. Re-uploads either Transformed_Vertices (weapon viewmodel)
+// or Current_Vertices (frame-animated entity) and performs an in-place BLAS refit (MODE_UPDATE).
 
-void Weapon_Bottom_Level_Rebuild (Figure_Instance *Weapon) {
+void Figure_BLAS_Rebuild (Figure_Instance *Weapon) {
 
-  // Skip if no weapon geometry is loaded
   if (not Weapon->Figure.Vertex_Count) return;
 
-  // Re-upload the CPU-transformed vertices to the host-visible GPU buffer
-  Buffer_Upload (Weapon->Vertex_Buffer, Weapon->Transformed_Vertices, sizeof (Vertex) * Weapon->Figure.Vertex_Count);
+  // Re-upload the appropriate vertex source to the GPU buffer
+  const void *Vertex_Source = Weapon->Transformed_Vertices ? (const void *)Weapon->Transformed_Vertices
+                                                           : (const void *)Weapon->Current_Vertices;
+  if (Vertex_Source) Buffer_Upload (Weapon->Vertex_Buffer, Vertex_Source, sizeof (Vertex) * Weapon->Figure.Vertex_Count);
 
-  // Rebuild the BLAS with the updated vertex positions (full rebuild, not update)
+  // Refit the BLAS with the updated vertex positions
   VkAccelerationStructureGeometryKHR Geometry = {
     .sType        = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR,
     .geometryType = VK_GEOMETRY_TYPE_TRIANGLES_KHR,
@@ -8471,180 +8612,7 @@ void Weapon_Bottom_Level_Rebuild (Figure_Instance *Weapon) {
   VK_CHECK (vkQueueWaitIdle (Queue));
 }
 
-// ══════════════════════════════════
-//   Entity_Bottom_Level_Initialize
-// ══════════════════════════════════
-
-void Entity_Bottom_Level_Initialize (Figure_Instance *Enemy) {
-  if (not Enemy->Figure.Vertex_Count) return;
-
-  // Host-visible vertex buffer for per-frame CPU uploads (host-visible so we can update each frame without staging)
-  Enemy->Vertex_Buffer = Buffer_Allocate (/*Size         =>*/ sizeof (Vertex) * Enemy->Figure.Vertex_Count,
-                                          /*Usage        =>*/ VK_BUFFER_USAGE_VERTEX_BUFFER_BIT
-                                                            | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
-                                                            | VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR
-                                                            | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
-                                          /*Memory_Flags =>*/ VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT
-                                                            | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
-  Buffer_Upload (Enemy->Vertex_Buffer, Enemy->Current_Vertices, sizeof (Vertex) * Enemy->Figure.Vertex_Count);
-
-  // index and texture-id buffers (device-local - these never change after the initial upload)
-  Enemy->Index_Buffer      = Buffer_Stage_Upload (/*Command_Buffer =>*/ Command_Buffer,
-                                                  /*Queue          =>*/ Queue,
-                                                  /*Data           =>*/ Enemy->Figure.Indices,
-                                                  /*Size           =>*/ sizeof (uint) * Enemy->Figure.Index_Count,
-                                                  /*Usage          =>*/ VK_BUFFER_USAGE_INDEX_BUFFER_BIT
-                                                                      | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
-                                                                      | VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR);
-  Enemy->Texture_Id_Buffer = Buffer_Stage_Upload (/*Command_Buffer =>*/ Command_Buffer,
-                                                  /*Queue          =>*/ Queue,
-                                                  /*Data           =>*/ Enemy->Figure.Texture_Ids,
-                                                  /*Size           =>*/ sizeof (uint) * Enemy->Figure.Triangle_Count,
-                                                  /*Usage          =>*/ VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
-
-  // Build the initial BLAS with FAST_BUILD + ALLOW_UPDATE for per-frame refit
-  VkAccelerationStructureGeometryKHR Geometry = {
-    .sType        = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR,
-    .geometryType = VK_GEOMETRY_TYPE_TRIANGLES_KHR,
-    .flags        = VK_GEOMETRY_OPAQUE_BIT_KHR,
-    .geometry.triangles = {
-      .sType                    = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_TRIANGLES_DATA_KHR,
-      .vertexFormat             = VK_FORMAT_R32G32B32_SFLOAT,
-      .vertexData.deviceAddress = Enemy->Vertex_Buffer.Address,
-      .vertexStride             = sizeof (Vertex),
-      .maxVertex                = Enemy->Figure.Vertex_Count - 1,
-      .indexType                = VK_INDEX_TYPE_UINT32,
-      .indexData.deviceAddress  = Enemy->Index_Buffer.Address}};
-
-  // Configure the build for fast construction with per-frame update support
-  VkAccelerationStructureBuildGeometryInfoKHR Build_Info = {
-    .sType         = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR,
-    .type          = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR,
-    .flags         = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_BUILD_BIT_KHR
-                   | VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_UPDATE_BIT_KHR,
-    .geometryCount = 1,
-    .pGeometries   = &Geometry};
-
-  // Query required BLAS and scratch buffer sizes from the driver for the given triangle geometry
-  uint Primitive_Count = Enemy->Figure.Triangle_Count;
-  VkAccelerationStructureBuildSizesInfoKHR Build_Sizes = {.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR};
-  vkGetAccelerationStructureBuildSizes (/*device             =>*/ Device,
-                                        /*buildType          =>*/ VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR,
-                                        /*pBuildInfo         =>*/ &Build_Info,
-                                        /*pMaxPrimitiveCounts =>*/ &Primitive_Count,
-                                        /*pSizeInfo          =>*/ &Build_Sizes);
-
-  // Allocate BLAS storage, create the acceleration structure, and allocate persistent scratch memory for per-frame refits
-  Enemy->Bottom_Level.Buffer  = Buffer_Allocate (/*Size         =>*/ Build_Sizes.accelerationStructureSize,
-                                                 /*Usage        =>*/ VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR
-                                                                   | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
-                                                 /*Memory_Flags =>*/ VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-  VK_CHECK (vkCreateAccelerationStructure (/*device      =>*/ Device,
-                                           /*pCreateInfo =>*/ &(VkAccelerationStructureCreateInfoKHR){
-                                             .sType  = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_CREATE_INFO_KHR,
-                                             .buffer = Enemy->Bottom_Level.Buffer.Buffer,
-                                             .size   = Build_Sizes.accelerationStructureSize,
-                                             .type   = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR},
-                                           /*pAllocator  =>*/ NULL,
-                                           /*pStructure  =>*/ &Enemy->Bottom_Level.Handle));
-  Enemy->Bottom_Level_Scratch = Buffer_Allocate (/*Size         =>*/ Build_Sizes.buildScratchSize,
-                                                 /*Usage        =>*/ VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
-                                                                   | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
-                                                 /*Memory_Flags =>*/ VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-
-  // Finalize the build info with destination and scratch addresses
-  Build_Info.dstAccelerationStructure  = Enemy->Bottom_Level.Handle;
-  Build_Info.scratchData.deviceAddress = Enemy->Bottom_Level_Scratch.Address;
-
-  // Record and submit a one-shot command buffer to build the enemy BLAS
-  VkAccelerationStructureBuildRangeInfoKHR Range = {.primitiveCount = Primitive_Count};
-  const VkAccelerationStructureBuildRangeInfoKHR *Range_Pointer = &Range;
-  VK_CHECK (vkResetCommandBuffer (Command_Buffer, 0));
-  VK_CHECK (vkBeginCommandBuffer (/*commandBuffer =>*/ Command_Buffer,
-                                  /*pBeginInfo    =>*/ &(VkCommandBufferBeginInfo){
-                                    .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
-                                    .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT}));
-  vkCmdBuildAccelerationStructures (/*commandBuffer     =>*/ Command_Buffer,
-                                    /*infoCount         =>*/ 1,
-                                    /*pInfos            =>*/ &Build_Info,
-                                    /*ppBuildRangeInfos =>*/ &Range_Pointer);
-  VK_CHECK (vkEndCommandBuffer (Command_Buffer));
-  VK_CHECK (vkQueueSubmit (/*queue       =>*/ Queue,
-                           /*submitCount =>*/ 1,
-                           /*pSubmits    =>*/ &(VkSubmitInfo){
-                             .sType              = VK_STRUCTURE_TYPE_SUBMIT_INFO,
-                             .commandBufferCount = 1,
-                             .pCommandBuffers    = &Command_Buffer},
-                           /*fence       =>*/ VK_NULL_HANDLE));
-  VK_CHECK (vkQueueWaitIdle (Queue));
-
-  // Query the BLAS device address for TLAS instance referencing
-  Enemy->Bottom_Level.Address = vkGetAccelerationStructureDeviceAddress (/*device =>*/ Device,
-                                  /*pInfo  =>*/ &(VkAccelerationStructureDeviceAddressInfoKHR){
-                                    .sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_DEVICE_ADDRESS_INFO_KHR,
-      .accelerationStructure = Enemy->Bottom_Level.Handle});
-  printf ("[enemy] BLAS built: %u triangles\n", Primitive_Count);
-}
-
-// ═══════════════════════════════
-//   Entity_Bottom_Level_Rebuild
-// ═══════════════════════════════
-
-void Entity_Bottom_Level_Rebuild (Figure_Instance *Enemy) {
-  if (not Enemy->Figure.Vertex_Count) return;
-
-  // Re-upload the transformed vertices to the GPU buffer
-  Buffer_Upload (Enemy->Vertex_Buffer, Enemy->Current_Vertices, sizeof (Vertex) * Enemy->Figure.Vertex_Count);
-
-  // Define the triangle geometry referencing the updated vertex data
-  VkAccelerationStructureGeometryKHR Geometry = {
-    .sType        = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR,
-    .geometryType = VK_GEOMETRY_TYPE_TRIANGLES_KHR,
-    .flags        = VK_GEOMETRY_OPAQUE_BIT_KHR,
-    .geometry.triangles = {
-      .sType                    = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_TRIANGLES_DATA_KHR,
-      .vertexFormat             = VK_FORMAT_R32G32B32_SFLOAT,
-      .vertexData.deviceAddress = Enemy->Vertex_Buffer.Address,
-      .vertexStride             = sizeof (Vertex),
-      .maxVertex                = Enemy->Figure.Vertex_Count - 1,
-      .indexType                = VK_INDEX_TYPE_UINT32,
-      .indexData.deviceAddress  = Enemy->Index_Buffer.Address}};
-
-  // Configure in-place BLAS refit using the existing structure
-  VkAccelerationStructureBuildGeometryInfoKHR Build_Info = {
-    .sType                     = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR,
-    .type                      = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR,
-    .flags                     = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_BUILD_BIT_KHR
-                               | VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_UPDATE_BIT_KHR,
-    .mode                      = VK_BUILD_ACCELERATION_STRUCTURE_MODE_UPDATE_KHR,
-    .srcAccelerationStructure  = Enemy->Bottom_Level.Handle,
-    .dstAccelerationStructure  = Enemy->Bottom_Level.Handle,
-    .scratchData.deviceAddress = Enemy->Bottom_Level_Scratch.Address,
-    .geometryCount             = 1,
-    .pGeometries               = &Geometry};
-
-  // Record and submit the BLAS refit command into a one-shot command buffer
-  VkAccelerationStructureBuildRangeInfoKHR Range = {.primitiveCount = Enemy->Figure.Triangle_Count};
-  const VkAccelerationStructureBuildRangeInfoKHR *Range_Pointer = &Range;
-  VK_CHECK (vkResetCommandBuffer (Command_Buffer, 0));
-  VK_CHECK (vkBeginCommandBuffer (/*commandBuffer =>*/ Command_Buffer,
-                                  /*pBeginInfo    =>*/ &(VkCommandBufferBeginInfo){
-                                    .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
-                                    .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT}));
-  vkCmdBuildAccelerationStructures (/*commandBuffer     =>*/ Command_Buffer,
-                                    /*infoCount         =>*/ 1,
-                                    /*pInfos            =>*/ &Build_Info,
-                                    /*ppBuildRangeInfos =>*/ &Range_Pointer);
-  VK_CHECK (vkEndCommandBuffer (Command_Buffer));
-  VK_CHECK (vkQueueSubmit (/*queue       =>*/ Queue,
-                           /*submitCount =>*/ 1,
-                           /*pSubmits    =>*/ &(VkSubmitInfo){
-                             .sType              = VK_STRUCTURE_TYPE_SUBMIT_INFO,
-                             .commandBufferCount = 1,
-                             .pCommandBuffers    = &Command_Buffer},
-                           /*fence       =>*/ VK_NULL_HANDLE));
-  VK_CHECK (vkQueueWaitIdle (Queue));
-}
+// (Entity_Bottom_Level_Initialize / Entity_Bottom_Level_Rebuild removed — merged into Figure_BLAS_Initialize / Figure_BLAS_Rebuild above)
 
 // ════════════════════════
 //   Top_Level_Initialize
@@ -8719,14 +8687,11 @@ void Top_Level_Initialize (uint Maximum_Instances) {
 //   Top_Level_Rebuild
 // ═════════════════════
 
-void Top_Level_Rebuild (Acceleration_Structure *World, Acceleration_Structure *Weapon, Acceleration_Structure *Enemy,
-                        const float *Player_Body_Transform) {
+void Top_Level_Rebuild (Acceleration_Structure *World, Figure_Pool *Pool) {
 
-  // Zero-initialize the instance descriptors
-  VkAccelerationStructureInstanceKHR Instances[4];
-  memset (Instances, 0, sizeof (Instances));
-
-  // Instance 0: the world geometry with identity transform, visible to all rays
+  // Instance 0: world geometry (identity transform, visible to all rays)
+  VkAccelerationStructureInstanceKHR Instances[1 + FIGURE_POOL_MAX];
+  memset (&Instances[0], 0, sizeof Instances[0]);
   Instances[0].transform.matrix[0][0]         = 1.f;
   Instances[0].transform.matrix[1][1]         = 1.f;
   Instances[0].transform.matrix[2][2]         = 1.f;
@@ -8734,52 +8699,33 @@ void Top_Level_Rebuild (Acceleration_Structure *World, Acceleration_Structure *W
   Instances[0].instanceCustomIndex            = 0;
   Instances[0].flags                          = VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR;
   Instances[0].accelerationStructureReference = World->Address;
+  uint N = 1;
 
-  // Track the number of active TLAS instances
-  uint Instance_Count = 1;
+  // Append one TLAS instance per active figure from the pool
+  for (uint I = 0; I < FIGURE_POOL_MAX and N < 1 + FIGURE_POOL_MAX; I++) {
+    if (not Pool->Active[I]) continue;
+    Figure_Instance *F = &Pool->Slots[I];
+    if (not F->Bottom_Level.Handle) continue;
 
-  // Instance 1 (optional): the weapon viewmodel, excluded from shadow rays via mask 0x01
-  if (Weapon and Weapon->Handle) {
-    Instances[1].transform.matrix[0][0]         = 1.f;
-    Instances[1].transform.matrix[1][1]         = 1.f;
-    Instances[1].transform.matrix[2][2]         = 1.f;
-    Instances[1].mask                           = 0x01;
-    Instances[1].instanceCustomIndex            = 1;
-    Instances[1].flags                          = VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR;
-    Instances[1].accelerationStructureReference = Weapon->Address;
-    Instance_Count = 2;
+    // Pack instanceCustomIndex: [7:0] = figure slot (I + 1), [8] = weapon flag, [23:9] = texture base
+    uint Is_Weapon_Bit = (F->Ray_Mask == 0x01) ? 0x100u : 0u;
+    uint Custom_Index  = (I + 1) | Is_Weapon_Bit | (F->Texture_Base_Index << 9);
+
+    memset (&Instances[N], 0, sizeof Instances[N]);
+    memcpy (&Instances[N].transform, F->TLAS_Transform, sizeof (float) * 12);
+    Instances[N].mask                           = F->Ray_Mask;
+    Instances[N].instanceCustomIndex            = Custom_Index;
+    Instances[N].flags                          = VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR;
+    Instances[N].accelerationStructureReference = F->Bottom_Level.Address;
+    N++;
   }
 
-  // Instance 2 (optional): entity (animated character), visible to all rays (casts shadows)
-  if (Enemy and Enemy->Handle) {
-    Instances[2].transform.matrix[0][0]         = 1.f;
-    Instances[2].transform.matrix[1][1]         = 1.f;
-    Instances[2].transform.matrix[2][2]         = 1.f;
-    Instances[2].mask                           = 0xFF;
-    Instances[2].instanceCustomIndex            = 2;
-    Instances[2].flags                          = VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR;
-    Instances[2].accelerationStructureReference = Enemy->Address;
-    Instance_Count = 3;
+  // Upload and build TLAS
+  Buffer_Upload (Top_Level_Instance_Buffer, Instances, sizeof (VkAccelerationStructureInstanceKHR) * N);
 
-    // Instance 3 (optional): player body - same BLAS as entity, repositioned at the player's location
-    if (Player_Body_Transform) {
-      memcpy (&Instances[3].transform, Player_Body_Transform, sizeof (float) * 12);
-      Instances[3].mask                           = 0x02;
-      Instances[3].instanceCustomIndex            = 2;  // Same as entity - shares entity buffers
-      Instances[3].flags                          = VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR;
-      Instances[3].accelerationStructureReference = Enemy->Address;  // Reuse the enemy BLAS
-      Instance_Count = 4;
-    }
-  }
-
-  // Upload instance data to the host-visible instance buffer
-  Buffer_Upload (Top_Level_Instance_Buffer, Instances, sizeof (VkAccelerationStructureInstanceKHR) * Instance_Count);
-
-  // Set up the TLAS build range and geometry
-  VkAccelerationStructureBuildRangeInfoKHR Range = {.primitiveCount = Instance_Count};
+  VkAccelerationStructureBuildRangeInfoKHR Range = {.primitiveCount = N};
   const VkAccelerationStructureBuildRangeInfoKHR *Range_Pointer = &Range;
 
-  // TLAS geometry: references the instance buffer
   VkAccelerationStructureGeometryKHR Geometry = {
     .sType              = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR,
     .geometryType       = VK_GEOMETRY_TYPE_INSTANCES_KHR,
@@ -8789,8 +8735,7 @@ void Top_Level_Rebuild (Acceleration_Structure *World, Acceleration_Structure *W
       .arrayOfPointers    = VK_FALSE,
       .data.deviceAddress = Top_Level_Instance_Buffer.Address}};
 
-  // TLAS refit instead of full rebuild
-  int First_Build = 1;
+  static int First_Build = 1;
   VkAccelerationStructureBuildGeometryInfoKHR Build_Info = {
     .sType                     = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR,
     .type                      = VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR,
@@ -8805,7 +8750,6 @@ void Top_Level_Rebuild (Acceleration_Structure *World, Acceleration_Structure *W
     .pGeometries               = &Geometry};
   First_Build = 0;
 
-  // Record and submit the TLAS rebuild command into a one-shot command buffer
   VK_CHECK (vkResetCommandBuffer (Command_Buffer, 0));
   VK_CHECK (vkBeginCommandBuffer (/*commandBuffer =>*/ Command_Buffer,
                                   /*pBeginInfo    =>*/ &(VkCommandBufferBeginInfo){
@@ -8816,8 +8760,6 @@ void Top_Level_Rebuild (Acceleration_Structure *World, Acceleration_Structure *W
                                     /*pInfos            =>*/ &Build_Info,
                                     /*ppBuildRangeInfos =>*/ &Range_Pointer);
   VK_CHECK (vkEndCommandBuffer (Command_Buffer));
-
-  // Submit and wait for the TLAS rebuild to complete before the frame uses it
   VK_CHECK (vkQueueSubmit (/*queue       =>*/ Queue,
                            /*submitCount =>*/ 1,
                            /*pSubmits    =>*/ &(VkSubmitInfo){
@@ -9013,48 +8955,47 @@ void Denoise_Pipeline_Create () {
 
 void Raytracing_Pipeline_Create () {
 
-  // Define the 16 descriptor bindings for the ray tracing pipeline. Note: some bindings are entity geometry; with one being the texture
-  // array which must be last for variable count.
+  // Define 13 descriptor bindings (0-12). Bindings 8-10 are SSBO arrays indexed by figure slot for multi-figure support.
+  // Binding 12 (texture array) must be last for variable descriptor count.
   VkDescriptorSetLayoutBinding Bindings[] = {
-    {0,  VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, 1, VK_SHADER_STAGE_RAYGEN_BIT_KHR
-                                                         | VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR, NULL},
-    {1,  VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,              1, VK_SHADER_STAGE_RAYGEN_BIT_KHR,      NULL},
-    {2,  VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,             1, VK_SHADER_STAGE_RAYGEN_BIT_KHR
-                                                         | VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR
-                                                         | VK_SHADER_STAGE_MISS_BIT_KHR,        NULL},
-    {3,  VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,             1, VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR, NULL},
-    {4,  VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,             1, VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR, NULL},
-    {5,  VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,             1, VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR, NULL},
-    {6,  VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,             1, VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR, NULL},
-    {7,  VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,     1, VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR, NULL},
-    {8,  VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,             1, VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR, NULL},
-    {9,  VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,             1, VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR, NULL},
-    {10, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,             1, VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR, NULL},
-    {11, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,              1, VK_SHADER_STAGE_RAYGEN_BIT_KHR,      NULL}, // Depth output
-    {12, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,             1, VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR, NULL}, // Entity vertices
-    {13, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,             1, VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR, NULL}, // Entity indices
-    {14, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,             1, VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR, NULL}, // Entity texture IDs
-    {15, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, DESCRIPTOR_TEXTURE_SLOTS, VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR, NULL}};
+    {0,  VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR,     1, VK_SHADER_STAGE_RAYGEN_BIT_KHR
+                                                              | VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR, NULL},
+    {1,  VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,                  1, VK_SHADER_STAGE_RAYGEN_BIT_KHR,      NULL},
+    {2,  VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,                 1, VK_SHADER_STAGE_RAYGEN_BIT_KHR
+                                                              | VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR
+                                                              | VK_SHADER_STAGE_MISS_BIT_KHR,        NULL},
+    {3,  VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,                 1, VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR, NULL},
+    {4,  VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,                 1, VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR, NULL},
+    {5,  VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,                 1, VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR, NULL},
+    {6,  VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,                 1, VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR, NULL},
+    {7,  VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,         1, VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR, NULL},
+    {8,  VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, FIGURE_POOL_MAX, VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR, NULL},  // Figure vertices[]
+    {9,  VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, FIGURE_POOL_MAX, VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR, NULL},  // Figure indices[]
+    {10, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, FIGURE_POOL_MAX, VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR, NULL},  // Figure texture IDs[]
+    {11, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,                  1, VK_SHADER_STAGE_RAYGEN_BIT_KHR,      NULL}, // Depth output
+    {12, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, DESCRIPTOR_TEXTURE_SLOTS, VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR, NULL}};
 
-  // The texture array binding uses partially-bound and variable-count flags
-  VkDescriptorBindingFlags Binding_Flags[] = {0, 0, 0, 0, 0,
-                                              0, 0, 0, 0, 0,
-                                              0, 0, 0, 0, 0,
-                                               VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT
-                                             | VK_DESCRIPTOR_BINDING_VARIABLE_DESCRIPTOR_COUNT_BIT};
+  // Bindings 8-10 (figure SSBO arrays) and 12 (texture array) use partially-bound. Binding 12 also uses variable count.
+  VkDescriptorBindingFlags Binding_Flags[] = {0, 0, 0, 0, 0, 0, 0, 0,
+                                              VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT,    // 8: figure vertices
+                                              VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT,    // 9: figure indices
+                                              VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT,    // 10: figure tex ids
+                                              0,                                            // 11: depth
+                                              VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT
+                                            | VK_DESCRIPTOR_BINDING_VARIABLE_DESCRIPTOR_COUNT_BIT};  // 12: textures
 
   // Chain the binding flags extension into the descriptor set layout creation
   VkDescriptorSetLayoutBindingFlagsCreateInfo Binding_Flags_Info = {
     .sType         = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_BINDING_FLAGS_CREATE_INFO,
-    .bindingCount  = 16,
+    .bindingCount  = 13,
     .pBindingFlags = Binding_Flags};
 
-  // Create the descriptor set layout with all 16 bindings
+  // Create the descriptor set layout with all 13 bindings
   VK_CHECK (vkCreateDescriptorSetLayout (/*device      =>*/ Device,
                                          /*pCreateInfo =>*/ &(VkDescriptorSetLayoutCreateInfo){
                                            .sType        = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
                                            .pNext        = &Binding_Flags_Info,
-                                           .bindingCount = 16,
+                                           .bindingCount = 13,
                                            .pBindings    = Bindings},
                                          /*pAllocator  =>*/ NULL,
                                          /*pSetLayout  =>*/ &Descriptor_Set_Layout));
@@ -9165,14 +9106,15 @@ void Shader_Binding_Table_Create () {
 //   Descriptor_Set_Create
 // ═════════════════════════
 
-void Descriptor_Set_Create (Figure_Instance *Weapon, Figure_Instance *Enemy) {
+void Descriptor_Set_Create (Figure_Pool *Pool) {
 
-  // Allocate a descriptor pool large enough for all binding types
-  VkDescriptorPoolSize Pool_Sizes[] = {{VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, 1},
-                                       {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,              2}, // Color + Depth
-                                       {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,             1},
-                                       {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,             10}, // World/weapon + entities
-                                       {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,     DESCRIPTOR_TEXTURE_SLOTS + 1}}; // One added for lightmap
+  // Pool sizes: 4 world SSBOs + 3 * FIGURE_POOL_MAX figure SSBOs + 2 images + 1 UBO + 1 lightmap + texture array
+  VkDescriptorPoolSize Pool_Sizes[] = {
+    {VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, 1},
+    {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,              2},
+    {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,             1},
+    {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,             4 + 3 * FIGURE_POOL_MAX},
+    {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,     DESCRIPTOR_TEXTURE_SLOTS + 1}};
   VK_CHECK (vkCreateDescriptorPool (/*device          =>*/ Device,
                                     /*pCreateInfo     =>*/ &(VkDescriptorPoolCreateInfo){
                                       .sType         = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
@@ -9182,7 +9124,6 @@ void Descriptor_Set_Create (Figure_Instance *Weapon, Figure_Instance *Enemy) {
                                     /*pAllocator      =>*/ NULL,
                                     /*pDescriptorPool =>*/ &Descriptor_Pool));
 
-  // Allocate the descriptor set with a variable descriptor count for the texture array
   uint Variable_Count = Texture_Count;
   VkDescriptorSetVariableDescriptorCountAllocateInfo Variable_Allocate = {
     .sType              = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_VARIABLE_DESCRIPTOR_COUNT_ALLOCATE_INFO,
@@ -9197,62 +9138,70 @@ void Descriptor_Set_Create (Figure_Instance *Weapon, Figure_Instance *Enemy) {
                                         .pSetLayouts        = &Descriptor_Set_Layout},
                                       /*pDescriptorSets =>*/ &Descriptor_Set));
 
-  // Prepare descriptor info structures for each binding
+  // Fixed descriptor infos for world and global bindings
   VkWriteDescriptorSetAccelerationStructureKHR Acceleration_Write = {
     .sType                      = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET_ACCELERATION_STRUCTURE_KHR,
     .accelerationStructureCount = 1,
     .pAccelerationStructures    = &Top_Level.Handle};
-  VkDescriptorImageInfo  Image_Info             = {.imageView = Raytracing_Storage_Image.View, .imageLayout = VK_IMAGE_LAYOUT_GENERAL};
-  VkDescriptorBufferInfo Camera_Info            = {Camera_Uniform_Buffer.Buffer,     0, Camera_Uniform_Buffer.Size};
-  VkDescriptorBufferInfo Vertex_Info            = {Vertex_Buffer.Buffer,             0, Vertex_Buffer.Size};
-  VkDescriptorBufferInfo Index_Info             = {Index_Buffer.Buffer,              0, Index_Buffer.Size};
-  VkDescriptorBufferInfo Material_Info          = {Material_Buffer.Buffer,           0, Material_Buffer.Size};
-  VkDescriptorBufferInfo Texture_Id_Info        = {Texture_Id_Buffer.Buffer,         0, Texture_Id_Buffer.Size};
-  VkDescriptorBufferInfo Weapon_Vertex_Info     = {Weapon->Vertex_Buffer.Buffer,     0, Weapon->Vertex_Buffer.Size};
-  VkDescriptorBufferInfo Weapon_Index_Info      = {Weapon->Index_Buffer.Buffer,      0, Weapon->Index_Buffer.Size};
-  VkDescriptorBufferInfo Weapon_Texture_Id_Info = {Weapon->Texture_Id_Buffer.Buffer, 0, Weapon->Texture_Id_Buffer.Size};
-  VkDescriptorBufferInfo Entity_Vertex_Info     = {Enemy->Vertex_Buffer.Buffer,      0, Enemy->Vertex_Buffer.Size};
-  VkDescriptorBufferInfo Entity_Index_Info      = {Enemy->Index_Buffer.Buffer,       0, Enemy->Index_Buffer.Size};
-  VkDescriptorBufferInfo Entity_Texture_Id_Info = {Enemy->Texture_Id_Buffer.Buffer,  0, Enemy->Texture_Id_Buffer.Size};
+  VkDescriptorImageInfo  Image_Info      = {.imageView = Raytracing_Storage_Image.View, .imageLayout = VK_IMAGE_LAYOUT_GENERAL};
+  VkDescriptorBufferInfo Camera_Info     = {Camera_Uniform_Buffer.Buffer, 0, Camera_Uniform_Buffer.Size};
+  VkDescriptorBufferInfo Vertex_Info     = {Vertex_Buffer.Buffer,        0, Vertex_Buffer.Size};
+  VkDescriptorBufferInfo Index_Info      = {Index_Buffer.Buffer,         0, Index_Buffer.Size};
+  VkDescriptorBufferInfo Material_Info   = {Material_Buffer.Buffer,      0, Material_Buffer.Size};
+  VkDescriptorBufferInfo Texture_Id_Info = {Texture_Id_Buffer.Buffer,    0, Texture_Id_Buffer.Size};
+  VkDescriptorImageInfo  Lightmap_Info   = {.sampler     = Lightmap_Sampler,
+                                            .imageView   = Lightmap_View,
+                                            .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+  VkDescriptorImageInfo  Depth_Info      = {.imageView = Depth_Image.View, .imageLayout = VK_IMAGE_LAYOUT_GENERAL};
 
-  // Build the texture array descriptor info for all loaded textures (world + weapon)
-  VkDescriptorImageInfo *Texture_Infos = calloc (Texture_Count, sizeof (VkDescriptorImageInfo));
-  for (uint Index = 0; Index < Texture_Count; Index++) {
-    Texture_Infos[Index] = (VkDescriptorImageInfo){.sampler     = Texture_Sampler,
-                                                   .imageView   = Texture_Views[Index],
-                                                   .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+  // Build per-figure SSBO descriptor arrays (bindings 8, 9, 10) indexed by pool slot.
+  // Inactive slots get the world vertex buffer as a dummy (PARTIALLY_BOUND prevents access).
+  VkDescriptorBufferInfo Dummy = {Vertex_Buffer.Buffer, 0, Vertex_Buffer.Size};
+  VkDescriptorBufferInfo Fig_Vertex_Infos [FIGURE_POOL_MAX];
+  VkDescriptorBufferInfo Fig_Index_Infos  [FIGURE_POOL_MAX];
+  VkDescriptorBufferInfo Fig_Tex_Id_Infos [FIGURE_POOL_MAX];
+  uint Fig_Count = 0;
+  for (uint I = 0; I < FIGURE_POOL_MAX; I++) {
+    if (Pool->Active[I] and Pool->Slots[I].Vertex_Buffer.Buffer) {
+      Figure_Instance *F = &Pool->Slots[I];
+      Fig_Vertex_Infos [I] = (VkDescriptorBufferInfo){F->Vertex_Buffer.Buffer,     0, F->Vertex_Buffer.Size};
+      Fig_Index_Infos  [I] = (VkDescriptorBufferInfo){F->Index_Buffer.Buffer,      0, F->Index_Buffer.Size};
+      Fig_Tex_Id_Infos [I] = (VkDescriptorBufferInfo){F->Texture_Id_Buffer.Buffer, 0, F->Texture_Id_Buffer.Size};
+      Fig_Count = I + 1;
+    } else {
+      Fig_Vertex_Infos [I] = Dummy;
+      Fig_Index_Infos  [I] = Dummy;
+      Fig_Tex_Id_Infos [I] = Dummy;
+    }
   }
 
-  // Lightmap sampler descriptor
-  VkDescriptorImageInfo Lightmap_Info = {.sampler     = Lightmap_Sampler,
-                                         .imageView   = Lightmap_View,
-                                         .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+  // Texture array
+  VkDescriptorImageInfo *Texture_Infos = calloc (Texture_Count, sizeof (VkDescriptorImageInfo));
+  for (uint I = 0; I < Texture_Count; I++) {
+    Texture_Infos[I] = (VkDescriptorImageInfo){.sampler     = Texture_Sampler,
+                                               .imageView   = Texture_Views[I],
+                                               .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+  }
 
-  // Depth output image descriptor
-  VkDescriptorImageInfo Depth_Info = {.imageView = Depth_Image.View, .imageLayout = VK_IMAGE_LAYOUT_GENERAL};
-
-  // Write all 16 descriptor bindings in one batch
+  // Write all 13 bindings (0-12). Bindings 8-10 are written as contiguous SSBO arrays spanning [0..Fig_Count).
+  uint Fig_N = Fig_Count ? Fig_Count : 1;  // Vulkan requires descriptorCount >= 1 for array writes
   VkWriteDescriptorSet Writes[] = {
-    {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, &Acceleration_Write, Descriptor_Set, 0,  0, 1, VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, NULL,           NULL,                    NULL},
-    {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, Descriptor_Set, 1,  0, 1,                VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,              &Image_Info,    NULL,                    NULL},
-    {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, Descriptor_Set, 2,  0, 1,                VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,             NULL,           &Camera_Info,            NULL},
-    {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, Descriptor_Set, 3,  0, 1,                VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,             NULL,           &Vertex_Info,            NULL},
-    {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, Descriptor_Set, 4,  0, 1,                VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,             NULL,           &Index_Info,             NULL},
-    {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, Descriptor_Set, 5,  0, 1,                VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,             NULL,           &Material_Info,          NULL},
-    {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, Descriptor_Set, 6,  0, 1,                VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,             NULL,           &Texture_Id_Info,        NULL},
-    {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, Descriptor_Set, 7,  0, 1,                VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,     &Lightmap_Info, NULL,                    NULL},
-    {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, Descriptor_Set, 8,  0, 1,                VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,             NULL,           &Weapon_Vertex_Info,     NULL},
-    {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, Descriptor_Set, 9,  0, 1,                VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,             NULL,           &Weapon_Index_Info,      NULL},
-    {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, Descriptor_Set, 10, 0, 1,                VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,             NULL,           &Weapon_Texture_Id_Info, NULL},
-    {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, Descriptor_Set, 11, 0, 1,                VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,              &Depth_Info,    NULL,                    NULL},
-    {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, Descriptor_Set, 12, 0, 1,                VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,             NULL,           &Entity_Vertex_Info,     NULL},
-    {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, Descriptor_Set, 13, 0, 1,                VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,             NULL,           &Entity_Index_Info,      NULL},
-    {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, Descriptor_Set, 14, 0, 1,                VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,             NULL,           &Entity_Texture_Id_Info, NULL},
-    {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, Descriptor_Set, 15, 0, Texture_Count,    VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,     Texture_Infos,  NULL,                    NULL},
+    {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, &Acceleration_Write, Descriptor_Set, 0,  0, 1,             VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, NULL,           NULL,              NULL},
+    {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, Descriptor_Set, 1,  0, 1,                            VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,              &Image_Info,    NULL,              NULL},
+    {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, Descriptor_Set, 2,  0, 1,                            VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,             NULL,           &Camera_Info,      NULL},
+    {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, Descriptor_Set, 3,  0, 1,                            VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,             NULL,           &Vertex_Info,      NULL},
+    {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, Descriptor_Set, 4,  0, 1,                            VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,             NULL,           &Index_Info,       NULL},
+    {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, Descriptor_Set, 5,  0, 1,                            VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,             NULL,           &Material_Info,    NULL},
+    {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, Descriptor_Set, 6,  0, 1,                            VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,             NULL,           &Texture_Id_Info,  NULL},
+    {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, Descriptor_Set, 7,  0, 1,                            VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,     &Lightmap_Info, NULL,              NULL},
+    {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, Descriptor_Set, 8,  0, Fig_N,                        VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,             NULL,           Fig_Vertex_Infos,  NULL},
+    {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, Descriptor_Set, 9,  0, Fig_N,                        VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,             NULL,           Fig_Index_Infos,   NULL},
+    {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, Descriptor_Set, 10, 0, Fig_N,                        VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,             NULL,           Fig_Tex_Id_Infos,  NULL},
+    {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, Descriptor_Set, 11, 0, 1,                            VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,              &Depth_Info,    NULL,              NULL},
+    {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, Descriptor_Set, 12, 0, Texture_Count,                VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,     Texture_Infos,  NULL,              NULL},
   };
 
-  // Update Vulkan state
-  vkUpdateDescriptorSets (Device, 16, Writes, 0, NULL);
+  vkUpdateDescriptorSets (Device, 13, Writes, 0, NULL);
   free (Texture_Infos);
 
 } // Descriptor_Set_Create
@@ -10865,18 +10814,13 @@ glsl rchit Closest_Hit {
   layout(binding = 6, std430) readonly buffer Tex_Id_Data   {uint Data[];} Texture_Ids;
   layout(binding = 7)         uniform sampler2D              Lightmap;
   
-  // Weapon geometry
-  layout(binding = 8,  std430) readonly buffer Weapon_Vertex_Data {vec4 Data[];} Weapon_Vertices;
-  layout(binding = 9,  std430) readonly buffer Weapon_Index_Data  {uint Data[];} Weapon_Indices;
-  layout(binding = 10, std430) readonly buffer Weapon_Tex_Id_Data {uint Data[];} Weapon_Tex_Ids;
-  
-  // Entity geometry
-  layout(binding = 12, std430) readonly buffer Entity_Vertex_Data {vec4 Data[];} Entity_Vertices;
-  layout(binding = 13, std430) readonly buffer Entity_Index_Data  {uint Data[];} Entity_Indices;
-  layout(binding = 14, std430) readonly buffer Entity_Tex_Id_Data {uint Data[];} Entity_Tex_Ids;
-  
-  // Bindless texture array (binding 15: must be highest for variable descriptor count)
-  layout(binding = 15) uniform sampler2D Textures[];
+  // Per-figure geometry arrays: indexed by (instanceCustomIndex & 0xFF) - 1
+  layout(binding = 8,  std430) readonly buffer Figure_Vertex_Data {vec4 Data[];} Figure_Vertices[];
+  layout(binding = 9,  std430) readonly buffer Figure_Index_Data  {uint Data[];} Figure_Indices[];
+  layout(binding = 10, std430) readonly buffer Figure_Tex_Id_Data {uint Data[];} Figure_Tex_Ids[];
+
+  // Bindless texture array (binding 12: must be highest for variable descriptor count)
+  layout(binding = 12) uniform sampler2D Textures[];
 
   // Comment here !!! 
   layout(location = 0) rayPayloadInEXT vec4 Payload; // rgb = color, a = hit distance
@@ -10938,9 +10882,9 @@ glsl rchit Closest_Hit {
   }
   
   // Read a vertex attribute (48 bytes = 12 floats per vertex) from the appropriate buffer
-  vec4 Read_Raw (uint I, uint Slot, uint Instance) {
-    if (Instance == 2u) return Entity_Vertices.Data[I * 3 + Slot];
-    if (Instance == 1u) return Weapon_Vertices.Data[I * 3 + Slot];
+  // Instance encodes (Texture_Base << 8) | Figure_Slot where Slot 0 = world, Slot 1+ = figure array index + 1
+  vec4 Read_Raw (uint I, uint Slot, uint Fig) {
+    if (Fig > 0u) return Figure_Vertices[Fig - 1u].Data[I * 3 + Slot];
     return Vertices.Data[I * 3 + Slot];
   }
   vec3 Read_Position    (uint I, uint Inst) {return Read_Raw (I, 0, Inst).xyz;}
@@ -10951,25 +10895,26 @@ glsl rchit Closest_Hit {
   // Closest_Hit shader main
   void main () {
 
-    // Determine which instance we hit: 0 = world, 1 = weapon, 2 = entity
-    uint  Instance  = gl_InstanceCustomIndexEXT;
-    uint  Primitive = gl_PrimitiveID;
-    bool  Is_Weapon = (Instance == 1u);
-    bool  Is_Entity = (Instance == 2u);
-  
+    // Unpack instanceCustomIndex:  [7:0] = figure slot (0 = world, 1+ = pool slot + 1)
+    //                              [8]   = weapon flag (weapon-style lighting)
+    //                              [23:9] = texture base offset (15 bits)
+    uint  Raw_Instance = gl_InstanceCustomIndexEXT;
+    uint  Fig          = Raw_Instance & 0xFFu;
+    bool  Is_Figure    = (Fig > 0u);
+    bool  Is_Weapon    = (Raw_Instance & 0x100u) != 0u;
+    uint  Tex_Base     = Raw_Instance >> 9u;
+    uint  Primitive    = gl_PrimitiveID;
+
     // Adaptive quality budget: 0.0 = full quality (60fps+), 1.0 = minimal work (< 5fps)
     float Budget = float ((Active_SPP >> 8u) & 0xFFu) / 255.0;
-  
-    // Fetch triangle vertex indices from the appropriate buffer
+
+    // Fetch triangle vertex indices from the appropriate buffer (world or figure array)
     uint I0, I1, I2;
-    if (Is_Entity) {
-      I0 = Entity_Indices.Data [Primitive * 3 + 0];
-      I1 = Entity_Indices.Data [Primitive * 3 + 1];
-      I2 = Entity_Indices.Data [Primitive * 3 + 2];
-    } else if (Is_Weapon) {
-      I0 = Weapon_Indices.Data [Primitive * 3 + 0];
-      I1 = Weapon_Indices.Data [Primitive * 3 + 1];
-      I2 = Weapon_Indices.Data [Primitive * 3 + 2];
+    if (Is_Figure) {
+      uint Idx = Fig - 1u;
+      I0 = Figure_Indices[Idx].Data [Primitive * 3 + 0];
+      I1 = Figure_Indices[Idx].Data [Primitive * 3 + 1];
+      I2 = Figure_Indices[Idx].Data [Primitive * 3 + 2];
     } else {
       I0 = Indices.Data [Primitive * 3 + 0];
       I1 = Indices.Data [Primitive * 3 + 1];
@@ -10978,9 +10923,9 @@ glsl rchit Closest_Hit {
   
     // Batched vertex attribute reads
     vec3 Bary  = vec3 (1.0 - Barycentrics.x - Barycentrics.y, Barycentrics.x, Barycentrics.y);
-    vec4 V0_S0 = Read_Raw (I0, 0, Instance), V0_S1 = Read_Raw (I0, 1, Instance), V0_S2 = Read_Raw (I0, 2, Instance);
-    vec4 V1_S0 = Read_Raw (I1, 0, Instance), V1_S1 = Read_Raw (I1, 1, Instance), V1_S2 = Read_Raw (I1, 2, Instance);
-    vec4 V2_S0 = Read_Raw (I2, 0, Instance), V2_S1 = Read_Raw (I2, 1, Instance), V2_S2 = Read_Raw (I2, 2, Instance);
+    vec4 V0_S0 = Read_Raw (I0, 0, Fig), V0_S1 = Read_Raw (I0, 1, Fig), V0_S2 = Read_Raw (I0, 2, Fig);
+    vec4 V1_S0 = Read_Raw (I1, 0, Fig), V1_S1 = Read_Raw (I1, 1, Fig), V1_S2 = Read_Raw (I1, 2, Fig);
+    vec4 V2_S0 = Read_Raw (I2, 0, Fig), V2_S1 = Read_Raw (I2, 1, Fig), V2_S2 = Read_Raw (I2, 2, Fig);
 
     // Comment here !!!
     vec3 Position            = V0_S0.xyz * Bary.x + V1_S0.xyz * Bary.y + V2_S0.xyz * Bary.z;
@@ -10988,13 +10933,11 @@ glsl rchit Closest_Hit {
     vec2 Lightmap_Coordinate = V0_S1.zw  * Bary.x + V1_S1.zw  * Bary.y + V2_S1.zw  * Bary.z;
     vec3 Normal = normalize   (V0_S2.xyz * Bary.x + V1_S2.xyz * Bary.y + V2_S2.xyz * Bary.z);
   
-    // Fetch the texture ID for this triangle and sample the albedo
+    // Fetch the texture ID for this triangle. Figures use per-figure SSBO + packed Tex_Base offset.
     uint Tex_Id;
-    uint Weapon_Base   = Weapon_Texture_Base & 0xFFFFu;
     uint Weapon_Stride = Weapon_Texture_Base >> 16u;
-    if      (Is_Entity) Tex_Id = Entity_Tex_Ids.Data [Primitive];
-    else if (Is_Weapon) Tex_Id = Weapon_Tex_Ids.Data [Primitive] + Weapon_Base;
-    else                Tex_Id = Texture_Ids.Data    [Primitive];
+    if (Is_Figure) Tex_Id = Figure_Tex_Ids[Fig - 1u].Data [Primitive] + Tex_Base;
+    else           Tex_Id = Texture_Ids.Data [Primitive];
   
     // Build tangent frame (Frisvad method) for normal mapping and parallax
     vec3 Geo_Normal = Normal; // Preserve geometric normal for parallax
@@ -11014,7 +10957,7 @@ glsl rchit Closest_Hit {
 
     // Adaptive parallax: 300u at full quality, 0u at Budget=1 (pure lightmap fallback).
     float Parallax_Dist = 300.0 * (1.0 - Budget);
-    if (not Is_Weapon and not Is_Entity and Tex_Id < PBR_Stride and Hit_Dist < Parallax_Dist) {
+    if (not Is_Figure and Tex_Id < PBR_Stride and Hit_Dist < Parallax_Dist) {
 
       // Transform view to tangent space for parallax ray marching
       vec3 V_Tangent = vec3 (dot (V, T_Axis), dot (V, B_Axis), dot (V, Geo_Normal));
@@ -11057,11 +11000,17 @@ glsl rchit Closest_Hit {
     float M = 0.0;
     vec3  Emissive  = vec3 (0.0);
   
-    // Sample PBR maps for world geometry, entities, and weapon
+    // Sample PBR maps for world geometry, figures, and weapon
     float PBR_Dist = mix (1000.0, 200.0, Budget);
-    if (not Is_Weapon and Tex_Id < PBR_Stride) {
+    if (Is_Weapon) {
+      // Weapon PBR: 6 map types by N surfaces, stride = Weapon_Stride
+      Normal_Map = textureLod (Textures [nonuniformEXT (Tex_Id + Weapon_Stride)],      Tex_Coord, 0.0).rgb * 2.0 - 1.0;
+      R          = textureLod (Textures [nonuniformEXT (Tex_Id + Weapon_Stride * 2u)], Tex_Coord, 0.0).r;
+      M          = textureLod (Textures [nonuniformEXT (Tex_Id + Weapon_Stride * 3u)], Tex_Coord, 0.0).r;
+      Emissive   = textureLod (Textures [nonuniformEXT (Tex_Id + Weapon_Stride * 4u)], Tex_Coord, 0.0).rgb;
 
-      // World / Entity PBR: maps laid out at [diffuse_0..N, normal_0..N, roughness_0..N, ...]
+    } else if (not Is_Figure and Tex_Id < PBR_Stride) {
+      // World PBR: maps laid out at [diffuse_0..N, normal_0..N, roughness_0..N, ...]
       if (Hit_Dist < PBR_Dist) {
         Normal_Map = textureLod (Textures [nonuniformEXT (Tex_Id + PBR_Stride)],      Tex_Coord, 0.0).rgb * 2.0 - 1.0;
         R          = textureLod (Textures [nonuniformEXT (Tex_Id + PBR_Stride * 2u)], Tex_Coord, 0.0).r;
@@ -11069,15 +11018,8 @@ glsl rchit Closest_Hit {
       }
       Emissive   = textureLod (Textures[nonuniformEXT(Tex_Id + PBR_Stride * 4u)], Tex_Coord, 0.0).rgb;
 
-    // Weapon PBR: 6 map types  by  N surfaces, stride = Weapon_Stride
-    } else if (Is_Weapon) {
-      Normal_Map = textureLod (Textures [nonuniformEXT (Tex_Id + Weapon_Stride)],      Tex_Coord, 0.0).rgb * 2.0 - 1.0;
-      R          = textureLod (Textures [nonuniformEXT (Tex_Id + Weapon_Stride * 2u)], Tex_Coord, 0.0).r;
-      M          = textureLod (Textures [nonuniformEXT (Tex_Id + Weapon_Stride * 3u)], Tex_Coord, 0.0).r;
-      Emissive   = textureLod (Textures [nonuniformEXT (Tex_Id + Weapon_Stride * 4u)], Tex_Coord, 0.0).rgb;
-
-    // Fallback for textures outside the PBR material range: derive from albedo statistics
-    } else {
+    // Fallback: derive from albedo statistics (non-weapon figures and textures outside PBR range)
+    } else if (not Is_Weapon) {
       float Lu = dot (Albedo, vec3 (0.2126, 0.7152, 0.0722));
       float Hi = max (Albedo.r, max (Albedo.g, Albedo.b));
       float Sa = (Hi - min (Albedo.r, min (Albedo.g, Albedo.b))) / max (Hi, 1e-3);
@@ -11228,10 +11170,10 @@ glsl rchit Closest_Hit {
       vec3 Weapon_Cheap = Ambient_Irradiance * Albedo * 2.5 + Albedo * max(NL, 0.3);
       Color = mix (Weapon_Full, Weapon_Cheap, Budget);
 
-    // Entity: direct sun + shadows + hemisphere ambient, no lightmap
-    } else if (Is_Entity) {
+    // Figure (non-weapon): direct sun + shadows + hemisphere ambient, no lightmap
+    } else if (Is_Figure) {
       float Shadow_Factor = (NL > 0.0 and not Is_Reflection_Bounce and Hit_Dist < Shadow_Dist)
-                              ? Trace_Shadow (Position, Normal, Ld, Primitive, Instance, Frame, Env_Sun_Dir.w)
+                              ? Trace_Shadow (Position, Normal, Ld, Primitive, Fig, Frame, Env_Sun_Dir.w)
                               : 1.0;
       vec3 Direct = (Diffuse + Specular) * Lr * NL * Shadow_Factor;
 
@@ -11250,7 +11192,7 @@ glsl rchit Closest_Hit {
   
       // Inline ray query for shadows
       float Shadow_Factor = (NL > 0.0 and not Is_Reflection_Bounce and Hit_Dist < Shadow_Dist)
-        ? Trace_Shadow (Position, Normal, Ld, Primitive, Instance, Frame, Env_Sun_Dir.w) : 1.0;
+        ? Trace_Shadow (Position, Normal, Ld, Primitive, Fig, Frame, Env_Sun_Dir.w) : 1.0;
   
       // Dual-path rendering with Budget blend
       vec3 Direct = (Diffuse + Specular) * Lr * NL * Shadow_Factor;
@@ -12380,28 +12322,56 @@ glsl comp Skinning {
 
   layout(local_size_x = 64) in;
 
-  // Bone matrices - array of mat3x4 in row-major order (3 rows  by  4 columns per bone)
-  layout(binding = 0, std430) readonly buffer Bone_Data {
-    mat3x4 Bones[]; // World-space bone matrix composed with inverse bind-pose
+  // Bind-pose bone matrices (uploaded once at load time)
+  layout(binding = 0, std430) readonly buffer Bind_Pose_Bones {
+    mat3x4 Bind_Bones[];
+  };
+
+  // Inverse bind-pose matrices (uploaded once at load time)
+  layout(binding = 1, std430) readonly buffer Inv_Bind_Bones {
+    mat3x4 Inv_Bind[];
+  };
+
+  // Bone parent indices (-1 = root). Uploaded once at load time.
+  layout(binding = 2, std430) readonly buffer Bone_Parents {
+    int Parents[];
+  };
+
+  // Output: world-space skinning matrices (Pose[i] * InvBind[i]). Written by bone hierarchy pass.
+  layout(binding = 3, std430) buffer Pose_Output {
+    mat3x4 Pose[];
   };
 
   // Bind-pose source vertices (position, normal, uv, bone ids + weights packed)
-  layout(binding = 1, std430) readonly buffer Bind_Pose {
-    float Bind_Vertices[]; // Interleaved vertex data
+  layout(binding = 4, std430) readonly buffer Bind_Vertices_Data {
+    float Bind_Vertices[];
   };
 
-  // Output skinned vertices (same layout, overwritten in-place for BLAS)
-  layout(binding = 2, std430) writeonly buffer Skinned_Output {
-    float Out_Vertices[]; // Skinned vertex data
+  // Output skinned vertices
+  layout(binding = 5, std430) writeonly buffer Skinned_Output {
+    float Out_Vertices[];
   };
 
-  // Vertex count and bone count
+  // Push constants: vertex count, bone count, pass (0 = bone hierarchy, 1 = vertex skinning)
   layout(push_constant) uniform Skinning_Push {
     uint Vertex_Count;
     uint Bone_Count;
+    uint Pass;
   };
 
-  // Transform a vec3 by a 3 by 4 affine matrix (row-major)
+  // 3x4 matrix multiply: C = A * B (row-major affine)
+  mat3x4 Mat34_Mul_GPU (mat3x4 A, mat3x4 B) {
+    mat3x4 C;
+    for (int R = 0; R < 3; R++) {
+      C[R][0] = A[R][0]*B[0][0] + A[R][1]*B[1][0] + A[R][2]*B[2][0];
+      C[R][1] = A[R][0]*B[0][1] + A[R][1]*B[1][1] + A[R][2]*B[2][1];
+      C[R][2] = A[R][0]*B[0][2] + A[R][1]*B[1][2] + A[R][2]*B[2][2];
+      C[R][3] = A[R][0]*B[0][3] + A[R][1]*B[1][3] + A[R][2]*B[2][3] + A[R][3];
+    }
+    return C;
+  }
+
+  // Transform position by affine 3x4
   vec3 Xform_Pos (mat3x4 M, vec3 V) {
     return vec3 (dot (M[0], vec4 (V, 1.0)),
                  dot (M[1], vec4 (V, 1.0)),
@@ -12410,67 +12380,67 @@ glsl comp Skinning {
 
   // Transform direction (no translation)
   vec3 Xform_Dir (mat3x4 M, vec3 V) {
-    return vec3 (dot (M[0].xyz, V),
-                 dot (M[1].xyz, V),
-                 dot (M[2].xyz, V));
+    return vec3 (dot (M[0].xyz, V), dot (M[1].xyz, V), dot (M[2].xyz, V));
   }
 
-  // Skinning shader main
   void main () {
-    uint Vi = gl_GlobalInvocationID.x;
-    if (Vi >= Vertex_Count) return;
+    uint Id = gl_GlobalInvocationID.x;
 
-    // Read bind-pose vertex (10 floats per vertex)
-    uint Base = Vi * 10u;
-    vec3 Pos  = vec3 (Bind_Vertices[Base],   Bind_Vertices[Base+1], Bind_Vertices[Base+2]);
+    // Pass 0: bone hierarchy evaluation (one invocation per bone)
+    // Bones are topologically sorted (parent index < child index), so a single serial pass in one
+    // workgroup evaluates the whole skeleton. For skeletons up to 128 bones this is one wavefront.
+    if (Pass == 0u) {
+      if (Id >= Bone_Count) return;
+
+      // Start with the bind pose as the local matrix
+      mat3x4 Local = Bind_Bones[Id];
+
+      // Walk parent chain: Pose[i] = Pose[parent] * Local
+      int P = Parents[Id];
+      if (P >= 0 and uint(P) < Bone_Count) {
+        // Barrier: we need Pose[P] to be written before we read it. Since bones are topologically sorted
+        // and we process them in order within the workgroup, we use a memory barrier.
+        memoryBarrierBuffer ();
+        barrier ();
+        Pose[Id] = Mat34_Mul_GPU (Pose[P], Local);
+      } else {
+        Pose[Id] = Local;
+      }
+
+      // Second barrier, then compose with inverse bind-pose: Final[i] = Pose[i] * InvBind[i]
+      memoryBarrierBuffer ();
+      barrier ();
+      Pose[Id] = Mat34_Mul_GPU (Pose[Id], Inv_Bind[Id]);
+      return;
+    }
+
+    // Pass 1: vertex skinning (one invocation per vertex)
+    if (Id >= Vertex_Count) return;
+
+    uint Base = Id * 10u;
+    vec3 Pos  = vec3 (Bind_Vertices[Base], Bind_Vertices[Base+1], Bind_Vertices[Base+2]);
     vec3 Norm = vec3 (Bind_Vertices[Base+3], Bind_Vertices[Base+4], Bind_Vertices[Base+5]);
-    float U   = Bind_Vertices[Base+6];
-    float V   = Bind_Vertices[Base+7];
-    float Lu  = Bind_Vertices[Base+8];
-    float Lv  = Bind_Vertices[Base+9];
+    float U   = Bind_Vertices[Base+6], V = Bind_Vertices[Base+7];
+    float Lu  = Bind_Vertices[Base+8], Lv = Bind_Vertices[Base+9];
 
-    // Read bone indices and weights from the packed appendix (stored after all vertex data)
-    uint Bone_Offset = Vertex_Count * 10u + (Vi * 2u); // 2 uints per vertex = 8 bytes = 3 ids + 3 weights + 2 pad
+    // Read packed bone ids and weights from appendix after vertex data
+    uint Bone_Offset = Vertex_Count * 10u + (Id * 2u);
     uint Pack_A = floatBitsToUint (Bind_Vertices[Bone_Offset]);
     uint Pack_B = floatBitsToUint (Bind_Vertices[Bone_Offset + 1u]);
     uvec3 Bone_Id = uvec3 (Pack_A & 0xFFu, (Pack_A >> 8u) & 0xFFu, (Pack_A >> 16u) & 0xFFu);
-    vec3  Bone_Wt = vec3  (float (Pack_B & 0xFFu), float ((Pack_B >> 8u) & 0xFFu), float ((Pack_B >> 16u) & 0xFFu)) / 255.0;
+    vec3  Bone_Wt = vec3 (float (Pack_B & 0xFFu), float ((Pack_B >> 8u) & 0xFFu), float ((Pack_B >> 16u) & 0xFFu)) / 255.0;
 
-    // Blend bone transforms (3 influences max - driver-friendly, no divergent loops)
-    vec3 Skinned_Pos  = vec3 (0.0);
-    vec3 Skinned_Norm = vec3 (0.0);
-
-    if (Bone_Wt.x > 0.001) {
-      mat3x4 M = Bones[min (Bone_Id.x, Bone_Count - 1u)];
-      Skinned_Pos  += Xform_Pos (M, Pos)  * Bone_Wt.x;
-      Skinned_Norm += Xform_Dir (M, Norm) * Bone_Wt.x;
-    }
-    if (Bone_Wt.y > 0.001) {
-      mat3x4 M = Bones[min (Bone_Id.y, Bone_Count - 1u)];
-      Skinned_Pos  += Xform_Pos (M, Pos)  * Bone_Wt.y;
-      Skinned_Norm += Xform_Dir (M, Norm) * Bone_Wt.y;
-    }
-    if (Bone_Wt.z > 0.001) {
-      mat3x4 M = Bones[min (Bone_Id.z, Bone_Count - 1u)];
-      Skinned_Pos  += Xform_Pos (M, Pos)  * Bone_Wt.z;
-      Skinned_Norm += Xform_Dir (M, Norm) * Bone_Wt.z;
-    }
-
-    // Renormalize the blended normal (critical for shading correctness under non-uniform bone scales)
+    vec3 Skinned_Pos = vec3 (0.0), Skinned_Norm = vec3 (0.0);
+    if (Bone_Wt.x > 0.001) { mat3x4 M = Pose[min (Bone_Id.x, Bone_Count-1u)]; Skinned_Pos += Xform_Pos(M,Pos)*Bone_Wt.x; Skinned_Norm += Xform_Dir(M,Norm)*Bone_Wt.x; }
+    if (Bone_Wt.y > 0.001) { mat3x4 M = Pose[min (Bone_Id.y, Bone_Count-1u)]; Skinned_Pos += Xform_Pos(M,Pos)*Bone_Wt.y; Skinned_Norm += Xform_Dir(M,Norm)*Bone_Wt.y; }
+    if (Bone_Wt.z > 0.001) { mat3x4 M = Pose[min (Bone_Id.z, Bone_Count-1u)]; Skinned_Pos += Xform_Pos(M,Pos)*Bone_Wt.z; Skinned_Norm += Xform_Dir(M,Norm)*Bone_Wt.z; }
     Skinned_Norm = normalize (Skinned_Norm);
 
-    // Write skinned vertex to output (same 10-float layout)
-    uint Out_Base = Vi * 10u;
-    Out_Vertices[Out_Base]   = Skinned_Pos.x;
-    Out_Vertices[Out_Base+1] = Skinned_Pos.y;
-    Out_Vertices[Out_Base+2] = Skinned_Pos.z;
-    Out_Vertices[Out_Base+3] = Skinned_Norm.x;
-    Out_Vertices[Out_Base+4] = Skinned_Norm.y;
-    Out_Vertices[Out_Base+5] = Skinned_Norm.z;
-    Out_Vertices[Out_Base+6] = U;
-    Out_Vertices[Out_Base+7] = V;
-    Out_Vertices[Out_Base+8] = Lu;
-    Out_Vertices[Out_Base+9] = Lv;
+    uint Out_Base = Id * 10u;
+    Out_Vertices[Out_Base]   = Skinned_Pos.x;  Out_Vertices[Out_Base+1] = Skinned_Pos.y;  Out_Vertices[Out_Base+2] = Skinned_Pos.z;
+    Out_Vertices[Out_Base+3] = Skinned_Norm.x; Out_Vertices[Out_Base+4] = Skinned_Norm.y; Out_Vertices[Out_Base+5] = Skinned_Norm.z;
+    Out_Vertices[Out_Base+6] = U;  Out_Vertices[Out_Base+7] = V;
+    Out_Vertices[Out_Base+8] = Lu; Out_Vertices[Out_Base+9] = Lv;
   }
 } // Skinning
 
@@ -12480,26 +12450,28 @@ glsl comp Skinning {
 
 void Skinning_Pipeline_Create () {
 
-  // Descriptor set layout
-  VkDescriptorSetLayoutBinding Bindings[3] = {
-    {.binding = 0, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .descriptorCount = 1,
-     .stageFlags=VK_SHADER_STAGE_COMPUTE_BIT},
-    {.binding = 1, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .descriptorCount = 1,
-     .stageFlags=VK_SHADER_STAGE_COMPUTE_BIT},
-    {.binding = 2, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .descriptorCount = 1,
-     .stageFlags=VK_SHADER_STAGE_COMPUTE_BIT},
-  };
+  // Descriptor set layout: 6 SSBOs for the combined bone-evaluation + skinning pipeline
+  //   0: bind-pose bone matrices    (readonly, uploaded once)
+  //   1: inverse bind-pose matrices (readonly, uploaded once)
+  //   2: bone parent indices        (readonly, uploaded once)
+  //   3: output pose matrices       (read-write, computed per-frame)
+  //   4: bind-pose vertices         (readonly)
+  //   5: skinned output vertices    (writeonly)
+  VkDescriptorSetLayoutBinding Bindings[6];
+  for (int I = 0; I < 6; I++)
+    Bindings[I] = (VkDescriptorSetLayoutBinding){.binding = (uint)I, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                                                  .descriptorCount = 1, .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT};
   VK_CHECK (vkCreateDescriptorSetLayout (/*device      =>*/ Device,
                                           /*pCreateInfo =>*/ &(VkDescriptorSetLayoutCreateInfo){
                                             .sType        = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
                                             .flags        = VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR,
-                                            .bindingCount = 3,
+                                            .bindingCount = 6,
                                             .pBindings    = Bindings},
                                           /*pAllocator  =>*/ NULL,
                                           /*pSetLayout  =>*/ &Skinning_Descriptor_Layout));
 
-  // Push constant range: vertex count + bone count 
-  VkPushConstantRange Push_Range = {.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT, .offset = 0, .size = 8};
+  // Push constant range: vertex count + bone count + pass (12 bytes)
+  VkPushConstantRange Push_Range = {.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT, .offset = 0, .size = 12};
 
   VK_CHECK (vkCreatePipelineLayout (/*device      =>*/ Device,
                                     /*pCreateInfo =>*/ &(VkPipelineLayoutCreateInfo){
