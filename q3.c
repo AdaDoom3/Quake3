@@ -3240,17 +3240,17 @@ typedef struct {uint Magic, Version; VBSP_Lump Lumps[VBSP_LUMP_COUNT]; int Map_R
 typedef struct {float P[3];}                            VBSP_Vertex;
 typedef struct {uint16_t V[2];}                         VBSP_Edge;
 typedef struct {
-  uint16_t Plane_Num; uint8_t Side, On_Node; int First_Edge, Num_Edges;
-  int16_t Tex_Info, Disp_Info; int16_t Fog_Volume; uint8_t Styles[4];
+  uint16_t Plane_Num; uint8_t Side, On_Node; int First_Edge; int16_t Num_Edges;
+  int16_t Tex_Info, Disp_Info, Fog_Volume; uint8_t Styles[4];
   int Light_Ofs; float Area; int Lm_Mins[2], Lm_Size[2];
   int Orig_Face; uint16_t Num_Prims, First_Prim; uint Smooth;
-} VBSP_Face;
+} VBSP_Face; // 56 bytes — matches Source SDK dface_t
 typedef struct {float Tex_Vecs[2][4]; float Lm_Vecs[2][4]; int Flags, Tex_Data;} VBSP_Tex_Info;
 typedef struct {float Refl[3]; int Name_Id; int W, H, Vw, Vh;}                    VBSP_Tex_Data;
 typedef struct {
   float Start[3]; int Disp_Vert_Start, Disp_Tri_Start, Power, Min_Tess;
   float Smoothing; int Contents; uint16_t Map_Face, Pad;
-  int Lm_Alpha, Lm_Sample; uint8_t Tail[112];
+  int Lm_Alpha, Lm_Sample; uint8_t Tail[128]; // 176 bytes total (matches CDispInfo in Source SDK)
 } VBSP_Disp_Info;
 typedef struct {float Vec[3]; float Dist; float Alpha;} VBSP_Disp_Vert;
 
@@ -3407,10 +3407,14 @@ Scene Scene_Load_From_VBSP (const char *Path, Spawn *Out_Spawn) {
   const VBSP_Tex_Data *Tex_Datas = (const VBSP_Tex_Data*)(D+H->Lumps[VBSP_TEXDATA].Offset);
   const int           *Str_Table = (const int*)          (D+H->Lumps[VBSP_TEXDATA_STRING_TABLE].Offset);
   const char          *Str_Data  = (const char*)         (D+H->Lumps[VBSP_TEXDATA_STRING_DATA].Offset);
+  uint Vert_Count   = (uint)(H->Lumps[VBSP_VERTICES].Length / sizeof(VBSP_Vertex));
+  uint Edge_Count   = (uint)(H->Lumps[VBSP_EDGES].Length / sizeof(VBSP_Edge));
+  uint Surf_Edge_N  = (uint)(H->Lumps[VBSP_SURFEDGES].Length / sizeof(int));
   uint Face_Count   = (uint)(H->Lumps[VBSP_FACES].Length / sizeof(VBSP_Face));
   uint Tex_Info_N   = (uint)(H->Lumps[VBSP_TEXINFO].Length / sizeof(VBSP_Tex_Info));
   uint Tex_Data_N   = (uint)(H->Lumps[VBSP_TEXDATA].Length / sizeof(VBSP_Tex_Data));
-  (void)Tex_Info_N;
+  printf("[vbsp] %u verts, %u edges, %u surfedges, %u faces, %u texinfos, %u texdatas\n",
+         Vert_Count, Edge_Count, Surf_Edge_N, Face_Count, Tex_Info_N, Tex_Data_N);
 
   // Displacement data
   const VBSP_Disp_Info *Disps    = (const VBSP_Disp_Info*)(D+H->Lumps[VBSP_DISPINFO].Offset);
@@ -3418,12 +3422,16 @@ Scene Scene_Load_From_VBSP (const char *Path, Spawn *Out_Spawn) {
   uint Disp_Count = (uint)(H->Lumps[VBSP_DISPINFO].Length / sizeof(VBSP_Disp_Info));
 
   // Build material name table
+  uint Str_Table_N = (uint)(H->Lumps[VBSP_TEXDATA_STRING_TABLE].Length / sizeof(int));
+  uint Str_Data_N  = (uint)(H->Lumps[VBSP_TEXDATA_STRING_DATA].Length);
   Scene S = {0};
   S.Material_Count = Tex_Data_N;
   S.Materials      = calloc(Tex_Data_N, sizeof(vec4));
   S.Texture_Names  = calloc(Tex_Data_N, 64);
   for (uint I=0; I<Tex_Data_N; I++) {
-    snprintf(S.Texture_Names[I], 64, "%s", Str_Data+Str_Table[Tex_Datas[I].Name_Id]);
+    uint Nid = (uint)Tex_Datas[I].Name_Id;
+    const char *Name = (Nid < Str_Table_N and (uint)Str_Table[Nid] < Str_Data_N) ? Str_Data+Str_Table[Nid] : "missing";
+    snprintf(S.Texture_Names[I], 64, "%s", Name);
     S.Materials[I] = (vec4){Tex_Datas[I].Refl[0], Tex_Datas[I].Refl[1], Tex_Datas[I].Refl[2], 1.f};
   }
 
@@ -3450,16 +3458,23 @@ Scene Scene_Load_From_VBSP (const char *Path, Spawn *Out_Spawn) {
   for (uint I=0; I<Face_Count; I++) {
     const VBSP_Face *Fc = &Faces[I];
     if (Fc->Disp_Info >= 0 or Fc->Num_Edges < 3) continue;
-    int Ti = Fc->Tex_Info; if (Ti<0) continue;
+    int Ti = Fc->Tex_Info; if (Ti<0 or (uint)Ti>=Tex_Info_N) continue;
     const VBSP_Tex_Info *Tx = &Tex_Infos[Ti];
     if (Tx->Flags & 0x204) continue; // skip sky + nodraw
-    uint Mat = (uint)Tx->Tex_Data;
+    uint Mat = (uint)Tx->Tex_Data; if (Mat>=Tex_Data_N) continue;
 
     // Collect face vertex positions from surf-edge indirection
-    vec3 Positions[128]; int Norms_Done = 0; vec3 Face_Normal = {0,0,0}; (void)Norms_Done;
-    for (int E=0; E<Fc->Num_Edges and E<128; E++) {
-      int Se = Surf_Edges[Fc->First_Edge+E];
-      uint Vi = Se >= 0 ? Edges[Se].V[0] : Edges[-Se].V[1];
+    int Ne = Fc->Num_Edges; if (Ne > 4096) continue; // sanity cap
+    vec3 *Positions = alloca(sizeof(vec3) * Ne);
+    vec3 Face_Normal = {0,0,0};
+    for (int E=0; E<Ne; E++) {
+      uint Se_Idx = (uint)(Fc->First_Edge+E);
+      if (Se_Idx >= Surf_Edge_N) { Positions[E] = Make(0,0,0); continue; }
+      int Se = Surf_Edges[Se_Idx];
+      uint Abs_Se = (uint)(Se >= 0 ? Se : -Se);
+      if (Abs_Se >= Edge_Count) { Positions[E] = Make(0,0,0); continue; }
+      uint Vi = Se >= 0 ? Edges[Abs_Se].V[0] : Edges[Abs_Se].V[1];
+      if (Vi >= Vert_Count) Vi = 0;
       Positions[E] = Make(Verts[Vi].P[0], Verts[Vi].P[1], Verts[Vi].P[2]);
     }
     // Compute face normal from first triangle
@@ -3499,10 +3514,15 @@ Scene Scene_Load_From_VBSP (const char *Path, Spawn *Out_Spawn) {
     if (Fc->Num_Edges < 4) continue;
 
     // Get the face's 4 corner positions
-    vec3 Corners[4];
+    vec3 Corners[4] = {{0}};
     for (int E=0; E<4 and E<Fc->Num_Edges; E++) {
-      int Se = Surf_Edges[Fc->First_Edge+E];
-      uint Vi = Se>=0 ? Edges[Se].V[0] : Edges[-Se].V[1];
+      uint Se_Idx = (uint)(Fc->First_Edge+E);
+      if (Se_Idx >= Surf_Edge_N) continue;
+      int Se = Surf_Edges[Se_Idx];
+      uint Abs_Se = (uint)(Se >= 0 ? Se : -Se);
+      if (Abs_Se >= Edge_Count) continue;
+      uint Vi = Se>=0 ? Edges[Abs_Se].V[0] : Edges[Abs_Se].V[1];
+      if (Vi >= Vert_Count) Vi = 0;
       Corners[E] = Make(Verts[Vi].P[0], Verts[Vi].P[1], Verts[Vi].P[2]);
     }
 
@@ -3532,7 +3552,9 @@ Scene Scene_Load_From_VBSP (const char *Path, Spawn *Out_Spawn) {
     int Tris = (Side-1)*(Side-1)*2;
     S.Indices     = realloc(S.Indices,     sizeof(uint)*(S.Index_Count+Tris*3));
     S.Texture_Ids = realloc(S.Texture_Ids, sizeof(uint)*(S.Triangle_Count+Tris));
-    int Ti = Fc->Tex_Info; uint Mat = Ti>=0 ? (uint)Tex_Infos[Ti].Tex_Data : 0;
+    int Ti = Fc->Tex_Info;
+    uint Mat = (Ti>=0 and (uint)Ti<Tex_Info_N) ? (uint)Tex_Infos[Ti].Tex_Data : 0;
+    if (Mat >= Tex_Data_N) Mat = 0;
     for(int Y=0;Y<Side-1;Y++) for(int X=0;X<Side-1;X++) {
       uint A=Disp_Base+Y*Side+X, B=A+1, C=A+Side, Dd=C+1;
       S.Indices[S.Index_Count++]=A; S.Indices[S.Index_Count++]=C; S.Indices[S.Index_Count++]=B;
@@ -3557,37 +3579,43 @@ Scene Scene_Load_From_VBSP (const char *Path, Spawn *Out_Spawn) {
     S.Lightmap_Width = S.Lightmap_Height = 1;
   }
 
-  // Parse spawn point from entity lump
+  // Parse spawn point from entity lump (Source BSP: key-value pairs as "key" "value"\n inside { } blocks)
   *Out_Spawn = (Spawn){{0,64,0}, 0};
-  const char *Ent_Data = (const char*)(D + H->Lumps[VBSP_ENTITIES].Offset);
-  const char *P = Ent_Data;
-  while (*P) {
-    if (*P == '{') {
-      P++;
-      char Class[64]={0}; float Ox=0,Oy=0,Oz=0,Ang=0; int Is_Spawn=0;
-      while (*P and *P!='}') {
-        while(*P==' '||*P=='\n'||*P=='\r'||*P=='\t') P++;
-        if(*P=='"') {
-          P++; char Key[64]={0}; int Ki=0;
-          while(*P and *P!='"' and Ki<63) Key[Ki++]=*P++;
-          if(*P=='"') P++;
-          while(*P==' ') P++;
-          if(*P=='"') {
-            P++; char Val[128]={0}; int Vi=0;
-            while(*P and *P!='"' and Vi<127) Val[Vi++]=*P++;
-            if(*P=='"') P++;
-            if(strcmp(Key,"classname")==0) snprintf(Class,64,"%s",Val);
-            if(strcmp(Key,"origin")==0) sscanf(Val,"%f %f %f",&Ox,&Oy,&Oz);
-            if(strcmp(Key,"angles")==0) sscanf(Val,"%*f %f",&Ang);
-          }
-        } else P++;
+  uint Ent_Len = (uint)H->Lumps[VBSP_ENTITIES].Length;
+  char *Ent_Copy = malloc(Ent_Len+1); memcpy(Ent_Copy, D+H->Lumps[VBSP_ENTITIES].Offset, Ent_Len); Ent_Copy[Ent_Len]=0;
+  int Spawn_Found = 0;
+  { char *Cur = Ent_Copy;
+    while (*Cur) {
+      while (*Cur and *Cur!='{') Cur++;
+      if (!*Cur) break; Cur++; // skip {
+      char Class[64]={0}; float Ox=0,Oy=0,Oz=0,Ang=0;
+      while (*Cur and *Cur!='}') {
+        while (*Cur and *Cur!='"') { if (*Cur=='}') goto done; Cur++; }
+        if (!*Cur) break; Cur++; // skip opening "
+        char Key[64]={0}; int Ki=0;
+        while (*Cur and *Cur!='"' and Ki<63) Key[Ki++]=*Cur++;
+        if (*Cur=='"') Cur++; // skip closing "
+        while (*Cur and *Cur!='"' and *Cur!='}') Cur++;
+        if (*Cur!='"') continue; Cur++; // skip opening "
+        char Val[128]={0}; int Vi=0;
+        while (*Cur and *Cur!='"' and Vi<127) Val[Vi++]=*Cur++;
+        if (*Cur=='"') Cur++; // skip closing "
+        if (strcmp(Key,"classname")==0) snprintf(Class,64,"%s",Val);
+        if (strcmp(Key,"origin")==0)    sscanf(Val,"%f %f %f",&Ox,&Oy,&Oz);
+        if (strcmp(Key,"angles")==0)    sscanf(Val,"%*f %f",&Ang);
       }
-      if(*P=='}') P++;
-      if(strcmp(Class,"info_player_terrorist")==0||strcmp(Class,"info_player_counterterrorist")==0
-         ||strcmp(Class,"info_player_start")==0) Is_Spawn=1;
-      if(Is_Spawn) {Out_Spawn->Origin=Make(Ox,Oz,-Oy); Out_Spawn->Angle=Ang; break;}
-    } else P++;
+      done:
+      if (*Cur=='}') Cur++;
+      if (strcmp(Class,"info_player_terrorist")==0 or strcmp(Class,"info_player_counterterrorist")==0
+          or strcmp(Class,"info_player_start")==0 or strcmp(Class,"info_player_deathmatch")==0) {
+        Out_Spawn->Origin = Make(Ox, Oz, -Oy); Out_Spawn->Angle = Ang; Spawn_Found = 1;
+        printf("[vbsp] spawn '%s': src=(%g,%g,%g) gl=(%g,%g,%g) yaw=%g\n", Class, Ox,Oy,Oz, Ox,Oz,-Oy, Ang);
+        break;
+      }
+    }
   }
+  free(Ent_Copy);
+  if (!Spawn_Found) printf("[vbsp] WARNING: no spawn found in entity lump (%u bytes)\n", Ent_Len);
 
   // Entity lump parsing (full BSP_Entity array) — reuse the Scene's entity fields
   S.Entities     = calloc(MAX_BSP_ENTITIES, sizeof(BSP_Entity));
