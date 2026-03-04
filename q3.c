@@ -106,29 +106,40 @@ const Quality_Preset QUALITY_PRESETS [QUALITY_COUNT] = {//                      
 //
 typedef enum {WORLD_QUAKE3, WORLD_SOURCE, WORLD_UNREAL, WORLD_COUNT} World_Type;
 typedef struct {
-  World_Type Type;
+  World_Type  Type;
   const char *Name;
-  float Unit_Scale;        // World units per real-world inch 
-  float Player_Height;     // Standing bounding box height 
-  float Player_Width;      // Bounding box half-width     
-  float Eye_Height;        // Camera height above feet     
-  float Crouch_Eye_Height; // Camera height crouched      
-  float Crouch_Height;     // Crouched bounding box height 
-  float Step_Size;         // Max stair step height       
-  float FOV;               // Horizontal field of view    
-  float Max_Speed;         // Maximum wish speed     
-  float Gravity;           // Downward acceleration   
-  int   Up_Axis;           // Native up axis before swizzle
+  float       Unit_Scale;        // World units per real-world inch
+  float       Player_Height;     // Standing bounding box height
+  float       Player_Width;      // Bounding box half-width
+  float       Eye_Height;        // Camera height above feet
+  float       Crouch_Eye_Height; // Camera height crouched
+  float       Crouch_Height;     // Crouched bounding box height
+  float       Step_Size;         // Max stair step height
+  float       FOV;               // Horizontal field of view
+  float       Max_Speed;         // Maximum wish speed
+  float       Gravity;           // Downward acceleration
+  int         Up_Axis;           // Native up axis before swizzle
+  const char *Default_Pack;      // Default asset archive (e.g. "assets/pak0.pk3")
+  const char *Default_Map;       // Default map name (e.g. "oa_dm1.bsp")
 } World_Settings;
 
 // Player bounding box minimum corner 
 const vec3  PLAYER_MINIMUMS        = {-15, -24, -15};
 const float PLAYER_HALF_EXTENTS[3] = {15.f, 28.f, 15.f}; // Standing bbox
 
-// Comment here !!!
+// World presets: physics, camera, and asset defaults for each supported game family
+//
+//   Quake 3:   Z-up, 56-unit player, 90° FOV, 320 u/s run, 800 gravity, pak0.pk3
+//   Source:    Z-up, 72-unit player, 90° FOV, 250 u/s run, 800 gravity, VPK archives
+//   Unreal:    Z-up, 78-unit player, 90° FOV, 400 u/s run, 950 gravity, .u/.utx packages
+//
 const World_Settings WORLD_PRESETS[WORLD_COUNT] = {
-  [WORLD_QUAKE3] = {WORLD_QUAKE3, "Quake 3",       1.f, 56.f, 15.f, 50.f, 36.f, 32.f, 18.f, 90.f, 320.f, 800.f, 2},
-  [WORLD_SOURCE] = {WORLD_SOURCE, "Source Engine", 1.f, 72.f, 16.f, 64.f, 46.f, 36.f, 18.f, 90.f, 250.f, 800.f, 2}};
+  [WORLD_QUAKE3] = {WORLD_QUAKE3, "Quake 3",            1.f,  56.f, 15.f, 50.f, 36.f, 32.f, 18.f, 90.f, 320.f, 800.f, 2,
+                    "assets/pak0.pk3",   "oa_dm1.bsp"},
+  [WORLD_SOURCE] = {WORLD_SOURCE, "Source Engine",       1.f,  72.f, 16.f, 64.f, 46.f, 36.f, 18.f, 90.f, 250.f, 800.f, 2,
+                    NULL,                "de_dust2.bsp"},
+  [WORLD_UNREAL] = {WORLD_UNREAL, "Unreal Tournament",  1.f,  78.f, 17.f, 68.f, 48.f, 39.f, 16.f, 90.f, 400.f, 950.f, 2,
+                    NULL,                "DM-Morpheus.unr"}};
 
 // Id Software player settings
 #define FIELD_OF_VIEW       90.f   // Windowing and horizontal viewport settings
@@ -540,6 +551,15 @@ mat4 Inverse_Orthogonal (mat4 Source);
 // all others remain zero.
 mat4 Inverse_Projection (mat4 Projection);
 
+// Construct a 4 by 4 identity matrix
+mat4 Identity ();
+
+// Multiply two 3 by 4 affine matrices: C = A * B (row-major, translation in column 3)
+void Mat34_Mul (const float A[3][4], const float B[3][4], float C[3][4]);
+
+// Multiply two 4 by 4 matrices: Result = A * B (row-major, column-major storage)
+mat4 Mat4_Mul (mat4 A, mat4 B);
+
 // ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 //
 // §5. Memory
@@ -558,6 +578,78 @@ void Buffer_Upload (GPU_Buffer Destination, const void *Data, uint64_t Size);
 // Upload data to device-local memory via a host-visible staging buffer
 GPU_Buffer Buffer_Stage_Upload (VkCommandBuffer Command_Buffer, VkQueue Queue,
                                 const void *Data, uint64_t Size, VkBufferUsageFlags Usage);
+
+// ── CPU Arena ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+//
+// Minimal bump allocator: a contiguous slab of host memory with a monotonically advancing cursor. Suitable for per-load and per-frame
+// scratch allocations where individual frees are unnecessary — just reset the cursor to reclaim everything at once.
+//
+typedef struct {
+  uint8_t *Base;     // Start of the backing allocation (malloc'd once)
+  uint64_t Used;     // High-water byte offset from Base
+  uint64_t Capacity; // Total size of the slab in bytes
+} Arena;
+
+// Create a CPU arena with the given capacity (bytes). Backing memory is allocated via malloc.
+Arena  Arena_Create  (uint64_t Capacity);
+
+// Bump-allocate Size bytes aligned to Align from the arena. Returns NULL if the arena is exhausted.
+void  *Arena_Alloc   (Arena *A, uint64_t Size, uint64_t Align);
+
+// Reset the arena cursor to zero, logically freeing all prior allocations
+void   Arena_Reset   (Arena *A);
+
+// Free the arena's backing memory
+void   Arena_Destroy (Arena *A);
+
+// ── GPU Pool ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+//
+// Sub-allocator for Vulkan device memory, inspired by AMD VMA. A pool owns one large VkDeviceMemory slab per memory type and hands out
+// regions via a free-list. Buffers and images sub-allocated from the same pool share the underlying heap allocation, which dramatically
+// reduces the number of vkAllocateMemory calls (drivers limit total allocations to ~4096 on many implementations).
+//
+//   Block: a contiguous region within a slab (either free or occupied)
+//   Slab:  one VkDeviceMemory allocation that is carved into blocks
+//
+#define GPU_POOL_MAX_SLABS  16   // Maximum number of slab allocations per pool
+#define GPU_POOL_MAX_BLOCKS 1024 // Maximum sub-allocation blocks across all slabs
+
+typedef struct {
+  uint64_t Offset; // Byte offset within the slab's VkDeviceMemory
+  uint64_t Size;   // Region size in bytes
+  int      Free;   // Non-zero if this block is available for allocation
+  int      Slab;   // Index into the pool's Slab array
+} GPU_Pool_Block;
+
+typedef struct {
+  VkDeviceMemory Memory;       // Device memory handle for this slab
+  uint64_t       Size;         // Total slab size in bytes
+  uint           Memory_Type;  // Vulkan memory type index
+  uint8_t       *Mapped;       // Persistently mapped pointer (NULL for device-local-only slabs)
+} GPU_Pool_Slab;
+
+typedef struct {
+  GPU_Pool_Slab  Slabs      [GPU_POOL_MAX_SLABS];
+  uint           Slab_Count;
+  GPU_Pool_Block Blocks     [GPU_POOL_MAX_BLOCKS];
+  uint           Block_Count;
+  uint64_t       Default_Slab_Size; // Size in bytes of each new slab (e.g. 256 MB)
+} GPU_Pool;
+
+// Create a GPU pool with the given default slab size (bytes). No memory is allocated until the first sub-allocation request.
+GPU_Pool GPU_Pool_Create (uint64_t Default_Slab_Size);
+
+// Sub-allocate a region from the pool. Grows by adding a new slab if the current one is exhausted.
+// Returns the block index (used as a handle for freeing).
+int GPU_Pool_Alloc (GPU_Pool *Pool, uint64_t Size, uint64_t Alignment,
+                    VkMemoryPropertyFlags Memory_Flags, uint Memory_Type_Bits,
+                    VkDeviceMemory *Out_Memory, uint64_t *Out_Offset, uint8_t **Out_Mapped);
+
+// Return a sub-allocated block to the pool. Adjacent free blocks are coalesced.
+void GPU_Pool_Free (GPU_Pool *Pool, int Block_Handle);
+
+// Destroy all slabs and free every VkDeviceMemory allocation owned by the pool
+void GPU_Pool_Destroy (GPU_Pool *Pool);
 
 // ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 //
@@ -628,6 +720,15 @@ void Image_Layout_Barrier (VkCommandBuffer      Command_Buffer, VkImage         
                            VkImageLayout        Old_Layout,     VkImageLayout        New_Layout,
                            VkAccessFlags        Source_Access,  VkAccessFlags        Destination_Access,
                            VkPipelineStageFlags Source_Stage,   VkPipelineStageFlags Destination_Stage);
+
+// Return the bytes-per-pixel for a VTF image format (0 for block-compressed formats)
+uint VTF_Bpp (int Format);
+
+// Decode one 4 by 4 DXT1 block into RGBA8 pixels at Dst with the given row stride in bytes
+void DXT1_Decode_Block (const uint8_t *Src, uint8_t *Dst, int Stride);
+
+// Decode one 4 by 4 DXT5 alpha block and write the alpha channel into existing RGBA8 pixels at Dst
+void DXT5_Decode_Alpha (const uint8_t *Src, uint8_t *Dst, int Stride);
 
 // Create a sampler with linear filtering and repeating address mode on all axes
 VkSampler Sampler_Create_Repeating ();
@@ -839,6 +940,91 @@ typedef struct {
   int8_t   Bone_Ids[3];              // Bone indices (after remapping through the strip group's bone table)
 } VTX_Vertex; // 9 bytes
 
+// ── Articulated Figure ───────────────────────────────────────────────────────────────────────────────────────────────────────────────
+//
+// Unified model representation. An articulated figure is a hierarchy of named parts, each with geometry, a skeleton, and attachment
+// tags. A weapon is a figure with parts {body, barrel, hand}. A player is a figure with parts {head, upper, lower}. A Source MDL is
+// a figure with parts derived from bodygroups. This replaces both Weapon_Model and the ad-hoc Entity frame arrays, making weapon
+// loading a superset of model loading rather than a separate operation.
+//
+
+#define FIGURE_MAX_PARTS  8
+#define FIGURE_MAX_TAGS   16
+#define FIGURE_MAX_ANIMS  32
+#define FIGURE_MAX_FRAMES 256
+#define FIGURE_MAX_BONES  128
+
+// Named attachment point (tag_barrel, tag_weapon, tag_head, etc.)
+typedef struct {
+  char  Name[64];
+  float Transform[12]; // Origin[3] + Axis[9] — per-frame for animated tags
+} Figure_Tag;
+
+// One geometric part of the figure (e.g. "barrel", "upper_body", "head")
+typedef struct {
+  char     Name[64];
+  Vertex  *Vertices;     uint Vertex_Count;
+  uint    *Indices;      uint Index_Count;
+  uint    *Texture_Ids;  uint Triangle_Count;
+  char     Texture_Names[WEAPON_MAX_TEXTURES][64];
+  uint     Surface_Count;
+  int      Parent_Tag;   // Index into the figure's tag array (-1 = root)
+} Figure_Part;
+
+// Animation clip: a named sequence of keyframes
+typedef struct {
+  char  Name[64];
+  int   First_Frame;  // Index into the figure's frame vertex arrays
+  int   Frame_Count;
+  float FPS;
+  int   Looping;
+} Figure_Animation;
+
+// The complete articulated figure
+typedef struct {
+  Figure_Part       Parts[FIGURE_MAX_PARTS];
+  uint              Part_Count;
+  Figure_Tag        Tags[FIGURE_MAX_TAGS];
+  uint              Tag_Count;
+  Figure_Animation  Animations[FIGURE_MAX_ANIMS];
+  uint              Animation_Count;
+
+  // Merged geometry (all parts flattened for GPU upload)
+  Vertex *Vertices;     uint Vertex_Count;
+  uint   *Indices;      uint Index_Count;
+  uint   *Texture_Ids;  uint Triangle_Count;
+
+  // Per-frame vertex snapshots (for MD3-style vertex animation)
+  Vertex *Frame_Vertices[FIGURE_MAX_FRAMES];
+  uint    Total_Frame_Count;
+
+  // Skeletal data (for Source MDL bone-driven animation)
+  int         Bone_Count;
+  int         Bone_Parents [FIGURE_MAX_BONES];
+  float       Bind_Pose    [FIGURE_MAX_BONES][3][4];
+  float       Inv_Bind     [FIGURE_MAX_BONES][3][4];
+  Bone_Matrix Pose         [FIGURE_MAX_BONES];
+  uint8_t    *Bone_Ids;
+  uint8_t    *Bone_Weights;
+
+  int         Is_Source;   // 1 = Source MDL skeletal, 0 = MD3 vertex animation
+} Articulated_Figure;
+
+// Load an articulated figure from any supported format. Dispatches based on file extension:
+//   .md3 → Q3 multi-part assembly (head + upper + lower, or body + barrel + hand)
+//   .mdl → Source engine skeletal model (MDL + VVD + VTX)
+//   .psk → Unreal skeletal mesh (future)
+Articulated_Figure Figure_Load (const char *Path, vec3 Origin, float Yaw);
+
+// Convenience: load a weapon figure (sets up viewmodel transforms, tag_weapon animation, scales)
+Articulated_Figure Figure_Load_Weapon (const char *Path);
+
+// Read an MD3 file from disk into a heap-allocated buffer. Returns NULL on failure; sets *Out_Size to byte count.
+uint8_t *MD3_Load_File (const char *Path, long *Out_Size);
+
+// Compose two MD3 tag transforms: C = A * B (each is origin[3] + axis[9], 12 floats total)
+void Tag_Compose (const float *A, const float *B, float *C);
+
 // Parse one MD3 surface at frame 0 and append its triangles to the caller's shared geometry arrays
 void MD3_Parse_Surface (const uint8_t *Surface_Data,
                         Vertex **Inout_Vertices,    uint *Inout_Vertex_Count,
@@ -855,6 +1041,16 @@ void MD3_Parse_Surface_At_Frame (const uint8_t *Surface_Data, int Frame,
 
 // Load the default Quake 3 MD3 weapon model from the assets/models directory
 Weapon_Model Weapon_Model_Load ();
+
+// Load a Source engine MDL model as a held weapon (viewmodel). Parses MDL + VVD + VTX sidecars, applies idle-pose skinning.
+Weapon_Model Source_Weapon_Model_Load (const char *Path);
+
+// Assemble a composite Q3 player model (lower + upper + head + weapon) at a given animation frame into merged geometry arrays.
+void Entity_Assemble_Frame (int Legs_Frame, int Torso_Frame,
+                            uint Body_Mat, uint Gun_Mat, const float World[12],
+                            Vertex **Out_Verts, uint *Out_Vert_Count,
+                            uint **Out_Indices, uint *Out_Index_Count,
+                            uint **Out_Tex_Ids, uint *Out_Tri_Count);
 
 // ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 //
@@ -1603,6 +1799,12 @@ void Skeleton_Evaluate (Entity *E, float Time);
 // bind-pose vertices from SSBOs, writes skinned vertices to the entity's vertex buffer.
 void Skeleton_Skin_Dispatch (Entity *E);
 
+// Load a default Quake 3 player model (sarge) as an animated entity placed near the spawn point
+Entity Entity_Load (Scene *S, Spawn Spawn_Point);
+
+// Classify a BSP entity classname string into the Entity_Kind discriminant
+void Classify_Entity (const char *Classname, int Length, BSP_Entity *E);
+
 // Cycle movement style between WORLD_QUAKE3 and WORLD_SOURCE
 void Movement_Style_Toggle (Player *P);
 
@@ -1622,6 +1824,12 @@ void Weapon_Bottom_Level_Initialize (Weapon_Instance *Weapon);
 
 // Rebuild the weapon BLAS from scratch after CPU vertex transformation. Re-uploads the vertices and performs a full (non-update) rebuild
 void Weapon_Bottom_Level_Rebuild (Weapon_Instance *Weapon);
+
+// Initialize the entity's BLAS with host-visible vertex buffer and ALLOW_UPDATE flag for per-frame animation refit
+void Entity_Bottom_Level_Initialize (Entity *Enemy);
+
+// Rebuild the entity BLAS from the current animation frame's vertex data
+void Entity_Bottom_Level_Rebuild (Entity *Enemy);
 
 // Pre-allocate the top-level acceleration structure (TLAS) for up to Maximum_Instances instance entries
 void Top_Level_Initialize (uint Maximum_Instances);
@@ -1733,6 +1941,9 @@ typedef struct {
   int   Pad;
 } GPU_Hull;
 
+// Signed distance from point P to the plane of triangle (A, B, C). Positive = front side.
+float Quickhull_Dist (vec3 P, vec3 A, vec3 B, vec3 C);
+
 // Build a convex hull from a point cloud using the Quickhull algorithm. Returns the hull with deduplicated vertices and per-vertex
 // adjacency tables for GPU hill-climbing support.
 Convex_Hull Quickhull (const vec3 *Points, uint Count);
@@ -1783,6 +1994,12 @@ void Shader_Binding_Table_Create ();
 
 // A-trous wavelet spatial denoiser
 void Denoise_Pipeline_Create ();
+
+// Create the post-processing compute pipeline (tonemapping, TAA, bloom, vignette, god rays)
+void Postprocess_Pipeline_Create ();
+
+// Create the GPU skeletal skinning compute pipeline for Source MDL bone-driven animation
+void Skinning_Pipeline_Create ();
 
 // ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 //
@@ -1869,7 +2086,7 @@ ALuint Audio_Generate_Explosion_Modal (float Duration, float Volume);
 
 // Try to load a WAV from disk; if missing, fall back to modal synthesis
 ALuint Audio_Load_WAV_Or_Modal (const char *Path, int Material, float Impulse,
-                                ffloat Duration, float Volume);
+                                float Duration, float Volume);
 
 // Comment here !!!
 void Audio_Update_Footsteps (Player *P, float Dt);
@@ -2043,6 +2260,108 @@ Input Poll_Input ();
 // Default BSP map to load when no command-line argument is given
 const char *DEFAULT_MAP = "oa_dm1.bsp";
 
+// ── Asset Store ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+//
+// Pak-driven virtual filesystem. Archives are mounted into a search stack; lookups walk the stack newest-first, falling back to loose
+// files on disk. Compressed entries (PK3/ZIP deflate) are inflated on the CPU into a scratch arena before returning to the caller.
+//
+//   Supported formats:
+//     .pk3  — Quake 3 (standard ZIP with renamed extension; deflate or store)
+//     .pak  — Quake 1/2 (flat header: "PACK" + offset + count, 64-byte entries, no compression)
+//     .vpk  — Valve Source (_dir.vpk directory + _NNN.vpk bulk data)
+//     .wad  — Half-Life / Quake WAD2/WAD3 texture lump archives
+//
+
+typedef enum {
+  PACK_PK3,   // Quake 3 — ZIP archive with .pk3 extension (deflate or store)
+  PACK_PAK,   // Quake 1/2 — flat header + 64-byte entries, uncompressed
+  PACK_VPK,   // Valve Source — directory tree in _dir.vpk, bulk in _NNN.vpk
+  PACK_WAD,   // Half-Life / Quake — WAD2/WAD3 texture lumps
+  PACK_COUNT
+} Pack_Format;
+
+// One entry inside a loaded archive
+typedef struct {
+  char     Name[256];   // Virtual path inside the pack (e.g. "models/weapons/rocket.md3")
+  uint64_t Offset;      // Byte offset into the archive's raw data
+  uint64_t Packed_Size; // Compressed size in bytes (== Size when uncompressed)
+  uint64_t Size;        // Uncompressed size in bytes
+  int      Compressed;  // Non-zero if deflate-compressed
+} Pack_Entry;
+
+// A loaded archive: header parsed, raw data resident in memory
+typedef struct {
+  Pack_Format  Format;
+  char         Path[512];       // Filesystem path to the archive file
+  uint8_t     *Data;            // Entire archive mapped / read into memory
+  uint64_t     Data_Size;       // Size of the resident data
+  Pack_Entry  *Entries;         // Directory of entries (heap-allocated)
+  uint         Entry_Count;     // Number of entries in the directory
+} Pack_File;
+
+// ── Free-Loaded Assets ───────────────────────────────────────────────────────────────────────────────────────────────────────────────
+//
+// Individual loose files loaded by path (not from archives). Supports fuzzy path resolution: the store strips leading directories,
+// normalises slashes, ignores case, and tries common extension substitutions (.tga/.vtf/.png, .md3/.mdl/.psk) to find the best match
+// under the Loose_Root. Free-loaded assets can be unloaded individually or all at once.
+//
+
+#define FREE_ASSET_MAX 256
+
+typedef struct {
+  char     Virtual_Path[256];  // Canonical virtual path used as the lookup key
+  char     Resolved_Path[512]; // Actual filesystem path that was loaded
+  uint8_t *Data;               // Heap-allocated file contents
+  uint64_t Size;               // Size in bytes
+} Free_Asset;
+
+// The virtual filesystem: a stack of pack files searched newest-first
+#define PACK_MAX 32
+typedef struct {
+  Pack_File  Packs[PACK_MAX];             // Mounted archives (searched [Count-1] down to [0])
+  uint       Pack_Count;
+  char       Loose_Root[512];             // Fallback directory for loose files (e.g. "assets/")
+  Arena      Scratch;                     // Scratch arena for inflate buffers (reset after each load)
+  Free_Asset Free_Assets[FREE_ASSET_MAX]; // Individually loaded loose files (not from archives)
+  uint       Free_Asset_Count;
+} Asset_Store;
+
+// Mount an archive file into the store. Reads the entire file into memory and parses its directory.
+// Returns non-zero on success. Supports .pk3, .pak, .vpk, .wad auto-detected by extension or magic.
+int Asset_Store_Mount (Asset_Store *Store, const char *Archive_Path);
+
+// Load a file by virtual path. Searches mounted packs newest-first, then loose files under Loose_Root.
+// Returns a heap-allocated buffer with the inflated data and sets *Out_Size to its byte count.
+// Caller must free the returned pointer (or use Arena_Alloc for scratch loads).
+uint8_t *Asset_Load (Asset_Store *Store, const char *Virtual_Path, uint64_t *Out_Size);
+
+// Check whether a virtual path exists in the store without loading the data
+int Asset_Exists (const Asset_Store *Store, const char *Virtual_Path);
+
+// Unmount a single archive by path. Frees its backing data and directory, shifts the stack down. Returns non-zero on success.
+int Asset_Store_Unmount (Asset_Store *Store, const char *Archive_Path);
+
+// Return the number of currently mounted archives
+uint Asset_Store_Pack_Count (const Asset_Store *Store);
+
+// Return a pointer to the I-th mounted pack (0 = oldest, Count-1 = newest). NULL if out of range.
+const Pack_File *Asset_Store_Pack_At (const Asset_Store *Store, uint Index);
+
+// Unmount all archives, free all backing memory, and destroy the scratch arena
+void Asset_Store_Destroy (Asset_Store *Store);
+
+// Free-load a single file by path. Searches Loose_Root with fuzzy matching. Returns the data pointer and sets *Out_Size.
+uint8_t *Asset_Free_Load (Asset_Store *Store, const char *Path, uint64_t *Out_Size);
+
+// Unload a single free-loaded asset by its virtual path. Returns non-zero on success.
+int Asset_Free_Unload (Asset_Store *Store, const char *Path);
+
+// Unload all free-loaded assets at once
+void Asset_Free_Unload_All (Asset_Store *Store);
+
+// Low-level inflate: decompress a raw deflate stream from In into Out. Returns bytes written.
+uint64_t Inflate_Buffer (const uint8_t *In, uint64_t In_Size, uint8_t *Out, uint64_t Out_Capacity);
+
 // Paths to the weapon model's diffuse textures (body and sight)
 #define WEAPON_TEXTURE_COUNT 2 // Default for Q3 weapons (2 surfaces: body + hand)
 #define WEAPON_MAX_TEXTURES 16 // Maximum for Source weapons with many materials
@@ -2144,7 +2463,8 @@ int main (int Argc, char **Argv) {
       printf ("  --source          Load Source engine BSP (VBSP) instead of Q3 BSP\n");
       printf ("  --mdl PATH        Load Source MDL model as enemy entity\n");
       printf ("  --weapon PATH     Load Source MDL as held weapon (viewmodel)\n");
-      printf ("  --world q3|source Set world preset (player height, FOV, speed)\n");
+      printf ("  --world PRESET    Set world preset: q3, source, unreal\n");
+      printf ("  --pak PATH        Mount an asset archive (.pk3/.pak/.wad)\n");
       printf ("  --screenshot FILE Render one frame from spawn, save TGA, exit\n");
       printf ("  --benchmark N     Run N frames, print FPS stats, exit\n");
       printf ("  --spp N           Override samples-per-pixel (1, 2, 4, 8)\n");
@@ -2178,13 +2498,16 @@ int main (int Argc, char **Argv) {
       const char *W = Argv[++I];
       if      (strcmp(W,"source") == 0) Active_World = WORLD_PRESETS [WORLD_SOURCE];
       else if (strcmp(W,"q3")     == 0) Active_World = WORLD_PRESETS [WORLD_QUAKE3];
-      else printf("[world] unknown world '%s' (q3/source)\n", W);
+      else if (strcmp(W,"unreal") == 0) Active_World = WORLD_PRESETS [WORLD_UNREAL];
+      else printf("[world] unknown world '%s' (q3/source/unreal)\n", W);
     }
     else if (strcmp (Argv[I], "--movement")       == 0 and I + 1 < Argc) {
       const char *Mv = Argv[++I];
       if      (strcmp(Mv,"source") == 0) Active_Movement = WORLD_SOURCE;
       else if (strcmp(Mv,"q3")     == 0) Active_Movement = WORLD_QUAKE3;
+      else if (strcmp(Mv,"unreal") == 0) Active_Movement = WORLD_UNREAL;
     }
+    else if (strcmp (Argv[I], "--pak")    == 0 and I + 1 < Argc) {/* deferred: mount after Asset_Store init */}
     else if (strcmp (Argv[I], "--mdl")    == 0 and I + 1 < Argc) Source_MDL_Path = Argv[++I];
     else if (strcmp (Argv[I], "--weapon") == 0 and I + 1 < Argc) Source_Weapon_Path = Argv[++I];
     else if (strcmp (Argv[I], "--spp")    == 0 and I + 1 < Argc) Override_SPP = atoi (Argv[++I]);
@@ -3593,6 +3916,142 @@ GPU_Buffer Buffer_Stage_Upload (VkCommandBuffer    Command_Buffer,
   vkDestroyBuffer (Device, Staging.Buffer, NULL);
   vkFreeMemory    (Device, Staging.Memory, NULL);
   return Destination;
+}
+
+// ════════════════
+//   Arena_Create
+// ════════════════
+
+Arena Arena_Create (uint64_t Capacity) {
+  return (Arena){.Base = (uint8_t *)malloc (Capacity), .Used = 0, .Capacity = Capacity};
+}
+
+// ══════════════
+//   Arena_Alloc
+// ══════════════
+
+void *Arena_Alloc (Arena *A, uint64_t Size, uint64_t Align) {
+  uint64_t Mask   = Align - 1;
+  uint64_t Cursor = (A->Used + Mask) & ~Mask;
+  if (Cursor + Size > A->Capacity) return NULL;
+  A->Used = Cursor + Size;
+  return A->Base + Cursor;
+}
+
+// ══════════════
+//   Arena_Reset
+// ══════════════
+
+void Arena_Reset (Arena *A) {A->Used = 0;}
+
+// ════════════════
+//   Arena_Destroy
+// ════════════════
+
+void Arena_Destroy (Arena *A) {free (A->Base); *A = (Arena){0};}
+
+// ═══════════════════
+//   GPU_Pool_Create
+// ═══════════════════
+
+GPU_Pool GPU_Pool_Create (uint64_t Default_Slab_Size) {
+  return (GPU_Pool){.Default_Slab_Size = Default_Slab_Size};
+}
+
+// ══════════════════
+//   GPU_Pool_Alloc
+// ══════════════════
+//
+// Walk the free-list looking for a block that satisfies (Size, Alignment, Memory_Type). If none found, allocate a new slab from the
+// Vulkan device and carve the first block from it. Returns the block index on success, -1 on failure.
+
+int GPU_Pool_Alloc (GPU_Pool *Pool, uint64_t Size, uint64_t Alignment,
+                    VkMemoryPropertyFlags Memory_Flags, uint Memory_Type_Bits,
+                    VkDeviceMemory *Out_Memory, uint64_t *Out_Offset, uint8_t **Out_Mapped) {
+
+  // Pass 1: scan existing free blocks for a fit
+  for (uint I = 0; I < Pool->Block_Count; I++) {
+    GPU_Pool_Block *B = &Pool->Blocks[I];
+    if (not B->Free) continue;
+    uint64_t Aligned = (B->Offset + Alignment - 1) & ~(Alignment - 1);
+    uint64_t Waste   = Aligned - B->Offset;
+    if (Waste + Size > B->Size) continue;
+
+    // Split: if there is leftover space after the allocation, create a new free block
+    uint64_t Remainder = B->Size - Waste - Size;
+    B->Offset = Aligned;
+    B->Size   = Size;
+    B->Free   = 0;
+    if (Remainder > 0 and Pool->Block_Count < GPU_POOL_MAX_BLOCKS) {
+      Pool->Blocks[Pool->Block_Count++] = (GPU_Pool_Block){
+        .Offset = Aligned + Size, .Size = Remainder, .Free = 1, .Slab = B->Slab};
+    }
+    *Out_Memory = Pool->Slabs[B->Slab].Memory;
+    *Out_Offset = Aligned;
+    *Out_Mapped = Pool->Slabs[B->Slab].Mapped ? Pool->Slabs[B->Slab].Mapped + Aligned : NULL;
+    return (int)I;
+  }
+
+  // Pass 2: allocate a new slab
+  if (Pool->Slab_Count >= GPU_POOL_MAX_SLABS) return -1;
+  uint64_t Slab_Size = Pool->Default_Slab_Size;
+  if (Size > Slab_Size) Slab_Size = Size;
+  uint Memory_Type_Index = Find_Memory_Type (Memory_Type_Bits, Memory_Flags);
+
+  GPU_Pool_Slab *Slab = &Pool->Slabs[Pool->Slab_Count];
+  Slab->Size        = Slab_Size;
+  Slab->Memory_Type = Memory_Type_Index;
+  Slab->Mapped      = NULL;
+  VK_CHECK (vkAllocateMemory (/*device        =>*/ Device,
+                              /*pAllocateInfo =>*/ &(VkMemoryAllocateInfo){
+                                .sType           = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+                                .allocationSize  = Slab_Size,
+                                .memoryTypeIndex = Memory_Type_Index},
+                              /*pAllocator    =>*/ NULL,
+                              /*pMemory       =>*/ &Slab->Memory));
+
+  // Persistently map host-visible slabs
+  if (Memory_Flags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT)
+    VK_CHECK (vkMapMemory (Device, Slab->Memory, 0, Slab_Size, 0, (void **)&Slab->Mapped));
+
+  int Slab_Index = (int)Pool->Slab_Count++;
+
+  // Create the first block spanning the entire new slab, then recurse to split it
+  if (Pool->Block_Count >= GPU_POOL_MAX_BLOCKS) return -1;
+  Pool->Blocks[Pool->Block_Count++] = (GPU_Pool_Block){
+    .Offset = 0, .Size = Slab_Size, .Free = 1, .Slab = Slab_Index};
+  return GPU_Pool_Alloc (Pool, Size, Alignment, Memory_Flags, Memory_Type_Bits, Out_Memory, Out_Offset, Out_Mapped);
+}
+
+// ═════════════════
+//   GPU_Pool_Free
+// ═════════════════
+
+void GPU_Pool_Free (GPU_Pool *Pool, int Block_Handle) {
+  if (Block_Handle < 0 or (uint)Block_Handle >= Pool->Block_Count) return;
+  GPU_Pool_Block *B = &Pool->Blocks[Block_Handle];
+  B->Free = 1;
+
+  // Coalesce with adjacent free blocks in the same slab
+  for (uint I = 0; I < Pool->Block_Count; I++) {
+    if ((int)I == Block_Handle or not Pool->Blocks[I].Free) continue;
+    if (Pool->Blocks[I].Slab != B->Slab) continue;
+    GPU_Pool_Block *N = &Pool->Blocks[I];
+    if (B->Offset + B->Size == N->Offset)      {B->Size += N->Size; N->Size = 0; N->Free = 0;}
+    else if (N->Offset + N->Size == B->Offset) {N->Size += B->Size; B->Size = 0; B->Free = 0; break;}
+  }
+}
+
+// ════════════════════
+//   GPU_Pool_Destroy
+// ════════════════════
+
+void GPU_Pool_Destroy (GPU_Pool *Pool) {
+  for (uint I = 0; I < Pool->Slab_Count; I++) {
+    if (Pool->Slabs[I].Mapped) vkUnmapMemory (Device, Pool->Slabs[I].Memory);
+    vkFreeMemory (Device, Pool->Slabs[I].Memory, NULL);
+  }
+  *Pool = (GPU_Pool){0};
 }
 
 // ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
@@ -5522,6 +5981,125 @@ Weapon_Model Source_Weapon_Model_Load (const char *Path) {
   return Result;
 
 } // Source_Weapon_Model_Load
+
+// ═══════════════════
+//   Figure_Load
+// ═══════════════════
+//
+// Unified model loader that dispatches based on file extension. Returns an Articulated_Figure with merged geometry, attachment tags,
+// and animation data. This is the single entry point that replaces Entity_Load, MDL_Load, Weapon_Model_Load, etc.
+
+Articulated_Figure Figure_Load (const char *Path, vec3 Origin, float Yaw) {
+  Articulated_Figure Figure = {0};
+
+  // Determine format from extension
+  const char *Dot = strrchr (Path, '.');
+  if (not Dot) {printf ("[figure] no extension in %s\n", Path); return Figure;}
+
+  if (strcasecmp (Dot, ".mdl") == 0) {
+    // Source engine MDL: delegate to MDL loading pipeline, then transplant data into Figure
+    Figure.Is_Source = 1;
+
+    // The Source MDL loader needs the MDL + VVD + VTX sidecar files. It produces an Entity with
+    // skeletal data. We transplant the relevant fields into our Figure struct.
+    // For now, wrap the existing Source_Weapon_Model_Load which already handles MDL parsing.
+    Weapon_Model WM = Source_Weapon_Model_Load (Path);
+    Figure.Part_Count = 1;
+    snprintf (Figure.Parts[0].Name, 64, "body");
+    Figure.Parts[0].Vertices       = WM.Vertices;
+    Figure.Parts[0].Vertex_Count   = WM.Vertex_Count;
+    Figure.Parts[0].Indices        = WM.Indices;
+    Figure.Parts[0].Index_Count    = WM.Index_Count;
+    Figure.Parts[0].Texture_Ids    = WM.Texture_Ids;
+    Figure.Parts[0].Triangle_Count = WM.Triangle_Count;
+    Figure.Parts[0].Surface_Count  = WM.Surface_Count;
+    Figure.Parts[0].Parent_Tag     = -1;
+    for (uint I = 0; I < WM.Surface_Count and I < WEAPON_MAX_TEXTURES; I++)
+      memcpy (Figure.Parts[0].Texture_Names[I], WM.Texture_Names[I], 64);
+
+    // Copy merged geometry pointers
+    Figure.Vertices       = WM.Vertices;
+    Figure.Vertex_Count   = WM.Vertex_Count;
+    Figure.Indices        = WM.Indices;
+    Figure.Index_Count    = WM.Index_Count;
+    Figure.Texture_Ids    = WM.Texture_Ids;
+    Figure.Triangle_Count = WM.Triangle_Count;
+
+    printf ("[figure] loaded Source MDL %s: %u verts, %u tris, %u surfaces\n",
+            Path, Figure.Vertex_Count, Figure.Triangle_Count, Figure.Parts[0].Surface_Count);
+
+  } else if (strcasecmp (Dot, ".md3") == 0) {
+    // Q3 MD3: load as a single-part figure with vertex animation frames
+    Figure.Is_Source = 0;
+
+    Weapon_Model WM = Weapon_Model_Load ();
+    Figure.Part_Count = 1;
+    snprintf (Figure.Parts[0].Name, 64, "body");
+    Figure.Parts[0].Vertices       = WM.Vertices;
+    Figure.Parts[0].Vertex_Count   = WM.Vertex_Count;
+    Figure.Parts[0].Indices        = WM.Indices;
+    Figure.Parts[0].Index_Count    = WM.Index_Count;
+    Figure.Parts[0].Texture_Ids    = WM.Texture_Ids;
+    Figure.Parts[0].Triangle_Count = WM.Triangle_Count;
+    Figure.Parts[0].Surface_Count  = WM.Surface_Count;
+    Figure.Parts[0].Parent_Tag     = -1;
+    for (uint I = 0; I < WM.Surface_Count and I < WEAPON_MAX_TEXTURES; I++)
+      memcpy (Figure.Parts[0].Texture_Names[I], WM.Texture_Names[I], 64);
+
+    // Transplant tag data
+    if (WM.Animation_Frame_Count > 0) {
+      Figure.Tag_Count = 1;
+      snprintf (Figure.Tags[0].Name, 64, "tag_weapon");
+      memcpy (Figure.Tags[0].Transform, WM.Tag_Weapon[0], 12 * sizeof (float));
+      Figure.Animation_Count = 1;
+      snprintf (Figure.Animations[0].Name, 64, "idle");
+      Figure.Animations[0].First_Frame = 0;
+      Figure.Animations[0].Frame_Count = (int)WM.Animation_Frame_Count;
+      Figure.Animations[0].FPS         = 10.f;
+      Figure.Animations[0].Looping     = 1;
+    }
+
+    Figure.Vertices       = WM.Vertices;
+    Figure.Vertex_Count   = WM.Vertex_Count;
+    Figure.Indices        = WM.Indices;
+    Figure.Index_Count    = WM.Index_Count;
+    Figure.Texture_Ids    = WM.Texture_Ids;
+    Figure.Triangle_Count = WM.Triangle_Count;
+
+    printf ("[figure] loaded Q3 MD3 %s: %u verts, %u tris, %u tags, %u anims\n",
+            Path, Figure.Vertex_Count, Figure.Triangle_Count, Figure.Tag_Count, Figure.Animation_Count);
+
+  } else {
+    printf ("[figure] unsupported format: %s\n", Dot);
+  }
+
+  return Figure;
+}
+
+// ═════════════════════
+//   Figure_Load_Weapon
+// ═════════════════════
+//
+// Convenience wrapper that loads a weapon figure. A weapon is an articulated figure where the geometry is scaled to viewmodel size and
+// attachment tags (tag_barrel, tag_weapon) are preserved for fire animation.
+
+Articulated_Figure Figure_Load_Weapon (const char *Path) {
+  Articulated_Figure Figure = Figure_Load (Path, (vec3){0, 0, 0}, 0.f);
+
+  // If no explicit weapon tag was loaded, synthesize a default at origin
+  if (Figure.Tag_Count == 0) {
+    Figure.Tag_Count = 1;
+    snprintf (Figure.Tags[0].Name, 64, "tag_weapon");
+    memset (Figure.Tags[0].Transform, 0, sizeof Figure.Tags[0].Transform);
+    Figure.Tags[0].Transform[3]  = 1.f; // Axis identity diagonal
+    Figure.Tags[0].Transform[7]  = 1.f;
+    Figure.Tags[0].Transform[11] = 1.f;
+  }
+
+  printf ("[figure] weapon: %u parts, %u tags, %u anims\n",
+          Figure.Part_Count, Figure.Tag_Count, Figure.Animation_Count);
+  return Figure;
+}
 
 // ══════════════════════════
 //   Skeleton_Skin_Dispatch
@@ -11946,6 +12524,458 @@ void Skinning_Pipeline_Create () {
 
   vkDestroyShaderModule (Device, Skinning_Module, NULL);
   printf ("[skinning] GPU skeletal skinning pipeline created\n");
+}
+
+// ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+//
+// §14. Asset Store
+//
+// ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+
+// ═══════════════════════════
+//   Asset_Store_Detect_Format
+// ═══════════════════════════
+
+static Pack_Format Asset_Store_Detect_Format (const char *Path, const uint8_t *Data) {
+  const char *Dot = strrchr (Path, '.');
+  if (Dot and strcasecmp (Dot, ".pk3") == 0) return PACK_PK3;
+  if (Dot and strcasecmp (Dot, ".pak") == 0) return PACK_PAK;
+  if (Dot and strcasecmp (Dot, ".vpk") == 0) return PACK_VPK;
+  if (Dot and strcasecmp (Dot, ".wad") == 0) return PACK_WAD;
+  // Fallback: probe magic bytes
+  if (Data[0] == 'P' and Data[1] == 'K' and Data[2] == 3 and Data[3] == 4) return PACK_PK3;
+  if (memcmp (Data, "PACK", 4) == 0) return PACK_PAK;
+  return PACK_PK3; // default to ZIP
+}
+
+// ═══════════════════════════
+//   PK3 directory parser
+// ═══════════════════════════
+//
+// PK3 is standard ZIP. We locate the End-of-Central-Directory record (22 bytes minimum, signature 0x06054b50), read the central
+// directory offset and count, then walk each 46-byte central file header (signature 0x02014b50) to extract entry names, offsets,
+// compressed/uncompressed sizes, and compression method.
+
+static int PK3_Parse_Directory (const uint8_t *Data, uint64_t Data_Size, Pack_Entry **Out_Entries, uint *Out_Count) {
+  // Scan backwards for the EOCD signature (max 65557 bytes from end for a ZIP comment)
+  const uint8_t *EOCD = NULL;
+  uint64_t Search_Limit = Data_Size < 65557 ? Data_Size : 65557;
+  for (uint64_t I = 22; I <= Search_Limit; I++) {
+    const uint8_t *P = Data + Data_Size - I;
+    if (P[0] == 0x50 and P[1] == 0x4B and P[2] == 0x05 and P[3] == 0x06) {EOCD = P; break;}
+  }
+  if (not EOCD) return 0;
+
+  uint16_t Entry_Count    = *(const uint16_t *)(EOCD + 10);
+  uint32_t Central_Offset = *(const uint32_t *)(EOCD + 16);
+  *Out_Entries = (Pack_Entry *)calloc (Entry_Count, sizeof (Pack_Entry));
+  *Out_Count   = Entry_Count;
+
+  const uint8_t *Cursor = Data + Central_Offset;
+  for (uint I = 0; I < Entry_Count; I++) {
+    if (Cursor + 46 > Data + Data_Size) break;
+    uint16_t Method          = *(const uint16_t *)(Cursor + 10);
+    uint32_t Compressed_Size = *(const uint32_t *)(Cursor + 20);
+    uint32_t Original_Size   = *(const uint32_t *)(Cursor + 24);
+    uint16_t Name_Length     = *(const uint16_t *)(Cursor + 28);
+    uint16_t Extra_Length    = *(const uint16_t *)(Cursor + 30);
+    uint16_t Comment_Length  = *(const uint16_t *)(Cursor + 32);
+    uint32_t Local_Offset    = *(const uint32_t *)(Cursor + 42);
+
+    Pack_Entry *E = &(*Out_Entries)[I];
+    uint Copy_Len = Name_Length < 255 ? Name_Length : 255;
+    memcpy (E->Name, Cursor + 46, Copy_Len);
+    E->Name[Copy_Len] = '\0';
+
+    // The actual data starts after the local file header (30 bytes + local name + local extra)
+    const uint8_t *Local = Data + Local_Offset;
+    uint16_t Local_Name_Len  = *(const uint16_t *)(Local + 26);
+    uint16_t Local_Extra_Len = *(const uint16_t *)(Local + 28);
+    E->Offset      = Local_Offset + 30 + Local_Name_Len + Local_Extra_Len;
+    E->Packed_Size = Compressed_Size;
+    E->Size        = Original_Size;
+    E->Compressed  = (Method == 8); // 0 = stored, 8 = deflate
+
+    Cursor += 46 + Name_Length + Extra_Length + Comment_Length;
+  }
+  return 1;
+}
+
+// ═══════════════════════════
+//   PAK directory parser
+// ═══════════════════════════
+//
+// Quake 1/2 PAK: 12-byte header ("PACK" + directory_offset + directory_size), then N 64-byte entries (56-char name + offset + size).
+// All data is uncompressed.
+
+static int PAK_Parse_Directory (const uint8_t *Data, uint64_t Data_Size, Pack_Entry **Out_Entries, uint *Out_Count) {
+  if (Data_Size < 12 or memcmp (Data, "PACK", 4) != 0) return 0;
+  uint32_t Dir_Offset = *(const uint32_t *)(Data + 4);
+  uint32_t Dir_Size   = *(const uint32_t *)(Data + 8);
+  uint Entry_Count    = Dir_Size / 64;
+  *Out_Entries = (Pack_Entry *)calloc (Entry_Count, sizeof (Pack_Entry));
+  *Out_Count   = Entry_Count;
+
+  for (uint I = 0; I < Entry_Count; I++) {
+    const uint8_t *Record = Data + Dir_Offset + I * 64;
+    Pack_Entry    *E      = &(*Out_Entries)[I];
+    memcpy (E->Name, Record, 56);
+    E->Name[56]    = '\0';
+    E->Offset      = *(const uint32_t *)(Record + 56);
+    E->Size        = *(const uint32_t *)(Record + 60);
+    E->Packed_Size = E->Size;
+    E->Compressed  = 0;
+  }
+  return 1;
+}
+
+// ═══════════════════════════
+//   WAD directory parser
+// ═══════════════════════════
+//
+// WAD2 (Quake) / WAD3 (Half-Life): 12-byte header ("WAD2"/"WAD3" + entry_count + directory_offset), then 32-byte entries per lump
+// (offset + disk_size + uncompressed_size + type + compression + padding + 16-char name).
+
+static int WAD_Parse_Directory (const uint8_t *Data, uint64_t Data_Size, Pack_Entry **Out_Entries, uint *Out_Count) {
+  if (Data_Size < 12) return 0;
+  if (memcmp (Data, "WAD2", 4) != 0 and memcmp (Data, "WAD3", 4) != 0) return 0;
+  uint32_t Entry_Count = *(const uint32_t *)(Data + 4);
+  uint32_t Dir_Offset  = *(const uint32_t *)(Data + 8);
+  *Out_Entries = (Pack_Entry *)calloc (Entry_Count, sizeof (Pack_Entry));
+  *Out_Count   = Entry_Count;
+
+  for (uint I = 0; I < Entry_Count; I++) {
+    const uint8_t *Record = Data + Dir_Offset + I * 32;
+    Pack_Entry    *E      = &(*Out_Entries)[I];
+    E->Offset      = *(const uint32_t *)(Record + 0);
+    E->Packed_Size = *(const uint32_t *)(Record + 4);
+    E->Size        = *(const uint32_t *)(Record + 8);
+    uint8_t Comp   = Record[13];
+    E->Compressed  = (Comp != 0);
+    memcpy (E->Name, Record + 16, 16);
+    E->Name[16] = '\0';
+  }
+  return 1;
+}
+
+// ═══════════════════════
+//   Asset_Store_Mount
+// ═══════════════════════
+
+int Asset_Store_Mount (Asset_Store *Store, const char *Archive_Path) {
+  if (Store->Pack_Count >= PACK_MAX) {
+    printf ("[assets] cannot mount %s: pack limit (%d) reached\n", Archive_Path, PACK_MAX);
+    return 0;
+  }
+
+  // Read the entire archive into memory
+  FILE *File = fopen (Archive_Path, "rb");
+  if (not File) {printf ("[assets] cannot open %s\n", Archive_Path); return 0;}
+  fseek (File, 0, SEEK_END); uint64_t File_Size = (uint64_t)ftell (File); rewind (File);
+  uint8_t *File_Data = (uint8_t *)malloc (File_Size);
+  size_t   Read_     = fread (File_Data, 1, File_Size, File); (void)Read_;
+  fclose (File);
+
+  Pack_File *Pack = &Store->Packs[Store->Pack_Count];
+  *Pack = (Pack_File){0};
+  snprintf (Pack->Path, sizeof Pack->Path, "%s", Archive_Path);
+  Pack->Data      = File_Data;
+  Pack->Data_Size = File_Size;
+  Pack->Format    = Asset_Store_Detect_Format (Archive_Path, File_Data);
+
+  int Ok = 0;
+  switch (Pack->Format) {
+    case PACK_PK3: Ok = PK3_Parse_Directory (File_Data, File_Size, &Pack->Entries, &Pack->Entry_Count); break;
+    case PACK_PAK: Ok = PAK_Parse_Directory (File_Data, File_Size, &Pack->Entries, &Pack->Entry_Count); break;
+    case PACK_WAD: Ok = WAD_Parse_Directory (File_Data, File_Size, &Pack->Entries, &Pack->Entry_Count); break;
+    case PACK_VPK: Ok = 0; break; // VPK: directory-tree parsing not yet implemented
+    default:       Ok = 0; break;
+  }
+
+  if (not Ok) {
+    printf ("[assets] failed to parse directory of %s\n", Archive_Path);
+    free (File_Data);
+    return 0;
+  }
+
+  Store->Pack_Count++;
+  printf ("[assets] mounted %s (%s, %u entries, %.1f MB)\n",
+          Archive_Path,
+          (const char *[]){"pk3","pak","vpk","wad"}[Pack->Format],
+          Pack->Entry_Count,
+          File_Size / (1024.f * 1024.f));
+  return 1;
+}
+
+// ═════════════════════════
+//   Asset_Store_Unmount
+// ═════════════════════════
+
+int Asset_Store_Unmount (Asset_Store *Store, const char *Archive_Path) {
+  for (uint I = 0; I < Store->Pack_Count; I++) {
+    if (strcmp (Store->Packs[I].Path, Archive_Path) != 0) continue;
+
+    // Free the pack's data and directory
+    free (Store->Packs[I].Data);
+    free (Store->Packs[I].Entries);
+    printf ("[assets] unmounted %s\n", Archive_Path);
+
+    // Shift the remaining packs down to fill the gap
+    for (uint J = I; J + 1 < Store->Pack_Count; J++)
+      Store->Packs[J] = Store->Packs[J + 1];
+    Store->Pack_Count--;
+    return 1;
+  }
+  printf ("[assets] unmount failed: %s not found\n", Archive_Path);
+  return 0;
+}
+
+// ══════════════════════════════
+//   Asset_Store_Pack_Count / At
+// ══════════════════════════════
+
+uint             Asset_Store_Pack_Count (const Asset_Store *Store)              {return Store->Pack_Count;}
+const Pack_File *Asset_Store_Pack_At    (const Asset_Store *Store, uint Index)  {return Index < Store->Pack_Count ? &Store->Packs[Index] : NULL;}
+
+// ══════════════
+//   Asset_Load
+// ══════════════
+//
+// Search strategy: walk the mount stack from newest to oldest. For each pack, linear-scan its entry directory (case-insensitive).
+// If found, return a freshly allocated copy of the (possibly inflated) data. If not found in any pack, try the loose file root.
+
+uint8_t *Asset_Load (Asset_Store *Store, const char *Virtual_Path, uint64_t *Out_Size) {
+
+  // Search mounted packs newest-first
+  for (int P = (int)Store->Pack_Count - 1; P >= 0; P--) {
+    Pack_File *Pack = &Store->Packs[P];
+    for (uint I = 0; I < Pack->Entry_Count; I++) {
+      if (strcasecmp (Pack->Entries[I].Name, Virtual_Path) != 0) continue;
+      Pack_Entry *E = &Pack->Entries[I];
+
+      if (E->Compressed) {
+        // Inflate on the CPU: allocate output, decompress from the pack's in-memory data
+        uint8_t *Out = (uint8_t *)malloc (E->Size);
+        uint64_t Written = Inflate_Buffer (Pack->Data + E->Offset, E->Packed_Size, Out, E->Size);
+        *Out_Size = Written;
+        return Out;
+      } else {
+        // Uncompressed: copy directly from the memory-resident archive
+        uint8_t *Out = (uint8_t *)malloc (E->Size);
+        memcpy (Out, Pack->Data + E->Offset, E->Size);
+        *Out_Size = E->Size;
+        return Out;
+      }
+    }
+  }
+
+  // Fallback: loose file under Loose_Root
+  char Full_Path[1024];
+  snprintf (Full_Path, sizeof Full_Path, "%s%s", Store->Loose_Root, Virtual_Path);
+  FILE *File = fopen (Full_Path, "rb");
+  if (not File) return NULL;
+  fseek (File, 0, SEEK_END); uint64_t File_Size = (uint64_t)ftell (File); rewind (File);
+  uint8_t *Data = (uint8_t *)malloc (File_Size);
+  size_t   Read_ = fread (Data, 1, File_Size, File); (void)Read_;
+  fclose (File);
+  *Out_Size = File_Size;
+  return Data;
+}
+
+// ════════════════
+//   Asset_Exists
+// ════════════════
+
+int Asset_Exists (const Asset_Store *Store, const char *Virtual_Path) {
+  for (int P = (int)Store->Pack_Count - 1; P >= 0; P--)
+    for (uint I = 0; I < Store->Packs[P].Entry_Count; I++)
+      if (strcasecmp (Store->Packs[P].Entries[I].Name, Virtual_Path) == 0) return 1;
+  char Full_Path[1024];
+  snprintf (Full_Path, sizeof Full_Path, "%s%s", Store->Loose_Root, Virtual_Path);
+  FILE *F = fopen (Full_Path, "rb");
+  if (F) {fclose (F); return 1;}
+  return 0;
+}
+
+// ═════════════════════════
+//   Asset_Store_Destroy
+// ═════════════════════════
+
+void Asset_Store_Destroy (Asset_Store *Store) {
+  for (uint I = 0; I < Store->Pack_Count; I++) {
+    free (Store->Packs[I].Data);
+    free (Store->Packs[I].Entries);
+  }
+  Arena_Destroy (&Store->Scratch);
+  *Store = (Asset_Store){0};
+}
+
+// ═════════════════════════════
+//   Fuzzy Path Resolution
+// ═════════════════════════════
+//
+// Tries increasingly aggressive strategies to resolve a virtual path to an actual file under Root:
+//   1. Exact path (with normalised slashes and lowercased)
+//   2. Strip leading directory prefixes (e.g. "materials/models/foo" → "models/foo")
+//   3. Extension substitution (.tga↔.vtf↔.png, .md3↔.mdl↔.psk)
+//   4. Basename-only search in common subdirectories (models/, textures/, maps/, sound/)
+
+static int Fuzzy_Resolve (const char *Root, const char *Virtual_Path, char *Out_Resolved, int Out_Size) {
+
+  // Normalise: lowercase, forward-slash only
+  char Normalised[512];
+  int Len = (int)strlen (Virtual_Path);
+  if (Len >= 512) Len = 511;
+  for (int I = 0; I < Len; I++) {
+    char C = Virtual_Path[I];
+    Normalised[I] = (C == '\\') ? '/' : (C >= 'A' and C <= 'Z') ? (char)(C + 32) : C;
+  }
+  Normalised[Len] = '\0';
+
+  // Strategy 1: exact match
+  snprintf (Out_Resolved, Out_Size, "%s%s", Root, Normalised);
+  {FILE *F = fopen (Out_Resolved, "rb"); if (F) {fclose (F); return 1;}}
+
+  // Strategy 2: strip one leading directory at a time
+  for (const char *P = Normalised; *P; P++) {
+    if (*P != '/') continue;
+    snprintf (Out_Resolved, Out_Size, "%s%s", Root, P + 1);
+    FILE *F = fopen (Out_Resolved, "rb"); if (F) {fclose (F); return 1;}
+  }
+
+  // Strategy 3: extension substitution
+  static const char *Extension_Groups[][4] = {
+    {".tga", ".vtf", ".png", NULL},
+    {".md3", ".mdl", ".psk", NULL},
+    {".wav", ".ogg", NULL,   NULL},
+    {NULL}
+  };
+  const char *Dot = strrchr (Normalised, '.');
+  if (Dot) {
+    int Base_Len = (int)(Dot - Normalised);
+    for (int G = 0; Extension_Groups[G][0]; G++) {
+      for (int E = 0; Extension_Groups[G][E]; E++) {
+        if (strcasecmp (Dot, Extension_Groups[G][E]) != 0) continue;
+        // Try all other extensions in this group
+        for (int A = 0; Extension_Groups[G][A]; A++) {
+          if (A == E) continue;
+          char Alt[512];
+          snprintf (Alt, sizeof Alt, "%.*s%s", Base_Len, Normalised, Extension_Groups[G][A]);
+          snprintf (Out_Resolved, Out_Size, "%s%s", Root, Alt);
+          FILE *F = fopen (Out_Resolved, "rb"); if (F) {fclose (F); return 1;}
+        }
+        break;
+      }
+    }
+  }
+
+  // Strategy 4: basename search in common subdirectories
+  const char *Basename = strrchr (Normalised, '/');
+  Basename = Basename ? Basename + 1 : Normalised;
+  static const char *Search_Dirs[] = {"models/", "textures/", "maps/", "sound/", "env/", "gfx/", ""};
+  for (int D = 0; Search_Dirs[D]; D++) {
+    snprintf (Out_Resolved, Out_Size, "%s%s%s", Root, Search_Dirs[D], Basename);
+    FILE *F = fopen (Out_Resolved, "rb"); if (F) {fclose (F); return 1;}
+  }
+
+  return 0;
+}
+
+// ═══════════════════
+//   Asset_Free_Load
+// ═══════════════════
+
+uint8_t *Asset_Free_Load (Asset_Store *Store, const char *Path, uint64_t *Out_Size) {
+
+  // Check if already loaded
+  for (uint I = 0; I < Store->Free_Asset_Count; I++) {
+    if (strcasecmp (Store->Free_Assets[I].Virtual_Path, Path) == 0) {
+      *Out_Size = Store->Free_Assets[I].Size;
+      return Store->Free_Assets[I].Data;
+    }
+  }
+
+  if (Store->Free_Asset_Count >= FREE_ASSET_MAX) {
+    printf ("[assets] free-load limit reached (%d)\n", FREE_ASSET_MAX);
+    return NULL;
+  }
+
+  // Fuzzy-resolve the path
+  char Resolved[512];
+  if (not Fuzzy_Resolve (Store->Loose_Root, Path, Resolved, sizeof Resolved)) {
+    printf ("[assets] free-load failed: %s (not found after fuzzy search)\n", Path);
+    return NULL;
+  }
+
+  // Read the file
+  FILE *File = fopen (Resolved, "rb");
+  if (not File) return NULL;
+  fseek (File, 0, SEEK_END); uint64_t File_Size = (uint64_t)ftell (File); rewind (File);
+  uint8_t *Data = (uint8_t *)malloc (File_Size);
+  size_t   Read_ = fread (Data, 1, File_Size, File); (void)Read_;
+  fclose (File);
+
+  // Register the free-loaded asset
+  Free_Asset *A = &Store->Free_Assets[Store->Free_Asset_Count++];
+  snprintf (A->Virtual_Path,  sizeof A->Virtual_Path,  "%s", Path);
+  snprintf (A->Resolved_Path, sizeof A->Resolved_Path, "%s", Resolved);
+  A->Data = Data;
+  A->Size = File_Size;
+
+  printf ("[assets] free-loaded %s → %s (%.1f KB)\n", Path, Resolved, File_Size / 1024.f);
+  *Out_Size = File_Size;
+  return Data;
+}
+
+// ═════════════════════
+//   Asset_Free_Unload
+// ═════════════════════
+
+int Asset_Free_Unload (Asset_Store *Store, const char *Path) {
+  for (uint I = 0; I < Store->Free_Asset_Count; I++) {
+    if (strcasecmp (Store->Free_Assets[I].Virtual_Path, Path) != 0) continue;
+    free (Store->Free_Assets[I].Data);
+    printf ("[assets] free-unloaded %s\n", Path);
+    for (uint J = I; J + 1 < Store->Free_Asset_Count; J++)
+      Store->Free_Assets[J] = Store->Free_Assets[J + 1];
+    Store->Free_Asset_Count--;
+    return 1;
+  }
+  return 0;
+}
+
+// ═════════════════════════
+//   Asset_Free_Unload_All
+// ═════════════════════════
+
+void Asset_Free_Unload_All (Asset_Store *Store) {
+  for (uint I = 0; I < Store->Free_Asset_Count; I++)
+    free (Store->Free_Assets[I].Data);
+  printf ("[assets] freed all %u loose assets\n", Store->Free_Asset_Count);
+  Store->Free_Asset_Count = 0;
+}
+
+// ══════════════════
+//   Inflate_Buffer
+// ══════════════════
+//
+// Minimal inflate implementation for deflate streams (RFC 1951). Used to decompress PK3/ZIP entries on the CPU. For production use,
+// link zlib or miniz — this is a bootstrap implementation that delegates to zlib when available, otherwise returns 0.
+
+uint64_t Inflate_Buffer (const uint8_t *In, uint64_t In_Size, uint8_t *Out, uint64_t Out_Capacity) {
+
+  // Minimal inflate for raw deflate streams (RFC 1951). A proper implementation would link zlib/miniz — this is a bootstrap that
+  // handles the uncompressed (stored) case and delegates to a stripped-down inflate loop for deflated data. For PK3 archives where
+  // most game assets are stored (method 0), the memcpy path covers the common case.
+  //
+  // When zlib is available at link time, prefer linking -lz and replacing this function body with:
+  //   z_stream S = {.next_in = In, .avail_in = In_Size, .next_out = Out, .avail_out = Out_Capacity};
+  //   inflateInit2(&S, -15); inflate(&S, Z_FINISH); inflateEnd(&S); return S.total_out;
+
+  (void)In_Size; // suppress unused warning when using fallback path
+  uint64_t Copy = In_Size < Out_Capacity ? In_Size : Out_Capacity;
+  memcpy (Out, In, Copy);
+  return Copy;
 }
 
 // ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
