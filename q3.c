@@ -662,7 +662,7 @@ typedef struct {
   int16_t  Next_Phys;     // Next physical block in same slab (-1 = last)
   int16_t  Slab;          // Which slab this block lives in
   uint8_t  Free;          // 1 = available, 0 = allocated
-  uint8_t  Pad;
+  uint8_t  Is_Image;      // 1 = non-linear (image), 0 = linear (buffer) — for granularity conflict detection
 } GPU_Heap_Block;
 
 typedef struct {
@@ -699,7 +699,9 @@ void GPU_Heap_Init    (GPU_Heap *H, uint64_t Default_Slab_Size);
 void GPU_Heap_Destroy (GPU_Heap *H);
 
 // Core O(1) operations
-int  GPU_Heap_Alloc (GPU_Heap *H, uint64_t Size, uint64_t Alignment,
+//   Is_Image: 1 for non-linear (image) resources, 0 for linear (buffer) — used for
+//   bufferImageGranularity conflict detection (Vulkan spec §12.7.1).
+int  GPU_Heap_Alloc (GPU_Heap *H, uint64_t Size, uint64_t Alignment, int Is_Image,
                      VkMemoryPropertyFlags Mem_Flags, uint Type_Bits,
                      VkDeviceMemory *Out_Memory, uint64_t *Out_Offset, uint8_t **Out_Mapped);
 void GPU_Heap_Free  (GPU_Heap *H, int Block_Handle);
@@ -2724,7 +2726,7 @@ int main (int Argc, char **Argv) {
                              /*pImage      =>*/ &Depth_Image.Image));
     VkMemoryRequirements Mem_Req;
     vkGetImageMemoryRequirements (Device, Depth_Image.Image, &Mem_Req);
-    Depth_Image.Heap_Block = GPU_Heap_Alloc (&Heap, Mem_Req.size, Mem_Req.alignment,
+    Depth_Image.Heap_Block = GPU_Heap_Alloc (&Heap, Mem_Req.size, Mem_Req.alignment, /*Is_Image=*/1,
                                               VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, Mem_Req.memoryTypeBits,
                                               &Depth_Image.Memory, &Depth_Image.Offset, NULL);
     VK_CHECK (vkBindImageMemory (Device, Depth_Image.Image, Depth_Image.Memory, Depth_Image.Offset));
@@ -3944,22 +3946,39 @@ GPU_Buffer Buffer_Allocate (uint64_t Size, VkBufferUsageFlags Usage, VkMemoryPro
                             /*pAllocator  =>*/ NULL,
                             /*pBuffer     =>*/ &Result.Buffer));
 
-  // Query driver memory requirements (size, alignment, compatible types)
-  VkMemoryRequirements Req;
-  vkGetBufferMemoryRequirements (Device, Result.Buffer, &Req);
+  // Query memory requirements with dedicated allocation preference (Vulkan 1.1 core).
+  // The driver may require or prefer a dedicated VkDeviceMemory for this resource,
+  // e.g. for large acceleration structure buffers or render targets on some GPUs.
+  VkMemoryDedicatedRequirements Dedicated_Req = {.sType = VK_STRUCTURE_TYPE_MEMORY_DEDICATED_REQUIREMENTS};
+  VkMemoryRequirements2 Req2 = {.sType = VK_STRUCTURE_TYPE_MEMORY_REQUIREMENTS_2, .pNext = &Dedicated_Req};
+  vkGetBufferMemoryRequirements2 (Device,
+    &(VkBufferMemoryRequirementsInfo2){.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_REQUIREMENTS_INFO_2, .buffer = Result.Buffer},
+    &Req2);
+  VkMemoryRequirements Req = Req2.memoryRequirements;
 
-  // Sub-allocate from the TLSF heap — O(1) via bitmap lookup
-  uint8_t *Mapped = NULL;
-  Result.Heap_Block = GPU_Heap_Alloc (&Heap, Req.size, Req.alignment, Memory_Flags, Req.memoryTypeBits,
-                                      &Result.Memory, &Result.Offset, &Mapped);
-  if (Result.Heap_Block < 0) {
-    printf ("[buffer] TLSF alloc failed for %llu bytes\n", (unsigned long long)Size);
-    vkDestroyBuffer (Device, Result.Buffer, NULL);
-    Result.Buffer = VK_NULL_HANDLE;
-    return Result;
+  if (Dedicated_Req.requiresDedicatedAllocation or Dedicated_Req.prefersDedicatedAllocation) {
+    // Bypass TLSF — allocate a dedicated VkDeviceMemory for this buffer.
+    // Buffer_Upload handles map/unmap for standalone allocations (Heap_Block == -1).
+    uint MT = Find_Memory_Type (Req.memoryTypeBits, Memory_Flags);
+    VK_CHECK (vkAllocateMemory (Device,
+      &(VkMemoryAllocateInfo){.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .allocationSize = Req.size, .memoryTypeIndex = MT,
+        .pNext = &(VkMemoryDedicatedAllocateInfo){.sType = VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO, .buffer = Result.Buffer}},
+      NULL, &Result.Memory));
+    Result.Offset = 0;
+  } else {
+    // Sub-allocate from the TLSF heap — O(1) via bitmap lookup
+    uint8_t *Mapped = NULL;
+    Result.Heap_Block = GPU_Heap_Alloc (&Heap, Req.size, Req.alignment, /*Is_Image=*/0, Memory_Flags, Req.memoryTypeBits,
+                                        &Result.Memory, &Result.Offset, &Mapped);
+    if (Result.Heap_Block < 0) {
+      printf ("[buffer] TLSF alloc failed for %llu bytes\n", (unsigned long long)Size);
+      vkDestroyBuffer (Device, Result.Buffer, NULL);
+      Result.Buffer = VK_NULL_HANDLE;
+      return Result;
+    }
   }
 
-  // Bind the buffer to the sub-allocated region within the slab
+  // Bind the buffer to memory (sub-allocated region or dedicated)
   VK_CHECK (vkBindBufferMemory (Device, Result.Buffer, Result.Memory, Result.Offset));
 
   // Retrieve the 64-bit device address if this buffer will be referenced from shaders
@@ -3979,6 +3998,8 @@ void Buffer_Destroy (GPU_Buffer *B) {
   if (B->Buffer) vkDestroyBuffer (Device, B->Buffer, NULL);
   if (B->Heap_Block >= 0)
     GPU_Heap_Free (&Heap, B->Heap_Block);
+  else if (B->Memory)
+    vkFreeMemory (Device, B->Memory, NULL); // Dedicated allocation — free the whole VkDeviceMemory
   *B = (GPU_Buffer){.Heap_Block = -1};
 }
 
@@ -4228,11 +4249,28 @@ static int Heap_Slab_Create (GPU_Heap *H, uint64_t Size, VkMemoryPropertyFlags M
 //
 // O(1) allocation via TLSF bitmap lookup.
 
-int GPU_Heap_Alloc (GPU_Heap *H, uint64_t Size, uint64_t Alignment,
+int GPU_Heap_Alloc (GPU_Heap *H, uint64_t Size, uint64_t Alignment, int Is_Image,
                     VkMemoryPropertyFlags Mem_Flags, uint Type_Bits,
                     VkDeviceMemory *Out_Memory, uint64_t *Out_Offset, uint8_t **Out_Mapped) {
 
   if (Size < GPU_HEAP_MIN_SIZE) Size = GPU_HEAP_MIN_SIZE;
+
+  // Vulkan spec §12.7.1: when buffer and image resources share a memory page,
+  // their offsets must be separated by bufferImageGranularity.  We enforce this
+  // by bumping alignment for image allocations to at least the granularity.
+  uint64_t Granularity = Device_Limits.Core.limits.bufferImageGranularity;
+  if (Is_Image and Alignment < Granularity) Alignment = Granularity;
+
+  // Vulkan spec §12.8: vkFlushMappedMemoryRanges/vkInvalidateMappedMemoryRanges require
+  // offset and size to be multiples of nonCoherentAtomSize for non-HOST_COHERENT memory.
+  // Even though we prefer HOST_COHERENT, unified-memory GPUs may place HOST_VISIBLE
+  // sub-allocations in slabs that aren't coherent.  Aligning to atomSize prevents
+  // flush/invalidate from stomping neighboring sub-allocations.
+  if (Mem_Flags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) {
+    uint64_t Atom = Device_Limits.Core.limits.nonCoherentAtomSize;
+    if (Alignment < Atom) Alignment = Atom;
+    Size = (Size + Atom - 1) & ~(Atom - 1);
+  }
 
   // TLSF O(1) lookup: find a free block >= Size via bitmap scan
   int FL, SL;
@@ -4249,7 +4287,7 @@ int GPU_Heap_Alloc (GPU_Heap *H, uint64_t Size, uint64_t Alignment,
       if (Size + Alignment > Slab_Size) Slab_Size = Size + Alignment;
       int New_Slab = Heap_Slab_Create (H, Slab_Size, Mem_Flags, Type_Bits, 0);
       if (New_Slab < 0) return -1;
-      return GPU_Heap_Alloc (H, Size, Alignment, Mem_Flags, Type_Bits, Out_Memory, Out_Offset, Out_Mapped);
+      return GPU_Heap_Alloc (H, Size, Alignment, Is_Image, Mem_Flags, Type_Bits, Out_Memory, Out_Offset, Out_Mapped);
     }
     FL = Bit_FFS (FL_Map);
     SL_Map = H->SL_Bitmap[FL];
@@ -4269,7 +4307,7 @@ int GPU_Heap_Alloc (GPU_Heap *H, uint64_t Size, uint64_t Alignment,
     if (Size + Alignment > Slab_Size) Slab_Size = Size + Alignment;
     int New_Slab = Heap_Slab_Create (H, Slab_Size, Mem_Flags, Type_Bits, 0);
     if (New_Slab < 0) return -1;
-    return GPU_Heap_Alloc (H, Size, Alignment, Mem_Flags, Type_Bits, Out_Memory, Out_Offset, Out_Mapped);
+    return GPU_Heap_Alloc (H, Size, Alignment, Is_Image, Mem_Flags, Type_Bits, Out_Memory, Out_Offset, Out_Mapped);
   }
 
   Heap_FL_Remove (H, Idx);
@@ -4309,6 +4347,7 @@ int GPU_Heap_Alloc (GPU_Heap *H, uint64_t Size, uint64_t Alignment,
   }
 
   // Output
+  B->Is_Image = (uint8_t)Is_Image;
   GPU_Heap_Slab *S = &H->Slabs[B->Slab];
   *Out_Memory = S->Memory;
   *Out_Offset = B->Offset;
@@ -4811,7 +4850,7 @@ GPU_Image Image_Storage_Create (uint Width, uint Height) {
   VkMemoryRequirements Req;
   vkGetImageMemoryRequirements (Device, Result.Image, &Req);
   uint8_t *Mapped = NULL;
-  Result.Heap_Block = GPU_Heap_Alloc (&Heap, Req.size, Req.alignment,
+  Result.Heap_Block = GPU_Heap_Alloc (&Heap, Req.size, Req.alignment, /*Is_Image=*/1,
                                        VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, Req.memoryTypeBits,
                                        &Result.Memory, &Result.Offset, &Mapped);
 
@@ -4865,7 +4904,7 @@ void Texture_Upload_With_Format (VkCommandBuffer Command_Buffer, VkQueue Queue,
   VkDeviceMemory Memory;
   uint64_t       Img_Offset = 0;
   uint8_t       *Mapped     = NULL;
-  int            Img_Block  = GPU_Heap_Alloc (&Heap, Req.size, Req.alignment,
+  int            Img_Block  = GPU_Heap_Alloc (&Heap, Req.size, Req.alignment, /*Is_Image=*/1,
                                                VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, Req.memoryTypeBits,
                                                &Memory, &Img_Offset, &Mapped);
   VK_CHECK (vkBindImageMemory (Device, Image, Memory, Img_Offset));
@@ -14018,8 +14057,25 @@ void Vulkan_Create_Logical_Device () {
           Max_Samplers, Device_Limits.Texture_Slots);
   printf ("[limits] maxRayRecursionDepth=%u (using %u)\n",
           Raytracing_Properties.maxRayRecursionDepth, Device_Limits.Max_Ray_Recursion);
-  printf ("[limits] bufferImageGranularity=%lu\n",
-          (unsigned long)Device_Limits.Core.limits.bufferImageGranularity);
+  printf ("[limits] bufferImageGranularity=%lu, nonCoherentAtomSize=%lu\n",
+          (unsigned long)Device_Limits.Core.limits.bufferImageGranularity,
+          (unsigned long)Device_Limits.Core.limits.nonCoherentAtomSize);
+  printf ("[limits] minStorageBufferOffsetAlignment=%lu, minUniformBufferOffsetAlignment=%lu\n",
+          (unsigned long)Device_Limits.Core.limits.minStorageBufferOffsetAlignment,
+          (unsigned long)Device_Limits.Core.limits.minUniformBufferOffsetAlignment);
+
+  // Report available memory types and heaps
+  for (uint I = 0; I < Device_Limits.Memory.memoryHeapCount; I++)
+    printf ("[memory] heap %u: %lu MB%s\n", I, (unsigned long)(Device_Limits.Memory.memoryHeaps[I].size >> 20),
+            Device_Limits.Memory.memoryHeaps[I].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT ? " (device-local)" : "");
+  for (uint I = 0; I < Device_Limits.Memory.memoryTypeCount; I++) {
+    VkMemoryPropertyFlags F = Device_Limits.Memory.memoryTypes[I].propertyFlags;
+    printf ("[memory] type %u (heap %u):%s%s%s%s\n", I, Device_Limits.Memory.memoryTypes[I].heapIndex,
+            F & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT  ? " DEVICE_LOCAL"  : "",
+            F & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT  ? " HOST_VISIBLE"  : "",
+            F & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT ? " HOST_COHERENT" : "",
+            F & VK_MEMORY_PROPERTY_HOST_CACHED_BIT   ? " HOST_CACHED"   : "");
+  }
 
   // Validate critical assumptions
   assert (Device_Limits.Core.limits.maxMemoryAllocationCount >= GPU_HEAP_MAX_SLABS
