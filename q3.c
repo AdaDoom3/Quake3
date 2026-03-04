@@ -4185,8 +4185,17 @@ static int Heap_Slab_Create (GPU_Heap *H, uint64_t Size, VkMemoryPropertyFlags M
                               /*pAllocator    =>*/ NULL,
                               /*pMemory       =>*/ &S->Memory));
 
-  if (Mem_Flags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT)
-    VK_CHECK (vkMapMemory (Device, S->Memory, 0, Size, 0, (void **)&S->Mapped));
+  // Map the slab if the actual memory type supports host visibility, regardless of
+  // what flags the caller requested.  On unified-memory GPUs (lavapipe, integrated),
+  // DEVICE_LOCAL memory is often also HOST_VISIBLE — mapping it eagerly means later
+  // HOST_VISIBLE allocations that land in this slab will find it already mapped.
+  {
+    static VkPhysicalDeviceMemoryProperties MP;
+    static int MP_Init = 0;
+    if (not MP_Init) {vkGetPhysicalDeviceMemoryProperties (Physical_Device, &MP); MP_Init = 1;}
+    if (MP.memoryTypes[MT].propertyFlags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT)
+      VK_CHECK (vkMapMemory (Device, S->Memory, 0, Size, 0, (void **)&S->Mapped));
+  }
 
   // Create one free block spanning the entire slab
   int16_t BI = Heap_Block_New (H);
@@ -4290,7 +4299,7 @@ int GPU_Heap_Alloc (GPU_Heap *H, uint64_t Size, uint64_t Alignment,
   GPU_Heap_Slab *S = &H->Slabs[B->Slab];
   *Out_Memory = S->Memory;
   *Out_Offset = B->Offset;
-  *Out_Mapped = S->Mapped ? S->Mapped + B->Offset : NULL;
+  if (Out_Mapped) *Out_Mapped = S->Mapped ? S->Mapped + B->Offset : NULL;
   H->Total_Used += B->Size;
   if (H->Block_Count > H->Peak_Blocks) H->Peak_Blocks = H->Block_Count;
   return (int)Idx;
@@ -4380,7 +4389,7 @@ int GPU_Heap_Pack_Alloc (GPU_Heap *H, int Pack_Slab, uint64_t Size, uint64_t Ali
 
   *Out_Memory = H->Slabs[Pack_Slab].Memory;
   *Out_Offset = B->Offset;
-  *Out_Mapped = H->Slabs[Pack_Slab].Mapped ? H->Slabs[Pack_Slab].Mapped + B->Offset : NULL;
+  if (Out_Mapped) *Out_Mapped = H->Slabs[Pack_Slab].Mapped ? H->Slabs[Pack_Slab].Mapped + B->Offset : NULL;
   H->Total_Used += B->Size;
   return Found;
 }
@@ -5914,6 +5923,7 @@ Figure_Instance Entity_Load (Scene *S, Spawn Spawn_Point) {
   }
 
   // Initialize animation state to the first frame
+  E.Figure.Vertices  = E.Figure.Frame_Vertices[0];
   E.Current_Vertices = E.Figure.Frame_Vertices[0];
   E.Animation_Time   = 0.f;
   E.Active_Animation = 0;
