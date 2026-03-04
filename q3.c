@@ -258,6 +258,30 @@ const float PLAYER_HALF_EXTENTS[3] = {15.f, 28.f, 15.f}; // Q3 standing bbox: he
 // Movement style selection
 typedef enum {MOVEMENT_QUAKE3, MOVEMENT_SOURCE, MOVEMENT_STYLE_COUNT} Movement_Style;
 
+// World settings: each asset group has a dominant coordinate convention, player scale, and camera model.
+// The active world determines physics extents, eye height, FOV, and the swizzle applied during asset load.
+// Assets from a non-dominant world are rescaled by (Active.Unit_Scale / Asset.Unit_Scale) on load.
+typedef enum {WORLD_QUAKE3, WORLD_SOURCE, WORLD_COUNT} World_Type;
+typedef struct {
+  World_Type Type;
+  const char *Name;
+  float Unit_Scale;        // World units per real-world inch (Q3 ≈ 1.0, Source ≈ 1.0 but proportions differ)
+  float Player_Height;     // Standing bounding box height (Q3: 56, Source: 72)
+  float Player_Width;      // Bounding box half-width     (Q3: 15, Source: 16)
+  float Eye_Height;        // Camera height above feet     (Q3: 50, Source: 64)
+  float Crouch_Eye_Height; // Camera height crouched       (Q3: 36, Source: 46)
+  float Crouch_Height;     // Crouched bounding box height (Q3: 32, Source: 36)
+  float Step_Size;         // Max stair step height        (Q3: 18, Source: 18)
+  float FOV;               // Horizontal field of view     (Q3: 90, Source: 90)
+  float Max_Speed;         // Maximum wish speed           (Q3: 320, Source: 250)
+  float Gravity;           // Downward acceleration        (Q3: 800, Source: 800)
+  int   Up_Axis;           // Native up axis before swizzle (0=X, 1=Y, 2=Z; both Q3 and Source are Z-up natively)
+} World_Settings;
+const World_Settings WORLD_PRESETS[WORLD_COUNT] = {
+  [WORLD_QUAKE3] = {WORLD_QUAKE3, "Quake 3",       1.f, 56.f, 15.f, 50.f, 36.f, 32.f, 18.f, 90.f, 320.f, 800.f, 2},
+  [WORLD_SOURCE] = {WORLD_SOURCE, "Source Engine",  1.f, 72.f, 16.f, 64.f, 46.f, 36.f, 18.f, 90.f, 250.f, 800.f, 2},
+};
+
 // Source movement physics (CS:Source / CSPromod competitive values)
 #define SRC_GRAVITY             800.f
 #define SRC_GROUND_FRICTION     4.f
@@ -694,7 +718,8 @@ SDL_Cursor      *SDL_Cursor_Arrow;               // System arrow cursor (menu de
 SDL_Cursor      *SDL_Cursor_Hand;                // Active cursor (hovering interactive UI)
 SDL_Cursor      *SDL_Cursor_Crosshair;           // Inactive cursor (menu, not hovering)
 
-// Movement style state (switchable at runtime via key bind)
+// World and movement state (switchable at runtime via key binds)
+World_Settings Active_World = {WORLD_QUAKE3, "Quake 3", 1.f, 56.f, 15.f, 50.f, 36.f, 32.f, 18.f, 90.f, 320.f, 800.f, 2};
 int Active_Movement = MOVEMENT_QUAKE3;           // Current movement physics model (Q3 or Source)
 
 // Skeletal animation pipeline state (shared by all skeletal entities)
@@ -10137,6 +10162,11 @@ Input Poll_Input () {
           Active_Movement = (Active_Movement + 1) % MOVEMENT_STYLE_COUNT;
           printf("[movement] switched to %s\n", Active_Movement ? "Source" : "Quake 3");
         }
+        if (Event.key.keysym.sym == SDLK_F6) {
+          Active_World = WORLD_PRESETS[(Active_World.Type + 1) % WORLD_COUNT];
+          printf("[world] switched to %s (height %.0f, eye %.0f, fov %.0f)\n",
+                 Active_World.Name, Active_World.Player_Height, Active_World.Eye_Height, Active_World.FOV);
+        }
         break;
 
       // Handle mouse button clicks
@@ -10250,7 +10280,13 @@ int main (int Argc, char **Argv) {
     else if (strcmp (Argv[I], "--no-parallax")    == 0) No_Parallax = 1;
     else if (strcmp (Argv[I], "--cheap")          == 0) Force_Cheap = 1;
     else if (strcmp (Argv[I], "--validation")     == 0) Use_Validation = 1;
-    else if (strcmp (Argv[I], "--source")         == 0) { Source_Mode = 1; Active_Movement = MOVEMENT_SOURCE; }
+    else if (strcmp (Argv[I], "--source")         == 0) { Source_Mode = 1; Active_Movement = MOVEMENT_SOURCE; Active_World = WORLD_PRESETS[WORLD_SOURCE]; }
+    else if (strcmp (Argv[I], "--world")          == 0 and I + 1 < Argc) {
+      const char *W = Argv[++I];
+      if      (strcmp(W,"source")==0) Active_World = WORLD_PRESETS[WORLD_SOURCE];
+      else if (strcmp(W,"q3")==0)     Active_World = WORLD_PRESETS[WORLD_QUAKE3];
+      else printf("[world] unknown world '%s' (q3/source)\n", W);
+    }
     else if (strcmp (Argv[I], "--movement")       == 0 and I + 1 < Argc) {
       const char *Mv = Argv[++I];
       if      (strcmp(Mv,"source")==0) Active_Movement = MOVEMENT_SOURCE;
@@ -10283,6 +10319,8 @@ int main (int Argc, char **Argv) {
   if (not No_Parallax) No_Parallax = not Preset->Parallax;
   printf ("[quality] preset: %s (%dx%d @ %.0f%% scale, %d SPP)\n",
           Preset->Name, Width, Height, Active_Render_Scale * 100.f, Override_SPP ? Override_SPP : Preset->SPP);
+  printf ("[world] %s (height %.0f, eye %.0f, fov %.0f, speed %.0f)\n",
+          Active_World.Name, Active_World.Player_Height, Active_World.Eye_Height, Active_World.FOV, Active_World.Max_Speed);
 
   // ...
   (void)No_PBR;      // Used after texture loading to zero PBR_Stride
@@ -10322,7 +10360,7 @@ int main (int Argc, char **Argv) {
   Render_Width  = (Render_Width  + 7) & ~7;  // Round up to multiple of 8 (postprocess workgroup size)
   Render_Height = (Render_Height + 7) & ~7;
   // Convert horizontal FOV (Q3-style) to vertical for the Perspective matrix
-  float Vertical_FOV = Hfov_To_Vfov (FIELD_OF_VIEW, (float)Width / Height);
+  float Vertical_FOV = Hfov_To_Vfov (Active_World.FOV, (float)Width / Height);
   printf ("[render] internal %dx%d > window %dx%d (scale %.0f%%, vFOV %.1f°)\n",
           Render_Width, Render_Height, Width, Height, Active_Render_Scale * 100.f, Vertical_FOV);
 
@@ -10564,10 +10602,12 @@ int main (int Argc, char **Argv) {
   // Create the GPU physics pipeline and resources (with hull binding)
   Physics_Pipeline_Create ();
 
-  // Spawn origin is at Q3 player origin (24 units above feet). Our capsule half-height is 32, so raise by 8 to align capsule bottom
-  // with Q3 bounding box bottom.
+  // Compute world-relative spawn offset. Q3: spawn origin is 24 above feet, capsule center is half-height above feet.
+  // Source: spawn origin is at feet. The capsule adjustment places the physics origin at capsule center.
+  float Spawn_Feet_Offset = (Active_World.Type == WORLD_SOURCE) ? 0.f : 24.f; // Q3 entity origin vs Source feet origin
+  float Capsule_Y = Active_World.Player_Height * 0.5f - Spawn_Feet_Offset;    // Offset from spawn to capsule center
   Player Initial_Player = {
-    .Position = {Spawn_Point.Origin.x, Spawn_Point.Origin.y + 8.f, Spawn_Point.Origin.z},
+    .Position = {Spawn_Point.Origin.x, Spawn_Point.Origin.y + Capsule_Y, Spawn_Point.Origin.z},
     .Yaw      = 1.5707963f - Spawn_Point.Angle * 3.14159f / 180.f}; // π/2 - angle: Q3 angle 0 = +X = our yaw π/2
   Physics_Resources_Create (&Initial_Player);
 
@@ -10637,7 +10677,8 @@ int main (int Argc, char **Argv) {
 
   // Benchmark mode
   if (Benchmark_Frames > 0 or Screenshot_Path) {
-    Camera Bench_Cam = {.Position = {Spawn_Point.Origin.x, Spawn_Point.Origin.y + 8.f + DEFAULT_VIEW_HEIGHT, Spawn_Point.Origin.z},
+    float Eye_Y = Active_World.Eye_Height - Spawn_Feet_Offset; // World-relative eye height above spawn origin
+    Camera Bench_Cam = {.Position = {Spawn_Point.Origin.x, Spawn_Point.Origin.y + Eye_Y, Spawn_Point.Origin.z},
                          .Yaw = 1.5707963f - Spawn_Point.Angle * 3.14159f / 180.f};
     int Total_Frames = Screenshot_Path ? 1 : Benchmark_Frames;
     float Fixed_Dt = 1.f / 60.f;
@@ -11017,7 +11058,8 @@ int main (int Argc, char **Argv) {
   }
 
   // Game loop
-  Camera   Cam   = {.Position = {Spawn_Point.Origin.x, Spawn_Point.Origin.y + 8.f + DEFAULT_VIEW_HEIGHT, Spawn_Point.Origin.z},
+  float Game_Eye_Y = Active_World.Eye_Height - Spawn_Feet_Offset;
+  Camera   Cam   = {.Position = {Spawn_Point.Origin.x, Spawn_Point.Origin.y + Game_Eye_Y, Spawn_Point.Origin.z},
                      .Yaw = 1.5707963f - Spawn_Point.Angle * 3.14159f / 180.f};
   Prev_View_Matrix = View (Cam.Position, Cam.Yaw, Cam.Pitch);
   uint64_t Last  = SDL_GetPerformanceCounter ();
