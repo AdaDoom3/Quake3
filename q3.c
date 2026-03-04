@@ -702,6 +702,10 @@ int  GPU_Heap_Pack_Alloc   (GPU_Heap *H, int Pack_Slab, uint64_t Size, uint64_t 
                             VkDeviceMemory *Out_Memory, uint64_t *Out_Offset, uint8_t **Out_Mapped);
 void GPU_Heap_Pack_Destroy (GPU_Heap *H, int Pack_Slab);
 
+// Diagnostics
+int  GPU_Heap_Validate (GPU_Heap *H);
+void GPU_Heap_Dump     (GPU_Heap *H);
+
 // GPU memory heap (TLSF sub-allocator — all GPU memory flows through this)
 GPU_Heap Heap;
 
@@ -4411,16 +4415,212 @@ void GPU_Heap_Pack_Destroy (GPU_Heap *H, int Pack_Slab) {
 // ── GPU_Heap_Destroy ────────────────────────────────────────────
 
 void GPU_Heap_Destroy (GPU_Heap *H) {
+  // Validate structural integrity before teardown to catch corruption early
+  if (not GPU_Heap_Validate (H))
+    printf ("[heap] WARNING: validation failed during destroy — possible corruption or leak\n");
+  GPU_Heap_Dump (H);
+
+  // Report any blocks still allocated (leaks)
+  for (uint I = 0; I < H->Block_Count; I++) {
+    if (H->Blocks[I].Slab >= 0 and not H->Blocks[I].Free and H->Slabs[H->Blocks[I].Slab].Memory)
+      printf ("[heap] leak: block %u, slab %d, offset %llu, size %llu\n",
+              I, H->Blocks[I].Slab,
+              (unsigned long long)H->Blocks[I].Offset,
+              (unsigned long long)H->Blocks[I].Size);
+  }
+
   for (uint I = 0; I < H->Slab_Count; I++) {
     if (not H->Slabs[I].Memory) continue;
     if (H->Slabs[I].Mapped) vkUnmapMemory (Device, H->Slabs[I].Memory);
     vkFreeMemory (Device, H->Slabs[I].Memory, NULL);
   }
-  printf ("[heap] destroyed: %u slabs, peak %u blocks, %llu MB allocated, %llu MB used\n",
-          H->Slab_Count, H->Peak_Blocks,
-          (unsigned long long)(H->Total_Allocated >> 20),
-          (unsigned long long)(H->Total_Used >> 20));
   memset (H, 0, sizeof *H);
+}
+
+// ── GPU_Heap_Validate ───────────────────────────────────────────
+//
+// Full structural integrity check.  Walks every slab's physical chain and
+// every TLSF free-list, verifying:
+//   - Physical chain links are symmetric (A.Next=B ⟹ B.Prev=A)
+//   - Block offsets tile the slab contiguously (no gaps, no overlaps)
+//   - Every free block appears in the correct (FL,SL) free-list exactly once
+//   - Bitmap bits are set iff the corresponding free-list is non-empty
+//   - Total free + used size equals slab size
+//
+// Returns 1 if everything is consistent, 0 (with diagnostics) if not.
+// Cost: O(blocks + FL*SL) — only for debug/startup, never in the hot path.
+
+int GPU_Heap_Validate (GPU_Heap *H) {
+  int OK = 1;
+
+  // Mark all blocks as unvisited for free-list cross-check
+  uint8_t Seen_In_FL[GPU_HEAP_MAX_BLOCKS] = {0};
+
+  // ── Walk every TLSF free-list and verify each entry ──
+  for (int FL = 0; FL < GPU_HEAP_FL_BITS; FL++) {
+    for (int SL = 0; SL < (int)GPU_HEAP_SL_COUNT; SL++) {
+      int Count = 0;
+      for (int16_t I = H->Free_Head[FL][SL]; I >= 0; I = H->Blocks[I].Next_Free) {
+        GPU_Heap_Block *B = &H->Blocks[I];
+        if (not B->Free) {
+          printf ("[heap-validate] block %d in free-list(%d,%d) but Free=0\n", I, FL, SL);
+          OK = 0;
+        }
+        int EFL, ESL; TLSF_Map (B->Size, &EFL, &ESL);
+        if (EFL != FL or ESL != SL) {
+          printf ("[heap-validate] block %d size=%llu maps to (%d,%d) but listed in (%d,%d)\n",
+                  I, (unsigned long long)B->Size, EFL, ESL, FL, SL);
+          OK = 0;
+        }
+        if (B->Prev_Free >= 0 and H->Blocks[B->Prev_Free].Next_Free != I) {
+          printf ("[heap-validate] block %d Prev_Free=%d but that block's Next_Free=%d\n",
+                  I, B->Prev_Free, H->Blocks[B->Prev_Free].Next_Free);
+          OK = 0;
+        }
+        if ((uint)I < GPU_HEAP_MAX_BLOCKS) Seen_In_FL[I] = 1;
+        if (++Count > (int)GPU_HEAP_MAX_BLOCKS) {
+          printf ("[heap-validate] free-list(%d,%d) cycle detected\n", FL, SL);
+          OK = 0; break;
+        }
+      }
+      // Bitmap consistency: bit set iff list non-empty
+      int Bit_Set = (H->SL_Bitmap[FL] >> SL) & 1;
+      int Has_Head = H->Free_Head[FL][SL] >= 0;
+      if (Bit_Set and not Has_Head) {
+        printf ("[heap-validate] SL_Bitmap[%d] bit %d set but Free_Head is -1\n", FL, SL);
+        OK = 0;
+      }
+      if (Has_Head and not Bit_Set) {
+        printf ("[heap-validate] Free_Head[%d][%d]=%d but SL_Bitmap bit is 0\n", FL, SL, H->Free_Head[FL][SL]);
+        OK = 0;
+      }
+    }
+    int FL_Bit = (H->FL_Bitmap >> FL) & 1;
+    int SL_Any = H->SL_Bitmap[FL] != 0;
+    if (FL_Bit and not SL_Any) {
+      printf ("[heap-validate] FL_Bitmap bit %d set but SL_Bitmap[%d]=0\n", FL, FL);
+      OK = 0;
+    }
+    if (SL_Any and not FL_Bit) {
+      printf ("[heap-validate] SL_Bitmap[%d]!=0 but FL_Bitmap bit %d is 0\n", FL, FL);
+      OK = 0;
+    }
+  }
+
+  // ── Walk each slab's physical chain ──
+  for (uint SI = 0; SI < H->Slab_Count; SI++) {
+    GPU_Heap_Slab *S = &H->Slabs[SI];
+    if (not S->Memory) continue;
+
+    uint64_t Expected_Offset = 0;
+    uint64_t Total_Free = 0, Total_Used = 0;
+    int Block_Count = 0;
+
+    for (int16_t I = S->First_Block; I >= 0; I = H->Blocks[I].Next_Phys) {
+      GPU_Heap_Block *B = &H->Blocks[I];
+
+      // Slab membership
+      if (B->Slab != (int16_t)SI) {
+        printf ("[heap-validate] slab %u chain contains block %d with Slab=%d\n", SI, I, B->Slab);
+        OK = 0;
+      }
+
+      // Contiguity: block offset must match expected
+      if (B->Offset != Expected_Offset) {
+        printf ("[heap-validate] slab %u block %d offset=%llu expected=%llu (gap/overlap of %lld)\n",
+                SI, I, (unsigned long long)B->Offset, (unsigned long long)Expected_Offset,
+                (long long)(B->Offset - Expected_Offset));
+        OK = 0;
+      }
+      Expected_Offset = B->Offset + B->Size;
+
+      // Symmetric links
+      if (B->Next_Phys >= 0 and H->Blocks[B->Next_Phys].Prev_Phys != I) {
+        printf ("[heap-validate] block %d Next_Phys=%d but that block's Prev_Phys=%d\n",
+                I, B->Next_Phys, H->Blocks[B->Next_Phys].Prev_Phys);
+        OK = 0;
+      }
+
+      // Free blocks must appear in exactly one free-list
+      if (B->Free and not Seen_In_FL[I]) {
+        printf ("[heap-validate] block %d is Free but not found in any free-list\n", I);
+        OK = 0;
+      }
+      if (not B->Free and Seen_In_FL[I]) {
+        printf ("[heap-validate] block %d is allocated but found in a free-list\n", I);
+        OK = 0;
+      }
+
+      if (B->Free) Total_Free += B->Size; else Total_Used += B->Size;
+
+      if (++Block_Count > (int)GPU_HEAP_MAX_BLOCKS) {
+        printf ("[heap-validate] slab %u physical chain cycle detected\n", SI);
+        OK = 0; break;
+      }
+    }
+
+    // Total coverage must equal slab size
+    if (Total_Free + Total_Used != S->Size) {
+      printf ("[heap-validate] slab %u: free(%llu) + used(%llu) = %llu != slab size %llu\n",
+              SI, (unsigned long long)Total_Free, (unsigned long long)Total_Used,
+              (unsigned long long)(Total_Free + Total_Used), (unsigned long long)S->Size);
+      OK = 0;
+    }
+  }
+
+  return OK;
+}
+
+// ── GPU_Heap_Dump ───────────────────────────────────────────────
+//
+// Print a human-readable summary of heap state: per-slab utilization,
+// fragmentation metrics, and block distribution.
+
+void GPU_Heap_Dump (GPU_Heap *H) {
+  printf ("\n╔══ GPU Heap Status ══════════════════════════════════════════╗\n");
+  printf ("║ Slabs: %u / %u   Blocks: %u / %u (peak %u)%*s║\n",
+          H->Slab_Count, GPU_HEAP_MAX_SLABS, H->Block_Count, GPU_HEAP_MAX_BLOCKS, H->Peak_Blocks, 14, "");
+  printf ("║ Allocated: %6llu MB   Used: %6llu MB   Overhead: %3llu MB%*s║\n",
+          (unsigned long long)(H->Total_Allocated >> 20),
+          (unsigned long long)(H->Total_Used >> 20),
+          (unsigned long long)((H->Total_Allocated - H->Total_Used) >> 20), 5, "");
+
+  float Util = H->Total_Allocated ? 100.f * (float)H->Total_Used / (float)H->Total_Allocated : 0.f;
+  printf ("║ Utilization: %5.1f%%", Util);
+
+  // Count free blocks and largest free block
+  uint64_t Largest_Free = 0;
+  uint Free_Blocks = 0;
+  for (uint I = 0; I < H->Block_Count; I++) {
+    if (H->Blocks[I].Free) {
+      Free_Blocks++;
+      if (H->Blocks[I].Size > Largest_Free) Largest_Free = H->Blocks[I].Size;
+    }
+  }
+  // External fragmentation = 1 - (largest_free / total_free)
+  uint64_t Total_Free = H->Total_Allocated - H->Total_Used;
+  float Frag = (Total_Free and Largest_Free) ? 100.f * (1.f - (float)Largest_Free / (float)Total_Free) : 0.f;
+  printf ("   Fragmentation: %5.1f%%   Free blocks: %u%*s║\n", Frag, Free_Blocks, 4, "");
+
+  printf ("╠═════════════════════════════════════════════════════════════╣\n");
+  for (uint SI = 0; SI < H->Slab_Count; SI++) {
+    GPU_Heap_Slab *S = &H->Slabs[SI];
+    if (not S->Memory) continue;
+    uint64_t Slab_Used = 0, Slab_Free = 0;
+    uint Slab_Blocks = 0, Slab_Free_N = 0;
+    for (int16_t I = S->First_Block; I >= 0; I = H->Blocks[I].Next_Phys) {
+      Slab_Blocks++;
+      if (H->Blocks[I].Free) {Slab_Free += H->Blocks[I].Size; Slab_Free_N++;}
+      else                     Slab_Used += H->Blocks[I].Size;
+    }
+    float SU = S->Size ? 100.f * (float)Slab_Used / (float)S->Size : 0.f;
+    printf ("║ Slab %2u: %4llu MB  %5.1f%% used  %3u blocks (%u free)  type %u%s",
+            SI, (unsigned long long)(S->Size >> 20), SU, Slab_Blocks, Slab_Free_N, S->Memory_Type,
+            S->Mapped ? " HOST" : "");
+    if (S->Flags & GPU_HEAP_PACK_FLAG) printf (" PACK");
+    printf ("%*s║\n", (int)(S->Mapped ? (S->Flags & GPU_HEAP_PACK_FLAG ? 1 : 6) : (S->Flags & GPU_HEAP_PACK_FLAG ? 6 : 11)), "");
+  }
+  printf ("╚═════════════════════════════════════════════════════════════╝\n\n");
 }
 
 // ═══════════════════════
