@@ -411,7 +411,15 @@ int Use_Validation;   // Non-zero to enable Vulkan validation layers
 Projectile_Pool Projectiles;
 
 // Shader binding table (SBT) alignment and handle sizes
-VkPhysicalDeviceRayTracingPipelinePropertiesKHR Raytracing_Properties; 
+VkPhysicalDeviceRayTracingPipelinePropertiesKHR Raytracing_Properties;
+
+// Queried device limits — populated once during Vulkan_Create_Logical_Device, used throughout
+struct {
+  VkPhysicalDeviceProperties           Core;          // maxImageDimension, maxPushConstantsSize, etc.
+  VkPhysicalDeviceMemoryProperties     Memory;        // Memory types and heaps
+  uint                                 Texture_Slots; // Clamped DESCRIPTOR_TEXTURE_SLOTS (≤ maxPerStageDescriptorSampledImages)
+  uint                                 Max_Ray_Recursion; // maxRayRecursionDepth from RT properties
+} Device_Limits;
 
 // BLAS for world geometry and TLAS combining all instances
 Acceleration_Structure Bottom_Level, Top_Level; 
@@ -2667,7 +2675,19 @@ int main (int Argc, char **Argv) {
   Vulkan_Create_Synchronization ();
 
   // Initialize the TLSF GPU memory heap (all GPU allocations flow through this)
-  GPU_Heap_Init (&Heap, GPU_HEAP_DEFAULT_SIZE);
+  // Size the default slab relative to the largest device heap (25%, capped at 256 MB)
+  {
+    uint64_t Largest_Heap = 0;
+    for (uint I = 0; I < Device_Limits.Memory.memoryHeapCount; I++)
+      if (Device_Limits.Memory.memoryHeaps[I].size > Largest_Heap)
+        Largest_Heap = Device_Limits.Memory.memoryHeaps[I].size;
+    uint64_t Slab_Size = Largest_Heap / 4;
+    if (Slab_Size > GPU_HEAP_DEFAULT_SIZE) Slab_Size = GPU_HEAP_DEFAULT_SIZE;
+    if (Slab_Size < (64u << 20))           Slab_Size = 64u << 20; // Floor: 64 MB
+    printf ("[heap] largest device heap: %lu MB, default slab: %lu MB\n",
+            (unsigned long)(Largest_Heap >> 20), (unsigned long)(Slab_Size >> 20));
+    GPU_Heap_Init (&Heap, Slab_Size);
+  }
 
   // Compute internal render resolution
   Render_Width  = (int)(Width  * Active_Render_Scale);
@@ -3900,12 +3920,8 @@ void Buffer_Upload (GPU_Buffer Destination, const void *Data, uint64_t Size) {
 // ════════════════════
 
 uint Find_Memory_Type (uint Type_Bits, VkMemoryPropertyFlags Desired_Properties) {
-  static VkPhysicalDeviceMemoryProperties Cached;
-  static int Initialized = 0;
-  if (not Initialized) { vkGetPhysicalDeviceMemoryProperties (Physical_Device, &Cached); Initialized = 1; }
-
-  for (uint Index = 0; Index < Cached.memoryTypeCount; Index++)
-    if ((Type_Bits >> Index & 1) and (Cached.memoryTypes[Index].propertyFlags & Desired_Properties) == Desired_Properties)
+  for (uint Index = 0; Index < Device_Limits.Memory.memoryTypeCount; Index++)
+    if ((Type_Bits >> Index & 1) and (Device_Limits.Memory.memoryTypes[Index].propertyFlags & Desired_Properties) == Desired_Properties)
       return Index;
 
   assert (0 and "no matching memory type");
@@ -4190,10 +4206,7 @@ static int Heap_Slab_Create (GPU_Heap *H, uint64_t Size, VkMemoryPropertyFlags M
   // DEVICE_LOCAL memory is often also HOST_VISIBLE — mapping it eagerly means later
   // HOST_VISIBLE allocations that land in this slab will find it already mapped.
   {
-    static VkPhysicalDeviceMemoryProperties MP;
-    static int MP_Init = 0;
-    if (not MP_Init) {vkGetPhysicalDeviceMemoryProperties (Physical_Device, &MP); MP_Init = 1;}
-    if (MP.memoryTypes[MT].propertyFlags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT)
+    if (Device_Limits.Memory.memoryTypes[MT].propertyFlags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT)
       VK_CHECK (vkMapMemory (Device, S->Memory, 0, Size, 0, (void **)&S->Mapped));
   }
 
@@ -9493,7 +9506,7 @@ void Raytracing_Pipeline_Create () {
     {9,  VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, FIGURE_POOL_MAX, VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR, NULL},  // Figure indices[]
     {10, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, FIGURE_POOL_MAX, VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR, NULL},  // Figure texture IDs[]
     {11, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,                  1, VK_SHADER_STAGE_RAYGEN_BIT_KHR,      NULL}, // Depth output
-    {12, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, DESCRIPTOR_TEXTURE_SLOTS, VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR, NULL}};
+    {12, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, Device_Limits.Texture_Slots, VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR, NULL}};
 
   // Bindings 8-10 (figure SSBO arrays) and 12 (texture array) use partially-bound. Binding 12 also uses variable count.
   VkDescriptorBindingFlags Binding_Flags[] = {0, 0, 0, 0, 0, 0, 0, 0,
@@ -9567,7 +9580,7 @@ void Raytracing_Pipeline_Create () {
                                            .pStages                      = Stages,
                                            .groupCount                   = 4,
                                            .pGroups                      = Groups,
-                                           .maxPipelineRayRecursionDepth = 2,
+                                           .maxPipelineRayRecursionDepth = Device_Limits.Max_Ray_Recursion,
                                            .layout                       = Pipeline_Layout},
                                          /*pAllocator        =>*/ NULL,
                                          /*pPipelines        =>*/ &Pipeline));
@@ -9633,7 +9646,7 @@ void Descriptor_Set_Create (Figure_Pool *Pool) {
     {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,              2},
     {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,             1},
     {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,             4 + 3 * FIGURE_POOL_MAX},
-    {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,     DESCRIPTOR_TEXTURE_SLOTS + 1}};
+    {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,     Device_Limits.Texture_Slots + 1}};
   VK_CHECK (vkCreateDescriptorPool (/*device          =>*/ Device,
                                     /*pCreateInfo     =>*/ &(VkDescriptorPoolCreateInfo){
                                       .sType         = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
@@ -13829,7 +13842,7 @@ void Vulkan_Create_Instance () {
 
 void Vulkan_Pick_Physical_Device () {
 
-  // Pick the first available physical device
+  // Enumerate all physical devices and select the best candidate
   uint Device_Count = 0;
   vkEnumeratePhysicalDevices (Instance, &Device_Count, NULL);
   if (Device_Count == 0) {
@@ -13840,7 +13853,39 @@ void Vulkan_Pick_Physical_Device () {
   }
   VkPhysicalDevice *Devices = malloc (sizeof (VkPhysicalDevice) * Device_Count);
   vkEnumeratePhysicalDevices (Instance, &Device_Count, Devices);
-  Physical_Device = Devices[0];
+
+  // Score each device: discrete GPU > integrated > virtual > CPU > other
+  // Tie-break by largest VRAM heap
+  int Best_Score = -1;
+  uint Best_Index = 0;
+  for (uint I = 0; I < Device_Count; I++) {
+    VkPhysicalDeviceProperties Props;
+    vkGetPhysicalDeviceProperties (Devices[I], &Props);
+
+    int Score = 0;
+    switch (Props.deviceType) {
+      case VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU:   Score = 400; break;
+      case VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU: Score = 300; break;
+      case VK_PHYSICAL_DEVICE_TYPE_VIRTUAL_GPU:    Score = 200; break;
+      case VK_PHYSICAL_DEVICE_TYPE_CPU:            Score = 100; break;
+      default:                                     Score =   0; break;
+    }
+
+    // Add VRAM size as tie-breaker (in MB, capped at 99 to not override type preference)
+    VkPhysicalDeviceMemoryProperties Mem;
+    vkGetPhysicalDeviceMemoryProperties (Devices[I], &Mem);
+    uint64_t VRAM = 0;
+    for (uint J = 0; J < Mem.memoryHeapCount; J++)
+      if (Mem.memoryHeaps[J].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT)
+        VRAM += Mem.memoryHeaps[J].size;
+    Score += (int)((VRAM >> 20) > 99 ? 99 : (VRAM >> 20));
+
+    if (Device_Count > 1)
+      printf ("[vulkan] device %u: %s (score %d)\n", I, Props.deviceName, Score);
+
+    if (Score > Best_Score) { Best_Score = Score; Best_Index = I; }
+  }
+  Physical_Device = Devices[Best_Index];
 
   // Report which device was selected
   VkPhysicalDeviceProperties Props;
@@ -13948,6 +13993,39 @@ void Vulkan_Create_Logical_Device () {
   VkPhysicalDeviceProperties2 Device_Properties = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2,
                                                    .pNext = &Raytracing_Properties};
   vkGetPhysicalDeviceProperties2 (Physical_Device, &Device_Properties);
+
+  // Populate the global device limits struct from queried properties
+  Device_Limits.Core = Device_Properties.properties;
+  vkGetPhysicalDeviceMemoryProperties (Physical_Device, &Device_Limits.Memory);
+
+  // Clamp bindless texture descriptor count to what the device actually supports
+  uint Max_Samplers = Device_Limits.Core.limits.maxPerStageDescriptorSampledImages;
+  Device_Limits.Texture_Slots = DESCRIPTOR_TEXTURE_SLOTS < Max_Samplers ? DESCRIPTOR_TEXTURE_SLOTS : Max_Samplers;
+
+  // Clamp ray recursion depth to device maximum (we want 2, but some drivers may cap lower)
+  Device_Limits.Max_Ray_Recursion = Raytracing_Properties.maxRayRecursionDepth;
+  if (Device_Limits.Max_Ray_Recursion > 2) Device_Limits.Max_Ray_Recursion = 2;
+
+  // Report key device limits for diagnostics
+  printf ("[limits] maxImageDimension2D=%u, maxPushConstants=%u, maxStorageBufferRange=%u\n",
+          Device_Limits.Core.limits.maxImageDimension2D,
+          Device_Limits.Core.limits.maxPushConstantsSize,
+          Device_Limits.Core.limits.maxStorageBufferRange);
+  printf ("[limits] maxMemoryAllocationCount=%u, maxBoundDescriptorSets=%u\n",
+          Device_Limits.Core.limits.maxMemoryAllocationCount,
+          Device_Limits.Core.limits.maxBoundDescriptorSets);
+  printf ("[limits] maxPerStageDescriptorSampledImages=%u -> texture slots=%u\n",
+          Max_Samplers, Device_Limits.Texture_Slots);
+  printf ("[limits] maxRayRecursionDepth=%u (using %u)\n",
+          Raytracing_Properties.maxRayRecursionDepth, Device_Limits.Max_Ray_Recursion);
+  printf ("[limits] bufferImageGranularity=%lu\n",
+          (unsigned long)Device_Limits.Core.limits.bufferImageGranularity);
+
+  // Validate critical assumptions
+  assert (Device_Limits.Core.limits.maxMemoryAllocationCount >= GPU_HEAP_MAX_SLABS
+          and "GPU_HEAP_MAX_SLABS exceeds device maxMemoryAllocationCount");
+  assert (Device_Limits.Core.limits.maxPushConstantsSize >= 128
+          and "Push constant size too small for engine requirements");
 
   // Load the ray tracing extension function pointers from the logical device
   VULKAN_FUNCTIONS (LOAD_VK)
