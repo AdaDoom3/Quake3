@@ -4056,9 +4056,9 @@ Weapon_Model Source_Weapon_Model_Load (const char *Path) {
 
     // Override with animation 0 (idle) frame 0 data
     // AnimDesc layout: base_ptr(4), name_o(4), fps(4), flags(4), num_frames(4),
-    //   num_movements(4), movement_o(4), unused(24), anim_block(4), anim_o(4)
+    //   num_movements(4), movement_o(4), unused(24), anim_block(4), anim_index(4)
     const uint8_t *Anim_Desc = D + H->Anim_O;
-    int Anim_Off = *(const int*)(Anim_Desc + 40); // anim_o at byte 40
+    int Anim_Off = *(const int*)(Anim_Desc + 56); // animindex at byte 56
     const uint8_t *Cur = Anim_Desc + Anim_Off;
     for (;;) {
       if (Cur < D or Cur >= D + Sz - 4) break;
@@ -7539,7 +7539,7 @@ void Weapon_Update (Weapon_Instance *Weapon, const Camera *Camera_Data, float De
   // Source viewmodels: origin = camera eye, weapon extends forward/down.
   // Scale ~0.45 compensates for viewmodel_fov(54) → scene_fov(90) difference.
   float Fwd_Offset   = Weapon->Model.Is_Source ? 3.f  : 5.f;
-  float Right_Offset = Weapon->Model.Is_Source ? 3.f  : 4.f;
+  float Right_Offset = Weapon->Model.Is_Source ? 0.5f : 4.f;
   float Up_Offset    = Weapon->Model.Is_Source ? -0.5f: -3.5f;
   vec3 Offset = Add (Camera_Data->Position,
                      Add (Scale (Forward, Fwd_Offset + Recoil),
@@ -9336,7 +9336,7 @@ glsl rchit Closest_Hit {
     // Dynamic reflection culling — Budget-aware: save rays on barely-reflective
     // surfaces, focus them on metals/smooth where reflections are clearly visible.
     float Refl_Roughness_Gate = mix (REFL_GATE_LO, REFL_GATE_HI, Budget);
-    bool  Refl_Active = not Is_Reflection_Bounce and (R < Refl_Roughness_Gate);
+    bool  Refl_Active = not Is_Reflection_Bounce and not Is_Weapon and (R < Refl_Roughness_Gate);
     float Refl_Dist = mix (800.0, SHADOW_DIST_HI, Budget);
     float Reflection_Weight = (not Refl_Active or Hit_Dist > Refl_Dist)
                                 ? 0.0
@@ -9403,7 +9403,7 @@ glsl rchit Closest_Hit {
     // Apply per-instance lighting model
     if (Is_Weapon) {
       vec3 Direct    = (Diffuse + Specular) * Lr * NL;
-      vec3 Weapon_Full  = Direct * 0.8 + Indirect_Diffuse * 1.2 + Traced_Specular * 0.3;
+      vec3 Weapon_Full  = Direct * 1.0 + Indirect_Diffuse * 1.2 + Traced_Specular * 0.5;
       vec3 Weapon_Cheap = Ambient_Irradiance * Albedo * 2.5 + Albedo * max(NL, 0.3);
       Color = mix (Weapon_Full, Weapon_Cheap, Budget);
 
