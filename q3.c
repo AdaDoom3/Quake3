@@ -1075,7 +1075,7 @@ typedef struct {
 //   .md3 → Q3 multi-part assembly (head + upper + lower, or body + barrel + hand)
 //   .mdl → Source engine skeletal model (MDL + VVD + VTX)
 //   .psk → Unreal skeletal mesh (future)
-Articulated_Figure Figure_Load (const char *Path, vec3 Origin, float Yaw);
+Articulated_Figure Figure_Load (const char *Path);
 
 // Convenience: load a weapon figure (sets up viewmodel transforms, tag_weapon animation, scales)
 Articulated_Figure Figure_Load_Weapon (const char *Path);
@@ -2849,7 +2849,7 @@ int main (int Argc, char **Argv) {
 
   // Allocate enemy figure from the pool
   Figure_Instance *Enemy;
-  Figure_Handle Enemy_Handle = Figure_Pool_Alloc (&Figures, &Enemy);
+  Figure_Pool_Alloc (&Figures, &Enemy);
   *Enemy = Entity_MDL_Path ? MDL_Load (&Scene_Data, Entity_MDL_Path, Enemy_Origin, Spawn_Point.Angle + 180.f)
                            : Entity_Load (&Scene_Data, Spawn_Point);
   Enemy->Ray_Mask = 0xFF;  // Visible to all rays (casts shadows)
@@ -2861,7 +2861,7 @@ int main (int Argc, char **Argv) {
   // Load scene and weapon textures
   Scene_Load_Textures (&Scene_Data);
   Figure_Instance *Weapon;
-  Figure_Handle Weapon_Handle = Figure_Pool_Alloc (&Figures, &Weapon);
+  Figure_Pool_Alloc (&Figures, &Weapon);
   const char *Weapon_MDL_Path = Source_Weapon_Path;
   if (not Weapon_MDL_Path and Source_Mode)
     Weapon_MDL_Path = "/tmp/v_m4_new/models/v_rif_m4a1.mdl";
@@ -2873,7 +2873,7 @@ int main (int Argc, char **Argv) {
 
   // Allocate a player body slot (shares enemy BLAS, shadow-only)
   Figure_Instance *Player_Body;
-  Figure_Handle Body_Handle = Figure_Pool_Alloc (&Figures, &Player_Body);
+  Figure_Pool_Alloc (&Figures, &Player_Body);
   Player_Body->Ray_Mask = 0x02;  // Shadow-only (visible to shadow rays, not primary)
 
   // Check quality arguments
@@ -6499,7 +6499,7 @@ Articulated_Figure Source_Weapon_Model_Load (const char *Path) {
 // Unified model loader that dispatches based on file extension. Returns an Articulated_Figure with merged geometry, attachment tags,
 // and animation data. This is the single entry point that replaces Entity_Load, MDL_Load, Weapon_Model_Load, etc.
 
-Articulated_Figure Figure_Load (const char *Path, vec3 Origin, float Yaw) {
+Articulated_Figure Figure_Load (const char *Path) {
   Articulated_Figure Figure = {0};
 
   // Determine format from extension
@@ -6587,7 +6587,7 @@ Articulated_Figure Figure_Load (const char *Path, vec3 Origin, float Yaw) {
 // attachment tags (tag_barrel, tag_weapon) are preserved for fire animation.
 
 Articulated_Figure Figure_Load_Weapon (const char *Path) {
-  Articulated_Figure Figure = Figure_Load (Path, (vec3){0, 0, 0}, 0.f);
+  Articulated_Figure Figure = Figure_Load (Path);
 
   // If no explicit weapon tag was loaded, synthesize a default at origin
   if (Figure.Tag_Count == 0) {
@@ -6928,7 +6928,8 @@ Scene Scene_Load_From_VBSP (const char *Path, Spawn *Out_Spawn) {
     char *Cursor = Entity_String;
     while (*Cursor) {
       while (*Cursor and *Cursor != '{') Cursor++;
-      if (not *Cursor) break; Cursor++;
+      if (not *Cursor) break;
+      Cursor++;
 
       // Parse all key-value pairs in this entity block
       char  Class[64]={0}, Sky[64]={0}, Light[128]={0}, Ambient[128]={0};
@@ -6937,12 +6938,14 @@ Scene Scene_Load_From_VBSP (const char *Path, Spawn *Out_Spawn) {
       int   Has_Explicit_Pitch = 0;
       while (*Cursor and *Cursor != '}') {
         while (*Cursor and *Cursor != '"') { if (*Cursor == '}') goto done; Cursor++; }
-        if (not *Cursor) break; Cursor++;
+        if (not *Cursor) break;
+        Cursor++;
         char Key[64] = {0}; int Key_Index = 0;
         while (*Cursor and *Cursor != '"' and Key_Index < 63) Key[Key_Index++] = *Cursor++;
         if (*Cursor == '"') Cursor++;
         while (*Cursor and *Cursor != '"' and *Cursor != '}') Cursor++;
-        if (*Cursor != '"') continue; Cursor++;
+        if (*Cursor != '"') continue;
+        Cursor++;
         char Value[128] = {0}; int Value_Index = 0;
         while (*Cursor and *Cursor != '"' and Value_Index < 127) Value[Value_Index++] = *Cursor++;
         if (*Cursor == '"') Cursor++;
