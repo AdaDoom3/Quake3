@@ -955,9 +955,11 @@ typedef struct {
 #define FIGURE_MAX_BONES  128
 
 // Named attachment point (tag_barrel, tag_weapon, tag_head, etc.)
+#define FIGURE_MAX_TAG_FRAMES 32
 typedef struct {
   char  Name[64];
-  float Transform[12]; // Origin[3] + Axis[9] — per-frame for animated tags
+  float Transforms[FIGURE_MAX_TAG_FRAMES][12]; // Per-frame: Origin[3] + Axis[9]
+  uint  Frame_Count;                            // Number of frames (1 for static tags)
 } Figure_Tag;
 
 // One geometric part of the figure (e.g. "barrel", "upper_body", "head")
@@ -993,6 +995,8 @@ typedef struct {
   Vertex *Vertices;     uint Vertex_Count;
   uint   *Indices;      uint Index_Count;
   uint   *Texture_Ids;  uint Triangle_Count;
+  uint    Surface_Count;
+  char    Texture_Names[WEAPON_MAX_TEXTURES][64];
 
   // Per-frame vertex snapshots (for MD3-style vertex animation)
   Vertex *Frame_Vertices[FIGURE_MAX_FRAMES];
@@ -1003,7 +1007,6 @@ typedef struct {
   int         Bone_Parents [FIGURE_MAX_BONES];
   float       Bind_Pose    [FIGURE_MAX_BONES][3][4];
   float       Inv_Bind     [FIGURE_MAX_BONES][3][4];
-  Bone_Matrix Pose         [FIGURE_MAX_BONES];
   uint8_t    *Bone_Ids;
   uint8_t    *Bone_Weights;
 
@@ -1040,10 +1043,10 @@ void MD3_Parse_Surface_At_Frame (const uint8_t *Surface_Data, int Frame,
                                  uint Assigned_Texture_Index, const float *Transform);
 
 // Load the default Quake 3 MD3 weapon model from the assets/models directory
-Weapon_Model Weapon_Model_Load ();
+Articulated_Figure Weapon_Model_Load ();
 
 // Load a Source engine MDL model as a held weapon (viewmodel). Parses MDL + VVD + VTX sidecars, applies idle-pose skinning.
-Weapon_Model Source_Weapon_Model_Load (const char *Path);
+Articulated_Figure Source_Weapon_Model_Load (const char *Path);
 
 // Assemble a composite Q3 player model (lower + upper + head + weapon) at a given animation frame into merged geometry arrays.
 void Entity_Assemble_Frame (int Legs_Frame, int Torso_Frame,
@@ -1673,65 +1676,40 @@ typedef struct {
 // Single spawn point parsed from the BSP entity lump
 typedef struct {vec3 Origin; float Angle;} Spawn; // World-space origin and facing angle in degrees
 
-// Parsed weapon model assembled from multiple MD3 surfaces
-typedef struct {
-  Vertex *Vertices;     uint Vertex_Count;        // Merged vertex array from all surfaces
-  uint    *Indices;     uint Index_Count;         // Merged index array from all surfaces
-  uint    *Texture_Ids; uint Triangle_Count;      // Per-triangle texture index and total triangle count
-  float   Tag_Barrel[12];                         // Barrel attachment transform: origin[3] + axis[9]
-  float   Tag_Weapon[MD3_MAX_ANIM_FRAMES][12];    // Per-frame weapon tag transforms (up to 30 animation frames)
-  uint    Animation_Frame_Count;                  // Number of valid frames in the Tag_Weapon array
-  char    Texture_Names[WEAPON_MAX_TEXTURES][64]; // Texture path for each surface
-  uint    Surface_Count;                          // Number of surfaces composing this weapon
-  int     Is_Source;                              // 1 = Source MDL viewmodel, 0 = Q3 MD3
-} Weapon_Model;
+typedef struct {float M[3][4];} Bone_Matrix; // A 3 by 4 row-major affine transform (shared by CPU skinning and GPU upload)
 
-// Runtime weapon state combining the model data with per-frame animation and GPU resources
+// Figure_Instance: the runtime representation of any loaded model — weapon viewmodel, player body, NPC, prop. Combines the parsed
+// Articulated_Figure with per-frame GPU state (buffers, BLAS, animation accumulators). This is the single type used everywhere —
+// there is no separate "weapon model" or "entity" type.
 typedef struct {
-  Weapon_Model           Model;                // Parsed model geometry and attachment tags
+  Articulated_Figure     Figure;               // Parsed geometry, tags, animations, skeleton
+
+  // GPU resources
+  GPU_Buffer             Vertex_Buffer;        // Host-visible for weapons (CPU-transformed each frame), or re-uploaded for entities
+  GPU_Buffer             Index_Buffer;         // Device-local, static
+  GPU_Buffer             Texture_Id_Buffer;    // Device-local, static
+  GPU_Buffer             Bottom_Level_Scratch; // Scratch buffer reused across BLAS rebuilds
+  Acceleration_Structure Bottom_Level;         // BLAS (rebuilt or refit each frame)
+
+  // Animation runtime
   Vertex                *Transformed_Vertices; // Scratch buffer for CPU-side per-frame vertex transformation
+  Vertex                *Current_Vertices;     // Pointer to the active frame's vertex data
+  float                  Animation_Time;       // Elapsed time accumulator
+  int                    Active_Animation;     // Index into Figure.Animations[]
+
+  // Weapon-specific state (zeroed for non-weapon instances)
   int                    Is_Firing;            // Non-zero while the fire button is held
   float                  Fire_Time, Bob_Time;  // Recoil decay timer and idle bob phase accumulator
-  GPU_Buffer             Vertex_Buffer, Index_Buffer, Texture_Id_Buffer; // GPU buffers for weapon geometry
-  Acceleration_Structure Bottom_Level;         // BLAS for the weapon (rebuilt each frame)
-  GPU_Buffer             Bottom_Level_Scratch; // Scratch buffer reused across BLAS rebuilds
-  uint                   Texture_Base_Index;   // Starting index into the global texture array for weapon textures
-} Weapon_Instance;
+  uint                   Texture_Base_Index;   // Starting index into the global texture array for this model's textures
 
-// Animated entity with pre-computed per-frame vertex data for BLAS refit
-#define ENTITY_MAX_FRAMES 16
-typedef struct {float M[3][4];} Bone_Matrix; // A 3 by 4 row-major affine transform (shared by CPU skinning and GPU upload)
-typedef struct {
-  Vertex *Frame_Vertices[ENTITY_MAX_FRAMES]; // Pre-computed world-space vertices for each animation frame
-  uint    Frame_Count;                       // Number of animation frames (LEGS_IDLE = 10)
-  float   Frame_FPS;                         // Animation playback rate (from animation.cfg)
-  float   Animation_Time;                    // Elapsed time accumulator
-  uint    Vertex_Count, Index_Count, Triangle_Count;
-  uint   *Indices;                           // Shared index array (topology identical across frames)
-  uint   *Texture_Ids;                       // Per-triangle global texture indices
-  Vertex *Current_Vertices;                  // Pointer to the active frame's vertex data
-  GPU_Buffer             Vertex_Buffer;      // Host-visible, re-uploaded each frame
-  GPU_Buffer             Index_Buffer;       // Device-local, static
-  GPU_Buffer             Texture_Id_Buffer;  // Device-local, static
-  GPU_Buffer             Bottom_Level_Scratch;
-  Acceleration_Structure Bottom_Level;       // BLAS (refit each frame)
-  vec3                   GL_Origin;          // World-space position in GL Y-up coordinates (for TLAS transform)
-  float                  GL_Yaw;             // Entity yaw angle in GL space (radians)
+  // World placement (zeroed for viewmodel weapons which are camera-relative)
+  vec3                   GL_Origin;            // World-space position in GL Y-up coordinates (for TLAS transform)
+  float                  GL_Yaw;               // Yaw angle in GL space (radians)
 
-  // Skeletal animation (Source engine MDL models; NULL when using MD3 frame-based animation)
-  int         Bone_Count;                        // Number of bones in the skeleton (0 = no skeleton)
-  int         Bone_Parents[MDL_MAX_BONES];       // Parent index per bone (-1 = root)
-  float       Bind_Pose[MDL_MAX_BONES][3][4];    // Local bind-pose matrices
-  float       Inv_Bind[MDL_MAX_BONES][3][4];     // Inverse bind-pose (model space > bone space)
-  Bone_Matrix Pose[MDL_MAX_BONES];               // Current world-space pose matrices (computed per-frame)
-  GPU_Buffer  Bone_Buffer;                       // GPU SSBO for bone matrices (skinning compute shader input)
-  uint8_t    *Bone_Ids;                          // Per-vertex bone indices  (3 per vertex, packed)
-  uint8_t    *Bone_Weights;                      // Per-vertex bone weights  (3 per vertex, 0-255)
-  int         Anim_Sequence;                     // Active animation sequence index
-  int         Anim_Frame_Counts[SKEL_MAX_ANIMS]; // Frame count per animation sequence
-  float       Anim_Fps_Table[SKEL_MAX_ANIMS];    // FPS per animation sequence
-  int         Anim_Count;                        // Number of loaded animation sequences
-} Entity;
+  // Skeletal runtime (Source MDL; zeroed for MD3 frame-based animation)
+  Bone_Matrix            Pose[FIGURE_MAX_BONES]; // Current world-space pose matrices (computed per-frame)
+  GPU_Buffer             Bone_Buffer;            // GPU SSBO for bone matrices (skinning compute shader input)
+} Figure_Instance;
 
 // Player movement state
 typedef struct {
@@ -1781,7 +1759,7 @@ Scene Scene_Load_From_BSP (const char *Path, Spawn *Out_Spawn);
 void Scene_Load_Textures (const Scene *Scene_Data);
 
 // Load the weapon model's TGA textures and append them to the global texture array.
-void Weapon_Load_Textures (Weapon_Instance *Weapon);
+void Weapon_Load_Textures (Figure_Instance *Weapon);
 
 // VTF texture loading: decodes Valve Texture Format (.vtf) files into RGBA8 pixel data for GPU upload.
 int VTF_Load (const char *Path, uint8_t **Out_Pixels, int *Out_W, int *Out_H);
@@ -1790,17 +1768,17 @@ int VTF_Load (const char *Path, uint8_t **Out_Pixels, int *Out_W, int *Out_H);
 Scene Scene_Load_From_VBSP (const char *Path, Spawn *Out_Spawn);
 
 // MDL skeletal model loading: parses Source engine .mdl + .vvd + .vtx into an Entity with bone data.
-Entity MDL_Load (Scene *S, const char *Path, vec3 Origin, float Yaw);
+Figure_Instance MDL_Load (Scene *S, const char *Path, vec3 Origin, float Yaw);
 
 // Skeletal animation: evaluate bone hierarchy at time T, write world-space matrices to Entity.Pose[]
-void Skeleton_Evaluate (Entity *E, float Time);
+void Skeleton_Evaluate (Figure_Instance *E, float Time);
 
 // GPU skeletal skinning: dispatch the Skinning compute shader to transform bind-pose vertices by bone matrices. Reads bone matrices and
 // bind-pose vertices from SSBOs, writes skinned vertices to the entity's vertex buffer.
-void Skeleton_Skin_Dispatch (Entity *E);
+void Skeleton_Skin_Dispatch (Figure_Instance *E);
 
 // Load a default Quake 3 player model (sarge) as an animated entity placed near the spawn point
-Entity Entity_Load (Scene *S, Spawn Spawn_Point);
+Figure_Instance Entity_Load (Scene *S, Spawn Spawn_Point);
 
 // Classify a BSP entity classname string into the Entity_Kind discriminant
 void Classify_Entity (const char *Classname, int Length, BSP_Entity *E);
@@ -1820,16 +1798,16 @@ Acceleration_Structure Build_World_Bottom_Level (const Scene *Scene_Data);
 
 // Initialize the weapon's BLAS with host-visible vertex buffer (for per-frame updates) and ALLOW_UPDATE flag for fast rebuilds. Scratch
 // memory is kept alive for reuse.
-void Weapon_Bottom_Level_Initialize (Weapon_Instance *Weapon);
+void Weapon_Bottom_Level_Initialize (Figure_Instance *Weapon);
 
 // Rebuild the weapon BLAS from scratch after CPU vertex transformation. Re-uploads the vertices and performs a full (non-update) rebuild
-void Weapon_Bottom_Level_Rebuild (Weapon_Instance *Weapon);
+void Weapon_Bottom_Level_Rebuild (Figure_Instance *Weapon);
 
 // Initialize the entity's BLAS with host-visible vertex buffer and ALLOW_UPDATE flag for per-frame animation refit
-void Entity_Bottom_Level_Initialize (Entity *Enemy);
+void Entity_Bottom_Level_Initialize (Figure_Instance *Enemy);
 
 // Rebuild the entity BLAS from the current animation frame's vertex data
-void Entity_Bottom_Level_Rebuild (Entity *Enemy);
+void Entity_Bottom_Level_Rebuild (Figure_Instance *Enemy);
 
 // Pre-allocate the top-level acceleration structure (TLAS) for up to Maximum_Instances instance entries
 void Top_Level_Initialize (uint Maximum_Instances);
@@ -1963,7 +1941,6 @@ void Hull_Upload (const Convex_Hull *Hull);
 //   Binding 4: GPU_Hull data (storage, read-only)
 // 
 void Physics_Pipeline_Create ();
-void Denoise_Pipeline_Create ();
 
 // Initialize the GPU_Player state buffer from a CPU-side Player, allocate the hull storage buffer (with a 1-vertex dummy if no hull has
 // been uploaded yet), create the descriptor pool and set, and bind all physics resources.
@@ -2212,14 +2189,14 @@ void Vulkan_Transition_Storage_Image ();
 void Vulkan_Recreate_Swapchain ();
 
 // Allocate the descriptor pool and set, then write the descriptor bindings for the ray tracing pipeline 
-void Descriptor_Set_Create (Weapon_Instance *Weapon, Entity *Enemy);
+void Descriptor_Set_Create (Figure_Instance *Weapon, Figure_Instance *Enemy);
 
 // Upload the camera uniform buffer with the inverse view and projection matrices computed from
 // the current player position, yaw, pitch, field-of-view, and aspect ratio.
 void Camera_Upload (Camera *State, float Field_Of_View, uint Weapon_Texture_Base, uint PBR_Stride_Value, uint Active_SPP);
 
 // Update the weapon viewmodel's vertex positions each frame based on the camera orientation
-void Weapon_Update (Weapon_Instance *Weapon, const Camera *Camera_Data, float Delta_Time, int Fire);
+void Weapon_Update (Figure_Instance *Weapon, const Camera *Camera_Data, float Delta_Time, int Fire);
 
 // Sample the current keyboard and mouse state from SDL, returning the frame's input snapshot
 Input Poll_Input ();
@@ -2776,19 +2753,19 @@ int main (int Argc, char **Argv) {
     printf("[enemy] placing at (%.1f, %.1f, %.1f), %.0f units forward from spawn\n",
            Enemy_Origin.x, Enemy_Origin.y, Enemy_Origin.z, 120.f);
   }
-  Entity Enemy = Entity_MDL_Path ? MDL_Load (&Scene_Data, Entity_MDL_Path, Enemy_Origin, Spawn_Point.Angle + 180.f)
-                                 : Entity_Load (&Scene_Data, Spawn_Point);
+  Figure_Instance Enemy = Entity_MDL_Path ? MDL_Load (&Scene_Data, Entity_MDL_Path, Enemy_Origin, Spawn_Point.Angle + 180.f)
+                                         : Entity_Load (&Scene_Data, Spawn_Point);
 
   // Infer per-scene environment settings from BSP data (sky textures, worldspawn)
   Active_Environment = Environment_Infer_From_Scene (&Scene_Data);
 
   // Load scene and weapon textures
   Scene_Load_Textures (&Scene_Data);
-  Weapon_Instance Weapon = {0};
+  Figure_Instance Weapon = {0};
   const char *Weapon_MDL_Path = Source_Weapon_Path;
   if (not Weapon_MDL_Path and Source_Mode)
     Weapon_MDL_Path = "/tmp/v_m4_new/models/v_rif_m4a1.mdl";
-  Weapon.Model = Weapon_MDL_Path ? Source_Weapon_Model_Load (Weapon_MDL_Path)
+  Weapon.Figure = Weapon_MDL_Path ? Source_Weapon_Model_Load (Weapon_MDL_Path)
                                  : Weapon_Model_Load ();
   Weapon_Load_Textures (&Weapon);
 
@@ -3011,7 +2988,7 @@ int main (int Argc, char **Argv) {
       Weapon_Update (&Weapon, &Bench_Cam, Fixed_Dt, 0);
       Weapon_Bottom_Level_Rebuild (&Weapon);
       Enemy.Animation_Time += Fixed_Dt;
-      Enemy.Current_Vertices = Enemy.Frame_Vertices[(int)(Enemy.Animation_Time * Enemy.Frame_FPS) % (int)Enemy.Frame_Count];
+      Enemy.Current_Vertices = Enemy.Figure.Frame_Vertices[(int)(Enemy.Animation_Time * Enemy.Figure.Animations[0].FPS) % Enemy.Figure.Animations[0].Frame_Count];
       Entity_Bottom_Level_Rebuild (&Enemy);
       Top_Level_Rebuild (&World_Bottom_Level, &Weapon.Bottom_Level, &Enemy.Bottom_Level, NULL);
       Camera_Upload (&Bench_Cam, Vertical_FOV, Weapon.Texture_Base_Index, PBR_Stride, Active_SPP);
@@ -3390,8 +3367,8 @@ int main (int Argc, char **Argv) {
     // Advance enemy idle animation and rebuild BLAS
     Enemy.Animation_Time += Delta_Time;
     {
-      int Frame_Index = (int)(Enemy.Animation_Time * Enemy.Frame_FPS) % (int)Enemy.Frame_Count;
-      Enemy.Current_Vertices = Enemy.Frame_Vertices[Frame_Index];
+      int Frame_Index = (int)(Enemy.Animation_Time * Enemy.Figure.Animations[0].FPS) % Enemy.Figure.Animations[0].Frame_Count;
+      Enemy.Current_Vertices = Enemy.Figure.Frame_Vertices[Frame_Index];
     }
     Entity_Bottom_Level_Rebuild (&Enemy);
 
@@ -3556,13 +3533,13 @@ int main (int Argc, char **Argv) {
   vkFreeMemory    (Device, Weapon.Index_Buffer.Memory, NULL);
   vkDestroyBuffer (Device, Weapon.Texture_Id_Buffer.Buffer, NULL);
   vkFreeMemory    (Device, Weapon.Texture_Id_Buffer.Memory, NULL);
-  free (Weapon.Model.Vertices);
-  free (Weapon.Model.Indices);
-  free (Weapon.Model.Texture_Ids);
+  free (Weapon.Figure.Vertices);
+  free (Weapon.Figure.Indices);
+  free (Weapon.Figure.Texture_Ids);
   free (Weapon.Transformed_Vertices);
 
   // Entity (enemy) resources
-  for (uint I = 0; I < Enemy.Frame_Count; I++) free (Enemy.Frame_Vertices[I]);
+  for (uint I = 0; I < Enemy.Figure.Total_Frame_Count; I++) free (Enemy.Figure.Frame_Vertices[I]);
   vkDestroyAccelerationStructure (Device, Enemy.Bottom_Level.Handle, NULL);
   vkDestroyBuffer (Device, Enemy.Bottom_Level.Buffer.Buffer, NULL);
   vkFreeMemory    (Device, Enemy.Bottom_Level.Buffer.Memory, NULL);
@@ -3574,8 +3551,8 @@ int main (int Argc, char **Argv) {
   vkFreeMemory    (Device, Enemy.Index_Buffer.Memory, NULL);
   vkDestroyBuffer (Device, Enemy.Texture_Id_Buffer.Buffer, NULL);
   vkFreeMemory    (Device, Enemy.Texture_Id_Buffer.Memory, NULL);
-  free (Enemy.Indices);
-  free (Enemy.Texture_Ids);
+  free (Enemy.Figure.Indices);
+  free (Enemy.Figure.Texture_Ids);
 
   // Shader binding table
   vkDestroyBuffer (Device, Shader_Binding_Table_Buffer.Buffer, NULL);
@@ -4666,28 +4643,27 @@ void Movement_Style_Toggle (Player *P) {
 //   Skeleton_Evaluate
 // ═════════════════════
 
-void Skeleton_Evaluate (Entity *E, float Time) {
-  if (E->Bone_Count <= 0) return;
+void Skeleton_Evaluate (Figure_Instance *E, float Time) {
+  if (E->Figure.Bone_Count <= 0) return;
 
-  // Build world-space bone matrices from the bind pose hierarchy (When animation keyframe data is available, interpolate here) ???
-  // We are only using the bind position right now ???
-  float Local[MDL_MAX_BONES][3][4];
-  for (int I=0; I<E->Bone_Count; I++)
-    memcpy(Local[I], E->Bind_Pose[I], sizeof(float)*12);
+  // Build world-space bone matrices from the bind pose hierarchy
+  float Local[FIGURE_MAX_BONES][3][4];
+  for (int I = 0; I < E->Figure.Bone_Count; I++)
+    memcpy (Local[I], E->Figure.Bind_Pose[I], sizeof (float) * 12);
 
   // Walk hierarchy: Pose[i] = Parent_World * Local[i]
-  for (int I=0; I<E->Bone_Count; I++) {
-    if (E->Bone_Parents[I] >= 0 and E->Bone_Parents[I] < I)
-      Mat34_Mul(E->Pose[E->Bone_Parents[I]].M, Local[I], E->Pose[I].M);
+  for (int I = 0; I < E->Figure.Bone_Count; I++) {
+    if (E->Figure.Bone_Parents[I] >= 0 and E->Figure.Bone_Parents[I] < I)
+      Mat34_Mul (E->Pose[E->Figure.Bone_Parents[I]].M, Local[I], E->Pose[I].M);
     else
-      memcpy(E->Pose[I].M, Local[I], sizeof(float)*12);
+      memcpy (E->Pose[I].M, Local[I], sizeof (float) * 12);
   }
 
   // Compose with inverse bind-pose: Final[i] = Pose[i] * InvBind[i]
-  for (int I=0; I<E->Bone_Count; I++) {
+  for (int I = 0; I < E->Figure.Bone_Count; I++) {
     float Tmp[3][4];
-    Mat34_Mul(E->Pose[I].M, E->Inv_Bind[I], Tmp);
-    memcpy(E->Pose[I].M, Tmp, sizeof(float)*12);
+    Mat34_Mul (E->Pose[I].M, E->Figure.Inv_Bind[I], Tmp);
+    memcpy (E->Pose[I].M, Tmp, sizeof (float) * 12);
   }
 }
 
@@ -4864,8 +4840,8 @@ void MD3_Parse_Surface_At_Frame (const uint8_t *Surface_Data, int Frame,
 //   Weapon_Model_Load
 // ═════════════════════
 
-Weapon_Model Weapon_Model_Load () {
-  Weapon_Model Result = {0};
+Articulated_Figure Weapon_Model_Load () {
+  Articulated_Figure Result = {0};
 
   // Open the main weapon body mesh
   FILE *File = fopen ("assets/models/weapons2/machinegun/machinegun.md3", "rb");
@@ -4886,16 +4862,19 @@ Weapon_Model Weapon_Model_Load () {
   int Body_Tags_Offset     = *(int *)(Body_Data + 96);
   int Body_Surfaces_Offset = *(int *)(Body_Data + 100);
 
-  // Search for the "tag_barrel" attachment point in the body's tag list
-  memset (Result.Tag_Barrel, 0, sizeof (Result.Tag_Barrel));
+  // Search for the "tag_barrel" attachment point in the body's tag list and store as Tags[0]
+  snprintf (Result.Tags[0].Name, 64, "tag_barrel");
+  Result.Tags[0].Frame_Count = 1;
+  memset (Result.Tags[0].Transforms[0], 0, sizeof (float) * 12);
   const MD3_Tag *Body_Tags = (const MD3_Tag *)(Body_Data + Body_Tags_Offset);
   for (int Tag = 0; Tag < Body_Tag_Count; Tag++) {
     if (strncmp (Body_Tags[Tag].Name, "tag_barrel", 64) == 0) {
-      memcpy (Result.Tag_Barrel, Body_Tags[Tag].Origin, 3 * sizeof (float));
-      memcpy (Result.Tag_Barrel + 3, Body_Tags[Tag].Axis, 9 * sizeof (float));
+      memcpy (Result.Tags[0].Transforms[0], Body_Tags[Tag].Origin, 3 * sizeof (float));
+      memcpy (Result.Tags[0].Transforms[0] + 3, Body_Tags[Tag].Axis, 9 * sizeof (float));
       break;
     }
   }
+  Result.Tag_Count = 1;
 
   // Iterate over each surface in the body and parse its geometry
   const uint8_t *Surface_Cursor = Body_Data + Body_Surfaces_Offset;
@@ -4952,14 +4931,14 @@ Weapon_Model Weapon_Model_Load () {
                          /*Inout_Texture_Ids      =>*/ &Result.Texture_Ids,
                          /*Inout_Triangle_Count   =>*/ &Result.Triangle_Count,
                          /*Assigned_Texture_Index =>*/ 0,
-                         /*Transform              =>*/ Result.Tag_Barrel);
+                         /*Transform              =>*/ Result.Tags[0].Transforms[0]);
       Surface_Cursor += ((const MD3_Surface *)Surface_Cursor)->End_Offset;
     }
     free (Barrel_Data);
     printf ("[weapon] barrel merged, tag_barrel=(%.1f,%.1f,%.1f)\n",
-            Result.Tag_Barrel[0],
-            Result.Tag_Barrel[1],
-            Result.Tag_Barrel[2]);
+            Result.Tags[0].Transforms[0][0],
+            Result.Tags[0].Transforms[0][1],
+            Result.Tags[0].Transforms[0][2]);
   }
 
   // Load the hand model for tag_weapon animation frames (no hand geometry - weapon-only viewmodel)
@@ -4977,23 +4956,32 @@ Weapon_Model Weapon_Model_Load () {
     int Hand_Frame_Count = *(int *)(Hand_Data + 76);
     int Hand_Tag_Count   = *(int *)(Hand_Data + 80);
     int Hand_Tags_Offset = *(int *)(Hand_Data + 96);
-    Result.Animation_Frame_Count = Hand_Frame_Count < 30 ? Hand_Frame_Count : 30;
+    // Store per-frame tag_weapon transforms in Tags[1]
+    snprintf (Result.Tags[1].Name, 64, "tag_weapon");
+    uint Anim_Frames = Hand_Frame_Count < FIGURE_MAX_TAG_FRAMES ? (uint)Hand_Frame_Count : FIGURE_MAX_TAG_FRAMES;
+    Result.Tags[1].Frame_Count = Anim_Frames;
 
-    // Extract the origin and axis for tag_weapon at each animation frame
-    for (uint Frame = 0; Frame < Result.Animation_Frame_Count; Frame++) {
+    for (uint Frame = 0; Frame < Anim_Frames; Frame++) {
       const MD3_Tag *Tags = (const MD3_Tag *)(Hand_Data + Hand_Tags_Offset + Frame * Hand_Tag_Count * sizeof (MD3_Tag));
       for (int Tag = 0; Tag < Hand_Tag_Count; Tag++) {
         if (strncmp (Tags[Tag].Name, "tag_weapon", 64) == 0) {
-          memcpy (Result.Tag_Weapon[Frame], Tags[Tag].Origin, 3 * sizeof (float));
-          memcpy (Result.Tag_Weapon[Frame] + 3, Tags[Tag].Axis, 9 * sizeof (float));
+          memcpy (Result.Tags[1].Transforms[Frame], Tags[Tag].Origin, 3 * sizeof (float));
+          memcpy (Result.Tags[1].Transforms[Frame] + 3, Tags[Tag].Axis, 9 * sizeof (float));
           break;
         }
       }
     }
+    Result.Tag_Count = 2;
+
+    // Store animation clip metadata
+    Result.Animation_Count = 1;
+    snprintf (Result.Animations[0].Name, 64, "fire");
+    Result.Animations[0].Frame_Count = (int)Anim_Frames;
+    Result.Animations[0].FPS         = 10.f;
+    Result.Animations[0].Looping     = 0;
 
     free (Hand_Data);
-    printf ("[weapon] hand: %u animation frames (no hand geometry)\n",
-            Result.Animation_Frame_Count);
+    printf ("[weapon] hand: %u animation frames (no hand geometry)\n", Anim_Frames);
   }
 
   // Report the loaded weapon geometry statistics
@@ -5134,8 +5122,8 @@ void Entity_Assemble_Frame (int Legs_Frame, int Torso_Frame,
 //   Entity_Load
 // ═══════════════
 
-Entity Entity_Load (Scene *S, Spawn Spawn_Point) {
-  Entity E = {0};
+Figure_Instance Entity_Load (Scene *S, Spawn Spawn_Point) {
+  Figure_Instance E = {0};
 
   // Add material entries for entity body skin + gun metal
   uint Body_Mat = S->Material_Count;
@@ -5178,17 +5166,24 @@ Entity Entity_Load (Scene *S, Spawn Spawn_Point) {
   // Configure idle leg animation frame range and playback rate
   int Legs_Base = 171;  // MD3 frame for first LEGS_IDLE frame
   int Legs_Num  = 10;   // Number of LEGS_IDLE frames
-  E.Frame_FPS   = 10.f; // LEGS_IDLE fps
   if (Legs_Base + Legs_Num > Lower_Frames) Legs_Num = Lower_Frames - Legs_Base;
   if (Legs_Num < 1) Legs_Num = 1;
-  if (Legs_Num > ENTITY_MAX_FRAMES) Legs_Num = ENTITY_MAX_FRAMES;
-  E.Frame_Count = Legs_Num;
+  if (Legs_Num > FIGURE_MAX_FRAMES) Legs_Num = FIGURE_MAX_FRAMES;
+
+  // Register the idle animation clip
+  E.Figure.Animation_Count = 1;
+  snprintf (E.Figure.Animations[0].Name, 64, "LEGS_IDLE");
+  E.Figure.Animations[0].First_Frame = 0;
+  E.Figure.Animations[0].Frame_Count = Legs_Num;
+  E.Figure.Animations[0].FPS         = 10.f;
+  E.Figure.Animations[0].Looping     = 1;
+  E.Figure.Total_Frame_Count         = (uint)Legs_Num;
 
   // Set the torso to its standing pose frame
   int Torso_Frame = 151;
 
   // Pre-compute vertex data for each animation frame
-  for (uint F = 0; F < E.Frame_Count; F++) {
+  for (int F = 0; F < Legs_Num; F++) {
     Vertex *Verts = NULL; uint VC = 0;
     uint *Idx = NULL; uint IC = 0;
     uint *Tex = NULL; uint TC = 0;
@@ -5198,18 +5193,15 @@ Entity Entity_Load (Scene *S, Spawn Spawn_Point) {
                           &Verts, &VC, &Idx, &IC, &Tex, &TC);
 
     // Cache vertex data for this frame
-    E.Frame_Vertices[F] = Verts;
+    E.Figure.Frame_Vertices[F] = Verts;
 
     // Store shared topology from the first frame or free duplicate arrays
     if (F == 0) {
-      // First frame establishes the shared topology
-      E.Vertex_Count   = VC;
-      E.Index_Count    = IC;
-      E.Triangle_Count = TC;
-      E.Indices        = Idx;
-      E.Texture_Ids    = Tex;
-
-    // Subsequent frames must match topology - free duplicate index/texture arrays
+      E.Figure.Vertex_Count   = VC;
+      E.Figure.Index_Count    = IC;
+      E.Figure.Triangle_Count = TC;
+      E.Figure.Indices        = Idx;
+      E.Figure.Texture_Ids    = Tex;
     } else {
       free (Idx);
       free (Tex);
@@ -5217,12 +5209,14 @@ Entity Entity_Load (Scene *S, Spawn Spawn_Point) {
   }
 
   // Initialize animation state to the first frame
-  E.Current_Vertices = E.Frame_Vertices[0];
+  E.Current_Vertices = E.Figure.Frame_Vertices[0];
   E.Animation_Time   = 0.f;
+  E.Active_Animation = 0;
 
   // Log entity statistics
   printf ("[enemy] sarge loaded: %u verts, %u tris, %u animation frames @ %.0f fps\n",
-          E.Vertex_Count, E.Triangle_Count, E.Frame_Count, E.Frame_FPS);
+          E.Figure.Vertex_Count, E.Figure.Triangle_Count,
+          E.Figure.Animations[0].Frame_Count, E.Figure.Animations[0].FPS);
   return E;
 
 } // Entity_Load
@@ -5341,8 +5335,8 @@ int VTF_Load (const char *Path, uint8_t **Out_Pixels, int *Out_W, int *Out_H) {
 //   MDL_Load
 // ════════════
 
-Entity MDL_Load (Scene *S, const char *Path, vec3 Origin, float Yaw) {
-  Entity Entity_Result = {0};
+Figure_Instance MDL_Load (Scene *S, const char *Path, vec3 Origin, float Yaw) {
+  Figure_Instance Entity_Result = {0};
 
   // Read MDL file
   FILE *File = fopen (Path, "rb");
@@ -5360,12 +5354,12 @@ Entity MDL_Load (Scene *S, const char *Path, vec3 Origin, float Yaw) {
   }
 
   // Parse bones and build each bone's 3x4 bind-pose matrix from its default position and quaternion
-  Entity_Result.Bone_Count = Header->Bone_Count < MDL_MAX_BONES
+  Entity_Result.Figure.Bone_Count = Header->Bone_Count < MDL_MAX_BONES
                              ? Header->Bone_Count : MDL_MAX_BONES;
-  for (int Bone_Index = 0; Bone_Index < Entity_Result.Bone_Count; Bone_Index++) {
+  for (int Bone_Index = 0; Bone_Index < Entity_Result.Figure.Bone_Count; Bone_Index++) {
     const MDL_Bone *Bone = (const MDL_Bone*)(File_Data + Header->Bone_Offset
                                              + Bone_Index * sizeof (MDL_Bone));
-    Entity_Result.Bone_Parents[Bone_Index] = Bone->Parent;
+    Entity_Result.Figure.Bone_Parents[Bone_Index] = Bone->Parent;
 
     // Expand the bind-pose quaternion into a row-major 3x4 rotation-translation matrix
     float Quat_X = Bone->Quat[0], Quat_Y = Bone->Quat[1];
@@ -5374,12 +5368,12 @@ Entity MDL_Load (Scene *S, const char *Path, vec3 Origin, float Yaw) {
     float XX = Quat_X * Two_X, XY = Quat_X * Two_Y, XZ = Quat_X * Two_Z;
     float YY = Quat_Y * Two_Y, YZ = Quat_Y * Two_Z, ZZ = Quat_Z * Two_Z;
     float WX = Quat_W * Two_X, WY = Quat_W * Two_Y, WZ = Quat_W * Two_Z;
-    Entity_Result.Bind_Pose[Bone_Index][0][0] = 1-(YY+ZZ); Entity_Result.Bind_Pose[Bone_Index][0][1] = XY-WZ;      Entity_Result.Bind_Pose[Bone_Index][0][2] = XZ+WY;      Entity_Result.Bind_Pose[Bone_Index][0][3] = Bone->Position.x;
-    Entity_Result.Bind_Pose[Bone_Index][1][0] = XY+WZ;     Entity_Result.Bind_Pose[Bone_Index][1][1] = 1-(XX+ZZ);  Entity_Result.Bind_Pose[Bone_Index][1][2] = YZ-WX;      Entity_Result.Bind_Pose[Bone_Index][1][3] = Bone->Position.y;
-    Entity_Result.Bind_Pose[Bone_Index][2][0] = XZ-WY;     Entity_Result.Bind_Pose[Bone_Index][2][1] = YZ+WX;      Entity_Result.Bind_Pose[Bone_Index][2][2] = 1-(XX+YY);  Entity_Result.Bind_Pose[Bone_Index][2][3] = Bone->Position.z;
+    Entity_Result.Figure.Bind_Pose[Bone_Index][0][0] = 1-(YY+ZZ); Entity_Result.Figure.Bind_Pose[Bone_Index][0][1] = XY-WZ;      Entity_Result.Figure.Bind_Pose[Bone_Index][0][2] = XZ+WY;      Entity_Result.Figure.Bind_Pose[Bone_Index][0][3] = Bone->Position.x;
+    Entity_Result.Figure.Bind_Pose[Bone_Index][1][0] = XY+WZ;     Entity_Result.Figure.Bind_Pose[Bone_Index][1][1] = 1-(XX+ZZ);  Entity_Result.Figure.Bind_Pose[Bone_Index][1][2] = YZ-WX;      Entity_Result.Figure.Bind_Pose[Bone_Index][1][3] = Bone->Position.y;
+    Entity_Result.Figure.Bind_Pose[Bone_Index][2][0] = XZ-WY;     Entity_Result.Figure.Bind_Pose[Bone_Index][2][1] = YZ+WX;      Entity_Result.Figure.Bind_Pose[Bone_Index][2][2] = 1-(XX+YY);  Entity_Result.Figure.Bind_Pose[Bone_Index][2][3] = Bone->Position.z;
 
     // Copy the inverse bind-pose (pose_to_bone) directly from the MDL bone descriptor
-    memcpy (Entity_Result.Inv_Bind[Bone_Index], Bone->Pose_To_Bone, sizeof (float) * 12);
+    memcpy (Entity_Result.Figure.Inv_Bind[Bone_Index], Bone->Pose_To_Bone, sizeof (float) * 12);
   }
 
   // Append materials from the MDL material table into the shared scene material list
@@ -5585,30 +5579,35 @@ Entity MDL_Load (Scene *S, const char *Path, vec3 Origin, float Yaw) {
   }
   free (VVD_Vertices);
 
-  // Populate entity fields from the assembled geometry buffers
-  Entity_Result.Frame_Count       = 1;
-  Entity_Result.Frame_Vertices[0] = Vertices;
-  Entity_Result.Frame_FPS         = 1.f;
-  Entity_Result.Vertex_Count      = Vertex_Count;
-  Entity_Result.Index_Count       = Index_Count;
-  Entity_Result.Triangle_Count    = Triangle_Count;
-  Entity_Result.Indices           = Indices;
-  Entity_Result.Texture_Ids       = Texture_Ids;
-  Entity_Result.Current_Vertices  = Entity_Result.Frame_Vertices[0];
+  // Populate figure and instance fields from the assembled geometry buffers
+  Entity_Result.Figure.Frame_Vertices[0] = Vertices;
+  Entity_Result.Figure.Total_Frame_Count = 1;
+  Entity_Result.Figure.Vertex_Count      = Vertex_Count;
+  Entity_Result.Figure.Index_Count       = Index_Count;
+  Entity_Result.Figure.Triangle_Count    = Triangle_Count;
+  Entity_Result.Figure.Indices           = Indices;
+  Entity_Result.Figure.Texture_Ids       = Texture_Ids;
+  Entity_Result.Figure.Vertices          = Vertices;
+  Entity_Result.Figure.Is_Source         = 1;
+  Entity_Result.Figure.Animation_Count   = 1;
+  snprintf (Entity_Result.Figure.Animations[0].Name, 64, "idle");
+  Entity_Result.Figure.Animations[0].Frame_Count = 1;
+  Entity_Result.Figure.Animations[0].FPS         = 1.f;
+  Entity_Result.Figure.Animations[0].Looping     = 1;
+  Entity_Result.Current_Vertices  = Vertices;
   Entity_Result.GL_Origin         = Origin;
   Entity_Result.GL_Yaw            = Yaw;
-  Entity_Result.Anim_Sequence     = 0;
-  Entity_Result.Anim_Count        = 0;
+  Entity_Result.Active_Animation  = 0;
 
   // Allocate bone weight arrays; default every vertex to rigid attachment on bone 0 (100% weight)
-  Entity_Result.Bone_Ids     = calloc (Vertex_Count * SKEL_MAX_BONES_PER_VERT, 1);
-  Entity_Result.Bone_Weights = calloc (Vertex_Count * SKEL_MAX_BONES_PER_VERT, 1);
+  Entity_Result.Figure.Bone_Ids     = calloc (Vertex_Count * SKEL_MAX_BONES_PER_VERT, 1);
+  Entity_Result.Figure.Bone_Weights = calloc (Vertex_Count * SKEL_MAX_BONES_PER_VERT, 1);
   for (uint Vert_Index = 0; Vert_Index < Vertex_Count; Vert_Index++)
-    Entity_Result.Bone_Weights[Vert_Index * SKEL_MAX_BONES_PER_VERT] = 255;
+    Entity_Result.Figure.Bone_Weights[Vert_Index * SKEL_MAX_BONES_PER_VERT] = 255;
 
   free (File_Data);
   printf ("[mdl] %s: %d bones, %u verts, %u tris\n",
-          Path, Entity_Result.Bone_Count, Vertex_Count, Triangle_Count);
+          Path, Entity_Result.Figure.Bone_Count, Vertex_Count, Triangle_Count);
   return Entity_Result;
 
 } // MDL_Load
@@ -5618,8 +5617,8 @@ Entity MDL_Load (Scene *S, const char *Path, vec3 Origin, float Yaw) {
 //   Source_Weapon_Model_Load
 // ════════════════════════════
 
-Weapon_Model Source_Weapon_Model_Load (const char *Path) {
-  Weapon_Model Result = {0};
+Articulated_Figure Source_Weapon_Model_Load (const char *Path) {
+  Articulated_Figure Result = {0};
   Result.Is_Source = 1;
 
   // Read MDL file
@@ -5958,9 +5957,16 @@ Weapon_Model Source_Weapon_Model_Load (const char *Path) {
   free (File_Data);
 
   // Source viewmodels include the hands; set a single-frame identity tag transform
-  Result.Animation_Frame_Count = 1;
-  memset (Result.Tag_Weapon[0], 0, sizeof (float) * 12);
-  Result.Tag_Weapon[0][3] = 1; Result.Tag_Weapon[0][7] = 1; Result.Tag_Weapon[0][11] = 1;
+  snprintf (Result.Tags[0].Name, 64, "tag_weapon");
+  Result.Tags[0].Frame_Count = 1;
+  memset (Result.Tags[0].Transforms[0], 0, sizeof (float) * 12);
+  Result.Tags[0].Transforms[0][3] = 1; Result.Tags[0].Transforms[0][7] = 1; Result.Tags[0].Transforms[0][11] = 1;
+  Result.Tag_Count = 1;
+  Result.Animation_Count = 1;
+  snprintf (Result.Animations[0].Name, 64, "idle");
+  Result.Animations[0].Frame_Count = 1;
+  Result.Animations[0].FPS         = 1.f;
+  Result.Animations[0].Looping     = 1;
 
   printf ("[weapon] Source MDL: %u verts, %u tris from %s\n",
           Result.Vertex_Count, Result.Triangle_Count, Path);
@@ -6003,7 +6009,7 @@ Articulated_Figure Figure_Load (const char *Path, vec3 Origin, float Yaw) {
     // The Source MDL loader needs the MDL + VVD + VTX sidecar files. It produces an Entity with
     // skeletal data. We transplant the relevant fields into our Figure struct.
     // For now, wrap the existing Source_Weapon_Model_Load which already handles MDL parsing.
-    Weapon_Model WM = Source_Weapon_Model_Load (Path);
+    Articulated_Figure WM = Source_Weapon_Model_Load (Path);
     Figure.Part_Count = 1;
     snprintf (Figure.Parts[0].Name, 64, "body");
     Figure.Parts[0].Vertices       = WM.Vertices;
@@ -6032,7 +6038,7 @@ Articulated_Figure Figure_Load (const char *Path, vec3 Origin, float Yaw) {
     // Q3 MD3: load as a single-part figure with vertex animation frames
     Figure.Is_Source = 0;
 
-    Weapon_Model WM = Weapon_Model_Load ();
+    Articulated_Figure WM = Weapon_Model_Load ();
     Figure.Part_Count = 1;
     snprintf (Figure.Parts[0].Name, 64, "body");
     Figure.Parts[0].Vertices       = WM.Vertices;
@@ -6046,18 +6052,11 @@ Articulated_Figure Figure_Load (const char *Path, vec3 Origin, float Yaw) {
     for (uint I = 0; I < WM.Surface_Count and I < WEAPON_MAX_TEXTURES; I++)
       memcpy (Figure.Parts[0].Texture_Names[I], WM.Texture_Names[I], 64);
 
-    // Transplant tag data
-    if (WM.Animation_Frame_Count > 0) {
-      Figure.Tag_Count = 1;
-      snprintf (Figure.Tags[0].Name, 64, "tag_weapon");
-      memcpy (Figure.Tags[0].Transform, WM.Tag_Weapon[0], 12 * sizeof (float));
-      Figure.Animation_Count = 1;
-      snprintf (Figure.Animations[0].Name, 64, "idle");
-      Figure.Animations[0].First_Frame = 0;
-      Figure.Animations[0].Frame_Count = (int)WM.Animation_Frame_Count;
-      Figure.Animations[0].FPS         = 10.f;
-      Figure.Animations[0].Looping     = 1;
-    }
+    // Transplant tag and animation data directly (already in Tags[]/Animations[] format)
+    Figure.Tag_Count       = WM.Tag_Count;
+    for (uint I = 0; I < WM.Tag_Count; I++) Figure.Tags[I] = WM.Tags[I];
+    Figure.Animation_Count = WM.Animation_Count;
+    for (uint I = 0; I < WM.Animation_Count; I++) Figure.Animations[I] = WM.Animations[I];
 
     Figure.Vertices       = WM.Vertices;
     Figure.Vertex_Count   = WM.Vertex_Count;
@@ -6090,10 +6089,11 @@ Articulated_Figure Figure_Load_Weapon (const char *Path) {
   if (Figure.Tag_Count == 0) {
     Figure.Tag_Count = 1;
     snprintf (Figure.Tags[0].Name, 64, "tag_weapon");
-    memset (Figure.Tags[0].Transform, 0, sizeof Figure.Tags[0].Transform);
-    Figure.Tags[0].Transform[3]  = 1.f; // Axis identity diagonal
-    Figure.Tags[0].Transform[7]  = 1.f;
-    Figure.Tags[0].Transform[11] = 1.f;
+    memset (Figure.Tags[0].Transforms[0], 0, sizeof (float) * 12);
+    Figure.Tags[0].Transforms[0][3]  = 1.f; // Axis identity diagonal
+    Figure.Tags[0].Transforms[0][7]  = 1.f;
+    Figure.Tags[0].Transforms[0][11] = 1.f;
+    Figure.Tags[0].Frame_Count = 1;
   }
 
   printf ("[figure] weapon: %u parts, %u tags, %u anims\n",
@@ -6105,18 +6105,18 @@ Articulated_Figure Figure_Load_Weapon (const char *Path) {
 //   Skeleton_Skin_Dispatch
 // ══════════════════════════
 
-void Skeleton_Skin_Dispatch (Entity *Entity_Ptr) {
-  if (Entity_Ptr->Bone_Count <= 0 or Entity_Ptr->Vertex_Count == 0) return;
+void Skeleton_Skin_Dispatch (Figure_Instance *Entity_Ptr) {
+  if (Entity_Ptr->Figure.Bone_Count <= 0 or Entity_Ptr->Figure.Vertex_Count == 0) return;
 
   // Upload the current pose matrices into the entity's bone SSBO
   void *Mapped_Memory;
   VK_CHECK (vkMapMemory (/*device  =>*/ Device,
                          /*memory  =>*/ Entity_Ptr->Bone_Buffer.Memory,
                          /*offset  =>*/ 0,
-                         /*size    =>*/ sizeof (Bone_Matrix) * Entity_Ptr->Bone_Count,
+                         /*size    =>*/ sizeof (Bone_Matrix) * Entity_Ptr->Figure.Bone_Count,
                          /*flags   =>*/ 0,
                          /*ppData  =>*/ &Mapped_Memory));
-  memcpy (Mapped_Memory, Entity_Ptr->Pose, sizeof (Bone_Matrix) * Entity_Ptr->Bone_Count);
+  memcpy (Mapped_Memory, Entity_Ptr->Pose, sizeof (Bone_Matrix) * Entity_Ptr->Figure.Bone_Count);
   vkUnmapMemory (Device, Entity_Ptr->Bone_Buffer.Memory);
 
   // Allocate a one-shot command buffer and record the skinning compute dispatch
@@ -6135,7 +6135,7 @@ void Skeleton_Skin_Dispatch (Entity *Entity_Ptr) {
   vkCmdBindPipeline (Skinning_Command_Buffer, VK_PIPELINE_BIND_POINT_COMPUTE, Skinning_Pipeline);
 
   // Push vertex count and bone count as a uvec2 push constant
-  uint Push[2] = {Entity_Ptr->Vertex_Count, (uint)Entity_Ptr->Bone_Count};
+  uint Push[2] = {Entity_Ptr->Figure.Vertex_Count, (uint)Entity_Ptr->Figure.Bone_Count};
   vkCmdPushConstants (/*commandBuffer =>*/ Skinning_Command_Buffer,
                       /*layout        =>*/ Skinning_Pipeline_Layout,
                       /*stageFlags    =>*/ VK_SHADER_STAGE_COMPUTE_BIT,
@@ -6164,7 +6164,7 @@ void Skeleton_Skin_Dispatch (Entity *Entity_Ptr) {
              /*pDescriptorWrites    =>*/ Writes);
 
   // Dispatch: one compute invocation per vertex, grouped into workgroups of 64
-  vkCmdDispatch (Skinning_Command_Buffer, (Entity_Ptr->Vertex_Count + 63) / 64, 1, 1);
+  vkCmdDispatch (Skinning_Command_Buffer, (Entity_Ptr->Figure.Vertex_Count + 63) / 64, 1, 1);
 
   // End recording and submit without a fence; synchronize by blocking on the queue
   VK_CHECK (vkEndCommandBuffer (Skinning_Command_Buffer));
@@ -8030,7 +8030,7 @@ void Scene_Load_Textures (const Scene *Scene_Data) {
 //   Weapon_Load_Textures
 // ════════════════════════
 
-void Weapon_Load_Textures (Weapon_Instance *Weapon) {
+void Weapon_Load_Textures (Figure_Instance *Weapon) {
 
   // Record the starting index in the global texture array for this weapon's textures
   Weapon->Texture_Base_Index = Texture_Count;
@@ -8046,7 +8046,7 @@ void Weapon_Load_Textures (Weapon_Instance *Weapon) {
     {128, 128, 128, 255}}; // Height: mid-level
 
   // Use the actual surface count from the weapon model (Source weapons may have many materials)
-  uint Weapon_Tex_Count = Weapon->Model.Surface_Count > 0 ? Weapon->Model.Surface_Count : WEAPON_TEXTURE_COUNT;
+  uint Weapon_Tex_Count = Weapon->Figure.Surface_Count > 0 ? Weapon->Figure.Surface_Count : WEAPON_TEXTURE_COUNT;
   if (Weapon_Tex_Count > WEAPON_MAX_TEXTURES) Weapon_Tex_Count = WEAPON_MAX_TEXTURES;
 
   // Grow the global texture arrays to hold weapon PBR slots
@@ -8064,10 +8064,10 @@ void Weapon_Load_Textures (Weapon_Instance *Weapon) {
       uint Img_W = 0, Img_H = 0;
       uint8_t *Pixels = NULL;
 
-      if (Map_Type == 0 and Index < Weapon->Model.Surface_Count and Weapon->Model.Texture_Names[Index][0]) {
+      if (Map_Type == 0 and Index < Weapon->Figure.Surface_Count and Weapon->Figure.Texture_Names[Index][0]) {
         // Try loading weapon texture from model's texture name (Source VTF or TGA)
         char Lower[256]; int Li=0;
-        for (const char *C=Weapon->Model.Texture_Names[Index]; *C and Li<255; C++)
+        for (const char *C=Weapon->Figure.Texture_Names[Index]; *C and Li<255; C++)
           Lower[Li++] = (*C>='A' and *C<='Z') ? *C+32 : *C;
         Lower[Li]=0;
 
@@ -8281,15 +8281,15 @@ Acceleration_Structure Build_World_Bottom_Level (const Scene *Scene_Data) {
 //   Weapon_Bottom_Level_Initialize
 // ══════════════════════════════════
 
-void Weapon_Bottom_Level_Initialize (Weapon_Instance *Weapon) {
-  if (not Weapon->Model.Vertex_Count) return;
+void Weapon_Bottom_Level_Initialize (Figure_Instance *Weapon) {
+  if (not Weapon->Figure.Vertex_Count) return;
 
   // Allocate a host-visible copy of the weapon vertices for per-frame CPU transformation
-  Weapon->Transformed_Vertices = malloc (sizeof (Vertex) * Weapon->Model.Vertex_Count);
-  memcpy (Weapon->Transformed_Vertices, Weapon->Model.Vertices, sizeof (Vertex) * Weapon->Model.Vertex_Count);
+  Weapon->Transformed_Vertices = malloc (sizeof (Vertex) * Weapon->Figure.Vertex_Count);
+  memcpy (Weapon->Transformed_Vertices, Weapon->Figure.Vertices, sizeof (Vertex) * Weapon->Figure.Vertex_Count);
 
   // Create host-visible vertex buffer for direct CPU writes each frame (host-visible so we can update without staging)
-  Weapon->Vertex_Buffer = Buffer_Allocate (/*Size         =>*/ sizeof (Vertex) * Weapon->Model.Vertex_Count,
+  Weapon->Vertex_Buffer = Buffer_Allocate (/*Size         =>*/ sizeof (Vertex) * Weapon->Figure.Vertex_Count,
                                            /*Usage        =>*/ VK_BUFFER_USAGE_VERTEX_BUFFER_BIT
                                                              | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
                                                              | VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR
@@ -8298,20 +8298,20 @@ void Weapon_Bottom_Level_Initialize (Weapon_Instance *Weapon) {
                                                              | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
 
   // Upload the initial vertex positions
-  Buffer_Upload (Weapon->Vertex_Buffer, Weapon->Transformed_Vertices, sizeof (Vertex) * Weapon->Model.Vertex_Count);
+  Buffer_Upload (Weapon->Vertex_Buffer, Weapon->Transformed_Vertices, sizeof (Vertex) * Weapon->Figure.Vertex_Count);
 
   // Upload index and texture-id data (static, device-local - these never change after the initial upload)
   Weapon->Index_Buffer      = Buffer_Stage_Upload (/*Command_Buffer =>*/ Command_Buffer,
                                                    /*Queue          =>*/ Queue,
-                                                   /*Data           =>*/ Weapon->Model.Indices,
-                                                   /*Size           =>*/ sizeof (uint) * Weapon->Model.Index_Count,
+                                                   /*Data           =>*/ Weapon->Figure.Indices,
+                                                   /*Size           =>*/ sizeof (uint) * Weapon->Figure.Index_Count,
                                                    /*Usage          =>*/ VK_BUFFER_USAGE_INDEX_BUFFER_BIT
                                                                        | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
                                                                        | VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR);
   Weapon->Texture_Id_Buffer = Buffer_Stage_Upload (/*Command_Buffer =>*/ Command_Buffer,
                                                    /*Queue          =>*/ Queue,
-                                                   /*Data           =>*/ Weapon->Model.Texture_Ids,
-                                                   /*Size           =>*/ sizeof (uint) * Weapon->Model.Triangle_Count,
+                                                   /*Data           =>*/ Weapon->Figure.Texture_Ids,
+                                                   /*Size           =>*/ sizeof (uint) * Weapon->Figure.Triangle_Count,
                                                    /*Usage          =>*/ VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
 
   // Configure the BLAS for fast builds with update capability
@@ -8324,7 +8324,7 @@ void Weapon_Bottom_Level_Initialize (Weapon_Instance *Weapon) {
       .vertexFormat             = VK_FORMAT_R32G32B32_SFLOAT,
       .vertexData.deviceAddress = Weapon->Vertex_Buffer.Address,
       .vertexStride             = sizeof (Vertex),
-      .maxVertex                = Weapon->Model.Vertex_Count - 1,
+      .maxVertex                = Weapon->Figure.Vertex_Count - 1,
       .indexType                = VK_INDEX_TYPE_UINT32,
       .indexData.deviceAddress  = Weapon->Index_Buffer.Address}};
 
@@ -8338,7 +8338,7 @@ void Weapon_Bottom_Level_Initialize (Weapon_Instance *Weapon) {
     .pGeometries   = &Geometry};
 
   // Query required sizes for the weapon BLAS and its scratch buffer from the driver
-  uint Primitive_Count = Weapon->Model.Triangle_Count;
+  uint Primitive_Count = Weapon->Figure.Triangle_Count;
   VkAccelerationStructureBuildSizesInfoKHR Build_Sizes = {.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR};
   vkGetAccelerationStructureBuildSizes (/*device             =>*/ Device,
                                         /*buildType          =>*/ VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR,
@@ -8407,13 +8407,13 @@ void Weapon_Bottom_Level_Initialize (Weapon_Instance *Weapon) {
 //   Weapon_Bottom_Level_Rebuild
 // ═══════════════════════════════
 
-void Weapon_Bottom_Level_Rebuild (Weapon_Instance *Weapon) {
+void Weapon_Bottom_Level_Rebuild (Figure_Instance *Weapon) {
 
   // Skip if no weapon geometry is loaded
-  if (not Weapon->Model.Vertex_Count) return;
+  if (not Weapon->Figure.Vertex_Count) return;
 
   // Re-upload the CPU-transformed vertices to the host-visible GPU buffer
-  Buffer_Upload (Weapon->Vertex_Buffer, Weapon->Transformed_Vertices, sizeof (Vertex) * Weapon->Model.Vertex_Count);
+  Buffer_Upload (Weapon->Vertex_Buffer, Weapon->Transformed_Vertices, sizeof (Vertex) * Weapon->Figure.Vertex_Count);
 
   // Rebuild the BLAS with the updated vertex positions (full rebuild, not update)
   VkAccelerationStructureGeometryKHR Geometry = {
@@ -8425,7 +8425,7 @@ void Weapon_Bottom_Level_Rebuild (Weapon_Instance *Weapon) {
       .vertexFormat             = VK_FORMAT_R32G32B32_SFLOAT,
       .vertexData.deviceAddress = Weapon->Vertex_Buffer.Address,
       .vertexStride             = sizeof (Vertex),
-      .maxVertex                = Weapon->Model.Vertex_Count - 1,
+      .maxVertex                = Weapon->Figure.Vertex_Count - 1,
       .indexType                = VK_INDEX_TYPE_UINT32,
       .indexData.deviceAddress  = Weapon->Index_Buffer.Address}};
 
@@ -8443,7 +8443,7 @@ void Weapon_Bottom_Level_Rebuild (Weapon_Instance *Weapon) {
     .pGeometries               = &Geometry};
 
   // Build range covering all weapon triangles
-  VkAccelerationStructureBuildRangeInfoKHR Range = {.primitiveCount = Weapon->Model.Triangle_Count};
+  VkAccelerationStructureBuildRangeInfoKHR Range = {.primitiveCount = Weapon->Figure.Triangle_Count};
   const VkAccelerationStructureBuildRangeInfoKHR *Range_Pointer = &Range;
 
   // Record the BLAS refit command into a one-shot command buffer
@@ -8475,31 +8475,31 @@ void Weapon_Bottom_Level_Rebuild (Weapon_Instance *Weapon) {
 //   Entity_Bottom_Level_Initialize
 // ══════════════════════════════════
 
-void Entity_Bottom_Level_Initialize (Entity *Enemy) {
-  if (not Enemy->Vertex_Count) return;
+void Entity_Bottom_Level_Initialize (Figure_Instance *Enemy) {
+  if (not Enemy->Figure.Vertex_Count) return;
 
   // Host-visible vertex buffer for per-frame CPU uploads (host-visible so we can update each frame without staging)
-  Enemy->Vertex_Buffer = Buffer_Allocate (/*Size         =>*/ sizeof (Vertex) * Enemy->Vertex_Count,
+  Enemy->Vertex_Buffer = Buffer_Allocate (/*Size         =>*/ sizeof (Vertex) * Enemy->Figure.Vertex_Count,
                                           /*Usage        =>*/ VK_BUFFER_USAGE_VERTEX_BUFFER_BIT
                                                             | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
                                                             | VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR
                                                             | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
                                           /*Memory_Flags =>*/ VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT
                                                             | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
-  Buffer_Upload (Enemy->Vertex_Buffer, Enemy->Current_Vertices, sizeof (Vertex) * Enemy->Vertex_Count);
+  Buffer_Upload (Enemy->Vertex_Buffer, Enemy->Current_Vertices, sizeof (Vertex) * Enemy->Figure.Vertex_Count);
 
   // index and texture-id buffers (device-local - these never change after the initial upload)
   Enemy->Index_Buffer      = Buffer_Stage_Upload (/*Command_Buffer =>*/ Command_Buffer,
                                                   /*Queue          =>*/ Queue,
-                                                  /*Data           =>*/ Enemy->Indices,
-                                                  /*Size           =>*/ sizeof (uint) * Enemy->Index_Count,
+                                                  /*Data           =>*/ Enemy->Figure.Indices,
+                                                  /*Size           =>*/ sizeof (uint) * Enemy->Figure.Index_Count,
                                                   /*Usage          =>*/ VK_BUFFER_USAGE_INDEX_BUFFER_BIT
                                                                       | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
                                                                       | VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR);
   Enemy->Texture_Id_Buffer = Buffer_Stage_Upload (/*Command_Buffer =>*/ Command_Buffer,
                                                   /*Queue          =>*/ Queue,
-                                                  /*Data           =>*/ Enemy->Texture_Ids,
-                                                  /*Size           =>*/ sizeof (uint) * Enemy->Triangle_Count,
+                                                  /*Data           =>*/ Enemy->Figure.Texture_Ids,
+                                                  /*Size           =>*/ sizeof (uint) * Enemy->Figure.Triangle_Count,
                                                   /*Usage          =>*/ VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
 
   // Build the initial BLAS with FAST_BUILD + ALLOW_UPDATE for per-frame refit
@@ -8512,7 +8512,7 @@ void Entity_Bottom_Level_Initialize (Entity *Enemy) {
       .vertexFormat             = VK_FORMAT_R32G32B32_SFLOAT,
       .vertexData.deviceAddress = Enemy->Vertex_Buffer.Address,
       .vertexStride             = sizeof (Vertex),
-      .maxVertex                = Enemy->Vertex_Count - 1,
+      .maxVertex                = Enemy->Figure.Vertex_Count - 1,
       .indexType                = VK_INDEX_TYPE_UINT32,
       .indexData.deviceAddress  = Enemy->Index_Buffer.Address}};
 
@@ -8526,7 +8526,7 @@ void Entity_Bottom_Level_Initialize (Entity *Enemy) {
     .pGeometries   = &Geometry};
 
   // Query required BLAS and scratch buffer sizes from the driver for the given triangle geometry
-  uint Primitive_Count = Enemy->Triangle_Count;
+  uint Primitive_Count = Enemy->Figure.Triangle_Count;
   VkAccelerationStructureBuildSizesInfoKHR Build_Sizes = {.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR};
   vkGetAccelerationStructureBuildSizes (/*device             =>*/ Device,
                                         /*buildType          =>*/ VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR,
@@ -8590,11 +8590,11 @@ void Entity_Bottom_Level_Initialize (Entity *Enemy) {
 //   Entity_Bottom_Level_Rebuild
 // ═══════════════════════════════
 
-void Entity_Bottom_Level_Rebuild (Entity *Enemy) {
-  if (not Enemy->Vertex_Count) return;
+void Entity_Bottom_Level_Rebuild (Figure_Instance *Enemy) {
+  if (not Enemy->Figure.Vertex_Count) return;
 
   // Re-upload the transformed vertices to the GPU buffer
-  Buffer_Upload (Enemy->Vertex_Buffer, Enemy->Current_Vertices, sizeof (Vertex) * Enemy->Vertex_Count);
+  Buffer_Upload (Enemy->Vertex_Buffer, Enemy->Current_Vertices, sizeof (Vertex) * Enemy->Figure.Vertex_Count);
 
   // Define the triangle geometry referencing the updated vertex data
   VkAccelerationStructureGeometryKHR Geometry = {
@@ -8606,7 +8606,7 @@ void Entity_Bottom_Level_Rebuild (Entity *Enemy) {
       .vertexFormat             = VK_FORMAT_R32G32B32_SFLOAT,
       .vertexData.deviceAddress = Enemy->Vertex_Buffer.Address,
       .vertexStride             = sizeof (Vertex),
-      .maxVertex                = Enemy->Vertex_Count - 1,
+      .maxVertex                = Enemy->Figure.Vertex_Count - 1,
       .indexType                = VK_INDEX_TYPE_UINT32,
       .indexData.deviceAddress  = Enemy->Index_Buffer.Address}};
 
@@ -8624,7 +8624,7 @@ void Entity_Bottom_Level_Rebuild (Entity *Enemy) {
     .pGeometries               = &Geometry};
 
   // Record and submit the BLAS refit command into a one-shot command buffer
-  VkAccelerationStructureBuildRangeInfoKHR Range = {.primitiveCount = Enemy->Triangle_Count};
+  VkAccelerationStructureBuildRangeInfoKHR Range = {.primitiveCount = Enemy->Figure.Triangle_Count};
   const VkAccelerationStructureBuildRangeInfoKHR *Range_Pointer = &Range;
   VK_CHECK (vkResetCommandBuffer (Command_Buffer, 0));
   VK_CHECK (vkBeginCommandBuffer (/*commandBuffer =>*/ Command_Buffer,
@@ -9165,7 +9165,7 @@ void Shader_Binding_Table_Create () {
 //   Descriptor_Set_Create
 // ═════════════════════════
 
-void Descriptor_Set_Create (Weapon_Instance *Weapon, Entity *Enemy) {
+void Descriptor_Set_Create (Figure_Instance *Weapon, Figure_Instance *Enemy) {
 
   // Allocate a descriptor pool large enough for all binding types
   VkDescriptorPoolSize Pool_Sizes[] = {{VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, 1},
@@ -9328,8 +9328,8 @@ void Camera_Upload (Camera *State, float Field_Of_View, uint Weapon_Texture_Base
 //   Weapon_Update
 // ═════════════════
 
-void Weapon_Update (Weapon_Instance *Weapon, const Camera *Camera_Data, float Delta_Time, int Fire) {
-  if (not Weapon->Model.Vertex_Count) return;
+void Weapon_Update (Figure_Instance *Weapon, const Camera *Camera_Data, float Delta_Time, int Fire) {
+  if (not Weapon->Figure.Vertex_Count) return;
 
   // Advance the fire animation state machine: start firing on button press
   if (Fire and not Weapon->Is_Firing) {
@@ -9366,26 +9366,30 @@ void Weapon_Update (Weapon_Instance *Weapon, const Camera *Camera_Data, float De
   float Recoil         = Weapon->Is_Firing ? -0.5f * expf (-Weapon->Fire_Time * 5.f) : 0.f;
 
   // Final weapon position: camera origin + forward/right/up offsets with bob and recoil ???
-  float Fwd_Offset   = Weapon->Model.Is_Source ? 3.f  : 5.f;
-  float Right_Offset = Weapon->Model.Is_Source ? 0.5f : 4.f;
-  float Up_Offset    = Weapon->Model.Is_Source ? -0.5f: -3.5f;
+  float Fwd_Offset   = Weapon->Figure.Is_Source ? 3.f  : 5.f;
+  float Right_Offset = Weapon->Figure.Is_Source ? 0.5f : 4.f;
+  float Up_Offset    = Weapon->Figure.Is_Source ? -0.5f: -3.5f;
   vec3 Offset = Add (Camera_Data->Position,
                      Add (Scale (Forward, Fwd_Offset + Recoil),
                           Add (Scale (Right, Right_Offset + Bob_Horizontal),
                                Scale (Up,   Up_Offset + Bob_Vertical))));
 
-  // Select the current animation frame from the hand model's tag_weapon data
+  // Find the tag_weapon tag index (convention: last tag with name "tag_weapon")
+  int Weapon_Tag = -1;
+  for (uint I = 0; I < Weapon->Figure.Tag_Count; I++)
+    if (strcmp (Weapon->Figure.Tags[I].Name, "tag_weapon") == 0) Weapon_Tag = (int)I;
+
+  // Select the current animation frame from the tag's per-frame transforms
   uint Frame_Index = 0;
-  if (Weapon->Model.Animation_Frame_Count > 1) {
-    if (Weapon->Is_Firing) {
-      Frame_Index = (uint)Weapon->Fire_Time;
-      if (Frame_Index >= Weapon->Model.Animation_Frame_Count)
-        Frame_Index = Weapon->Model.Animation_Frame_Count - 1;
-    }
+  uint Tag_Frames = Weapon_Tag >= 0 ? Weapon->Figure.Tags[Weapon_Tag].Frame_Count : 1;
+  if (Tag_Frames > 1 and Weapon->Is_Firing) {
+    Frame_Index = (uint)Weapon->Fire_Time;
+    if (Frame_Index >= Tag_Frames) Frame_Index = Tag_Frames - 1;
   }
 
   // Read the tag transform (origin + 3x3 axis matrix) for the current animation frame
-  const float *Tag = Weapon->Model.Tag_Weapon[Frame_Index];
+  static const float Identity_Tag[12] = {0,0,0, 1,0,0, 0,1,0, 0,0,1};
+  const float *Tag = Weapon_Tag >= 0 ? Weapon->Figure.Tags[Weapon_Tag].Transforms[Frame_Index] : Identity_Tag;
 
   // Swizzle each tag axis from Quake 3 Z-up to Y-up: (x,y,z) becomes (x,z,-y)
   vec3 Axis_0 = (vec3){Tag[3],  Tag[5],  -Tag[4]};
@@ -9411,16 +9415,16 @@ void Weapon_Update (Weapon_Instance *Weapon, const Camera *Camera_Data, float De
                                  + Camera_Basis[Row * 3 + 2] * Tag_Y_Up[2 * 3 + Column];
 
   // Scale the viewmodel down - no depth hack, so we shrink the model in world space ???
-  float Model_Scale = Weapon->Model.Is_Source ? 0.45f : WEAPON_MODEL_SCALE;
+  float Model_Scale = Weapon->Figure.Is_Source ? 0.45f : WEAPON_MODEL_SCALE;
 
   // Viewmodel FOV correction for Source weapons ???
-  float VM_Fov_Scale = Weapon->Model.Is_Source ? 0.51f : 1.f;
+  float VM_Fov_Scale = Weapon->Figure.Is_Source ? 0.51f : 1.f;
 
   // Transform each vertex from model space to world space
-  for (uint Index = 0; Index < Weapon->Model.Vertex_Count; Index++) {
-    float Source_X = Weapon->Model.Vertices[Index].Position[0] * Model_Scale * VM_Fov_Scale;
-    float Source_Y = Weapon->Model.Vertices[Index].Position[1] * Model_Scale; // up
-    float Source_Z = Weapon->Model.Vertices[Index].Position[2] * Model_Scale; // right
+  for (uint Index = 0; Index < Weapon->Figure.Vertex_Count; Index++) {
+    float Source_X = Weapon->Figure.Vertices[Index].Position[0] * Model_Scale * VM_Fov_Scale;
+    float Source_Y = Weapon->Figure.Vertices[Index].Position[1] * Model_Scale; // up
+    float Source_Z = Weapon->Figure.Vertices[Index].Position[2] * Model_Scale; // right
 
     // Apply the combined rotation and translate by the camera offset
     Weapon->Transformed_Vertices[Index].Position[0] = Rotation[0] * Source_X + Rotation[1] * Source_Y + Rotation[2] * Source_Z + Offset.x;
@@ -9428,16 +9432,16 @@ void Weapon_Update (Weapon_Instance *Weapon, const Camera *Camera_Data, float De
     Weapon->Transformed_Vertices[Index].Position[2] = Rotation[6] * Source_X + Rotation[7] * Source_Y + Rotation[8] * Source_Z + Offset.z;
 
     // Rotate the vertex normal by the rotation matrix (no translation)
-    float Normal_X = Weapon->Model.Vertices[Index].Normal[0];
-    float Normal_Y = Weapon->Model.Vertices[Index].Normal[1];
-    float Normal_Z = Weapon->Model.Vertices[Index].Normal[2];
+    float Normal_X = Weapon->Figure.Vertices[Index].Normal[0];
+    float Normal_Y = Weapon->Figure.Vertices[Index].Normal[1];
+    float Normal_Z = Weapon->Figure.Vertices[Index].Normal[2];
     Weapon->Transformed_Vertices[Index].Normal[0] = Rotation[0] * Normal_X + Rotation[1] * Normal_Y + Rotation[2] * Normal_Z;
     Weapon->Transformed_Vertices[Index].Normal[1] = Rotation[3] * Normal_X + Rotation[4] * Normal_Y + Rotation[5] * Normal_Z;
     Weapon->Transformed_Vertices[Index].Normal[2] = Rotation[6] * Normal_X + Rotation[7] * Normal_Y + Rotation[8] * Normal_Z;
 
     // Pass texture coordinates through unchanged
-    Weapon->Transformed_Vertices[Index].Texture_UV[0] = Weapon->Model.Vertices[Index].Texture_UV[0];
-    Weapon->Transformed_Vertices[Index].Texture_UV[1] = Weapon->Model.Vertices[Index].Texture_UV[1];
+    Weapon->Transformed_Vertices[Index].Texture_UV[0] = Weapon->Figure.Vertices[Index].Texture_UV[0];
+    Weapon->Transformed_Vertices[Index].Texture_UV[1] = Weapon->Figure.Vertices[Index].Texture_UV[1];
   }
 } // Weapon_Update
 
