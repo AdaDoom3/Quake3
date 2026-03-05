@@ -233,6 +233,10 @@ const World_Settings WORLD_PRESETS[WORLD_COUNT] = {
 #define SWAPCHAIN_MAX_IMAGES     8    // Maximum number of images in the Vulkan swapchain
 #define DESCRIPTOR_TEXTURE_SLOTS 1536 // Maximum number of bindless texture descriptors available to shaders
 
+// Texture dimension cap — software renderers (lavapipe) exhaust host memory with full-res VTFs.
+// Textures exceeding this dimension are box-filtered down after decode. 0 = no cap (hardware GPU).
+#define TEXTURE_MAX_DIM 512 // Cap to 512x512; set to 0 for uncapped on real GPUs
+
 // OpenAL resource pool limits
 #define MAX_AUDIO_BUFFERS 32 // Maximum number of OpenAL audio buffers (pre-generated or loaded PCM data)
 #define MAX_AUDIO_SOURCES 16 // Maximum number of concurrent OpenAL audio sources (simultaneously playing sounds)
@@ -6471,6 +6475,15 @@ void Texture_Upload_With_Format (VkCommandBuffer Command_Buffer, VkQueue Queue,
   int            Img_Block  = GPU_Heap_Alloc (&Heap, Req.size, Req.alignment, /*Is_Image=*/1,
                                                VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, Req.memoryTypeBits,
                                                &Memory, &Img_Offset, &Mapped);
+  if (Img_Block < 0) {
+    fprintf (stderr, "[tex] heap alloc failed for %ux%u image (%llu bytes) — skipping\n",
+             Width, Height, (unsigned long long)Req.size);
+    vkDestroyImage (Device, Image, NULL);
+    // Create a 1x1 fallback so the descriptor slot is still valid
+    *Out_Image = VK_NULL_HANDLE; *Out_Memory = VK_NULL_HANDLE; *Out_View = VK_NULL_HANDLE;
+    if (Out_Heap_Block) *Out_Heap_Block = -1;
+    return;
+  }
   VK_CHECK (vkBindImageMemory (Device, Image, Memory, Img_Offset));
 
   // Stage the pixel data through a host-visible buffer
@@ -6479,6 +6492,15 @@ void Texture_Upload_With_Format (VkCommandBuffer Command_Buffer, VkQueue Queue,
                                         /*Usage        =>*/ VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
                                         /*Memory_Flags =>*/ VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT
                                                           | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+  if (not Staging.Buffer) {
+    fprintf (stderr, "[tex] staging alloc failed for %ux%u (%llu bytes) — skipping\n",
+             Width, Height, (unsigned long long)Byte_Size);
+    vkDestroyImage (Device, Image, NULL);
+    if (Img_Block >= 0) GPU_Heap_Free (&Heap, Img_Block);
+    *Out_Image = VK_NULL_HANDLE; *Out_Memory = VK_NULL_HANDLE; *Out_View = VK_NULL_HANDLE;
+    if (Out_Heap_Block) *Out_Heap_Block = -1;
+    return;
+  }
   Buffer_Upload (Staging, Pixels, Byte_Size);
 
   // Record a command buffer that transitions the image and copies the staging data into it
@@ -7861,9 +7883,18 @@ int VTF_Load (const char *Path, uint8_t **Out_Pixels, int *Out_W, int *Out_H) {
         break;
     }
   }
-  // Bounds check: ensure we don't read past the file
-  if (Data_Offset >= (uint)File_Size) {
-    fprintf (stderr, "[vtf] WARN: data offset %u exceeds file size %ld for %s\n", Data_Offset, File_Size, Path);
+  // Compute the required data size for mip 0 at full resolution
+  uint64_t Mip0_Data_Size = 0;
+  switch (Format) {
+    case VTF_FMT_DXT1:  Mip0_Data_Size = (uint64_t)((Width+3)/4) * ((Height+3)/4) * 8;  break;
+    case VTF_FMT_DXT3:
+    case VTF_FMT_DXT5:  Mip0_Data_Size = (uint64_t)((Width+3)/4) * ((Height+3)/4) * 16; break;
+    default:            Mip0_Data_Size = (uint64_t)Width * Height * (VTF_Bpp(Format) ? VTF_Bpp(Format) : 4); break;
+  }
+  // Bounds check: ensure the entire mip 0 payload fits within the file
+  if (Data_Offset >= (uint)File_Size or Data_Offset + Mip0_Data_Size > (uint64_t)File_Size) {
+    fprintf (stderr, "[vtf] WARN: data offset %u + size %llu exceeds file %ld for %s\n",
+             Data_Offset, (unsigned long long)Mip0_Data_Size, File_Size, Path);
     free (*Out_Pixels); *Out_Pixels = NULL; *Out_W = 0; *Out_H = 0;
     free (File_Data); return 0;
   }
@@ -7926,6 +7957,34 @@ int VTF_Load (const char *Path, uint8_t **Out_Pixels, int *Out_W, int *Out_H) {
       break;
   }
   free (File_Data);
+
+  // Box-filter downscale if the texture exceeds TEXTURE_MAX_DIM (saves memory on software renderers)
+#if TEXTURE_MAX_DIM > 0
+  while (Width > TEXTURE_MAX_DIM or Height > TEXTURE_MAX_DIM) {
+    int New_W = Width  / 2; if (New_W < 1) New_W = 1;
+    int New_H = Height / 2; if (New_H < 1) New_H = 1;
+    uint8_t *Downscaled = calloc ((size_t)New_W * New_H * 4, 1);
+    if (not Downscaled) break;
+    for (int Y = 0; Y < New_H; Y++)
+      for (int X = 0; X < New_W; X++) {
+        uint R=0, G=0, B=0, A=0;
+        for (int Dy = 0; Dy < 2; Dy++)
+          for (int Dx = 0; Dx < 2; Dx++) {
+            int Sx = X*2+Dx < Width  ? X*2+Dx : Width-1;
+            int Sy = Y*2+Dy < Height ? Y*2+Dy : Height-1;
+            const uint8_t *P = Output_Pixels + (Sy * Width + Sx) * 4;
+            R += P[0]; G += P[1]; B += P[2]; A += P[3];
+          }
+        uint8_t *D = Downscaled + (Y * New_W + X) * 4;
+        D[0]=(uint8_t)(R/4); D[1]=(uint8_t)(G/4); D[2]=(uint8_t)(B/4); D[3]=(uint8_t)(A/4);
+      }
+    free (*Out_Pixels);
+    *Out_Pixels = Downscaled; Output_Pixels = Downscaled;
+    Width = New_W; Height = New_H;
+    *Out_W = Width; *Out_H = Height;
+  }
+#endif
+
   printf ("[vtf] %s %dx%d fmt=%d\n", Path, Width, Height, Format);
   return 1;
 
@@ -10522,14 +10581,32 @@ void Scene_Load_Textures (const Scene *Scene_Data) {
       // Use the forgiving texture resolver (case-insensitive, fuzzy path, PAK lookup)
       Pixels = Texture_Resolve_And_Load (Scene_Data->Texture_Names[Index], "", &W, &H);
 
-      // Fallback: try VTF from Source engine materials directories
+      // Fallback: fuzzy VTF search across Source engine materials directories.
+      // Tries every combination of {search_dir} x {name_variant} x {extension} until a match is found.
+      // Name variants: full lowercase path, basename-only, stripped "maps/mapname/" prefix.
+      // This handles CSPromod's nested directory structures, case mismatches, and per-map material
+      // overrides (Source: materials/maps/<mapname>/<base>_wvt_patch → strip to basename).
       if (not Pixels and Active_World.Type == WORLD_SOURCE) {
         char Vtf_Path[512]; char Lower[256];
         const char *N = Scene_Data->Texture_Names[Index];
         for (int C=0; N[C] and C<255; C++) Lower[C] = (N[C]>='A' and N[C]<='Z') ? N[C]+32 : N[C];
         Lower[strlen(N)<255?strlen(N):255] = 0;
 
+        // Extract basename from material path (e.g. "cspromod/aztec/azt_stone3" → "azt_stone3")
+        const char *Basename = Lower;
+        for (const char *P = Lower; *P; P++) if (*P == '/') Basename = P + 1;
+
+        // Strip "maps/<mapname>/" prefix for per-map material overrides
+        // (Source convention: materials/maps/csp_aztec/cspromod/aztec/azt_grass1_wvt_patch)
+        char Stripped[256]; Stripped[0] = 0;
+        if (strncmp (Lower, "maps/", 5) == 0) {
+          const char *After_Map = strchr (Lower + 5, '/');
+          if (After_Map) snprintf (Stripped, sizeof Stripped, "%s", After_Map + 1);
+        }
+
         const char *VTF_Search_Dirs[] = {
+          "/tmp/cspromod_extract/cspromod_b105/cspromod/materials", // 7z extraction path
+          "/tmp/cspromod_extract/cspromod_b105/cspromod/materials/models",
           "/tmp/cspromod_new/materials",                             // Extracted CSPromod materials
           "/tmp/cspromod_new/materials/models",                     // CSPromod model materials
           "/tmp/cspromod_new/cspromod_b105/cspromod/materials",     // Legacy path (nested extraction)
@@ -10539,11 +10616,19 @@ void Scene_Load_Textures (const Scene *Scene_Data) {
           "/tmp/v_m4_new/materials",
           NULL
         };
-        for (const char **Dir = VTF_Search_Dirs; *Dir and not Pixels; Dir++) {
-          snprintf (Vtf_Path, sizeof Vtf_Path, "%s/%s.vtf", *Dir, Lower);
-          int Vw=0, Vh=0; uint8_t *Vp = NULL;
-          if (VTF_Load(Vtf_Path, &Vp, &Vw, &Vh) and Vp) { Pixels=Vp; W=(uint)Vw; H=(uint)Vh;}
-        }
+
+        // Build list of name variants to try (most specific → most fuzzy)
+        const char *Name_Variants[8]; int Variant_Count = 0;
+        Name_Variants[Variant_Count++] = Lower;                                // Full lowercase path
+        if (Stripped[0]) Name_Variants[Variant_Count++] = Stripped;            // Stripped maps/ prefix
+        if (Basename != Lower) Name_Variants[Variant_Count++] = Basename;     // Basename only
+
+        for (const char **Dir = VTF_Search_Dirs; *Dir and not Pixels; Dir++)
+          for (int Vi = 0; Vi < Variant_Count and not Pixels; Vi++) {
+            snprintf (Vtf_Path, sizeof Vtf_Path, "%s/%s.vtf", *Dir, Name_Variants[Vi]);
+            int Vw=0, Vh=0; uint8_t *Vp = NULL;
+            if (VTF_Load(Vtf_Path, &Vp, &Vw, &Vh) and Vp) { Pixels=Vp; W=(uint)Vw; H=(uint)Vh; }
+          }
       }
     }
     if (Pixels and W and H) {
@@ -10610,19 +10695,33 @@ void Scene_Load_Textures (const Scene *Scene_Data) {
         Pixels = Texture_Resolve_And_Load (Scene_Data->Texture_Names[Index], PBR_Suffixes[Map_Type], &W, &H);
 
         // Source BSP normal maps: try VTF with _normal suffix from extracted materials
+        // Source BSP normal maps: fuzzy VTF search with _normal / _n suffixes
         if (not Pixels and Map_Type == 1 and Active_World.Type == WORLD_SOURCE) {
           char Lower[256];
           const char *N = Scene_Data->Texture_Names[Index];
           for (int C=0; N[C] and C<255; C++) Lower[C] = (N[C]>='A' and N[C]<='Z') ? N[C]+32 : N[C];
           Lower[strlen(N)<255?strlen(N):255] = 0;
-          const char *Norm_Dirs[] = {"/tmp/cspromod_new/materials", "assets/materials", NULL};
+          const char *Basename = Lower;
+          for (const char *P = Lower; *P; P++) if (*P == '/') Basename = P + 1;
+          char Stripped[256]; Stripped[0] = 0;
+          if (strncmp (Lower, "maps/", 5) == 0) {
+            const char *A = strchr (Lower + 5, '/');
+            if (A) snprintf (Stripped, sizeof Stripped, "%s", A + 1);
+          }
+          const char *Norm_Dirs[] = {"/tmp/cspromod_extract/cspromod_b105/cspromod/materials",
+                                     "/tmp/cspromod_new/materials", "assets/materials", NULL};
           const char *Norm_Suffixes[] = {"_normal", "_n", NULL};
+          const char *Norm_Names[4]; int Norm_NC = 0;
+          Norm_Names[Norm_NC++] = Lower;
+          if (Stripped[0]) Norm_Names[Norm_NC++] = Stripped;
+          if (Basename != Lower) Norm_Names[Norm_NC++] = Basename;
           for (const char **Sfx = Norm_Suffixes; *Sfx and not Pixels; Sfx++)
-            for (const char **Dir = Norm_Dirs; *Dir and not Pixels; Dir++) {
-              char Vtf[512]; snprintf(Vtf,512,"%s/%s%s.vtf",*Dir,Lower,*Sfx);
-              int Vw=0, Vh=0; uint8_t *Vp = NULL;
-              if (VTF_Load(Vtf,&Vp,&Vw,&Vh) and Vp) { Pixels=Vp; W=(uint)Vw; H=(uint)Vh; }
-            }
+            for (const char **Dir = Norm_Dirs; *Dir and not Pixels; Dir++)
+              for (int Ni = 0; Ni < Norm_NC and not Pixels; Ni++) {
+                char Vtf[512]; snprintf(Vtf,512,"%s/%s%s.vtf",*Dir,Norm_Names[Ni],*Sfx);
+                int Vw=0, Vh=0; uint8_t *Vp = NULL;
+                if (VTF_Load(Vtf,&Vp,&Vw,&Vh) and Vp) { Pixels=Vp; W=(uint)Vw; H=(uint)Vh; }
+              }
         }
       }
       VkFormat Fmt = VK_FORMAT_R8G8B8A8_UNORM;
