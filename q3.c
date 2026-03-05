@@ -7878,7 +7878,7 @@ Articulated_Figure Source_Weapon_Model_Load (const char *Path) {
       const char *Seq_Name = (const char*)(Seq_Data + Label_Offset);
       int Activity = *(const int*)(Seq_Data + 16);
       int Anim_Idx_Offset = *(const int*)(Seq_Data + 60);
-      int Anim_Idx = *(const int*)(Seq_Data + Anim_Idx_Offset);
+      int Anim_Idx = *(const short*)(Seq_Data + Anim_Idx_Offset);
       printf ("[weapon]   seq[%d]: '%s' activity=%d anim=%d\n", Seq, Seq_Name, Activity, Anim_Idx);
       if (not Idle_Found and (Activity == 185 or strstr (Seq_Name, "idle"))) {
         Idle_Anim_Index = Anim_Idx;
