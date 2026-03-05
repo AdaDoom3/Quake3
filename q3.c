@@ -7984,8 +7984,20 @@ Figure_Instance MDL_Load (Scene *S, const char *Path, vec3 Origin, float Yaw) {
   for (int Material_Index = 0;
        Material_Index < Header->Material_Count and Material_Index < MDL_MAX_MESHES;
        Material_Index++) {
-    const uint8_t *Material_Entry = File_Data + Header->Material_Offset + Material_Index * 64;
+    long Entry_Pos = (long)Header->Material_Offset + Material_Index * 64;
+    if (Entry_Pos < 0 or Entry_Pos + 64 > File_Size) {
+      fprintf (stderr, "[mdl] material entry %d at offset %ld exceeds file size %ld, stopping\n",
+               Material_Index, Entry_Pos, File_Size);
+      break;
+    }
+    const uint8_t *Material_Entry = File_Data + Entry_Pos;
     int         Name_Offset   = *(const int*)Material_Entry; // Relative name offset within the entry block
+    long Name_Pos = Entry_Pos + Name_Offset;
+    if (Name_Pos < 0 or Name_Pos >= File_Size) {
+      fprintf (stderr, "[mdl] material %d: name offset %d -> position %ld out of bounds, skipping\n",
+               Material_Index, Name_Offset, Name_Pos);
+      continue;
+    }
     const char *Material_Name = (const char*)(Material_Entry + Name_Offset);
     S->Material_Count++;
     S->Materials     = realloc (S->Materials,     sizeof (vec4) * S->Material_Count);
@@ -8005,8 +8017,10 @@ Figure_Instance MDL_Load (Scene *S, const char *Path, vec3 Origin, float Yaw) {
 
   // Derive sidecar file paths by replacing the .mdl extension
   char VVD_Path[512], VTX_Path[512];
-  snprintf (VVD_Path, sizeof VVD_Path, "%.*s.vvd",      (int)(strlen (Path) - 4), Path);
-  snprintf (VTX_Path, sizeof VTX_Path, "%.*s.dx90.vtx", (int)(strlen (Path) - 4), Path);
+  size_t Path_Len = strlen (Path);
+  int Base_Len = Path_Len >= 4 ? (int)(Path_Len - 4) : (int)Path_Len;
+  snprintf (VVD_Path, sizeof VVD_Path, "%.*s.vvd",      Base_Len, Path);
+  snprintf (VTX_Path, sizeof VTX_Path, "%.*s.dx90.vtx", Base_Len, Path);
 
   // Read VVD (vertex data sidecar)
   FILE       *VVD_File         = fopen (VVD_Path, "rb");
@@ -8015,14 +8029,18 @@ Figure_Instance MDL_Load (Scene *S, const char *Path, vec3 Origin, float Yaw) {
   if (VVD_File) {
     fseek (VVD_File, 0, SEEK_END); long VVD_File_Size = ftell (VVD_File); rewind (VVD_File);
     uint8_t *VVD_Data      = malloc (VVD_File_Size);
+    if (not VVD_Data) { fclose (VVD_File); printf ("[mdl] VVD alloc failed (%ld bytes)\n", VVD_File_Size); goto MDL_Skip_VTX; }
     size_t   VVD_Bytes_Read_ = fread (VVD_Data, 1, VVD_File_Size, VVD_File); (void)VVD_Bytes_Read_;
     fclose (VVD_File);
     const VVD_Header *VVD_Hdr = (const VVD_Header*)VVD_Data;
-    if (VVD_Hdr->Magic == VVD_MAGIC and VVD_Hdr->Version == 4) {
+    if (VVD_Hdr->Magic == VVD_MAGIC and VVD_Hdr->Version == 4
+        and VVD_Hdr->LOD_Vertex_Counts[0] > 0
+        and VVD_Hdr->Vertex_Data_Start + (long)sizeof(VVD_Vertex) * VVD_Hdr->LOD_Vertex_Counts[0] <= VVD_File_Size) {
       VVD_Vertex_Count = VVD_Hdr->LOD_Vertex_Counts[0];
       VVD_Vertices     = malloc (sizeof (VVD_Vertex) * VVD_Vertex_Count);
-      memcpy (VVD_Vertices, VVD_Data + VVD_Hdr->Vertex_Data_Start,
-              sizeof (VVD_Vertex) * VVD_Vertex_Count);
+      if (VVD_Vertices)
+        memcpy (VVD_Vertices, VVD_Data + VVD_Hdr->Vertex_Data_Start,
+                sizeof (VVD_Vertex) * VVD_Vertex_Count);
       printf ("[mdl] VVD: %d vertices from %s\n", VVD_Vertex_Count, VVD_Path);
     }
     free (VVD_Data);
@@ -8033,6 +8051,7 @@ Figure_Instance MDL_Load (Scene *S, const char *Path, vec3 Origin, float Yaw) {
   if (VTX_File and VVD_Vertices) {
     fseek (VTX_File, 0, SEEK_END); long VTX_File_Size = ftell (VTX_File); rewind (VTX_File);
     uint8_t *VTX_Data       = malloc (VTX_File_Size);
+    if (not VTX_Data) { fclose (VTX_File); VTX_File = NULL; printf ("[mdl] VTX alloc failed (%ld bytes)\n", VTX_File_Size); goto MDL_Skip_VTX; }
     size_t   VTX_Bytes_Read_ = fread (VTX_Data, 1, VTX_File_Size, VTX_File); (void)VTX_Bytes_Read_;
     fclose (VTX_File); VTX_File = NULL;
     const VTX_Header *VTX_Hdr = (const VTX_Header*)VTX_Data;
@@ -8092,22 +8111,42 @@ Figure_Instance MDL_Load (Scene *S, const char *Path, vec3 Origin, float Yaw) {
               int Group_Index_Count   = *(int*)(VTX_Data + Strip_Group_Base + 8);
               int Group_Index_Offset  = *(int*)(VTX_Data + Strip_Group_Base + 12);
 
+              // Sanity-check strip group counts
+              if (Group_Vertex_Count <= 0 or Group_Vertex_Count > 65536) continue;
+              if (Group_Index_Count  <= 0 or Group_Index_Count  > 300000) continue;
+
+              // Verify vertex and index data fit within VTX file
+              if (Strip_Group_Base + Group_Vertex_Offset + Group_Vertex_Count * 9 > VTX_File_Size) {
+                fprintf (stderr, "[mdl] VTX strip group vertex data out of bounds, skipping\n"); continue;
+              }
+              if (Strip_Group_Base + Group_Index_Offset + Group_Index_Count * 2 > VTX_File_Size) {
+                fprintf (stderr, "[mdl] VTX strip group index data out of bounds, skipping\n"); continue;
+              }
+
               // Build origMeshVertID mapping: strip-group vertex index -> VVD vertex index
               uint16_t *Original_Vertex_Map = malloc (Group_Vertex_Count * sizeof (uint16_t));
+              if (not Original_Vertex_Map) { fprintf (stderr, "[mdl] vertex map alloc failed\n"); continue; }
               for (int Vertex_Index = 0; Vertex_Index < Group_Vertex_Count; Vertex_Index++) {
                 int Vertex_Data_Offset = Strip_Group_Base + Group_Vertex_Offset + Vertex_Index * 9;
                 Original_Vertex_Map[Vertex_Index] = *(uint16_t*)(VTX_Data + Vertex_Data_Offset + 4);
               }
 
-              // Emit one triangle at a time from the flat index list
+              // Pre-allocate for all triangles in this strip group at once (avoids per-triangle realloc)
               uint16_t *Strip_Indices = (uint16_t*)(VTX_Data + Strip_Group_Base + Group_Index_Offset);
+              int Group_Tri_Count = Group_Index_Count / 3;
+              if (Group_Tri_Count > 0) {
+                Vertices       = realloc (Vertices,       sizeof (Vertex)   * (Vertex_Count   + Group_Tri_Count * 3));
+                Indices        = realloc (Indices,        sizeof (uint)     * (Index_Count    + Group_Tri_Count * 3));
+                Texture_Ids    = realloc (Texture_Ids,    sizeof (uint)     * (Triangle_Count + Group_Tri_Count));
+                Vert_Bone_Ids  = realloc (Vert_Bone_Ids,  SKEL_MAX_BONES_PER_VERT * (Vertex_Count + Group_Tri_Count * 3));
+                Vert_Bone_Wts  = realloc (Vert_Bone_Wts,  SKEL_MAX_BONES_PER_VERT * (Vertex_Count + Group_Tri_Count * 3));
+                if (!Vertices || !Indices || !Texture_Ids || !Vert_Bone_Ids || !Vert_Bone_Wts) {
+                  fprintf (stderr, "[mdl] realloc failed at %d tris, aborting VTX parse\n", Triangle_Count);
+                  free (Original_Vertex_Map); goto MDL_VTX_Done;
+                }
+              }
               for (int Triangle_Index = 0; Triangle_Index + 2 < Group_Index_Count; Triangle_Index += 3) {
                 uint Vertex_Base = Vertex_Count;
-                Vertices       = realloc (Vertices,       sizeof (Vertex)   * (Vertex_Count   + 3));
-                Indices        = realloc (Indices,        sizeof (uint)     * (Index_Count    + 3));
-                Texture_Ids    = realloc (Texture_Ids,    sizeof (uint)     * (Triangle_Count + 1));
-                Vert_Bone_Ids  = realloc (Vert_Bone_Ids,  SKEL_MAX_BONES_PER_VERT * (Vertex_Count + 3));
-                Vert_Bone_Wts  = realloc (Vert_Bone_Wts,  SKEL_MAX_BONES_PER_VERT * (Vertex_Count + 3));
                 for (int Corner = 0; Corner < 3; Corner++) {
                   int Strip_Vertex = Strip_Indices[Triangle_Index + Corner];
                   int VVD_Index    = Mesh_Vertex_Offset
@@ -8153,8 +8192,10 @@ Figure_Instance MDL_Load (Scene *S, const char *Path, vec3 Origin, float Yaw) {
         }
       }
     }
+    MDL_VTX_Done:
     free (VTX_Data);
   } else {
+    MDL_Skip_VTX:
     if (VTX_File) fclose (VTX_File);
     printf ("[mdl] VVD/VTX sidecars not found, generating placeholder\n");
 
@@ -8281,8 +8322,10 @@ Articulated_Figure Source_Weapon_Model_Load (const char *Path) {
 
   // Construct sidecar file paths by replacing the .mdl extension
   char VVD_Path[512], VTX_Path[512];
-  snprintf (VVD_Path, sizeof VVD_Path, "%.*s.vvd",      (int)(strlen (Path) - 4), Path);
-  snprintf (VTX_Path, sizeof VTX_Path, "%.*s.dx90.vtx", (int)(strlen (Path) - 4), Path);
+  size_t Src_Path_Len = strlen (Path);
+  int Src_Base_Len = Src_Path_Len >= 4 ? (int)(Src_Path_Len - 4) : (int)Src_Path_Len;
+  snprintf (VVD_Path, sizeof VVD_Path, "%.*s.vvd",      Src_Base_Len, Path);
+  snprintf (VTX_Path, sizeof VTX_Path, "%.*s.dx90.vtx", Src_Base_Len, Path);
 
   // Read VVD (vertex data sidecar)
   FILE       *VVD_File         = fopen (VVD_Path, "rb");
@@ -8291,14 +8334,19 @@ Articulated_Figure Source_Weapon_Model_Load (const char *Path) {
   if (VVD_File) {
     fseek (VVD_File, 0, SEEK_END); long VVD_File_Size = ftell (VVD_File); rewind (VVD_File);
     uint8_t *VVD_Data       = malloc (VVD_File_Size);
+    if (not VVD_Data) { fclose (VVD_File); printf ("[weapon] VVD alloc failed\n"); goto Source_Skip_VTX; }
     size_t   VVD_Bytes_Read_ = fread (VVD_Data, 1, VVD_File_Size, VVD_File); (void)VVD_Bytes_Read_;
     fclose (VVD_File);
     const VVD_Header *VVD_Hdr = (const VVD_Header*)VVD_Data;
-    if (VVD_Hdr->Magic == VVD_MAGIC and VVD_Hdr->Version == 4) {
+    if (VVD_Hdr->Magic == VVD_MAGIC and VVD_Hdr->Version == 4
+        and VVD_Hdr->LOD_Vertex_Counts[0] > 0
+        and VVD_Hdr->Vertex_Data_Start + (long)sizeof(VVD_Vertex) * VVD_Hdr->LOD_Vertex_Counts[0] <= VVD_File_Size) {
       VVD_Vertex_Count = VVD_Hdr->LOD_Vertex_Counts[0];
       VVD_Vertices     = malloc (sizeof (VVD_Vertex) * VVD_Vertex_Count);
-      memcpy (VVD_Vertices, VVD_Data + VVD_Hdr->Vertex_Data_Start,
-              sizeof (VVD_Vertex) * VVD_Vertex_Count);
+      if (VVD_Vertices)
+        memcpy (VVD_Vertices, VVD_Data + VVD_Hdr->Vertex_Data_Start,
+                sizeof (VVD_Vertex) * VVD_Vertex_Count);
+      else printf ("[weapon] VVD vertex alloc failed (%d verts)\n", VVD_Vertex_Count);
     }
     free (VVD_Data);
   }
@@ -8625,11 +8673,18 @@ Articulated_Figure Source_Weapon_Model_Load (const char *Path) {
                 Original_Vertex_Map[Vertex_Index] = *(uint16_t*)(VTX_Data + Vertex_Data_Offset + 4);
               }
               uint16_t *Strip_Indices = (uint16_t*)(VTX_Data + Group_Base + Group_Index_Offset);
+              int Group_Tri_Count = Group_Index_Count / 3;
+              if (Group_Tri_Count > 0) {
+                Result.Vertices    = realloc (Result.Vertices,    sizeof (Vertex) * (Result.Vertex_Count   + Group_Tri_Count * 3));
+                Result.Indices     = realloc (Result.Indices,     sizeof (uint)   * (Result.Index_Count    + Group_Tri_Count * 3));
+                Result.Texture_Ids = realloc (Result.Texture_Ids, sizeof (uint)   * (Result.Triangle_Count + Group_Tri_Count));
+                if (!Result.Vertices || !Result.Indices || !Result.Texture_Ids) {
+                  fprintf (stderr, "[weapon] realloc failed at %u tris, aborting VTX parse\n", Result.Triangle_Count);
+                  free (Original_Vertex_Map); goto Source_VTX_Done;
+                }
+              }
               for (int Triangle_Index = 0; Triangle_Index + 2 < Group_Index_Count; Triangle_Index += 3) {
                 uint Vertex_Base = Result.Vertex_Count;
-                Result.Vertices     = realloc (Result.Vertices,     sizeof (Vertex) * (Result.Vertex_Count   + 3));
-                Result.Indices      = realloc (Result.Indices,      sizeof (uint)   * (Result.Index_Count    + 3));
-                Result.Texture_Ids  = realloc (Result.Texture_Ids,  sizeof (uint)   * (Result.Triangle_Count + 1));
                 for (int Corner = 0; Corner < 3; Corner++) {
                   int Strip_Vertex = Strip_Indices[Triangle_Index + Corner];
                   int VVD_Index    = Mesh_Vertex_Offset
@@ -8696,9 +8751,11 @@ Articulated_Figure Source_Weapon_Model_Load (const char *Path) {
         }
       }
     }
+    Source_VTX_Done:
     #undef VTX_BOUNDS
     free (VTX_Data);
   } else {
+    Source_Skip_VTX:
     if (VTX_File) fclose (VTX_File);
   }
   free (VVD_Vertices);
@@ -9352,6 +9409,7 @@ Scene Scene_Load_From_BSP (const char *Path, Spawn *Out_Spawn) {
   uint        Raw_Vertex_Count  = (uint)         (Header->Lumps [BSP_VERTICES] .Length / sizeof (BSP_Vertex));
   uint        Raw_Face_Count    = (uint)         (Header->Lumps [BSP_FACES]    .Length / sizeof (BSP_Face));
   uint        Raw_Shader_Count  = (uint)         (Header->Lumps [BSP_SHADERS]  .Length / sizeof (BSP_Shader));
+  uint        Raw_Index_Count   = (uint)         (Header->Lumps [BSP_INDICES]  .Length / sizeof (int));
 
   // Build the lightmap atlas by packing all 128x128 lightmap pages into a single texture
   uint8_t *Lightmap_Atlas       = NULL;
@@ -9371,6 +9429,7 @@ Scene Scene_Load_From_BSP (const char *Path, Spawn *Out_Spawn) {
     Atlas_Width  = Atlas_Columns * LIGHTMAP_PAGE_SIZE;
     Atlas_Height = Atlas_Rows * LIGHTMAP_PAGE_SIZE;
     Lightmap_Atlas = calloc (Atlas_Width * Atlas_Height * 4, 1);
+    if (not Lightmap_Atlas) { fprintf (stderr, "[bsp] lightmap atlas alloc failed (%ux%u)\n", Atlas_Width, Atlas_Height); free (File_Data); return (Scene){0}; }
 
     // Locate the raw lightmap data in the BSP file
     const uint8_t *Lightmap_Data = File_Data + Header->Lumps[BSP_LIGHTMAPS].Offset;
@@ -9408,6 +9467,7 @@ Scene Scene_Load_From_BSP (const char *Path, Spawn *Out_Spawn) {
   // Convert all BSP vertices from Z-up to Y-up coordinate system
   uint Vertex_Count = Raw_Vertex_Count;
   Vertex *Vertices = malloc (sizeof (Vertex) * Vertex_Count);
+  if (not Vertices) { fprintf (stderr, "[bsp] vertex alloc failed (%u verts)\n", Vertex_Count); free (Lightmap_Atlas); free (File_Data); return (Scene){0}; }
   for (uint Index = 0; Index < Vertex_Count; Index++)
     Vertices[Index] = Convert_BSP_Vertex (&Raw_Vertices[Index]);
 
@@ -9421,15 +9481,31 @@ Scene Scene_Load_From_BSP (const char *Path, Spawn *Out_Spawn) {
 
     // Handle each face type: copy indices for planar/mesh, tessellate for patches
     if (Face->Surface_Type == SURFACE_TYPE_PLANAR or Face->Surface_Type == SURFACE_TYPE_MESH) {
+      // Validate face references are within lump bounds
+      if (Face->First_Index < 0 or Face->Index_Count < 0
+          or (uint)(Face->First_Index + Face->Index_Count) > Raw_Index_Count) {
+        fprintf (stderr, "[bsp] face %u: index range [%d..%d) out of bounds (max %u), skipping\n",
+                 Face_Index, Face->First_Index, Face->First_Index + Face->Index_Count, Raw_Index_Count);
+        continue;
+      }
+      if (Face->First_Vertex < 0 or Face->Vertex_Count < 0
+          or (uint)(Face->First_Vertex + Face->Vertex_Count) > Raw_Vertex_Count) {
+        fprintf (stderr, "[bsp] face %u: vertex range [%d..%d) out of bounds (max %u), skipping\n",
+                 Face_Index, Face->First_Vertex, Face->First_Vertex + Face->Vertex_Count, Raw_Vertex_Count);
+        continue;
+      }
       uint Face_Triangles = (uint)(Face->Index_Count / 3);
 
       // Grow the index and texture-id arrays to accommodate this face
       Indices     = realloc (Indices,     sizeof (uint) * (Index_Count    + Face->Index_Count));
       Texture_Ids = realloc (Texture_Ids, sizeof (uint) * (Triangle_Count + Face_Triangles));
 
-      // Copy face indices, offsetting by the face's first vertex
-      for (int Loop = 0; Loop < Face->Index_Count; Loop++)
-        Indices[Index_Count + Loop] = (uint)(Face->First_Vertex + Raw_Indices[Face->First_Index + Loop]);
+      // Copy face indices, offsetting by the face's first vertex (clamped to valid range)
+      for (int Loop = 0; Loop < Face->Index_Count; Loop++) {
+        int Vert_Idx = Face->First_Vertex + Raw_Indices[Face->First_Index + Loop];
+        if (Vert_Idx < 0 or (uint)Vert_Idx >= Vertex_Count) Vert_Idx = 0;
+        Indices[Index_Count + Loop] = (uint)Vert_Idx;
+      }
 
       // Assign the face's shader index to each triangle
       for (uint Triangle = 0; Triangle < Face_Triangles; Triangle++)
@@ -9440,17 +9516,19 @@ Scene Scene_Load_From_BSP (const char *Path, Spawn *Out_Spawn) {
       Triangle_Count += Face_Triangles;
 
       // Remap lightmap UVs from per-page to atlas space, or use the white fallback
-      if (Face->Lightmap_Index >= 0 and Atlas_Columns > 0) {
+      if (Face->Lightmap_Index >= 0 and Atlas_Columns > 0 and Atlas_Rows > 0) {
         float Column_Offset = (float)((uint)Face->Lightmap_Index % Atlas_Columns);
         float Row_Offset    = (float)((uint)Face->Lightmap_Index / Atlas_Columns);
         for (int Vertex_Loop = 0; Vertex_Loop < Face->Vertex_Count; Vertex_Loop++) {
           uint Vertex_Index = (uint)(Face->First_Vertex + Vertex_Loop);
+          if (Vertex_Index >= Vertex_Count) continue;
           Vertices[Vertex_Index].Lightmap_UV[0] = (Column_Offset + Vertices[Vertex_Index].Lightmap_UV[0]) / (float)Atlas_Columns;
           Vertices[Vertex_Index].Lightmap_UV[1] = (Row_Offset    + Vertices[Vertex_Index].Lightmap_UV[1]) / (float)Atlas_Rows;
         }
       } else {
         for (int Vertex_Loop = 0; Vertex_Loop < Face->Vertex_Count; Vertex_Loop++) {
           uint Vertex_Index = (uint)(Face->First_Vertex + Vertex_Loop);
+          if (Vertex_Index >= Vertex_Count) continue;
           Vertices[Vertex_Index].Lightmap_UV[0] = White_Fallback_U;
           Vertices[Vertex_Index].Lightmap_UV[1] = White_Fallback_V;
         }
@@ -13285,8 +13363,15 @@ ALuint Audio_Load_WAV (const char *Path) {
   int Bits        = Header[34] | (Header[35] << 8);
   int Data_Size   = Header[40] | (Header[41] << 8) | (Header[42] << 16) | (Header[43] << 24);
 
+  // Clamp Data_Size to remaining file size to protect against corrupt/malicious headers
+  fseek (F, 0, SEEK_END); long File_Length = ftell (F); fseek (F, 44, SEEK_SET);
+  long Remaining = File_Length - 44;
+  if (Data_Size <= 0 or Data_Size > (int)(Remaining > 0 ? Remaining : 0)) Data_Size = (int)(Remaining > 0 ? Remaining : 0);
+  if (Data_Size <= 0 or Sample_Rate <= 0) { fclose (F); return 0; }
+
   // Read PCM data
   void *Data = malloc (Data_Size);
+  if (not Data) { fclose (F); return 0; }
   int Read = (int)fread (Data, 1, Data_Size, F);
   fclose (F);
   if (Read < Data_Size) Data_Size = Read;
@@ -16015,7 +16100,9 @@ static int PK3_Parse_Directory (const uint8_t *Data, uint64_t Data_Size, Pack_En
 
   uint16_t Entry_Count    = *(const uint16_t *)(EOCD + 10);
   uint32_t Central_Offset = *(const uint32_t *)(EOCD + 16);
+  if (Central_Offset >= Data_Size) { fprintf (stderr, "[pk3] central directory offset %u exceeds file size %llu\n", Central_Offset, (unsigned long long)Data_Size); return 0; }
   *Out_Entries = (Pack_Entry *)calloc (Entry_Count, sizeof (Pack_Entry));
+  if (!*Out_Entries) { fprintf (stderr, "[pk3] failed to allocate %u directory entries\n", Entry_Count); return 0; }
   *Out_Count   = Entry_Count;
 
   const uint8_t *Cursor = Data + Central_Offset;
@@ -16035,6 +16122,10 @@ static int PK3_Parse_Directory (const uint8_t *Data, uint64_t Data_Size, Pack_En
     E->Name[Copy_Len] = '\0';
 
     // The actual data starts after the local file header (30 bytes + local name + local extra)
+    if (Local_Offset + 30 > Data_Size) {
+      fprintf (stderr, "[pk3] entry %u: local header offset %u+30 exceeds file size %llu, skipping\n", I, Local_Offset, (unsigned long long)Data_Size);
+      E->Size = 0; Cursor += 46 + Name_Length + Extra_Length + Comment_Length; continue;
+    }
     const uint8_t *Local = Data + Local_Offset;
     uint16_t Local_Name_Len  = *(const uint16_t *)(Local + 26);
     uint16_t Local_Extra_Len = *(const uint16_t *)(Local + 28);
@@ -16059,11 +16150,22 @@ static int PAK_Parse_Directory (const uint8_t *Data, uint64_t Data_Size, Pack_En
   if (Data_Size < 12 or memcmp (Data, "PACK", 4) != 0) return 0;
   uint32_t Dir_Offset = *(const uint32_t *)(Data + 4);
   uint32_t Dir_Size   = *(const uint32_t *)(Data + 8);
+  if (Dir_Offset > Data_Size || Dir_Offset + Dir_Size > Data_Size) {
+    fprintf (stderr, "[pak] directory range [%u..%u) exceeds file size %llu\n",
+             Dir_Offset, Dir_Offset + Dir_Size, (unsigned long long)Data_Size);
+    return 0;
+  }
   uint Entry_Count    = Dir_Size / 64;
   *Out_Entries = (Pack_Entry *)calloc (Entry_Count, sizeof (Pack_Entry));
+  if (!*Out_Entries) { fprintf (stderr, "[pak] failed to allocate %u directory entries\n", Entry_Count); return 0; }
   *Out_Count   = Entry_Count;
 
   for (uint I = 0; I < Entry_Count; I++) {
+    if ((uint64_t)Dir_Offset + (uint64_t)I * 64 + 64 > Data_Size) {
+      fprintf (stderr, "[pak] entry %u at offset %llu exceeds file size, truncating directory\n",
+               I, (unsigned long long)((uint64_t)Dir_Offset + (uint64_t)I * 64));
+      *Out_Count = I; break;
+    }
     const uint8_t *Record = Data + Dir_Offset + I * 64;
     Pack_Entry    *E      = &(*Out_Entries)[I];
     memcpy (E->Name, Record, 56);
@@ -16088,7 +16190,18 @@ static int WAD_Parse_Directory (const uint8_t *Data, uint64_t Data_Size, Pack_En
   if (memcmp (Data, "WAD2", 4) != 0 and memcmp (Data, "WAD3", 4) != 0) return 0;
   uint32_t Entry_Count = *(const uint32_t *)(Data + 4);
   uint32_t Dir_Offset  = *(const uint32_t *)(Data + 8);
+  if (Dir_Offset > Data_Size) {
+    fprintf (stderr, "[wad] directory offset %u exceeds file size %llu\n", Dir_Offset, (unsigned long long)Data_Size);
+    return 0;
+  }
+  // Clamp entry count to what fits in the file
+  uint64_t Max_Entries = (Data_Size - Dir_Offset) / 32;
+  if (Entry_Count > Max_Entries) {
+    fprintf (stderr, "[wad] entry count %u exceeds file capacity, clamping to %llu\n", Entry_Count, (unsigned long long)Max_Entries);
+    Entry_Count = (uint32_t)Max_Entries;
+  }
   *Out_Entries = (Pack_Entry *)calloc (Entry_Count, sizeof (Pack_Entry));
+  if (!*Out_Entries) { fprintf (stderr, "[wad] failed to allocate %u directory entries\n", Entry_Count); return 0; }
   *Out_Count   = Entry_Count;
 
   for (uint I = 0; I < Entry_Count; I++) {
@@ -16120,6 +16233,7 @@ int Asset_Store_Mount (Asset_Store *Store, const char *Archive_Path) {
   if (not File) {printf ("[assets] cannot open %s\n", Archive_Path); return 0;}
   fseek (File, 0, SEEK_END); uint64_t File_Size = (uint64_t)ftell (File); rewind (File);
   uint8_t *File_Data = (uint8_t *)malloc (File_Size);
+  if (not File_Data) { fclose (File); printf ("[assets] out of memory loading %s\n", Archive_Path); return 0; }
   size_t   Read_     = fread (File_Data, 1, File_Size, File); (void)Read_;
   fclose (File);
 
@@ -16214,11 +16328,13 @@ uint8_t *Asset_Load (Asset_Store *Store, const char *Virtual_Path, uint64_t *Out
       Pack_Entry *E = &Pack->Entries[I];
       if (E->Compressed) {
         uint8_t *Out = (uint8_t *)malloc (E->Size);
+        if (not Out) { fprintf (stderr, "[assets] alloc failed for %s (%llu bytes)\n", Virtual_Path, (unsigned long long)E->Size); return NULL; }
         uint64_t Written = Inflate_Buffer (Pack->Data + E->Offset, E->Packed_Size, Out, E->Size);
         *Out_Size = Written;
         return Out;
       } else {
         uint8_t *Out = (uint8_t *)malloc (E->Size);
+        if (not Out) { fprintf (stderr, "[assets] alloc failed for %s (%llu bytes)\n", Virtual_Path, (unsigned long long)E->Size); return NULL; }
         memcpy (Out, Pack->Data + E->Offset, E->Size);
         *Out_Size = E->Size;
         return Out;
@@ -16233,6 +16349,7 @@ uint8_t *Asset_Load (Asset_Store *Store, const char *Virtual_Path, uint64_t *Out
     if (File) {
       fseek (File, 0, SEEK_END); uint64_t File_Size = (uint64_t)ftell (File); rewind (File);
       uint8_t *Data = (uint8_t *)malloc (File_Size);
+      if (not Data) { fclose (File); return NULL; }
       size_t Read_ = fread (Data, 1, File_Size, File); (void)Read_;
       fclose (File);
       *Out_Size = File_Size;
@@ -16246,6 +16363,7 @@ uint8_t *Asset_Load (Asset_Store *Store, const char *Virtual_Path, uint64_t *Out
   if (not File) return NULL;
   fseek (File, 0, SEEK_END); uint64_t File_Size = (uint64_t)ftell (File); rewind (File);
   uint8_t *Data = (uint8_t *)malloc (File_Size);
+  if (not Data) { fclose (File); return NULL; }
   size_t   Read_ = fread (Data, 1, File_Size, File); (void)Read_;
   fclose (File);
   *Out_Size = File_Size;
