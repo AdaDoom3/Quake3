@@ -191,16 +191,16 @@ const World_Settings WORLD_PRESETS[WORLD_COUNT] = {
 #define WEAPON_RECOIL_DECAY 5.f   // Recoil exponential decay rate
 
 // Source engine viewmodel settings (per CalcViewModelView in Source SDK)
-#define SOURCE_VIEWMODEL_FOV     54.f   // Source viewmodel_fov default (ConVar: 54°)
-#define SOURCE_VIEWMODEL_SCALE   1.20f  // World-space scale factor (tuned for RT visibility without depth hack)
-#define SOURCE_VIEWMODEL_FWD     8.f    // Forward offset from eye (push barrel into view)
-#define SOURCE_VIEWMODEL_RIGHT   4.f    // Right offset from eye
-#define SOURCE_VIEWMODEL_UP     -3.f    // Up offset from eye (drop hands down)
+#define SOURCE_VIEWMODEL_FOV     74.f   // CS:S viewmodel_fov (ClientModeCSNormal::GetViewModelFOV returns 74.0f)
+#define SOURCE_VIEWMODEL_SCALE   1.0f   // No scale — Source viewmodels are authored at correct world size
+#define SOURCE_VIEWMODEL_FWD     0.f    // Source viewmodels are authored at the eye origin — no offset needed
+#define SOURCE_VIEWMODEL_RIGHT   0.f    // The model geometry itself extends forward/down from origin
+#define SOURCE_VIEWMODEL_UP      0.f    // CalcViewModelView: vmorigin = eyePosition, then only bob/lag/shake
 #define SOURCE_VIEWMODEL_FOV_RATIO (SOURCE_VIEWMODEL_FOV / 90.f) // Viewmodel-to-world FOV correction
 
 // HL2-style viewmodel CVars — individually tunable per ConVar, with presets as commands
 // (Derived from Source Engine CViewRender::DrawViewModels, CalcViewModelView, cl_righthand)
-#define CVAR_DEFAULT_VM_FOV       54.f    // viewmodel_fov: separate FOV for weapon (Source default 54)
+#define CVAR_DEFAULT_VM_FOV       74.f    // viewmodel_fov: CS:S default 74, HL2 default 54
 #define CVAR_DEFAULT_VM_OFFSET_X  0.f     // viewmodel_offset_x: forward/back offset from eye
 #define CVAR_DEFAULT_VM_OFFSET_Y  0.f     // viewmodel_offset_y: right/left offset from eye
 #define CVAR_DEFAULT_VM_OFFSET_Z  0.f     // viewmodel_offset_z: up/down offset from eye
@@ -3366,12 +3366,14 @@ int main (int Argc, char **Argv) {
         CVar_Set_Int (cl_righthand, 1);
         printf ("[vm] preset: screenshot (fov=54 scale=0.65 close+left, right-hand)\n");
       } else if (strcmp (P, "aztec") == 0) {
-        // CS:S Classic in Aztec: faithful Counter-Strike Source viewmodel position
-        CVar_Set_Float (vm_fov, 54.f); CVar_Set_Float (vm_scale, 1.0f);
-        CVar_Set_Float (vm_offset_x, 10.f); CVar_Set_Float (vm_offset_y, 5.f); CVar_Set_Float (vm_offset_z, -4.f);
+        // CS:S authentic: viewmodel at eye origin, FOV 74 (ClientModeCSNormal::GetViewModelFOV).
+        // Source CalcViewModelView sets vmorigin = eyePosition with zero offset — the model geometry
+        // is authored to extend forward/down from origin. FOV ratio handles apparent size.
+        CVar_Set_Float (vm_fov, 74.f); CVar_Set_Float (vm_scale, 1.0f);
+        CVar_Set_Float (vm_offset_x, 0.f); CVar_Set_Float (vm_offset_y, 0.f); CVar_Set_Float (vm_offset_z, 0.f);
         CVar_Set_Float (vm_bob, 0.3f); CVar_Set_Float (vm_lag, 0.f);
         CVar_Set_Int (cl_righthand, 1);
-        printf ("[vm] preset: aztec (CS:S Classic — fov=54 scale=1.00 fwd=10 right=5 up=-4)\n");
+        printf ("[vm] preset: aztec (CS:S authentic — fov=74 scale=1.00 at eye origin)\n");
       } else if (strcmp (P, "aztec-ab") == 0) {
         // A/B test mode: auto-cycles through 4 viewmodel presets every 3 seconds at runtime.
         // Watch the console output for which preset is active, pick your favourite.
