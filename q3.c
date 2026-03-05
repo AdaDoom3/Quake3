@@ -7868,7 +7868,7 @@ Articulated_Figure Source_Weapon_Model_Load (const char *Path) {
   //   offset 56: numblends (int)
   //   offset 60: animindexindex (int) — relative offset to animation index array
   // The animation index for a single-blend sequence: *(int*)(seqdesc + seqdesc->animindexindex)
-  int Idle_Anim_Index = 0; // Default to animation 0
+  int Idle_Anim_Index = 0, Idle_Found = 0;
   if (Header->Sequence_Count > 0) {
     printf ("[weapon] sequences: %d (searching for idle)\n", Header->Sequence_Count);
     for (int Seq = 0; Seq < Header->Sequence_Count and Seq < 64; Seq++) {
@@ -7880,9 +7880,9 @@ Articulated_Figure Source_Weapon_Model_Load (const char *Path) {
       int Anim_Idx_Offset = *(const int*)(Seq_Data + 60);
       int Anim_Idx = *(const int*)(Seq_Data + Anim_Idx_Offset);
       printf ("[weapon]   seq[%d]: '%s' activity=%d anim=%d\n", Seq, Seq_Name, Activity, Anim_Idx);
-      // ACT_VM_IDLE = 185 in Source SDK; prefer the first "idle" sequence
-      if (Activity == 185 or (strstr(Seq_Name, "idle") and not strstr(Seq_Name, "empty") and Idle_Anim_Index == 0)) {
+      if (not Idle_Found and (Activity == 185 or strstr (Seq_Name, "idle"))) {
         Idle_Anim_Index = Anim_Idx;
+        Idle_Found = 1;
         printf ("[weapon]   -> using seq[%d] '%s' (anim %d) as idle\n", Seq, Seq_Name, Anim_Idx);
       }
     }
@@ -7992,40 +7992,52 @@ Articulated_Figure Source_Weapon_Model_Load (const char *Path) {
           Data_Offset += 6;
         }
 
-        // ANIMROT (0x08): mstudioanim_valueptr_t — per-axis compressed rotation animation
+        // ANIMROT (0x08): mstudioanim_valueptr_t — per-axis RLE Euler rotation
+        // Source SDK: pRotV() points to the valueptr_t right after the raw rotation data.
+        //   valueptr_t.offset[i] is relative to the START of the valueptr_t struct itself.
+        //   ExtractAnimValue(frame=0, pAnimvalue, scale, angle) extracts frame 0 sample.
+        //   angle += baseRot, then AngleQuaternion(angle, q).
         if ((Anim_Flags & 0x08) and not Got_Rotation) {
-          const int16_t *Rotation_Pointer = (const int16_t*)(Animation_Cursor + Data_Offset);
+          const uint8_t *Value_Ptr_Base = Animation_Cursor + Data_Offset;
+          const int16_t *Offsets        = (const int16_t*)Value_Ptr_Base;
           float Rot[3] = {Bone->Rot.x, Bone->Rot.y, Bone->Rot.z};
-          float Rotation_Scale[3] = {Bone->Rot_Scale.x, Bone->Rot_Scale.y, Bone->Rot_Scale.z};
-          for (int Axis_Index = 0; Axis_Index < 3; Axis_Index++)
-            if (Rotation_Pointer[Axis_Index]) {
-              const uint8_t *VP = (const uint8_t*)&Rotation_Pointer[Axis_Index] + Rotation_Pointer[Axis_Index];
-              Rot[Axis_Index] = Rot[Axis_Index] + *(const int16_t*)(VP + 2) * Rotation_Scale[Axis_Index];
+          float Rot_Scale[3] = {Bone->Rot_Scale.x, Bone->Rot_Scale.y, Bone->Rot_Scale.z};
+          for (int Axis = 0; Axis < 3; Axis++)
+            if (Offsets[Axis] > 0) {
+              const uint8_t *Anim_Value = Value_Ptr_Base + Offsets[Axis]; // relative to struct start
+              // mstudioanimvalue_t[0] = {valid, total}, [1] = first sample value
+              int16_t Sample = *(const int16_t*)(Anim_Value + 2);
+              Rot[Axis] += Sample * Rot_Scale[Axis];
             }
-          // Convert Euler angles to quaternion
-          float CX = cosf(Rot[0]*0.5f), SX = sinf(Rot[0]*0.5f);
-          float CY = cosf(Rot[1]*0.5f), SY = sinf(Rot[1]*0.5f);
-          float CZ = cosf(Rot[2]*0.5f), SZ = sinf(Rot[2]*0.5f);
-          Anim_Quat_W = CX*CY*CZ + SX*SY*SZ;
-          Anim_Quat_X = SX*CY*CZ - CX*SY*SZ;
-          Anim_Quat_Y = CX*SY*CZ + SX*CY*SZ;
-          Anim_Quat_Z = CX*CY*SZ - SX*SY*CZ;
+          // Source AngleQuaternion(RadianEuler): note x=roll, y=pitch, z=yaw
+          float SR, CR, SP, CP, SY2, CY2;
+          SY2 = sinf (Rot[2] * 0.5f); CY2 = cosf (Rot[2] * 0.5f);
+          SP  = sinf (Rot[1] * 0.5f); CP  = cosf (Rot[1] * 0.5f);
+          SR  = sinf (Rot[0] * 0.5f); CR  = cosf (Rot[0] * 0.5f);
+          Anim_Quat_X = SR*CP*CY2 - CR*SP*SY2;
+          Anim_Quat_Y = CR*SP*CY2 + SR*CP*SY2;
+          Anim_Quat_Z = CR*CP*SY2 - SR*SP*CY2;
+          Anim_Quat_W = CR*CP*CY2 + SR*SP*SY2;
           Got_Rotation = 1;
           Data_Offset += 6;
         } else if (Anim_Flags & 0x08) {
-          Data_Offset += 6; // Skip ANIMROT data if we already got rotation from RAWROT/RAWROT2
+          Data_Offset += 6;
         }
 
-        // ANIMPOS (0x04): mstudioanim_valueptr_t — per-axis compressed position animation
+        // ANIMPOS (0x04): mstudioanim_valueptr_t — per-axis RLE position
+        // Source SDK: pPosV() = pData() + (ANIMROT ? sizeof(valueptr_t) : 0)
+        //   ExtractAnimValue(frame=0) → pos[axis] = sample * posscale[axis]
+        //   pos += basePos (non-delta mode)
         if (Anim_Flags & 0x04) {
-          // Only apply if no RAWPOS was already decoded
           if (not (Anim_Flags & 0x01)) {
-            const int16_t *Position_Pointer = (const int16_t*)(Animation_Cursor + Data_Offset);
+            const uint8_t *Value_Ptr_Base = Animation_Cursor + Data_Offset;
+            const int16_t *Offsets        = (const int16_t*)Value_Ptr_Base;
             float Pos_Scale[3] = {Bone->Position_Scale.x, Bone->Position_Scale.y, Bone->Position_Scale.z};
-            for (int Axis_Index = 0; Axis_Index < 3; Axis_Index++)
-              if (Position_Pointer[Axis_Index]) {
-                const uint8_t *VP = (const uint8_t*)&Position_Pointer[Axis_Index] + Position_Pointer[Axis_Index];
-                Position[Axis_Index] = Position[Axis_Index] + *(const int16_t*)(VP + 2) * Pos_Scale[Axis_Index];
+            for (int Axis = 0; Axis < 3; Axis++)
+              if (Offsets[Axis] > 0) {
+                const uint8_t *Anim_Value = Value_Ptr_Base + Offsets[Axis];
+                int16_t Sample = *(const int16_t*)(Anim_Value + 2);
+                Position[Axis] += Sample * Pos_Scale[Axis];
               }
           }
           Data_Offset += 6;
