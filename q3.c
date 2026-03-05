@@ -37,6 +37,7 @@
 #include <stdbool.h>
 #include <assert.h>
 #include <math.h>
+#include <stdatomic.h>
 
 // Media Layer
 #include <SDL2/SDL.h>
@@ -337,6 +338,202 @@ typedef struct {
   int         Was_On_Ground;    // Previous frame ground state (for land detection)
 } Audio_System;
 
+// ── CVar System ── Lock-free atomic named variables (Ada protected type pattern) ─────────────────
+//
+// A CVar is a named, typed, atomic variable readable/writable from any thread without locks.
+// INT CVars use _Atomic int; FLOAT CVars pack into _Atomic uint32_t via memcpy (type-punning).
+// No string CVars — use a separate localization database for text.
+//
+// This is the C equivalent of an Ada protected object with atomic Get/Set entries:
+//   protected CVar is
+//     function  Get return Value_Type;
+//     procedure Set (V : Value_Type);
+//   end CVar;
+
+typedef enum {CVAR_INT, CVAR_FLOAT} CVar_Type;
+
+// Flags (bitfield)
+#define CVAR_NONE     0
+#define CVAR_ARCHIVE  1   // Save to / load from config file
+#define CVAR_READONLY 2   // Cannot be changed from console; engine-internal only
+#define CVAR_LATCH    4   // Change is deferred until next map load / restart
+#define CVAR_CHEAT    8   // Only active when cheats are enabled
+
+typedef struct {
+  const char    *Name;       // "r_width", "w_gravity", "in_sensitivity", etc.
+  const char    *Help;       // One-line description for console / config comments
+  CVar_Type      Type;       // INT or FLOAT
+  int            Flags;      // Bitmask of CVAR_ARCHIVE | CVAR_READONLY | ...
+  _Atomic int    Value_I;    // Current value (int CVar) — lock-free atomic
+  _Atomic int    Value_F_Bits; // Current value (float CVar) — float bits stored as atomic int
+  int            Default_I;  // Default value for int CVars
+  int            Default_F_Bits; // Default value bits for float CVars
+  float          Min, Max;   // Numeric clamp range
+  _Atomic int    Modified;   // Dirty flag — set on write, cleared by consumer (atomic exchange)
+} CVar;
+
+#define MAX_CVARS 256
+
+// Helper: float ↔ int bit-punning (avoids strict aliasing violations)
+static inline int   Float_To_Bits (float F)  { int   B; memcpy (&B, &F, 4); return B; }
+static inline float Bits_To_Float (int   B)  { float F; memcpy (&F, &B, 4); return F; }
+
+// CVar API — lock-free, thread-safe registration, lookup, and access
+CVar *CVar_Register_Int   (const char *Name, const char *Help, int Flags, int   Default, float Min, float Max);
+CVar *CVar_Register_Float (const char *Name, const char *Help, int Flags, float Default, float Min, float Max);
+CVar *CVar_Find           (const char *Name);
+int   CVar_Get_Int         (CVar *V);
+float CVar_Get_Float       (CVar *V);
+void  CVar_Set_Int         (CVar *V, int   Val);
+void  CVar_Set_Float       (CVar *V, float Val);
+int   CVar_Modified        (CVar *V);          // Returns and clears the Modified flag (atomic exchange)
+void  CVar_Reset           (CVar *V);          // Reset to default
+void  CVar_Save            (const char *Path); // Write all ARCHIVE CVars to config file
+void  CVar_Load            (const char *Path); // Read config file and apply values
+void  CVar_Init            (void);             // Initialize CVar registry
+void  CVar_Shutdown        (void);             // Cleanup
+
+// ── Game Controller ── SDL_GameController wrapper for gamepads (Xbox, PS, etc.) ──────────────────
+
+#define MAX_GAMEPADS 4
+
+typedef struct {
+  SDL_GameController *Handle;   // SDL controller handle (NULL = slot empty)
+  SDL_JoystickID      Id;       // Joystick instance ID for event matching
+  int                 Player;   // Assigned player index (0-based)
+  // Axis states (normalized -1.0 to 1.0 for sticks, 0.0 to 1.0 for triggers)
+  float Stick_Left_X,  Stick_Left_Y;
+  float Stick_Right_X, Stick_Right_Y;
+  float Trigger_Left,  Trigger_Right;
+  // Button states (1 = pressed, 0 = released)
+  int   Button_A, Button_B, Button_X, Button_Y;
+  int   Button_Start, Button_Back, Button_Guide;
+  int   Button_Left_Shoulder, Button_Right_Shoulder;
+  int   Button_Left_Stick, Button_Right_Stick;
+  int   DPad_Up, DPad_Down, DPad_Left, DPad_Right;
+} Gamepad_State;
+
+// Gamepad dead-zone and sensitivity
+#define GAMEPAD_DEADZONE       0.15f  // Inner dead-zone (below this, axis reads 0)
+#define GAMEPAD_TRIGGER_THRESH 0.10f  // Trigger threshold for digital press
+
+// ── Impulse System ── Named input actions with rebindable keys (Ada Impulse generic pattern) ─────
+//
+// An Impulse is a named action ("forward", "jump", "fire") bound to one or more input sources
+// (keyboard, mouse, gamepad).  Multiple players can each have their own device→player mapping.
+// Impulses can be bound to keys, mouse buttons, gamepad buttons, or gamepad axes.
+
+typedef enum {IMPULSE_KEY, IMPULSE_MOUSE_BUTTON, IMPULSE_GAMEPAD_BUTTON, IMPULSE_GAMEPAD_AXIS} Impulse_Kind;
+
+typedef struct {
+  const char   *Name;              // "forward", "back", "left", "right", "jump", "fire", "crouch"
+  SDL_Scancode  Primary;           // Primary keyboard binding (SDL scancode)
+  SDL_Scancode  Alternate;         // Alternative keyboard binding (0 = none)
+  int           Mouse_Button;      // Mouse button (SDL_BUTTON_LEFT etc.), 0 = none
+  int           Gamepad_Button;    // SDL_CONTROLLER_BUTTON_* constant, -1 = none
+  int           Gamepad_Axis;      // SDL_CONTROLLER_AXIS_* constant, -1 = none
+  float         Axis_Threshold;    // Threshold for axis-to-digital conversion (default 0.5)
+  int           Axis_Positive;     // 1 = positive axis fires impulse, 0 = negative
+  int           Enabled;           // 1 = active, 0 = suppressed (e.g. during menu)
+  int           Held;              // Current held state (1 = down, 0 = up)
+  float         Analog_Value;      // Current analog value (for smooth stick movement)
+} Impulse;
+
+#define MAX_IMPULSES 32
+
+// Impulse API
+Impulse *Impulse_Register (const char *Name, SDL_Scancode Primary, SDL_Scancode Alternate, int Mouse_Button);
+Impulse *Impulse_Find     (const char *Name);
+void     Impulse_Bind_Gamepad_Button (Impulse *Imp, int SDL_Button);
+void     Impulse_Bind_Gamepad_Axis   (Impulse *Imp, int SDL_Axis, float Threshold, int Positive);
+void     Impulse_Enable   (Impulse *Imp);
+void     Impulse_Disable  (Impulse *Imp);
+
+// Gamepad lifecycle
+void Gamepad_Init      (void);
+void Gamepad_Shutdown   (void);
+void Gamepad_Handle_Event (const SDL_Event *Event);
+
+// ── Player / Device Mapping ── (multi-player / splitscreen support) ──────────────────────────────
+
+#define MAX_PLAYERS 4
+
+typedef struct {
+  int   Forward, Back, Left, Right, Jump, Fire, Crouch; // Binary action states from keyboard/gamepad
+  float Delta_X, Delta_Y;                               // Mouse displacement in pixels
+  float Stick_X, Stick_Y;                               // Left stick axes (-1 to 1)
+  float Look_X,  Look_Y;                                // Right stick axes for camera look
+  float Trigger_Left, Trigger_Right;                     // Gamepad triggers (0 to 1)
+} Player_Input;
+
+typedef struct {
+  Player_Input     Players[MAX_PLAYERS]; // Per-player combined input state
+  int              Player_Count;         // Active player count (1 = single-player)
+  Gamepad_State    Gamepads[MAX_GAMEPADS]; // Connected gamepad states
+  int              Gamepad_Count;        // Number of connected gamepads
+  SDL_mutex       *Lock;                 // Protects the player input state
+} Input_System;
+
+// ── Thread Architecture ── SDL_Thread based multi-threaded engine (Ada Task pattern) ─────────────
+//
+// Four logical threads:
+//   Main Thread   — SDL events, init/shutdown, orchestration (runs on the thread that created SDL_Window)
+//   Game Thread   — Physics at 60 Hz fixed timestep, entity animation, game logic
+//   Render Thread — Vulkan command recording, TLAS rebuild, queue submit, presentation
+//   (Input is handled by main thread since SDL requires event polling on the window-creating thread)
+//
+// Communication:
+//   Main → Game:   Input snapshot via atomic SPSC ring buffer
+//   Game → Render:  Game_Snapshot double-buffer with atomic swap index
+//   Any → Any:     CVars (lock-free atomics)
+//   Quit signal:   _Atomic int Quit_Requested (set by main, read by all)
+
+// Input snapshot ring buffer — single-producer (main) single-consumer (game)
+#define INPUT_RING_SIZE 4 // Power of 2 for fast masking
+
+typedef struct {
+  Input               Slots[INPUT_RING_SIZE]; // Ring buffer slots
+  _Atomic uint        Write;                  // Next slot to write (main thread)
+  _Atomic uint        Read;                   // Next slot to read (game thread)
+} Input_Ring;
+
+// Game state snapshot — produced by game thread, consumed by render thread
+typedef struct {
+  float    Camera_Position[3];
+  float    Camera_Forward[3];
+  float    Camera_Up[3];
+  float    Camera_Right[3];
+  float    Vertical_FOV;
+  mat4     View_Matrix;
+  mat4     Projection_Matrix;
+  mat4     Prev_View;                         // Previous frame view for TAA reprojection
+  int      Budget_Byte;                       // Quality budget 0-255
+  float    Delta_Time;                        // For animation / TAA
+  uint64_t Frame;                             // Monotonic frame counter
+  float    Exposure;                          // Tonemapping exposure
+  int      Denoise_Passes;                    // A-trous iterations
+  int      Active_SPP;                        // Samples per pixel this frame
+  int      Checkerboard;                      // Checkerboard dispatch
+  int      Skip_Postprocess;                  // Bypass post-processing
+  int      Texture_Base_Index;                // Weapon texture base
+  uint     PBR_Stride;                        // PBR map stride
+  float    Sun_Screen[4];                     // Sun position in screen space
+} Game_Snapshot;
+
+// Double-buffered snapshot: game writes back, render reads front, atomic index swap
+typedef struct {
+  Game_Snapshot  Buffers[2];
+  _Atomic int    Read_Index;    // Render thread reads Buffers[Read_Index]
+  SDL_mutex     *Swap_Lock;     // Protects the swap from game→render
+} Snapshot_Double_Buffer;
+
+// Thread timing: precise sleep using SDL_GetPerformanceCounter + spin-wait for last ~500us
+void Thread_Sleep_Until (uint64_t Target_Ticks);
+
+// Thread entry points
+int Game_Thread_Entry   (void *Data);
+int Render_Thread_Entry (void *Data);
+
 // Quickhull internal types used during hull construction
 typedef struct {int A, B, C; int Dead;} Quickhull_Face;
 typedef struct {int V0, V1, Face;}      Quickhull_Edge;
@@ -374,6 +571,23 @@ typedef struct {
 //
 // ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 
+// CVar registry — flat array with linear scan (< 256 entries, simpler than a hash table)
+// Registration is single-threaded at startup; Get/Set are lock-free atomics from any thread.
+CVar      CVar_Registry[MAX_CVARS];
+int       CVar_Count;
+
+// Impulse registry — named input actions with rebindable keys
+Impulse   Impulse_Registry[MAX_IMPULSES];
+int       Impulse_Count;
+
+// Input system — multi-player device→player mapping
+Input_System Input_State;
+
+// Thread handles (NULL until threads are spawned)
+SDL_Thread *Game_Thread;
+SDL_Thread *Render_Thread;
+_Atomic int Quit_Requested; // Set by main thread, read by all threads to initiate shutdown
+
 // World and movement state with defaults
 World_Settings Active_World    = WORLD_PRESETS [WORLD_QUAKE3];
 int            Active_Movement = WORLD_QUAKE3;
@@ -406,6 +620,30 @@ float Delta_Time; // Time elapsed since the previous frame in seconds
 // Runtime mode flags
 int Skip_Postprocess; // Non-zero to bypass the post-processing compute pass
 int Use_Validation;   // Non-zero to enable Vulkan validation layers
+
+// ── CVar Pointers ── Cached for hot-path per-frame reads (avoids CVar_Find every frame) ─────────
+//
+// Video CVars (r_ prefix)
+CVar *r_width, *r_height, *r_quality, *r_render_scale, *r_spp, *r_denoise_passes;
+CVar *r_checkerboard, *r_postprocess, *r_parallax, *r_pbr, *r_validation, *r_fullscreen;
+CVar *r_exposure, *r_fov;
+// World CVars (w_ prefix)
+CVar *w_preset, *w_gravity, *w_max_speed, *w_jump_velocity, *w_friction, *w_accelerate, *w_air_accelerate;
+CVar *w_stop_speed, *w_step_size;
+// Audio CVars (a_ prefix)
+CVar *a_volume, *a_enabled;
+// Input CVars (in_ prefix)
+CVar *in_sensitivity, *in_invert_y;
+// Shader tuning CVars (rt_ prefix) — LATCH: need shader recompile to take effect
+CVar *rt_vndf_alpha_floor, *rt_specular_d_bias;
+CVar *rt_refl_clamp_lo, *rt_refl_clamp_hi, *rt_refl_gate_lo, *rt_refl_gate_hi;
+CVar *rt_refl_thresh_lo, *rt_refl_thresh_hi, *rt_refl_damping, *rt_refl_soft_edge;
+CVar *rt_refl_trace_lo, *rt_refl_trace_hi;
+CVar *rt_shadow_dist_lo, *rt_shadow_dist_hi;
+CVar *rt_denoise_depth_lo, *rt_denoise_depth_hi, *rt_denoise_lum_lo, *rt_denoise_lum_hi;
+CVar *rt_firefly_headroom, *rt_firefly_bias;
+CVar *rt_cas_amount, *rt_cas_mix;
+CVar *rt_taa_static_floor, *rt_taa_sigma, *rt_taa_move_lo, *rt_taa_move_hi;
 
 // Projectile pool (CPU-side)
 Projectile_Pool Projectiles;
@@ -2541,6 +2779,13 @@ int main (int Argc, char **Argv) {
   const char *Map_Name           = DEFAULT_MAP;
   float       Active_Exposure    = STYLE.Exposure;
 
+  // Initialize CVar system — register all engine CVars with their defaults
+  CVar_Init ();
+  CVar_Register_All ();
+
+  // Load saved config (overrides defaults with user-persisted values)
+  CVar_Load ("q3.cfg");
+
   // Parse command-line arguments
   for (int I = 1; I < Argc; I++) {
     if (strcmp (Argv[I], "--help") == 0 or strcmp (Argv[I], "-h") == 0) {
@@ -2571,11 +2816,11 @@ int main (int Argc, char **Argv) {
     else if (strcmp (Argv[I], "--benchmark")      == 0 and I + 1 < Argc) Benchmark_Frames = atoi (Argv[++I]);
     else if (strcmp (Argv[I], "--screenshot")     == 0 and I + 1 < Argc) Screenshot_Path  =       Argv[++I];
     else if (strcmp (Argv[I], "--dump-frames")    == 0 and I + 1 < Argc) Dump_Frames_Dir  =       Argv[++I];
-    else if (strcmp (Argv[I], "--no-postprocess") == 0) No_Postprocess = 1;
-    else if (strcmp (Argv[I], "--no-pbr")         == 0) No_PBR         = 1;
-    else if (strcmp (Argv[I], "--no-parallax")    == 0) No_Parallax    = 1;
+    else if (strcmp (Argv[I], "--no-postprocess") == 0) { No_Postprocess = 1; CVar_Set_Int (r_postprocess, 0); }
+    else if (strcmp (Argv[I], "--no-pbr")         == 0) { No_PBR         = 1; CVar_Set_Int (r_pbr, 0); }
+    else if (strcmp (Argv[I], "--no-parallax")    == 0) { No_Parallax    = 1; CVar_Set_Int (r_parallax, 0); }
     else if (strcmp (Argv[I], "--cheap")          == 0) Force_Cheap    = 1;
-    else if (strcmp (Argv[I], "--validation")     == 0) Use_Validation = 1;
+    else if (strcmp (Argv[I], "--validation")     == 0) { Use_Validation = 1; CVar_Set_Int (r_validation, 1); }
     else if (strcmp (Argv[I], "--source")         == 0) {Source_Mode     = 1;
                                                          Active_Movement = WORLD_SOURCE;
                                                          Active_World    = WORLD_PRESETS[WORLD_SOURCE];
@@ -2596,10 +2841,12 @@ int main (int Argc, char **Argv) {
     else if (strcmp (Argv[I], "--pak")    == 0 and I + 1 < Argc) {/* deferred: mount after Asset_Store init */}
     else if (strcmp (Argv[I], "--mdl")    == 0 and I + 1 < Argc) Source_MDL_Path = Argv[++I];
     else if (strcmp (Argv[I], "--weapon") == 0 and I + 1 < Argc) Source_Weapon_Path = Argv[++I];
-    else if (strcmp (Argv[I], "--spp")    == 0 and I + 1 < Argc) Override_SPP = atoi (Argv[++I]);
+    else if (strcmp (Argv[I], "--spp")    == 0 and I + 1 < Argc) { Override_SPP = atoi (Argv[++I]); CVar_Set_Int (r_spp, Override_SPP); }
     else if (strcmp (Argv[I], "--res")    == 0 and I + 1 < Argc) {
       sscanf (Argv[++I], "%dx%d", &Width, &Height);
       Override_Res = 1;
+      CVar_Set_Int (r_width, Width);
+      CVar_Set_Int (r_height, Height);
     }
     else if (strcmp (Argv[I], "--quality") == 0 and I + 1 < Argc) {
       const char *Q = Argv[++I];
@@ -2613,13 +2860,30 @@ int main (int Argc, char **Argv) {
     else Map_Name = Argv[I];
   }
 
-  // Apply quality presets
+  // Apply quality presets — set both legacy globals and CVars
+  CVar_Set_Int (r_quality, Active_Quality);
   const Quality_Preset *Preset = &QUALITY_PRESETS[Active_Quality];
   if (not Override_Res) { Width = Preset->Width; Height = Preset->Height;}
-  Active_Render_Scale  = Preset->Render_Scale;
+  Active_Render_Scale   = Preset->Render_Scale;
   Active_Denoise_Passes = Preset->Denoise_Passes;
   Active_Checkerboard   = Preset->Checkerboard;
   if (not No_Parallax) No_Parallax = not Preset->Parallax;
+  // Sync CVars with applied preset values
+  CVar_Set_Int   (r_width,          Width);
+  CVar_Set_Int   (r_height,         Height);
+  CVar_Set_Float (r_render_scale,   Active_Render_Scale);
+  CVar_Set_Int   (r_denoise_passes, Active_Denoise_Passes);
+  CVar_Set_Int   (r_checkerboard,   Active_Checkerboard);
+  CVar_Set_Int   (r_parallax,       not No_Parallax);
+  CVar_Set_Float (r_exposure,       Active_Exposure);
+  CVar_Set_Int   (r_fullscreen,     Current_Window_Mode == FULLSCREEN_MODE);
+  // Sync world CVars from active world preset
+  CVar_Set_Float (w_gravity,        Active_World.Gravity);
+  CVar_Set_Float (w_max_speed,      Active_World.Max_Speed);
+  CVar_Set_Float (w_jump_velocity,  JUMP_VELOCITY);
+  CVar_Set_Float (w_friction,       GROUND_FRICTION);
+  CVar_Set_Float (w_accelerate,     GROUND_ACCELERATE);
+  CVar_Set_Float (w_air_accelerate, AIR_ACCELERATE);
   printf ("[quality] preset: %s (%dx%d @ %.0f%% scale, %d SPP)\n",
           Preset->Name, Width, Height, Active_Render_Scale * 100.f, Override_SPP ? Override_SPP : Preset->SPP);
   printf ("[world] %s (height %.0f, eye %.0f, fov %.0f, speed %.0f)\n",
@@ -2639,8 +2903,8 @@ int main (int Argc, char **Argv) {
     fclose (Map_Test);
   }
 
-  // Initialize SDL2 with video subsystem and create a Vulkan-capable resizable window
-  if (SDL_Init (SDL_INIT_VIDEO) < 0) {
+  // Initialize SDL2 with video and game controller subsystems
+  if (SDL_Init (SDL_INIT_VIDEO | SDL_INIT_GAMECONTROLLER) < 0) {
     fprintf (stderr, "[error] SDL_Init failed: %s\n", SDL_GetError ());
     fprintf (stderr, "  Ensure a display server (X11/Wayland) is running.\n");
     fprintf (stderr, "  For headless use: Xvfb :99 -screen 0 1920x1080x24 & export DISPLAY=:99\n");
@@ -2654,6 +2918,14 @@ int main (int Argc, char **Argv) {
     SDL_Quit ();
     return 1;
   }
+
+  // Initialize game controllers (gamepads)
+  Gamepad_Init ();
+
+  // Initialize thread synchronization primitives
+  Snapshot_Init (&Snapshot_Buffer);
+  atomic_store (&Quit_Requested, 0);
+  memset (&Input_Ring_Buffer, 0, sizeof Input_Ring_Buffer);
 
   // Create system cursors for menu mode rollover
   SDL_Cursor_Arrow     = SDL_CreateSystemCursor (SDL_SYSTEM_CURSOR_ARROW);
@@ -3464,8 +3736,11 @@ int main (int Argc, char **Argv) {
     Last = Now;
     Total_Time += Delta_Time;
 
-    // Poll input (handles windowing events, mode transitions, resize)
+    // Poll input (handles windowing events, mode transitions, resize, gamepad)
     Input In = Poll_Input ();
+
+    // Push input to ring buffer (for future game thread consumption)
+    Input_Ring_Push (&Input_Ring_Buffer, &In);
 
     // Skip rendering when minimized (window may be 0x0, nothing to present)
     if (Current_Activated == MINIMIZE_DEACTIVATED) {
@@ -3752,11 +4027,19 @@ int main (int Argc, char **Argv) {
   vkDestroyDevice       (Device, NULL);
   vkDestroyInstance     (Instance, NULL);
 
+  // Shutdown gamepad and thread synchronization
+  Gamepad_Shutdown ();
+  Snapshot_Destroy (&Snapshot_Buffer);
+
+  // Save config and shutdown CVar system
+  CVar_Save ("q3.cfg");
+  CVar_Shutdown ();
+
   // Media layer
   SDL_DestroyWindow (Window);
   SDL_Quit ();
   return 0;
-  
+
 } // main
 
 // ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
@@ -4083,6 +4366,597 @@ void Arena_Reset (Arena *A) {A->Used = 0;}
 // ════════════════
 
 void Arena_Destroy (Arena *A) {free (A->Base); *A = (Arena){0};}
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════
+//   CVar System — Lock-Free Atomic Named Variables (Ada Protected Type Pattern)
+// ═══════════════════════════════════════════════════════════════════════════════════════════
+//
+// All CVar values are C11 atomics — no mutexes, no locks, no contention.  INT CVars use
+// _Atomic int directly.  FLOAT CVars store their bits in _Atomic int via Float_To_Bits /
+// Bits_To_Float (memcpy-based type-punning, avoids strict aliasing violations).
+//
+// Registration happens single-threaded at startup, so CVar_Count is not atomic.
+// Get/Set are lock-free and safe from any thread at any time.
+
+// ════════════════
+//   CVar_Init
+// ════════════════
+
+void CVar_Init (void) {
+  CVar_Count = 0;
+  memset (CVar_Registry, 0, sizeof CVar_Registry);
+}
+
+// ════════════════
+//   CVar_Shutdown
+// ════════════════
+
+void CVar_Shutdown (void) {
+  CVar_Count = 0;
+}
+
+// ════════════════════════
+//   CVar_Register_Int
+// ════════════════════════
+
+CVar *CVar_Register_Int (const char *Name, const char *Help, int Flags, int Default, float Min, float Max) {
+  // Idempotent — return existing CVar if already registered
+  for (int I = 0; I < CVar_Count; I++)
+    if (strcmp (CVar_Registry[I].Name, Name) == 0) return &CVar_Registry[I];
+  if (CVar_Count >= MAX_CVARS) { printf ("[cvar] registry full, cannot register %s\n", Name); return NULL; }
+  CVar *V          = &CVar_Registry[CVar_Count++];
+  V->Name          = Name;
+  V->Help          = Help;
+  V->Type          = CVAR_INT;
+  V->Flags         = Flags;
+  V->Min           = Min;
+  V->Max           = Max;
+  V->Default_I     = Default;
+  V->Default_F_Bits = 0;
+  atomic_store (&V->Value_I,      Default);
+  atomic_store (&V->Value_F_Bits, 0);
+  atomic_store (&V->Modified,     0);
+  return V;
+}
+
+// ════════════════════════
+//   CVar_Register_Float
+// ════════════════════════
+
+CVar *CVar_Register_Float (const char *Name, const char *Help, int Flags, float Default, float Min, float Max) {
+  for (int I = 0; I < CVar_Count; I++)
+    if (strcmp (CVar_Registry[I].Name, Name) == 0) return &CVar_Registry[I];
+  if (CVar_Count >= MAX_CVARS) { printf ("[cvar] registry full, cannot register %s\n", Name); return NULL; }
+  CVar *V          = &CVar_Registry[CVar_Count++];
+  V->Name          = Name;
+  V->Help          = Help;
+  V->Type          = CVAR_FLOAT;
+  V->Flags         = Flags;
+  V->Min           = Min;
+  V->Max           = Max;
+  V->Default_I     = 0;
+  V->Default_F_Bits = Float_To_Bits (Default);
+  atomic_store (&V->Value_I,      0);
+  atomic_store (&V->Value_F_Bits, Float_To_Bits (Default));
+  atomic_store (&V->Modified,     0);
+  return V;
+}
+
+// ════════════════
+//   CVar_Find
+// ════════════════
+
+CVar *CVar_Find (const char *Name) {
+  for (int I = 0; I < CVar_Count; I++)
+    if (strcmp (CVar_Registry[I].Name, Name) == 0) return &CVar_Registry[I];
+  return NULL;
+}
+
+// ═══════════════════════════════════
+//   CVar_Get_Int / Float
+// ═══════════════════════════════════
+
+int   CVar_Get_Int   (CVar *V) { return atomic_load (&V->Value_I); }
+float CVar_Get_Float (CVar *V) { return Bits_To_Float (atomic_load (&V->Value_F_Bits)); }
+
+// ═══════════════════════════════════
+//   CVar_Set_Int / Float
+// ═══════════════════════════════════
+
+void CVar_Set_Int (CVar *V, int Val) {
+  if (V->Flags & CVAR_READONLY) return;
+  if (V->Min < V->Max) Val = Val < (int)V->Min ? (int)V->Min : Val > (int)V->Max ? (int)V->Max : Val;
+  atomic_store (&V->Value_I, Val);
+  atomic_store (&V->Modified, 1);
+}
+void CVar_Set_Float (CVar *V, float Val) {
+  if (V->Flags & CVAR_READONLY) return;
+  if (V->Min < V->Max) Val = Val < V->Min ? V->Min : Val > V->Max ? V->Max : Val;
+  atomic_store (&V->Value_F_Bits, Float_To_Bits (Val));
+  atomic_store (&V->Modified, 1);
+}
+
+// ════════════════════
+//   CVar_Modified
+// ════════════════════
+//
+// Returns the current Modified flag and atomically clears it (test-and-clear).
+
+int CVar_Modified (CVar *V) {
+  return atomic_exchange (&V->Modified, 0);
+}
+
+// ════════════════
+//   CVar_Reset
+// ════════════════
+
+void CVar_Reset (CVar *V) {
+  if (V->Type == CVAR_INT)   atomic_store (&V->Value_I,      V->Default_I);
+  if (V->Type == CVAR_FLOAT) atomic_store (&V->Value_F_Bits, V->Default_F_Bits);
+  atomic_store (&V->Modified, 1);
+}
+
+// ════════════════
+//   CVar_Save
+// ════════════════
+//
+// Writes all ARCHIVE-flagged CVars to a simple key-value config file.
+// Format: one CVar per line, "name value\n".  Comments start with //.
+
+void CVar_Save (const char *Path) {
+  FILE *F = fopen (Path, "w");
+  if (not F) { printf ("[cvar] failed to save config: %s\n", Path); return; }
+  fprintf (F, "// q3 engine config — auto-generated, do not edit by hand\n");
+  for (int I = 0; I < CVar_Count; I++) {
+    CVar *V = &CVar_Registry[I];
+    if (not (V->Flags & CVAR_ARCHIVE)) continue;
+    switch (V->Type) {
+      case CVAR_INT:   fprintf (F, "%s %d\n",   V->Name, CVar_Get_Int (V));   break;
+      case CVAR_FLOAT: fprintf (F, "%s %.6f\n", V->Name, CVar_Get_Float (V)); break;
+    }
+  }
+  fclose (F);
+  printf ("[cvar] saved %s\n", Path);
+}
+
+// ════════════════
+//   CVar_Load
+// ════════════════
+//
+// Reads a key-value config file and applies values to registered CVars.
+// Unknown keys are silently ignored (allows forward/backward compatibility).
+
+void CVar_Load (const char *Path) {
+  FILE *F = fopen (Path, "r");
+  if (not F) { printf ("[cvar] no config file: %s (using defaults)\n", Path); return; }
+  char Line[512];
+  int  Applied = 0;
+  while (fgets (Line, (int)sizeof Line, F)) {
+    char *P = Line;
+    while (*P == ' ' or *P == '\t') P++;
+    if (*P == '/' or *P == '#' or *P == '\n' or *P == '\0') continue;
+    char Name[256], Value_Str[256];
+    if (sscanf (P, "%255s %255[^\n]", Name, Value_Str) < 2) continue;
+    CVar *V = CVar_Find (Name);
+    if (not V or (V->Flags & CVAR_READONLY)) continue;
+    switch (V->Type) {
+      case CVAR_INT:   CVar_Set_Int   (V, atoi (Value_Str));         break;
+      case CVAR_FLOAT: CVar_Set_Float (V, (float)atof (Value_Str)); break;
+    }
+    Applied++;
+  }
+  fclose (F);
+  printf ("[cvar] loaded %s (%d values applied)\n", Path, Applied);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════
+//   Impulse System — Named Input Actions (Ada Impulse Generic Pattern)
+// ═══════════════════════════════════════════════════════════════════════════════════════════
+
+Impulse *Impulse_Register (const char *Name, SDL_Scancode Primary, SDL_Scancode Alternate, int Mouse_Button) {
+  for (int I = 0; I < Impulse_Count; I++)
+    if (strcmp (Impulse_Registry[I].Name, Name) == 0) return &Impulse_Registry[I];
+  if (Impulse_Count >= MAX_IMPULSES) return NULL;
+  Impulse *Imp       = &Impulse_Registry[Impulse_Count++];
+  Imp->Name           = Name;
+  Imp->Primary        = Primary;
+  Imp->Alternate      = Alternate;
+  Imp->Mouse_Button   = Mouse_Button;
+  Imp->Gamepad_Button = -1;
+  Imp->Gamepad_Axis   = -1;
+  Imp->Axis_Threshold = 0.5f;
+  Imp->Axis_Positive  = 1;
+  Imp->Enabled        = 1;
+  Imp->Held           = 0;
+  Imp->Analog_Value   = 0;
+  return Imp;
+}
+
+Impulse *Impulse_Find (const char *Name) {
+  for (int I = 0; I < Impulse_Count; I++)
+    if (strcmp (Impulse_Registry[I].Name, Name) == 0) return &Impulse_Registry[I];
+  return NULL;
+}
+
+void Impulse_Bind_Gamepad_Button (Impulse *Imp, int SDL_Button) {
+  Imp->Gamepad_Button = SDL_Button;
+}
+
+void Impulse_Bind_Gamepad_Axis (Impulse *Imp, int SDL_Axis, float Threshold, int Positive) {
+  Imp->Gamepad_Axis   = SDL_Axis;
+  Imp->Axis_Threshold = Threshold;
+  Imp->Axis_Positive  = Positive;
+}
+
+void Impulse_Enable  (Impulse *Imp) { Imp->Enabled = 1; }
+void Impulse_Disable (Impulse *Imp) { Imp->Enabled = 0; }
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════
+//   Gamepad System — SDL_GameController hot-plug and input
+// ═══════════════════════════════════════════════════════════════════════════════════════════
+//
+// Initializes SDL_INIT_GAMECONTROLLER, detects connected gamepads, handles hot-plug events.
+// Each connected gamepad is assigned to a player slot (first free slot wins).
+
+static float Gamepad_Apply_Deadzone (float Raw) {
+  if (Raw > -GAMEPAD_DEADZONE and Raw < GAMEPAD_DEADZONE) return 0.0f;
+  float Sign = Raw < 0 ? -1.0f : 1.0f;
+  float Mag  = (fabsf (Raw) - GAMEPAD_DEADZONE) / (1.0f - GAMEPAD_DEADZONE);
+  return Sign * (Mag > 1.0f ? 1.0f : Mag);
+}
+
+void Gamepad_Init (void) {
+  if (SDL_InitSubSystem (SDL_INIT_GAMECONTROLLER) < 0) {
+    printf ("[gamepad] SDL_INIT_GAMECONTROLLER failed: %s\n", SDL_GetError ());
+    return;
+  }
+  Input_State.Gamepad_Count = 0;
+  memset (Input_State.Gamepads, 0, sizeof Input_State.Gamepads);
+  // Open any already-connected controllers
+  int Num = SDL_NumJoysticks ();
+  for (int I = 0; I < Num and Input_State.Gamepad_Count < MAX_GAMEPADS; I++) {
+    if (SDL_IsGameController (I)) {
+      SDL_GameController *GC = SDL_GameControllerOpen (I);
+      if (GC) {
+        int Slot = Input_State.Gamepad_Count++;
+        Input_State.Gamepads[Slot].Handle = GC;
+        Input_State.Gamepads[Slot].Id     = SDL_JoystickInstanceID (SDL_GameControllerGetJoystick (GC));
+        Input_State.Gamepads[Slot].Player = Slot;
+        printf ("[gamepad] connected: %s (player %d)\n", SDL_GameControllerName (GC), Slot + 1);
+      }
+    }
+  }
+}
+
+void Gamepad_Shutdown (void) {
+  for (int I = 0; I < Input_State.Gamepad_Count; I++) {
+    if (Input_State.Gamepads[I].Handle) SDL_GameControllerClose (Input_State.Gamepads[I].Handle);
+    Input_State.Gamepads[I].Handle = NULL;
+  }
+  Input_State.Gamepad_Count = 0;
+}
+
+void Gamepad_Handle_Event (const SDL_Event *Event) {
+  switch (Event->type) {
+    case SDL_CONTROLLERDEVICEADDED: {
+      if (Input_State.Gamepad_Count >= MAX_GAMEPADS) break;
+      SDL_GameController *GC = SDL_GameControllerOpen (Event->cdevice.which);
+      if (GC) {
+        int Slot = Input_State.Gamepad_Count++;
+        Input_State.Gamepads[Slot].Handle = GC;
+        Input_State.Gamepads[Slot].Id     = SDL_JoystickInstanceID (SDL_GameControllerGetJoystick (GC));
+        Input_State.Gamepads[Slot].Player = Slot;
+        printf ("[gamepad] added: %s (player %d)\n", SDL_GameControllerName (GC), Slot + 1);
+      }
+      break;
+    }
+    case SDL_CONTROLLERDEVICEREMOVED: {
+      for (int I = 0; I < Input_State.Gamepad_Count; I++) {
+        if (Input_State.Gamepads[I].Id == Event->cdevice.which) {
+          printf ("[gamepad] removed: player %d\n", Input_State.Gamepads[I].Player + 1);
+          SDL_GameControllerClose (Input_State.Gamepads[I].Handle);
+          // Compact: move last into removed slot
+          Input_State.Gamepads[I] = Input_State.Gamepads[--Input_State.Gamepad_Count];
+          memset (&Input_State.Gamepads[Input_State.Gamepad_Count], 0, sizeof (Gamepad_State));
+          break;
+        }
+      }
+      break;
+    }
+    case SDL_CONTROLLERAXISMOTION: {
+      for (int I = 0; I < Input_State.Gamepad_Count; I++) {
+        if (Input_State.Gamepads[I].Id != Event->caxis.which) continue;
+        Gamepad_State *GP = &Input_State.Gamepads[I];
+        float V = Event->caxis.value / 32767.0f;
+        switch (Event->caxis.axis) {
+          case SDL_CONTROLLER_AXIS_LEFTX:        GP->Stick_Left_X  = Gamepad_Apply_Deadzone (V); break;
+          case SDL_CONTROLLER_AXIS_LEFTY:        GP->Stick_Left_Y  = Gamepad_Apply_Deadzone (V); break;
+          case SDL_CONTROLLER_AXIS_RIGHTX:       GP->Stick_Right_X = Gamepad_Apply_Deadzone (V); break;
+          case SDL_CONTROLLER_AXIS_RIGHTY:       GP->Stick_Right_Y = Gamepad_Apply_Deadzone (V); break;
+          case SDL_CONTROLLER_AXIS_TRIGGERLEFT:  GP->Trigger_Left  = V > 0 ? V : 0; break;
+          case SDL_CONTROLLER_AXIS_TRIGGERRIGHT: GP->Trigger_Right = V > 0 ? V : 0; break;
+          default: break;
+        }
+        break;
+      }
+      break;
+    }
+    case SDL_CONTROLLERBUTTONDOWN:
+    case SDL_CONTROLLERBUTTONUP: {
+      int Down = (Event->type == SDL_CONTROLLERBUTTONDOWN);
+      for (int I = 0; I < Input_State.Gamepad_Count; I++) {
+        if (Input_State.Gamepads[I].Id != Event->cbutton.which) continue;
+        Gamepad_State *GP = &Input_State.Gamepads[I];
+        switch (Event->cbutton.button) {
+          case SDL_CONTROLLER_BUTTON_A:             GP->Button_A              = Down; break;
+          case SDL_CONTROLLER_BUTTON_B:             GP->Button_B              = Down; break;
+          case SDL_CONTROLLER_BUTTON_X:             GP->Button_X              = Down; break;
+          case SDL_CONTROLLER_BUTTON_Y:             GP->Button_Y              = Down; break;
+          case SDL_CONTROLLER_BUTTON_START:         GP->Button_Start          = Down; break;
+          case SDL_CONTROLLER_BUTTON_BACK:          GP->Button_Back           = Down; break;
+          case SDL_CONTROLLER_BUTTON_GUIDE:         GP->Button_Guide          = Down; break;
+          case SDL_CONTROLLER_BUTTON_LEFTSHOULDER:  GP->Button_Left_Shoulder  = Down; break;
+          case SDL_CONTROLLER_BUTTON_RIGHTSHOULDER: GP->Button_Right_Shoulder = Down; break;
+          case SDL_CONTROLLER_BUTTON_LEFTSTICK:     GP->Button_Left_Stick     = Down; break;
+          case SDL_CONTROLLER_BUTTON_RIGHTSTICK:    GP->Button_Right_Stick    = Down; break;
+          case SDL_CONTROLLER_BUTTON_DPAD_UP:       GP->DPad_Up               = Down; break;
+          case SDL_CONTROLLER_BUTTON_DPAD_DOWN:     GP->DPad_Down             = Down; break;
+          case SDL_CONTROLLER_BUTTON_DPAD_LEFT:     GP->DPad_Left             = Down; break;
+          case SDL_CONTROLLER_BUTTON_DPAD_RIGHT:    GP->DPad_Right            = Down; break;
+          default: break;
+        }
+        break;
+      }
+      break;
+    }
+    default: break;
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════
+//   CVar_Register_All — Bulk registration of all engine CVars
+// ═══════════════════════════════════════════════════════════════════════════════════════════
+//
+// Called once at startup, before config load.  Each CVar gets its default from the matching
+// #define or initial global value.  After registration, CVar_Load overwrites ARCHIVEd values
+// from the config file, then command-line flags override individual CVars.
+
+void CVar_Register_All (void) {
+  // ── Video CVars ────────────────────────────────────────────────────────────────────────
+  r_width          = CVar_Register_Int   ("r_width",          "Window width in pixels",              CVAR_ARCHIVE, 1280, 320, 7680);
+  r_height         = CVar_Register_Int   ("r_height",         "Window height in pixels",             CVAR_ARCHIVE, 720,  240, 4320);
+  r_quality        = CVar_Register_Int   ("r_quality",        "Quality preset (0=ultra..4=potato)",  CVAR_ARCHIVE, QUALITY_MEDIUM, 0, QUALITY_COUNT - 1);
+  r_render_scale   = CVar_Register_Float ("r_render_scale",   "Internal RT render scale",            CVAR_ARCHIVE, 0.75f, 0.25f, 2.0f);
+  r_spp            = CVar_Register_Int   ("r_spp",            "Samples per pixel (0=use preset)",    CVAR_ARCHIVE, 0, 0, 8);
+  r_denoise_passes = CVar_Register_Int   ("r_denoise_passes", "A-trous wavelet denoise iterations",  CVAR_ARCHIVE, 3, 0, 8);
+  r_checkerboard   = CVar_Register_Int   ("r_checkerboard",   "Temporal checkerboard ray dispatch",  CVAR_ARCHIVE, 1, 0, 1);
+  r_postprocess    = CVar_Register_Int   ("r_postprocess",    "Enable post-processing pass",         CVAR_ARCHIVE, 1, 0, 1);
+  r_parallax       = CVar_Register_Int   ("r_parallax",       "Enable parallax occlusion mapping",   CVAR_ARCHIVE, 1, 0, 1);
+  r_pbr            = CVar_Register_Int   ("r_pbr",            "Enable PBR material maps",            CVAR_ARCHIVE, 1, 0, 1);
+  r_validation     = CVar_Register_Int   ("r_validation",     "Enable Vulkan validation layers",     CVAR_NONE,    0, 0, 1);
+  r_fullscreen     = CVar_Register_Int   ("r_fullscreen",     "Fullscreen mode (0=windowed 1=full)", CVAR_ARCHIVE, 0, 0, 1);
+  r_exposure       = CVar_Register_Float ("r_exposure",       "Tonemapping exposure multiplier",     CVAR_ARCHIVE, STYLE.Exposure, 0.1f, 10.0f);
+  r_fov            = CVar_Register_Float ("r_fov",            "Vertical FOV override (0=auto)",      CVAR_ARCHIVE, 0, 0, 170);
+
+  // ── World CVars ────────────────────────────────────────────────────────────────────────
+  w_preset         = CVar_Register_Int   ("w_preset",         "World preset (0=q3 1=source 2=unreal)", CVAR_ARCHIVE, WORLD_QUAKE3, 0, WORLD_COUNT - 1);
+  w_gravity        = CVar_Register_Float ("w_gravity",        "Gravity (units/s²)",                    CVAR_NONE, GRAVITY, 0, 10000);
+  w_max_speed      = CVar_Register_Float ("w_max_speed",      "Max run speed (units/s)",               CVAR_NONE, MAXIMUM_SPEED, 0, 5000);
+  w_jump_velocity  = CVar_Register_Float ("w_jump_velocity",  "Jump impulse velocity (units/s)",       CVAR_NONE, JUMP_VELOCITY, 0, 5000);
+  w_friction       = CVar_Register_Float ("w_friction",       "Ground friction coefficient",           CVAR_NONE, GROUND_FRICTION, 0, 100);
+  w_accelerate     = CVar_Register_Float ("w_accelerate",     "Ground acceleration rate",              CVAR_NONE, GROUND_ACCELERATE, 0, 100);
+  w_air_accelerate = CVar_Register_Float ("w_air_accelerate", "Air acceleration rate",                 CVAR_NONE, AIR_ACCELERATE, 0, 100);
+  w_stop_speed     = CVar_Register_Float ("w_stop_speed",     "Speed below which friction uses stop",  CVAR_NONE, STOP_SPEED, 0, 1000);
+  w_step_size      = CVar_Register_Float ("w_step_size",      "Max stair step height",                 CVAR_NONE, STEP_SIZE, 0, 100);
+
+  // ── Audio CVars ────────────────────────────────────────────────────────────────────────
+  a_volume         = CVar_Register_Float ("a_volume",         "Master volume (0.0 - 1.0)",           CVAR_ARCHIVE, 1.0f, 0.0f, 1.0f);
+  a_enabled        = CVar_Register_Int   ("a_enabled",        "Audio enabled",                       CVAR_ARCHIVE, 1, 0, 1);
+
+  // ── Input CVars ────────────────────────────────────────────────────────────────────────
+  in_sensitivity   = CVar_Register_Float ("in_sensitivity",   "Mouse sensitivity multiplier",        CVAR_ARCHIVE, 1.0f, 0.01f, 100.0f);
+  in_invert_y      = CVar_Register_Int   ("in_invert_y",      "Invert mouse Y axis",                 CVAR_ARCHIVE, 0, 0, 1);
+
+  // ── Shader Tuning CVars (rt_ prefix) ── ARCHIVE | LATCH: shader recompile needed ──────
+  rt_vndf_alpha_floor  = CVar_Register_Float ("rt_vndf_alpha_floor",  "Min roughness² for VNDF reflection",     CVAR_ARCHIVE | CVAR_LATCH, VNDF_ALPHA_FLOOR,  0, 1);
+  rt_specular_d_bias   = CVar_Register_Float ("rt_specular_d_bias",   "Min roughness² for GGX D term",          CVAR_ARCHIVE | CVAR_LATCH, SPECULAR_D_BIAS,   0, 1);
+  rt_refl_clamp_lo     = CVar_Register_Float ("rt_refl_clamp_lo",     "Reflection luminance clamp (budget=0)",  CVAR_ARCHIVE | CVAR_LATCH, REFL_CLAMP_LO,     0, 100);
+  rt_refl_clamp_hi     = CVar_Register_Float ("rt_refl_clamp_hi",     "Reflection luminance clamp (budget=1)",  CVAR_ARCHIVE | CVAR_LATCH, REFL_CLAMP_HI,     0, 100);
+  rt_refl_gate_lo      = CVar_Register_Float ("rt_refl_gate_lo",      "Max roughness for reflection (b=0)",     CVAR_ARCHIVE | CVAR_LATCH, REFL_GATE_LO,      0, 1);
+  rt_refl_gate_hi      = CVar_Register_Float ("rt_refl_gate_hi",      "Max roughness for reflection (b=1)",     CVAR_ARCHIVE | CVAR_LATCH, REFL_GATE_HI,      0, 1);
+  rt_refl_thresh_lo    = CVar_Register_Float ("rt_refl_thresh_lo",    "Fresnel skip threshold (budget=0)",      CVAR_ARCHIVE | CVAR_LATCH, REFL_THRESH_LO,    0, 1);
+  rt_refl_thresh_hi    = CVar_Register_Float ("rt_refl_thresh_hi",    "Fresnel skip threshold (budget=1)",      CVAR_ARCHIVE | CVAR_LATCH, REFL_THRESH_HI,    0, 1);
+  rt_refl_damping      = CVar_Register_Float ("rt_refl_damping",      "Budget-proportional reflection damping", CVAR_ARCHIVE | CVAR_LATCH, REFL_DAMPING,      0, 10);
+  rt_refl_soft_edge    = CVar_Register_Float ("rt_refl_soft_edge",    "Threshold transition sharpness",         CVAR_ARCHIVE | CVAR_LATCH, REFL_SOFT_EDGE,    0, 100);
+  rt_refl_trace_lo     = CVar_Register_Float ("rt_refl_trace_lo",     "Reflection trace max dist (budget=0)",   CVAR_ARCHIVE | CVAR_LATCH, REFL_TRACE_LO,     0, 100000);
+  rt_refl_trace_hi     = CVar_Register_Float ("rt_refl_trace_hi",     "Reflection trace max dist (budget=1)",   CVAR_ARCHIVE | CVAR_LATCH, REFL_TRACE_HI,     0, 100000);
+  rt_shadow_dist_lo    = CVar_Register_Float ("rt_shadow_dist_lo",    "Shadow ray max dist (budget=0)",         CVAR_ARCHIVE | CVAR_LATCH, SHADOW_DIST_LO,    0, 100000);
+  rt_shadow_dist_hi    = CVar_Register_Float ("rt_shadow_dist_hi",    "Shadow ray max dist (budget=1)",         CVAR_ARCHIVE | CVAR_LATCH, SHADOW_DIST_HI,    0, 100000);
+  rt_denoise_depth_lo  = CVar_Register_Float ("rt_denoise_depth_lo",  "Denoiser depth sensitivity (still)",     CVAR_ARCHIVE | CVAR_LATCH, DENOISE_DEPTH_LO,  0, 10000);
+  rt_denoise_depth_hi  = CVar_Register_Float ("rt_denoise_depth_hi",  "Denoiser depth sensitivity (motion)",    CVAR_ARCHIVE | CVAR_LATCH, DENOISE_DEPTH_HI,  0, 10000);
+  rt_denoise_lum_lo    = CVar_Register_Float ("rt_denoise_lum_lo",    "Denoiser lum sensitivity (still)",       CVAR_ARCHIVE | CVAR_LATCH, DENOISE_LUM_LO,    0, 10000);
+  rt_denoise_lum_hi    = CVar_Register_Float ("rt_denoise_lum_hi",    "Denoiser lum sensitivity (motion)",      CVAR_ARCHIVE | CVAR_LATCH, DENOISE_LUM_HI,    0, 10000);
+  rt_firefly_headroom  = CVar_Register_Float ("rt_firefly_headroom",  "Firefly clamp headroom multiplier",      CVAR_ARCHIVE | CVAR_LATCH, FIREFLY_HEADROOM,  1, 10);
+  rt_firefly_bias      = CVar_Register_Float ("rt_firefly_bias",      "Firefly clamp additive floor",           CVAR_ARCHIVE | CVAR_LATCH, FIREFLY_BIAS,      0, 1);
+  rt_cas_amount        = CVar_Register_Float ("rt_cas_amount",        "CAS sharpening strength",                CVAR_ARCHIVE | CVAR_LATCH, CAS_AMOUNT,        0, 2);
+  rt_cas_mix           = CVar_Register_Float ("rt_cas_mix",           "CAS edge enhancement multiplier",        CVAR_ARCHIVE | CVAR_LATCH, CAS_MIX,           0, 10);
+  rt_taa_static_floor  = CVar_Register_Float ("rt_taa_static_floor",  "TAA min blend when still",               CVAR_ARCHIVE | CVAR_LATCH, TAA_STATIC_FLOOR,  0, 1);
+  rt_taa_sigma         = CVar_Register_Float ("rt_taa_sigma",         "TAA variance clamp sigma",               CVAR_ARCHIVE | CVAR_LATCH, TAA_SIGMA,         0, 1);
+  rt_taa_move_lo       = CVar_Register_Float ("rt_taa_move_lo",       "TAA blend at low motion",                CVAR_ARCHIVE | CVAR_LATCH, TAA_MOVE_LO,       0, 1);
+  rt_taa_move_hi       = CVar_Register_Float ("rt_taa_move_hi",       "TAA blend at high motion",               CVAR_ARCHIVE | CVAR_LATCH, TAA_MOVE_HI,       0, 1);
+
+  printf ("[cvar] registered %d cvars\n", CVar_Count);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════
+//   Thread Timing — Precise sleep using performance counter + spin-wait
+// ═══════════════════════════════════════════════════════════════════════════════════════════
+//
+// Each thread calls Thread_Sleep_Until to avoid CPU hogging while maintaining timing precision.
+// Strategy: SDL_Delay for most of the wait (millisecond granularity), then spin-wait the
+// remaining sub-millisecond tail for accurate timing.
+
+void Thread_Sleep_Until (uint64_t Target_Ticks) {
+  uint64_t Freq = SDL_GetPerformanceFrequency ();
+  uint64_t Now  = SDL_GetPerformanceCounter ();
+  if (Now >= Target_Ticks) return;
+  uint64_t Remaining_Us = (Target_Ticks - Now) * 1000000 / Freq;
+  // Sleep coarsely for anything above 1.5ms (SDL_Delay has ~1ms granularity on most platforms)
+  if (Remaining_Us > 1500) SDL_Delay ((uint32_t)((Remaining_Us - 500) / 1000));
+  // Spin-wait the remaining ~500us for sub-millisecond precision
+  while (SDL_GetPerformanceCounter () < Target_Ticks) {}
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════
+//   Input Ring Buffer — SPSC (Single-Producer Single-Consumer)
+// ═══════════════════════════════════════════════════════════════════════════════════════════
+//
+// Main thread (producer) writes input snapshots; game thread (consumer) reads them.
+// Lock-free: Write and Read indices are atomic.  Ring size is a power of 2 for fast masking.
+
+Input_Ring  Input_Ring_Buffer;
+
+void Input_Ring_Push (Input_Ring *Ring, const Input *In) {
+  uint W = atomic_load_explicit (&Ring->Write, memory_order_relaxed);
+  Ring->Slots[W & (INPUT_RING_SIZE - 1)] = *In;
+  atomic_store_explicit (&Ring->Write, W + 1, memory_order_release);
+}
+
+int Input_Ring_Pop (Input_Ring *Ring, Input *Out) {
+  uint R = atomic_load_explicit (&Ring->Read,  memory_order_relaxed);
+  uint W = atomic_load_explicit (&Ring->Write, memory_order_acquire);
+  if (R == W) return 0; // Empty
+  *Out = Ring->Slots[R & (INPUT_RING_SIZE - 1)];
+  atomic_store_explicit (&Ring->Read, R + 1, memory_order_release);
+  return 1;
+}
+
+// Drain all pending inputs — returns the most recent one (skips stale frames)
+int Input_Ring_Drain (Input_Ring *Ring, Input *Out) {
+  int Got = 0;
+  Input Tmp;
+  while (Input_Ring_Pop (Ring, &Tmp)) { *Out = Tmp; Got = 1; }
+  return Got;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════
+//   Game Snapshot Double-Buffer — Game produces, Render consumes
+// ═══════════════════════════════════════════════════════════════════════════════════════════
+
+Snapshot_Double_Buffer Snapshot_Buffer;
+
+void Snapshot_Init (Snapshot_Double_Buffer *SB) {
+  memset (SB, 0, sizeof *SB);
+  atomic_store (&SB->Read_Index, 0);
+  SB->Swap_Lock = SDL_CreateMutex ();
+}
+
+void Snapshot_Destroy (Snapshot_Double_Buffer *SB) {
+  if (SB->Swap_Lock) SDL_DestroyMutex (SB->Swap_Lock);
+  SB->Swap_Lock = NULL;
+}
+
+// Game thread: write snapshot to back buffer, then atomically swap
+void Snapshot_Publish (Snapshot_Double_Buffer *SB, const Game_Snapshot *Snap) {
+  int Write_Index = 1 - atomic_load (&SB->Read_Index);
+  SB->Buffers[Write_Index] = *Snap;
+  // Atomic swap: render thread will now read from the just-written buffer
+  SDL_LockMutex (SB->Swap_Lock);
+  atomic_store (&SB->Read_Index, Write_Index);
+  SDL_UnlockMutex (SB->Swap_Lock);
+}
+
+// Render thread: read the latest published snapshot
+Game_Snapshot Snapshot_Read (Snapshot_Double_Buffer *SB) {
+  int Idx = atomic_load (&SB->Read_Index);
+  return SB->Buffers[Idx];
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════
+//   Game Thread Entry — 60 Hz fixed timestep game logic (Ada Task pattern)
+// ═══════════════════════════════════════════════════════════════════════════════════════════
+//
+// The game thread runs physics, entity animation, and weapon updates at a fixed 60 Hz rate.
+// It reads input from the Input_Ring_Buffer, runs the game simulation, and publishes a
+// Game_Snapshot to the Snapshot_Double_Buffer for the render thread to consume.
+//
+// Currently a stub — the existing single-threaded game loop in main() contains all the logic.
+// Thread extraction will move game logic here incrementally:
+//   1. Input consumption from ring buffer
+//   2. Physics_Dispatch + readback
+//   3. Entity animation + BLAS rebuilds
+//   4. TLAS rebuild
+//   5. Snapshot publication
+//
+// The pattern mirrors Ada's task body:
+//   task body Game_Task is
+//     begin
+//       loop
+//         exit when Quit_Requested;
+//         -- consume input, run physics, publish snapshot
+//         Thread_Sleep_Until (Next_Tick);
+//       end loop;
+//     end Game_Task;
+
+int Game_Thread_Entry (void *Data) {
+  (void)Data;
+  uint64_t Freq           = SDL_GetPerformanceFrequency ();
+  uint64_t Tick_Duration  = Freq / 60; // 60 Hz = ~16.67ms per tick
+  uint64_t Next_Tick      = SDL_GetPerformanceCounter () + Tick_Duration;
+
+  printf ("[game] thread started (60 Hz fixed timestep)\n");
+
+  while (not atomic_load (&Quit_Requested)) {
+    // Read latest input (drains stale frames, keeps only most recent)
+    Input In = {0};
+    Input_Ring_Drain (&Input_Ring_Buffer, &In);
+
+    // ── Game logic would go here ──
+    // Physics_Dispatch, entity animation, TLAS rebuild, snapshot publish
+    // For now this is a no-op; game logic remains in main() until incremental extraction.
+
+    // Sleep until next 60 Hz tick
+    Thread_Sleep_Until (Next_Tick);
+    Next_Tick += Tick_Duration;
+
+    // Catch up if we fell behind (skip ticks rather than accumulating debt)
+    uint64_t Now = SDL_GetPerformanceCounter ();
+    if (Next_Tick < Now) Next_Tick = Now + Tick_Duration;
+  }
+
+  printf ("[game] thread stopped\n");
+  return 0;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════
+//   Render Thread Entry — Unlocked framerate, GPU-bound (Ada Task pattern)
+// ═══════════════════════════════════════════════════════════════════════════════════════════
+//
+// The render thread reads the latest Game_Snapshot and submits Vulkan commands.  It is paced
+// by vkWaitForFences (GPU-bound) or by a CVar framerate cap.
+//
+// Currently a stub — rendering remains in main() until incremental extraction.
+
+int Render_Thread_Entry (void *Data) {
+  (void)Data;
+
+  printf ("[render] thread started (GPU-paced)\n");
+
+  while (not atomic_load (&Quit_Requested)) {
+    // Read the latest game snapshot
+    Game_Snapshot Snap = Snapshot_Read (&Snapshot_Buffer);
+
+    // ── Render logic would go here ──
+    // Camera upload, TLAS rebuild, command buffer recording, ray tracing, postprocess, present
+    // For now this is a no-op; rendering remains in main() until incremental extraction.
+
+    (void)Snap;
+    SDL_Delay (1); // Prevent busy-wait in stub mode
+  }
+
+  printf ("[render] thread stopped\n");
+  return 0;
+}
 
 // ═══════════════════════════════════════════════════════════════
 //   GPU Heap — TLSF (Two-Level Segregated Fit) Sub-Allocator
@@ -13730,13 +14604,14 @@ Input Poll_Input () {
       // Handle application quit
       case SDL_QUIT:
         Quit = 1;
+        atomic_store (&Quit_Requested, 1);
         break;
 
       // Handle key presses (ESC, F11)
       case SDL_KEYDOWN:
         if (Event.key.repeat) break; // Ignore key repeat for mode toggles
         if (Event.key.keysym.sym == SDLK_ESCAPE) {
-          if (In_Menu) Quit = 1;   // ESC in menu = quit
+          if (In_Menu) { Quit = 1; atomic_store (&Quit_Requested, 1); }  // ESC in menu = quit
           else Enter_Menu_Mode (); // ESC in game = open menu
         }
         if (Event.key.keysym.sym == SDLK_F11)
@@ -13766,6 +14641,15 @@ Input Poll_Input () {
           Input_Data.Delta_X += Event.motion.xrel;
           Input_Data.Delta_Y += Event.motion.yrel;
         }
+        break;
+
+      // Handle game controller events (gamepad hot-plug, buttons, axes)
+      case SDL_CONTROLLERDEVICEADDED:
+      case SDL_CONTROLLERDEVICEREMOVED:
+      case SDL_CONTROLLERAXISMOTION:
+      case SDL_CONTROLLERBUTTONDOWN:
+      case SDL_CONTROLLERBUTTONUP:
+        Gamepad_Handle_Event (&Event);
         break;
 
       // Handle window focus, minimize, and resize events
@@ -13810,6 +14694,24 @@ Input Poll_Input () {
     Input_Data.Right   = Keyboard[SDL_SCANCODE_D]     or Keyboard[SDL_SCANCODE_RIGHT];
     Input_Data.Jump    = Keyboard[SDL_SCANCODE_SPACE];
     Input_Data.Crouch  = Keyboard[SDL_SCANCODE_LCTRL] or Keyboard[SDL_SCANCODE_C];
+
+    // Merge gamepad input from first connected controller (player 1)
+    if (Input_State.Gamepad_Count > 0) {
+      Gamepad_State *GP = &Input_State.Gamepads[0];
+      // Left stick → movement (combine with keyboard via OR for digital, add for analog)
+      if (GP->Stick_Left_Y < -0.3f) Input_Data.Forward = 1;
+      if (GP->Stick_Left_Y >  0.3f) Input_Data.Back    = 1;
+      if (GP->Stick_Left_X < -0.3f) Input_Data.Left    = 1;
+      if (GP->Stick_Left_X >  0.3f) Input_Data.Right   = 1;
+      // Right stick → camera look (add to mouse delta, scaled by sensitivity)
+      float GP_Sens = CVar_Get_Float (in_sensitivity) * 10.0f;
+      Input_Data.Delta_X += GP->Stick_Right_X * GP_Sens;
+      Input_Data.Delta_Y += GP->Stick_Right_Y * GP_Sens;
+      // Buttons
+      if (GP->Button_A)              Input_Data.Jump   = 1;
+      if (GP->Button_B)              Input_Data.Crouch = 1;
+      if (GP->Trigger_Right > GAMEPAD_TRIGGER_THRESH) Input_Data.Fire = 1;
+    }
   }
 
   // Return result
