@@ -193,9 +193,9 @@ const World_Settings WORLD_PRESETS[WORLD_COUNT] = {
 // Source engine viewmodel settings (per CalcViewModelView in Source SDK)
 #define SOURCE_VIEWMODEL_FOV     54.f   // Source viewmodel_fov default (ConVar: 54°)
 #define SOURCE_VIEWMODEL_SCALE   1.20f  // World-space scale factor (tuned for RT visibility without depth hack)
-#define SOURCE_VIEWMODEL_FWD     13.f   // Forward offset from eye in engine units (push barrel into view)
-#define SOURCE_VIEWMODEL_RIGHT   1.5f   // Right offset from eye (moderate — not too far)
-#define SOURCE_VIEWMODEL_UP      0.0f   // Up offset from eye (hands visible)
+#define SOURCE_VIEWMODEL_FWD     13.f   // Forward offset from eye (push barrel into view)
+#define SOURCE_VIEWMODEL_RIGHT   1.5f   // Right offset from eye
+#define SOURCE_VIEWMODEL_UP      0.0f   // Up offset from eye
 #define SOURCE_VIEWMODEL_FOV_RATIO (SOURCE_VIEWMODEL_FOV / 90.f) // Viewmodel-to-world FOV correction
 
 // HL2-style viewmodel CVars — individually tunable per ConVar, with presets as commands
@@ -7855,7 +7855,40 @@ Articulated_Figure Source_Weapon_Model_Load (const char *Path) {
     free (VVD_Data);
   }
 
-  // Compute skeletal skinning matrices from the idle animation (sequence 0, frame 0).
+  // Find the idle animation by scanning sequences for the best idle candidate.
+  // Source MDL sequences (mstudioseqdesc_t, 212 bytes each) contain:
+  //   offset 0:  baseptr (int)
+  //   offset 4:  labelindex (int) — relative offset to sequence name
+  //   offset 8:  activitynameindex (int)
+  //   offset 12: flags (int)
+  //   offset 16: activity (int)  — ACT_VM_IDLE = 185
+  //   offset 20: actweight (int)
+  //   offset 24: numevents (int), offset 28: eventindex (int)
+  //   offset 32: bbmin (Vector, 12B), offset 44: bbmax (Vector, 12B)
+  //   offset 56: numblends (int)
+  //   offset 60: animindexindex (int) — relative offset to animation index array
+  // The animation index for a single-blend sequence: *(int*)(seqdesc + seqdesc->animindexindex)
+  int Idle_Anim_Index = 0; // Default to animation 0
+  if (Header->Sequence_Count > 0) {
+    printf ("[weapon] sequences: %d (searching for idle)\n", Header->Sequence_Count);
+    for (int Seq = 0; Seq < Header->Sequence_Count and Seq < 64; Seq++) {
+      const uint8_t *Seq_Data = File_Data + Header->Sequence_Offset + Seq * 212;
+      if (Seq_Data + 212 > File_Data + File_Size) break;
+      int Label_Offset = *(const int*)(Seq_Data + 4);
+      const char *Seq_Name = (const char*)(Seq_Data + Label_Offset);
+      int Activity = *(const int*)(Seq_Data + 16);
+      int Anim_Idx_Offset = *(const int*)(Seq_Data + 60);
+      int Anim_Idx = *(const int*)(Seq_Data + Anim_Idx_Offset);
+      printf ("[weapon]   seq[%d]: '%s' activity=%d anim=%d\n", Seq, Seq_Name, Activity, Anim_Idx);
+      // ACT_VM_IDLE = 185 in Source SDK; prefer the first "idle" sequence
+      if (Activity == 185 or (strstr(Seq_Name, "idle") and not strstr(Seq_Name, "empty") and Idle_Anim_Index == 0)) {
+        Idle_Anim_Index = Anim_Idx;
+        printf ("[weapon]   -> using seq[%d] '%s' (anim %d) as idle\n", Seq, Seq_Name, Anim_Idx);
+      }
+    }
+  }
+
+  // Compute skeletal skinning matrices from the idle animation.
   // This bakes the natural weapon-holding pose into the vertex positions at load time.
   float Skin_Matrices[128][3][4];
   int   Has_Skinning = 0;
@@ -7878,9 +7911,17 @@ Articulated_Figure Source_Weapon_Model_Load (const char *Path) {
       Local[Bone_Index][2][0] = XZ-WY;     Local[Bone_Index][2][1] = YZ+WX;     Local[Bone_Index][2][2] = 1-(XX+YY); Local[Bone_Index][2][3] = Bone->Position.z;
     }
 
-    // Walk the animation 0 data stream and override bind-pose transforms with frame 0 values
-    const uint8_t *Anim_Desc           = File_Data + Header->Animation_Offset;
-    int            Animation_Index_Offset = *(const int*)(Anim_Desc + 56); // animindex field at byte 56 of animdesc_t
+    // Walk the idle animation data stream and override bind-pose transforms with frame 0 values.
+    // Source animation data: mstudioanimdesc_t (100 bytes), with animindex at offset 56.
+    // Each per-bone entry (mstudioanim_t): bone[1], flags[1], nextoffset[2], then variable data.
+    // Flags: RAWPOS=0x01 (Vector48, 6B), RAWROT=0x02 (Quaternion48, 6B), ANIMPOS=0x04 (valueptr, 6B),
+    //        ANIMROT=0x08 (valueptr, 6B), RAWROT2=0x20 (Quaternion64, 8B).
+    if (Idle_Anim_Index >= Header->Animation_Count) Idle_Anim_Index = 0;
+    const uint8_t *Anim_Desc           = File_Data + Header->Animation_Offset + Idle_Anim_Index * 100;
+    int            Animation_Index_Offset = *(const int*)(Anim_Desc + 56); // animindex at byte 56
+    int            Anim_Num_Frames     = *(const int*)(Anim_Desc + 16);    // numframes at byte 16
+    printf ("[weapon] using animation %d, animindex offset=%d, frames=%d\n",
+            Idle_Anim_Index, Animation_Index_Offset, Anim_Num_Frames);
     const uint8_t *Animation_Cursor    = Anim_Desc + Animation_Index_Offset;
     for (;;) {
       if (Animation_Cursor < File_Data or Animation_Cursor >= File_Data + File_Size - 4) break;
@@ -7890,69 +7931,133 @@ Articulated_Figure Source_Weapon_Model_Load (const char *Path) {
       if (Anim_Bone_Index < Total_Bone_Count) {
         const MDL_Bone *Bone = (const MDL_Bone*)(File_Data + Header->Bone_Offset
                                                  + Anim_Bone_Index * sizeof (MDL_Bone));
-        int Data_Offset = 4;
-        if (Anim_Flags & 0x02) Data_Offset += 6; // RAWROT
-        if (Anim_Flags & 0x20) Data_Offset += 8; // RAWROT2
-        if (Anim_Flags & 0x01) Data_Offset += 6; // RAWPOS
-        float Rotation[3] = {Bone->Rot.x,      Bone->Rot.y,      Bone->Rot.z     };
-        float Position[3] = {Bone->Position.x,  Bone->Position.y, Bone->Position.z};
+        int Data_Offset = 4;  // Skip the 4-byte mstudioanim_t header
 
-        // ANIMROT: decode compressed per-axis rotation deltas and apply them
-        if (Anim_Flags & 0x08) {
+        // Start with bind-pose defaults
+        float Anim_Quat_X = Bone->Quat[0], Anim_Quat_Y = Bone->Quat[1];
+        float Anim_Quat_Z = Bone->Quat[2], Anim_Quat_W = Bone->Quat[3];
+        float Position[3] = {Bone->Position.x, Bone->Position.y, Bone->Position.z};
+        int   Got_Rotation = 0;
+
+        // RAWROT (0x02): Quaternion48 — Source Engine compressed_vector.h
+        // Layout: x:16 unsigned, y:16 unsigned, z:15 unsigned, wneg:1
+        // Decode: x = (raw_x - 32768) / 32768.0, y = (raw_y - 32768) / 32768.0
+        //         z = (raw_z - 16384) / 16384.0, w = sqrt(1 - x² - y² - z²) * (wneg ? -1 : 1)
+        if (Anim_Flags & 0x02) {
+          const uint16_t *Q48 = (const uint16_t*)(Animation_Cursor + Data_Offset);
+          Anim_Quat_X = ((int)Q48[0] - 32768) * (1.0f / 32768.0f);
+          Anim_Quat_Y = ((int)Q48[1] - 32768) * (1.0f / 32768.0f);
+          Anim_Quat_Z = ((int)(Q48[2] & 0x7FFF) - 16384) * (1.0f / 16384.0f);
+          int W_Neg   = (Q48[2] >> 15) & 1;
+          float W_Sq  = 1.0f - Anim_Quat_X*Anim_Quat_X - Anim_Quat_Y*Anim_Quat_Y - Anim_Quat_Z*Anim_Quat_Z;
+          Anim_Quat_W = W_Sq > 0 ? sqrtf(W_Sq) : 0;
+          if (W_Neg) Anim_Quat_W = -Anim_Quat_W;
+          Got_Rotation = 1;
+          Data_Offset += 6;
+        }
+
+        // RAWROT2 (0x20): Quaternion64 — Source Engine compressed_vector.h
+        // Layout: x:21, y:21, z:21, wneg:1 (64 bits total, little-endian)
+        // Decode: comp = (raw - 1048576) / 1048576.5, w = sqrt(1 - x² - y² - z²) * sign
+        if (Anim_Flags & 0x20) {
+          const uint8_t *Q64 = Animation_Cursor + Data_Offset;
+          uint64_t Packed = 0;
+          memcpy(&Packed, Q64, 8);
+          Anim_Quat_X = ((int)(Packed & 0x1FFFFF) - 1048576) * (1.0f / 1048576.5f);
+          Anim_Quat_Y = ((int)((Packed >> 21) & 0x1FFFFF) - 1048576) * (1.0f / 1048576.5f);
+          Anim_Quat_Z = ((int)((Packed >> 42) & 0x1FFFFF) - 1048576) * (1.0f / 1048576.5f);
+          int W_Neg   = (Packed >> 63) & 1;
+          float W_Sq  = 1.0f - Anim_Quat_X*Anim_Quat_X - Anim_Quat_Y*Anim_Quat_Y - Anim_Quat_Z*Anim_Quat_Z;
+          Anim_Quat_W = W_Sq > 0 ? sqrtf(W_Sq) : 0;
+          if (W_Neg) Anim_Quat_W = -Anim_Quat_W;
+          Got_Rotation = 1;
+          Data_Offset += 8;
+        }
+
+        // RAWPOS (0x01): Vector48 — 3x float16 (the actual position for this bone)
+        if (Anim_Flags & 0x01) {
+          const uint16_t *V48 = (const uint16_t*)(Animation_Cursor + Data_Offset);
+          for (int Axis = 0; Axis < 3; Axis++) {
+            uint16_t H     = V48[Axis];
+            int      Sign  = (H >> 15) & 1;
+            int      Exp   = (H >> 10) & 0x1F;
+            int      Mant  = H & 0x3FF;
+            float    Value;
+            if (Exp == 0)       Value = (Mant / 1024.0f) * (1.0f / 16384.0f); // denorm
+            else if (Exp == 31) Value = Mant ? 0.0f : (Sign ? -1e30f : 1e30f); // inf/nan
+            else                Value = (1.0f + Mant / 1024.0f) * powf(2.0f, Exp - 15.0f);
+            if (Sign) Value = -Value;
+            Position[Axis] = Value;
+          }
+          Data_Offset += 6;
+        }
+
+        // ANIMROT (0x08): mstudioanim_valueptr_t — per-axis compressed rotation animation
+        if ((Anim_Flags & 0x08) and not Got_Rotation) {
           const int16_t *Rotation_Pointer = (const int16_t*)(Animation_Cursor + Data_Offset);
-          float Rotation_Scale[3] = {Bone->Rot_Scale.x,      Bone->Rot_Scale.y,      Bone->Rot_Scale.z     };
-          float Rotation_Base [3] = {Bone->Rot.x,            Bone->Rot.y,            Bone->Rot.z           };
+          float Rot[3] = {Bone->Rot.x, Bone->Rot.y, Bone->Rot.z};
+          float Rotation_Scale[3] = {Bone->Rot_Scale.x, Bone->Rot_Scale.y, Bone->Rot_Scale.z};
           for (int Axis_Index = 0; Axis_Index < 3; Axis_Index++)
             if (Rotation_Pointer[Axis_Index]) {
-              const uint8_t *Value_Pointer = (const uint8_t*)&Rotation_Pointer[Axis_Index]
-                                             + Rotation_Pointer[Axis_Index];
-              Rotation[Axis_Index] = Rotation_Base[Axis_Index]
-                                     + *(const int16_t*)(Value_Pointer + 2) * Rotation_Scale[Axis_Index];
+              const uint8_t *VP = (const uint8_t*)&Rotation_Pointer[Axis_Index] + Rotation_Pointer[Axis_Index];
+              Rot[Axis_Index] = Rot[Axis_Index] + *(const int16_t*)(VP + 2) * Rotation_Scale[Axis_Index];
             }
+          // Convert Euler angles to quaternion
+          float CX = cosf(Rot[0]*0.5f), SX = sinf(Rot[0]*0.5f);
+          float CY = cosf(Rot[1]*0.5f), SY = sinf(Rot[1]*0.5f);
+          float CZ = cosf(Rot[2]*0.5f), SZ = sinf(Rot[2]*0.5f);
+          Anim_Quat_W = CX*CY*CZ + SX*SY*SZ;
+          Anim_Quat_X = SX*CY*CZ - CX*SY*SZ;
+          Anim_Quat_Y = CX*SY*CZ + SX*CY*SZ;
+          Anim_Quat_Z = CX*CY*SZ - SX*SY*CZ;
+          Got_Rotation = 1;
           Data_Offset += 6;
+        } else if (Anim_Flags & 0x08) {
+          Data_Offset += 6; // Skip ANIMROT data if we already got rotation from RAWROT/RAWROT2
         }
 
-        // ANIMPOS: decode compressed per-axis position deltas and apply them
+        // ANIMPOS (0x04): mstudioanim_valueptr_t — per-axis compressed position animation
         if (Anim_Flags & 0x04) {
-          const int16_t *Position_Pointer = (const int16_t*)(Animation_Cursor + Data_Offset);
-          float Position_Scale[3] = {Bone->Position_Scale.x, Bone->Position_Scale.y, Bone->Position_Scale.z};
-          float Position_Base [3] = {Bone->Position.x,       Bone->Position.y,       Bone->Position.z      };
-          for (int Axis_Index = 0; Axis_Index < 3; Axis_Index++)
-            if (Position_Pointer[Axis_Index]) {
-              const uint8_t *Value_Pointer = (const uint8_t*)&Position_Pointer[Axis_Index]
-                                             + Position_Pointer[Axis_Index];
-              Position[Axis_Index] = Position_Base[Axis_Index]
-                                     + *(const int16_t*)(Value_Pointer + 2) * Position_Scale[Axis_Index];
-            }
+          // Only apply if no RAWPOS was already decoded
+          if (not (Anim_Flags & 0x01)) {
+            const int16_t *Position_Pointer = (const int16_t*)(Animation_Cursor + Data_Offset);
+            float Pos_Scale[3] = {Bone->Position_Scale.x, Bone->Position_Scale.y, Bone->Position_Scale.z};
+            for (int Axis_Index = 0; Axis_Index < 3; Axis_Index++)
+              if (Position_Pointer[Axis_Index]) {
+                const uint8_t *VP = (const uint8_t*)&Position_Pointer[Axis_Index] + Position_Pointer[Axis_Index];
+                Position[Axis_Index] = Position[Axis_Index] + *(const int16_t*)(VP + 2) * Pos_Scale[Axis_Index];
+              }
+          }
           Data_Offset += 6;
         }
 
-        // Convert the resulting Euler angles (XYZ order) to a normalised unit quaternion
-        float Cos_X = cosf (Rotation[0] * 0.5f), Sin_X = sinf (Rotation[0] * 0.5f);
-        float Cos_Y = cosf (Rotation[1] * 0.5f), Sin_Y = sinf (Rotation[1] * 0.5f);
-        float Cos_Z = cosf (Rotation[2] * 0.5f), Sin_Z = sinf (Rotation[2] * 0.5f);
-        float Anim_Quat_W = Cos_X*Cos_Y*Cos_Z + Sin_X*Sin_Y*Sin_Z;
-        float Anim_Quat_X = Sin_X*Cos_Y*Cos_Z - Cos_X*Sin_Y*Sin_Z;
-        float Anim_Quat_Y = Cos_X*Sin_Y*Cos_Z + Sin_X*Cos_Y*Sin_Z;
-        float Anim_Quat_Z = Cos_X*Cos_Y*Sin_Z - Sin_X*Sin_Y*Cos_Z;
-        float Quat_Length = sqrtf (Anim_Quat_X*Anim_Quat_X + Anim_Quat_Y*Anim_Quat_Y
-                                   + Anim_Quat_Z*Anim_Quat_Z + Anim_Quat_W*Anim_Quat_W);
-        if (Quat_Length > 1e-6f) {
-          Anim_Quat_X /= Quat_Length; Anim_Quat_Y /= Quat_Length;
-          Anim_Quat_Z /= Quat_Length; Anim_Quat_W /= Quat_Length;
-        }
-        float A_Two_X = Anim_Quat_X + Anim_Quat_X;
-        float A_Two_Y = Anim_Quat_Y + Anim_Quat_Y;
-        float A_Two_Z = Anim_Quat_Z + Anim_Quat_Z;
-        float AXX = Anim_Quat_X*A_Two_X, AXY = Anim_Quat_X*A_Two_Y, AXZ = Anim_Quat_X*A_Two_Z;
-        float AYY = Anim_Quat_Y*A_Two_Y, AYZ = Anim_Quat_Y*A_Two_Z, AZZ = Anim_Quat_Z*A_Two_Z;
-        float AWX = Anim_Quat_W*A_Two_X, AWY = Anim_Quat_W*A_Two_Y, AWZ = Anim_Quat_W*A_Two_Z;
-        Local[Anim_Bone_Index][0][0] = 1-(AYY+AZZ); Local[Anim_Bone_Index][0][1] = AXY-AWZ;      Local[Anim_Bone_Index][0][2] = AXZ+AWY;      Local[Anim_Bone_Index][0][3] = Position[0];
-        Local[Anim_Bone_Index][1][0] = AXY+AWZ;     Local[Anim_Bone_Index][1][1] = 1-(AXX+AZZ);  Local[Anim_Bone_Index][1][2] = AYZ-AWX;      Local[Anim_Bone_Index][1][3] = Position[1];
-        Local[Anim_Bone_Index][2][0] = AXZ-AWY;     Local[Anim_Bone_Index][2][1] = AYZ+AWX;       Local[Anim_Bone_Index][2][2] = 1-(AXX+AYY); Local[Anim_Bone_Index][2][3] = Position[2];
+        // If we didn't get a rotation from any animation data, use the bind-pose quaternion
+        // which was already initialized from Bone->Quat above.
+
+        // Normalise the quaternion
+        float QL = sqrtf(Anim_Quat_X*Anim_Quat_X + Anim_Quat_Y*Anim_Quat_Y
+                         + Anim_Quat_Z*Anim_Quat_Z + Anim_Quat_W*Anim_Quat_W);
+        if (QL > 1e-6f) { Anim_Quat_X/=QL; Anim_Quat_Y/=QL; Anim_Quat_Z/=QL; Anim_Quat_W/=QL; }
+
+        // Convert quaternion to 3x4 matrix and set local bone transform
+        float TX = Anim_Quat_X+Anim_Quat_X, TY = Anim_Quat_Y+Anim_Quat_Y, TZ = Anim_Quat_Z+Anim_Quat_Z;
+        float AXX=Anim_Quat_X*TX, AXY=Anim_Quat_X*TY, AXZ=Anim_Quat_X*TZ;
+        float AYY=Anim_Quat_Y*TY, AYZ=Anim_Quat_Y*TZ, AZZ=Anim_Quat_Z*TZ;
+        float AWX=Anim_Quat_W*TX, AWY=Anim_Quat_W*TY, AWZ=Anim_Quat_W*TZ;
+        Local[Anim_Bone_Index][0][0] = 1-(AYY+AZZ); Local[Anim_Bone_Index][0][1] = AXY-AWZ;     Local[Anim_Bone_Index][0][2] = AXZ+AWY;     Local[Anim_Bone_Index][0][3] = Position[0];
+        Local[Anim_Bone_Index][1][0] = AXY+AWZ;     Local[Anim_Bone_Index][1][1] = 1-(AXX+AZZ); Local[Anim_Bone_Index][1][2] = AYZ-AWX;     Local[Anim_Bone_Index][1][3] = Position[1];
+        Local[Anim_Bone_Index][2][0] = AXZ-AWY;     Local[Anim_Bone_Index][2][1] = AYZ+AWX;     Local[Anim_Bone_Index][2][2] = 1-(AXX+AYY); Local[Anim_Bone_Index][2][3] = Position[2];
       }
       if (Next_Entry_Offset == 0) break;
       Animation_Cursor += Next_Entry_Offset;
+    }
+
+    // Debug: print bone names and check which were animated
+    for (int B = 0; B < Total_Bone_Count and B < 10; B++) {
+      const MDL_Bone *DB = (const MDL_Bone*)(File_Data + Header->Bone_Offset + B * sizeof(MDL_Bone));
+      const char *BN = (const char*)((const uint8_t*)DB + DB->Name_Offset);
+      printf ("[weapon]   bone[%d]: '%s' parent=%d pos=(%.2f,%.2f,%.2f)\n",
+              B, BN, DB->Parent, Local[B][0][3], Local[B][1][3], Local[B][2][3]);
     }
 
     // Forward pass: World[i] = World[parent] * Local[i]
@@ -8114,10 +8219,11 @@ Articulated_Figure Source_Weapon_Model_Load (const char *Path) {
                     }
                   }
 
-                  // Swizzle to (barrel=-Y, up=+Z, right=+X) for Weapon_Update
+                  // Store in Source-native coordinates (X=forward, Y=left, Z=up)
+                  // Weapon_Update will map these to camera space at render time.
                   Result.Vertices[Result.Vertex_Count] = (Vertex){
-                    .Position   = {-Skinned_Position[1],  Skinned_Position[2],  Skinned_Position[0]},
-                    .Normal     = {-Skinned_Normal  [1],  Skinned_Normal  [2],  Skinned_Normal  [0]},
+                    .Position   = {Skinned_Position[0],  Skinned_Position[1],  Skinned_Position[2]},
+                    .Normal     = {Skinned_Normal  [0],  Skinned_Normal  [1],  Skinned_Normal  [2]},
                     .Texture_UV = {Source_Vertex->Tex_Coord[0], Source_Vertex->Tex_Coord[1]}};
                   Result.Indices[Result.Index_Count++] = Vertex_Base + Corner;
                   Result.Vertex_Count++;
@@ -11263,30 +11369,36 @@ void Weapon_Update (Figure_Instance *Weapon, const Camera *Camera_Data, float De
   static const float Identity_Tag[12] = {0,0,0, 1,0,0, 0,1,0, 0,0,1};
   const float *Tag = Weapon_Tag >= 0 ? Weapon->Figure.Tags[Weapon_Tag].Transforms[Frame_Index] : Identity_Tag;
 
-  // Swizzle each tag axis from Quake 3 Z-up to Y-up: (x,y,z) becomes (x,z,-y)
-  vec3 Axis_0 = (vec3){Tag[3],  Tag[5],  -Tag[4]};
-  vec3 Axis_1 = (vec3){Tag[6],  Tag[8],  -Tag[7]};
-  vec3 Axis_2 = (vec3){Tag[9],  Tag[11], -Tag[10]};
-
-  // Build the Y-up tag rotation matrix columns (forward, up, right)
-  // Axis_1 (Q3 right after swizzle) points to -Z in engine space; using +Axis_1
-  // ensures model -Z (Q3 right) maps through Camera_Basis to camera right.
-  float Tag_Y_Up[9] = {Axis_0.x, Axis_2.x, Axis_1.x,
-                       Axis_0.y, Axis_2.y, Axis_1.y,
-                       Axis_0.z, Axis_2.z, Axis_1.z};
-
+  // Build the rotation matrix that maps model-space axes to world-space camera axes.
   // Camera basis matrix (row-major): columns = forward, up, right
   float Camera_Basis[9] = {Forward.x, Up.x, Right.x,
                            Forward.y, Up.y, Right.y,
                            Forward.z, Up.z, Right.z};
 
-  // Combined rotation = Camera_Basis * Tag_Y_Up
   float Rotation[9];
-  for (int Row = 0; Row < 3; Row++)
-    for (int Column = 0; Column < 3; Column++)
-      Rotation[Row * 3 + Column] = Camera_Basis[Row * 3 + 0] * Tag_Y_Up[0 * 3 + Column]
-                                 + Camera_Basis[Row * 3 + 1] * Tag_Y_Up[1 * 3 + Column]
-                                 + Camera_Basis[Row * 3 + 2] * Tag_Y_Up[2 * 3 + Column];
+  if (Weapon->Figure.Is_Source) {
+    // Source MDL: no tag rotation needed. Camera_Basis columns are (Forward, Up, Right),
+    // and our vertex loop feeds (Src_Fwd, Src_Up, Src_Right) as (X, Y, Z).
+    // So Rotation = Camera_Basis directly (identity tag).
+    memcpy (Rotation, Camera_Basis, sizeof Rotation);
+  } else {
+    // MD3: swizzle each tag axis from Quake 3 Z-up to Y-up: (x,y,z) → (x,z,-y)
+    vec3 Axis_0 = (vec3){Tag[3],  Tag[5],  -Tag[4]};
+    vec3 Axis_1 = (vec3){Tag[6],  Tag[8],  -Tag[7]};
+    vec3 Axis_2 = (vec3){Tag[9],  Tag[11], -Tag[10]};
+
+    // Build the Y-up tag rotation matrix columns (forward, up, right)
+    float Tag_Y_Up[9] = {Axis_0.x, Axis_2.x, Axis_1.x,
+                         Axis_0.y, Axis_2.y, Axis_1.y,
+                         Axis_0.z, Axis_2.z, Axis_1.z};
+
+    // Combined rotation = Camera_Basis * Tag_Y_Up
+    for (int Row = 0; Row < 3; Row++)
+      for (int Column = 0; Column < 3; Column++)
+        Rotation[Row * 3 + Column] = Camera_Basis[Row * 3 + 0] * Tag_Y_Up[0 * 3 + Column]
+                                   + Camera_Basis[Row * 3 + 1] * Tag_Y_Up[1 * 3 + Column]
+                                   + Camera_Basis[Row * 3 + 2] * Tag_Y_Up[2 * 3 + Column];
+  }
 
   // HL2-style viewmodel scale: read from CVar (individually settable, overrides mode default)
   float Model_Scale = CVar_Get_Float (vm_scale);
@@ -11303,41 +11415,54 @@ void Weapon_Update (Figure_Instance *Weapon, const Camera *Camera_Data, float De
   float Mirror = Hand_Sign;
 
   // Transform each vertex from model space to world space.
-  // Rotation columns: col0→camera Forward, col1→camera -Right, col2→camera Up.
-  // Source MDL swizzle: Position[0]=right, [1]=up, [2]=forward — reorder to match Rotation.
-  // MD3 swizzle: Position[0]=right, [1]=up, [2]=-forward — tag_weapon rotation handles mapping.
+  // Source MDL: vertices stored in Source-native coords (X=forward, Y=left, Z=up).
+  //   Map to camera: Source +X → Forward, Source -Y → Right, Source +Z → Up.
+  // MD3: vertices in tag_weapon-relative coords; tag rotation handles the mapping.
   for (uint Index = 0; Index < Weapon->Figure.Vertex_Count; Index++) {
     float Source_X, Source_Y, Source_Z;
+    float Normal_X, Normal_Y, Normal_Z;
     if (Weapon->Figure.Is_Source) {
-      // Source: After MDL loader swizzle (-Y,Z,X): Position[0]=right, [1]=up, [2]=forward
-      // Camera_Basis columns: col0=Forward, col1=Up, col2=Right
-      // Correct mapping: forward→Forward, up→Up, right→Right
-      Source_X = Weapon->Figure.Vertices[Index].Position[2] * Model_Scale * VM_Fov_Scale; // forward → Forward
-      Source_Y = Weapon->Figure.Vertices[Index].Position[1] * Model_Scale;                // up → Up
-      Source_Z = Weapon->Figure.Vertices[Index].Position[0] * Model_Scale * Mirror;       // right → Right
+      // Source viewmodel coordinates after idle-pose bone skinning.
+      // Vertex bounds: X[-20,-3], Y[-13,+9], Z[-16,-1]
+      // Barrel points in -Y, weapon body extends in -X, hands hang in -Z.
+      // For right-hand mode: flip X to put weapon on right side of screen.
+      // Camera mapping: Forward = -Y, Right = -X, Up = +Z
+      float Src_Fwd   = -Weapon->Figure.Vertices[Index].Position[1] * Model_Scale;
+      float Src_Right = -Weapon->Figure.Vertices[Index].Position[0] * Model_Scale;
+      float Src_Up    =  Weapon->Figure.Vertices[Index].Position[2] * Model_Scale;
+
+      // Apply handedness mirror on the right axis
+      Src_Right *= Mirror;
+
+      // Camera basis: col0=Forward, col1=Up, col2=Right
+      Source_X = Src_Fwd;
+      Source_Y = Src_Up;
+      Source_Z = Src_Right;
+
+      float N_Fwd   = -Weapon->Figure.Vertices[Index].Normal[1];
+      float N_Right = -Weapon->Figure.Vertices[Index].Normal[0];
+      float N_Up    =  Weapon->Figure.Vertices[Index].Normal[2];
+      N_Right *= Mirror;
+      Normal_X = N_Fwd;
+      Normal_Y = N_Up;
+      Normal_Z = N_Right;
     } else {
       // MD3: original mapping (tag_weapon rotation handles the coordinate mapping)
       Source_X = Weapon->Figure.Vertices[Index].Position[0] * Model_Scale * VM_Fov_Scale;
       Source_Y = Weapon->Figure.Vertices[Index].Position[1] * Model_Scale;
       Source_Z = Weapon->Figure.Vertices[Index].Position[2] * Model_Scale * Mirror;
-    }
 
-    // Apply the combined rotation and translate by the camera offset
-    Weapon->Transformed_Vertices[Index].Position[0] = Rotation[0] * Source_X + Rotation[1] * Source_Y + Rotation[2] * Source_Z + Offset.x;
-    Weapon->Transformed_Vertices[Index].Position[1] = Rotation[3] * Source_X + Rotation[4] * Source_Y + Rotation[5] * Source_Z + Offset.y;
-    Weapon->Transformed_Vertices[Index].Position[2] = Rotation[6] * Source_X + Rotation[7] * Source_Y + Rotation[8] * Source_Z + Offset.z;
-
-    // Rotate the vertex normal by the same axis mapping (no translation)
-    float Normal_X, Normal_Y, Normal_Z;
-    if (Weapon->Figure.Is_Source) {
-      Normal_X = Weapon->Figure.Vertices[Index].Normal[2];            // forward → Forward
-      Normal_Y = Weapon->Figure.Vertices[Index].Normal[1];           // up → Up
-      Normal_Z = Weapon->Figure.Vertices[Index].Normal[0] * Mirror;  // right → Right
-    } else {
       Normal_X = Weapon->Figure.Vertices[Index].Normal[0];
       Normal_Y = Weapon->Figure.Vertices[Index].Normal[1];
       Normal_Z = Weapon->Figure.Vertices[Index].Normal[2] * Mirror;
     }
+
+    // Apply the combined rotation (Camera_Basis * Tag_Y_Up) and translate by the camera offset
+    Weapon->Transformed_Vertices[Index].Position[0] = Rotation[0] * Source_X + Rotation[1] * Source_Y + Rotation[2] * Source_Z + Offset.x;
+    Weapon->Transformed_Vertices[Index].Position[1] = Rotation[3] * Source_X + Rotation[4] * Source_Y + Rotation[5] * Source_Z + Offset.y;
+    Weapon->Transformed_Vertices[Index].Position[2] = Rotation[6] * Source_X + Rotation[7] * Source_Y + Rotation[8] * Source_Z + Offset.z;
+
+    // Rotate the vertex normal (no translation)
     Weapon->Transformed_Vertices[Index].Normal[0] = Rotation[0] * Normal_X + Rotation[1] * Normal_Y + Rotation[2] * Normal_Z;
     Weapon->Transformed_Vertices[Index].Normal[1] = Rotation[3] * Normal_X + Rotation[4] * Normal_Y + Rotation[5] * Normal_Z;
     Weapon->Transformed_Vertices[Index].Normal[2] = Rotation[6] * Normal_X + Rotation[7] * Normal_Y + Rotation[8] * Normal_Z;
