@@ -10764,6 +10764,7 @@ void Scene_Load_Textures (const Scene *Scene_Data) {
       Diffuse_W[Index] = W;
       Diffuse_H[Index] = H;
       Textures_Loaded++;
+      if (Textures_Loaded % 10 == 0) printf ("[textures] loaded %u diffuse...\n", Textures_Loaded);
     } else {
       free (Pixels);
 
@@ -11119,13 +11120,62 @@ void Weapon_Load_Textures (Figure_Instance *Weapon) {
 
   // Six map types per weapon texture: diffuse, normal, roughness, metalness, emissive, height
   const char *Weapon_PBR_Suffixes[] = {"", "_n", "_r", "_m", "_e", "_h"};
+
+  // ── Per-material-class PBR fallbacks ──
+  //
+  // The default fallback is moderate roughness + low metalness (painted metal / polymer).
+  // Skin, cloth, and organic surfaces need much higher roughness to avoid the "wet plastic" look.
+  // Metal parts (barrel, clip, suppressor) get lower roughness + higher metalness.
+  //
+  //                              Roughness    Metalness
+  //   Skin/cloth (hands):         235 (0.92)    5 (0.02)   — very rough, diffuse
+  //   Polymer (stock, grips):     210 (0.82)   10 (0.04)   — rough plastic
+  //   Painted metal (receiver):   160 (0.63)   60 (0.24)   — semi-glossy
+  //   Bare metal (barrel, clip):  120 (0.47)  200 (0.78)   — metallic, somewhat rough
+  //   Optic (glass/coated):       100 (0.39)   30 (0.12)   — smooth, non-metallic
+  //
+  // Classify by material name keyword → {roughness_byte, metalness_byte}
+  typedef struct { const char *Keyword; uint8_t Roughness; uint8_t Metalness; } Weapon_PBR_Class;
+  static const Weapon_PBR_Class Weapon_PBR_Table[] = {
+    {"hand",       235,   5},    // skin / fabric gloves
+    {"arm",        235,   5},    // arm skin
+    {"skin",       235,   5},    // generic skin
+    {"cloth",      220,   5},    // cloth / fabric
+    {"sleeve",     220,   5},    // sleeve fabric
+    {"glove",      210,  10},    // tactical gloves
+    {"butt",       210,  10},    // stock / polymer grip
+    {"grip",       210,  10},    // polymer grip
+    {"stock",      210,  10},    // stock
+    {"plastic",    200,  10},    // generic plastic
+    {"polymer",    200,  10},    // generic polymer
+    {"ris",        130,  80},    // rail / optic mount
+    {"optic",      100,  30},    // glass optic
+    {"scope",      100,  30},    // scope glass
+    {"lens",        80,  20},    // lens
+    {"barrel",     120, 200},    // bare metal barrel
+    {"fixor",      120, 200},    // barrel / receiver
+    {"suppressor", 110, 180},    // suppressor (blued metal)
+    {"silencer",   110, 180},    // silencer
+    {"clip",       130, 200},    // magazine (stamped metal)
+    {"mag",        130, 200},    // magazine
+    {"bolt",       100, 220},    // bolt (polished metal)
+    {"trigger",    110, 210},    // trigger
+    {"metal",      120, 200},    // generic metal
+    {"steel",      110, 220},    // polished steel
+    {"iron",       130, 190},    // cast iron
+    {"right",      150,  80},    // right side (mixed - painted receiver)
+    {"left",       150,  80},    // left side (mixed - painted receiver)
+    {NULL, 0, 0}
+  };
+
+  // Generic fallback for unknown weapon materials
   const uint8_t Weapon_PBR_Fallbacks[][4] = {
-    {180, 180, 180, 255},  // Diffuse: grey
-    {128, 128, 255, 255},  // Normal: flat (0,0,1) encoded as (128,128,255)
-    {180, 180, 180, 255},  // Roughness: moderate (0.70) - mix of skin and painted metal
-    { 25,  25,  25, 255},  // Metalness: low (0.10) - mostly non-metallic (hands, polymer)
-    {  0,   0,   0, 255},  // Emissive: none
-    {128, 128, 128, 255}}; // Height: mid-level
+    {180, 180, 180, 255},  // [0] Diffuse: grey
+    {128, 128, 255, 255},  // [1] Normal: flat (0,0,1) encoded as (128,128,255)
+    {200, 200, 200, 255},  // [2] Roughness: fairly rough default (0.78) — avoids shiny-plastic look
+    { 15,  15,  15, 255},  // [3] Metalness: low (0.06) — default non-metallic
+    {  0,   0,   0, 255},  // [4] Emissive: none
+    {128, 128, 128, 255}}; // [5] Height: mid-level
 
   // Use the actual surface count from the weapon model (Source weapons may have many materials)
   uint Weapon_Tex_Count = Weapon->Figure.Surface_Count > 0 ? Weapon->Figure.Surface_Count : WEAPON_TEXTURE_COUNT;
@@ -11253,9 +11303,34 @@ void Weapon_Load_Textures (Figure_Instance *Weapon) {
         free (Pixels);
         if (Map_Type > 0) Weapon_PBR_Loaded++;
       } else {
+        // ── Per-material PBR fallback: classify weapon surface by name keywords ──
+        //
+        // For roughness (Map_Type 2) and metalness (Map_Type 3), override the generic
+        // fallback with material-specific values derived from the surface name.  This
+        // prevents the "wet plastic hands" artefact: skin surfaces get very high roughness
+        // (0.92) and near-zero metalness, while barrel/clip surfaces get low roughness
+        // and high metalness, matching their real-world optical properties.
+        uint8_t Material_Fallback[4];
+        memcpy (Material_Fallback, Weapon_PBR_Fallbacks[Map_Type], 4);
+
+        if ((Map_Type == 2 or Map_Type == 3) and Index < Weapon->Figure.Surface_Count) {
+          const char *Mat_Name = Weapon->Figure.Texture_Names[Index];
+          uint8_t Best_R = Weapon_PBR_Fallbacks[2][0]; // default roughness
+          uint8_t Best_M = Weapon_PBR_Fallbacks[3][0]; // default metalness
+          for (const Weapon_PBR_Class *Cls = Weapon_PBR_Table; Cls->Keyword and Mat_Name and Mat_Name[0]; Cls++) {
+            if (strcasestr (Mat_Name, Cls->Keyword)) {
+              Best_R = Cls->Roughness;
+              Best_M = Cls->Metalness;
+              break;
+            }
+          }
+          uint8_t Val = (Map_Type == 2) ? Best_R : Best_M;
+          Material_Fallback[0] = Material_Fallback[1] = Material_Fallback[2] = Val;
+        }
+
         Texture_Upload_With_Format (/*Command_Buffer =>*/ Command_Buffer,
                                     /*Queue          =>*/ Queue,
-                                    /*Pixels         =>*/ (uint8_t *)Weapon_PBR_Fallbacks[Map_Type],
+                                    /*Pixels         =>*/ Material_Fallback,
                                     /*Width          =>*/ 1,
                                     /*Height         =>*/ 1,
                                     /*Format         =>*/ Fmt,
