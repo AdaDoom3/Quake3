@@ -38,6 +38,7 @@
 #include <assert.h>
 #include <math.h>
 #include <stdatomic.h>
+#include <unistd.h>
 
 // Media Layer
 #include <SDL2/SDL.h>
@@ -195,6 +196,17 @@ const World_Settings WORLD_PRESETS[WORLD_COUNT] = {
 #define SOURCE_VIEWMODEL_RIGHT   0.5f   // Right offset from eye
 #define SOURCE_VIEWMODEL_UP     -0.5f   // Up offset from eye (negative = below eye level)
 #define SOURCE_VIEWMODEL_FOV_RATIO (SOURCE_VIEWMODEL_FOV / 90.f) // Viewmodel-to-world FOV correction
+
+// HL2-style viewmodel CVars — individually tunable per ConVar, with presets as commands
+// (Derived from Source Engine CViewRender::DrawViewModels, CalcViewModelView, cl_righthand)
+#define CVAR_DEFAULT_VM_FOV       54.f    // viewmodel_fov: separate FOV for weapon (Source default 54)
+#define CVAR_DEFAULT_VM_OFFSET_X  0.f     // viewmodel_offset_x: forward/back offset from eye
+#define CVAR_DEFAULT_VM_OFFSET_Y  0.f     // viewmodel_offset_y: right/left offset from eye
+#define CVAR_DEFAULT_VM_OFFSET_Z  0.f     // viewmodel_offset_z: up/down offset from eye
+#define CVAR_DEFAULT_VM_SCALE     0.45f   // viewmodel_scale: world-space scale factor
+#define CVAR_DEFAULT_VM_BOB       1.f     // viewmodel_bob: bob amplitude multiplier (0=disabled)
+#define CVAR_DEFAULT_VM_LAG       0.f     // viewmodel_lag: camera-trailing lag factor (0=no lag, Source ~0.2)
+#define CVAR_DEFAULT_CL_RIGHTHAND 1       // cl_righthand: 1=right-hand, 0=left-hand (mirror viewmodel)
 
 // Projectile limits
 #define MAX_PROJECTILES 64    // Maximum simultaneous projectiles in flight
@@ -856,6 +868,9 @@ CVar *rt_denoise_depth_lo, *rt_denoise_depth_hi, *rt_denoise_lum_lo, *rt_denoise
 CVar *rt_firefly_headroom, *rt_firefly_bias;
 CVar *rt_cas_amount, *rt_cas_mix;
 CVar *rt_taa_static_floor, *rt_taa_sigma, *rt_taa_move_lo, *rt_taa_move_hi;
+// Viewmodel CVars (vm_ prefix) — HL2-style individually settable viewmodel parameters
+CVar *vm_fov, *vm_offset_x, *vm_offset_y, *vm_offset_z, *vm_scale, *vm_bob, *vm_lag;
+CVar *cl_righthand;
 
 // Projectile pool (CPU-side)
 Projectile_Pool Projectiles;
@@ -3049,6 +3064,12 @@ int main (int Argc, char **Argv) {
       printf ("  --validation      Enable Vulkan validation layers\n");
       printf ("  --dump-frames DIR Save benchmark frames as DIR/frame_NNNN.tga\n");
       printf ("  --physics-test    Run physics simulation without rendering\n");
+      printf ("\nViewmodel (HL2-style individually settable, --vm-preset sets all at once):\n");
+      printf ("  --vm-preset P     Set viewmodel preset (source/q3/closeup/cinematic)\n");
+      printf ("  --vm-fov N        Viewmodel FOV (default 54, Source Engine style)\n");
+      printf ("  --vm-offset X,Y,Z Viewmodel offset: forward,right,up (additive)\n");
+      printf ("  --vm-scale N      Viewmodel scale factor (default 0.45)\n");
+      printf ("  --cl-righthand N  Right-handed weapon (1=right, 0=left mirror)\n");
       printf ("\nEnvironment:\n");
       printf ("  VK_ICD_FILENAMES  Set Vulkan driver (e.g. /usr/share/vulkan/icd.d/lvp_icd.json)\n");
       printf ("  DISPLAY           X11 display (use Xvfb for headless rendering)\n");
@@ -3083,6 +3104,39 @@ int main (int Argc, char **Argv) {
     else if (strcmp (Argv[I], "--pak")    == 0 and I + 1 < Argc) {/* deferred: mount after Asset_Store init */}
     else if (strcmp (Argv[I], "--mdl")    == 0 and I + 1 < Argc) Source_MDL_Path = Argv[++I];
     else if (strcmp (Argv[I], "--weapon") == 0 and I + 1 < Argc) Source_Weapon_Path = Argv[++I];
+    // ── HL2-style viewmodel CLI overrides (presets are commands that set individual CVars) ──
+    else if (strcmp (Argv[I], "--vm-preset") == 0 and I + 1 < Argc) {
+      const char *P = Argv[++I];
+      if (strcmp (P, "source") == 0) {
+        CVar_Set_Float (vm_fov, 54.f); CVar_Set_Float (vm_scale, 0.45f);
+        CVar_Set_Float (vm_offset_x, 0.f); CVar_Set_Float (vm_offset_y, 0.f); CVar_Set_Float (vm_offset_z, 0.f);
+        CVar_Set_Float (vm_bob, 1.f); CVar_Set_Float (vm_lag, 0.f);
+        printf ("[vm] preset: source (fov=54 scale=0.45)\n");
+      } else if (strcmp (P, "q3") == 0) {
+        CVar_Set_Float (vm_fov, 90.f); CVar_Set_Float (vm_scale, 0.50f);
+        CVar_Set_Float (vm_offset_x, 0.f); CVar_Set_Float (vm_offset_y, 0.f); CVar_Set_Float (vm_offset_z, 0.f);
+        CVar_Set_Float (vm_bob, 1.f); CVar_Set_Float (vm_lag, 0.f);
+        printf ("[vm] preset: q3 (fov=90 scale=0.50)\n");
+      } else if (strcmp (P, "closeup") == 0) {
+        CVar_Set_Float (vm_fov, 40.f); CVar_Set_Float (vm_scale, 0.55f);
+        CVar_Set_Float (vm_offset_x, 2.f); CVar_Set_Float (vm_offset_y, -1.f); CVar_Set_Float (vm_offset_z, -0.5f);
+        CVar_Set_Float (vm_bob, 0.3f); CVar_Set_Float (vm_lag, 0.1f);
+        printf ("[vm] preset: closeup (fov=40 scale=0.55 closer+left)\n");
+      } else if (strcmp (P, "cinematic") == 0) {
+        CVar_Set_Float (vm_fov, 45.f); CVar_Set_Float (vm_scale, 0.50f);
+        CVar_Set_Float (vm_offset_x, 1.f); CVar_Set_Float (vm_offset_y, -2.f); CVar_Set_Float (vm_offset_z, 0.f);
+        CVar_Set_Float (vm_bob, 0.1f); CVar_Set_Float (vm_lag, 0.2f);
+        printf ("[vm] preset: cinematic (fov=45 scale=0.50 left-biased)\n");
+      } else printf ("[vm] unknown preset '%s' (source/q3/closeup/cinematic)\n", P);
+    }
+    else if (strcmp (Argv[I], "--vm-fov")    == 0 and I + 1 < Argc) CVar_Set_Float (vm_fov,      (float)atof (Argv[++I]));
+    else if (strcmp (Argv[I], "--vm-scale")  == 0 and I + 1 < Argc) CVar_Set_Float (vm_scale,    (float)atof (Argv[++I]));
+    else if (strcmp (Argv[I], "--vm-offset") == 0 and I + 1 < Argc) {
+      float Ox=0, Oy=0, Oz=0;
+      sscanf (Argv[++I], "%f,%f,%f", &Ox, &Oy, &Oz);
+      CVar_Set_Float (vm_offset_x, Ox); CVar_Set_Float (vm_offset_y, Oy); CVar_Set_Float (vm_offset_z, Oz);
+    }
+    else if (strcmp (Argv[I], "--cl-righthand") == 0 and I + 1 < Argc) CVar_Set_Int (cl_righthand, atoi (Argv[++I]));
     else if (strcmp (Argv[I], "--spp")    == 0 and I + 1 < Argc) { Override_SPP = atoi (Argv[++I]); CVar_Set_Int (r_spp, Override_SPP); }
     else if (strcmp (Argv[I], "--res")    == 0 and I + 1 < Argc) {
       sscanf (Argv[++I], "%dx%d", &Width, &Height);
@@ -3418,8 +3472,13 @@ int main (int Argc, char **Argv) {
   Figure_Instance *Weapon;
   Figure_Pool_Alloc (&Figures, &Weapon);
   const char *Weapon_MDL_Path = Source_Weapon_Path;
-  if (not Weapon_MDL_Path and Source_Mode)
-    Weapon_MDL_Path = "/tmp/source_models/sas.stu -x- m4/models/weapons/v_rif_m4a1.mdl";
+  if (not Weapon_MDL_Path and Source_Mode) {
+    // Try the locally-extracted M4 first, then fall back to the legacy /tmp path
+    if (access ("assets/models/weapons/v_rif_m4a1.mdl", F_OK) == 0)
+      Weapon_MDL_Path = "assets/models/weapons/v_rif_m4a1.mdl";
+    else
+      Weapon_MDL_Path = "/tmp/source_models/sas.stu -x- m4/models/weapons/v_rif_m4a1.mdl";
+  }
   Weapon->Figure = Weapon_MDL_Path ? Source_Weapon_Model_Load (Weapon_MDL_Path)
                                    : Weapon_Model_Load ();
   Weapon_Load_Textures (Weapon);
@@ -5034,6 +5093,18 @@ void CVar_Register_All (void) {
   // ── Input CVars ────────────────────────────────────────────────────────────────────────
   in_sensitivity   = CVar_Register_Float ("in_sensitivity",   "Mouse sensitivity multiplier",        CVAR_ARCHIVE, CVAR_DEFAULT_SENSITIVITY, 0.01f, 100.0f);
   in_invert_y      = CVar_Register_Int   ("in_invert_y",      "Invert mouse Y axis",                 CVAR_ARCHIVE, 0, 0, 1);
+
+  // ── Viewmodel CVars (vm_ prefix) — HL2-style per-setting viewmodel control ────────────
+  // Modelled after Source Engine: viewmodel_fov, viewmodel_offset_x/y/z, cl_righthand.
+  // Each setting is individually tunable; preset commands (vm_preset) set them in bulk.
+  vm_fov       = CVar_Register_Float ("vm_fov",       "Viewmodel FOV (Source default 54)",         CVAR_ARCHIVE, CVAR_DEFAULT_VM_FOV, 10, 170);
+  vm_offset_x  = CVar_Register_Float ("vm_offset_x",  "Viewmodel forward offset from eye",         CVAR_ARCHIVE, CVAR_DEFAULT_VM_OFFSET_X, -20, 20);
+  vm_offset_y  = CVar_Register_Float ("vm_offset_y",  "Viewmodel right offset from eye",           CVAR_ARCHIVE, CVAR_DEFAULT_VM_OFFSET_Y, -20, 20);
+  vm_offset_z  = CVar_Register_Float ("vm_offset_z",  "Viewmodel up offset from eye",              CVAR_ARCHIVE, CVAR_DEFAULT_VM_OFFSET_Z, -20, 20);
+  vm_scale     = CVar_Register_Float ("vm_scale",     "Viewmodel world-space scale factor",        CVAR_ARCHIVE, CVAR_DEFAULT_VM_SCALE, 0.05f, 5.0f);
+  vm_bob       = CVar_Register_Float ("vm_bob",       "Viewmodel bob amplitude multiplier",        CVAR_ARCHIVE, CVAR_DEFAULT_VM_BOB, 0.0f, 5.0f);
+  vm_lag       = CVar_Register_Float ("vm_lag",       "Viewmodel camera-trailing lag (0=none)",    CVAR_ARCHIVE, CVAR_DEFAULT_VM_LAG, 0.0f, 1.0f);
+  cl_righthand = CVar_Register_Int   ("cl_righthand", "Right-handed viewmodel (0=left, 1=right)",  CVAR_ARCHIVE, CVAR_DEFAULT_CL_RIGHTHAND, 0, 1);
 
   // ── Shader Tuning CVars (rt_ prefix) ── ARCHIVE | LATCH: shader recompile needed ──────
   rt_vndf_alpha_floor  = CVar_Register_Float ("rt_vndf_alpha_floor",  "Min roughness² for VNDF reflection",     CVAR_ARCHIVE, VNDF_ALPHA_FLOOR,  0, 1);
@@ -9891,35 +9962,62 @@ void Weapon_Load_Textures (Figure_Instance *Weapon) {
           snprintf (Tex_Name, sizeof Tex_Name, "%s", Lower);
         }
 
-        // Try VTF from weapon materials directories, custom asset folders, and cspromod directories
+        // ── Fuzzy/forgiving texture path search (HL2 content pack style) ──
+        // Try VTF from many directories: local assets, extracted zips, cspromod, /tmp paths.
+        // Also try the texture by basename only (fuzzy match) so content from different
+        // directory structures can find its textures without exact path matching.
         const char *VTF_Dirs[] = {
+          "assets/materials/models/weapons/v_models/sas.m4",       // Local M4 textures (extracted)
+          "assets/materials/models/weapons/v_models",              // Local hands + general weapon textures
+          "assets/materials",                                       // General materials root
           "/tmp/source_models/cstrike/materials/models/weapons/v_models",
           "/tmp/source_models/cstrike/materials",
           "/tmp/source_models/sas.stu -x- m4/materials",
+          "/tmp/source_models/sas.stu -x- m4/materials/models/weapons/v_models/sas.m4",
           "/tmp/v_m4_new/materials",
           "/tmp/cspromod_new/cspromod_b105/cspromod/materials",
           "/tmp/cspromod_new/cspromod_b105/cspromod/materials/models/weapons/v_models/sas.m4",
-          "assets/materials", NULL
+          NULL
         };
+
+        // Extract just the basename from the texture path for fuzzy matching
+        // (e.g. "models/weapons/v_models/sas.m4/clip" -> "clip")
+        const char *Basename = Tex_Name;
+        for (const char *P = Tex_Name; *P; P++)
+          if (*P == '/' or *P == '\\') Basename = P + 1;
+
         for (const char **Dir = VTF_Dirs; *Dir and not Pixels; Dir++) {
-          char Vtf_Path[512];
-          snprintf(Vtf_Path, sizeof Vtf_Path, "%s/%s.vtf", *Dir, Tex_Name);
-          int Vtf_Width=0, Vtf_Height=0; uint8_t *Vtf_Pixels = NULL;
-          if (VTF_Load(Vtf_Path, &Vtf_Pixels, &Vtf_Width, &Vtf_Height) and Vtf_Pixels) {
-            Pixels=Vtf_Pixels; Img_W=(uint)Vtf_Width; Img_H=(uint)Vtf_Height;
-            printf("[weapon] loaded VTF %s %s (%ux%u)\n", Map_Type==1 ? "normal" : "diffuse", Vtf_Path, Img_W, Img_H);
-          }
-        }
-        // For normals: if "_normal" failed, try "_n" suffix
-        if (not Pixels and Map_Type == 1) {
-          snprintf (Tex_Name, sizeof Tex_Name, "%s_n", Lower);
-          for (const char **Dir = VTF_Dirs; *Dir and not Pixels; Dir++) {
+          // Try full relative path first, then basename-only (fuzzy)
+          const char *Names[] = {Tex_Name, Basename, NULL};
+          for (const char **N = Names; *N and not Pixels; N++) {
             char Vtf_Path[512];
-            snprintf(Vtf_Path, sizeof Vtf_Path, "%s/%s.vtf", *Dir, Tex_Name);
+            snprintf(Vtf_Path, sizeof Vtf_Path, "%s/%s.vtf", *Dir, *N);
             int Vtf_Width=0, Vtf_Height=0; uint8_t *Vtf_Pixels = NULL;
             if (VTF_Load(Vtf_Path, &Vtf_Pixels, &Vtf_Width, &Vtf_Height) and Vtf_Pixels) {
               Pixels=Vtf_Pixels; Img_W=(uint)Vtf_Width; Img_H=(uint)Vtf_Height;
-              printf("[weapon] loaded VTF normal %s (%ux%u)\n", Vtf_Path, Img_W, Img_H);
+              printf("[weapon] loaded VTF %s %s (%ux%u)\n", Map_Type==1 ? "normal" : "diffuse", Vtf_Path, Img_W, Img_H);
+            }
+          }
+        }
+        // For normals: if "_normal" failed, try "_n" suffix (also fuzzy by basename)
+        if (not Pixels and Map_Type == 1) {
+          // Try with _n suffix on both full name and basename
+          const char *Normal_Suffixes[] = {"_n", "_norm", NULL};
+          for (const char **Sfx = Normal_Suffixes; *Sfx and not Pixels; Sfx++) {
+            char Alt_Name[256], Alt_Base[256];
+            snprintf (Alt_Name, sizeof Alt_Name, "%s%s", Lower, *Sfx);
+            snprintf (Alt_Base, sizeof Alt_Base, "%s%s", Basename, *Sfx);
+            for (const char **Dir = VTF_Dirs; *Dir and not Pixels; Dir++) {
+              const char *Names[] = {Alt_Name, Alt_Base, NULL};
+              for (const char **N = Names; *N and not Pixels; N++) {
+                char Vtf_Path[512];
+                snprintf(Vtf_Path, sizeof Vtf_Path, "%s/%s.vtf", *Dir, *N);
+                int Vtf_Width=0, Vtf_Height=0; uint8_t *Vtf_Pixels = NULL;
+                if (VTF_Load(Vtf_Path, &Vtf_Pixels, &Vtf_Width, &Vtf_Height) and Vtf_Pixels) {
+                  Pixels=Vtf_Pixels; Img_W=(uint)Vtf_Width; Img_H=(uint)Vtf_Height;
+                  printf("[weapon] loaded VTF normal %s (%ux%u)\n", Vtf_Path, Img_W, Img_H);
+                }
+              }
             }
           }
         }
@@ -11026,15 +11124,35 @@ void Weapon_Update (Figure_Instance *Weapon, const Camera *Camera_Data, float De
   vec3 Right   = Normalize (Cross (Forward, Make (0, 1, 0)));
   vec3 Up      = Cross     (Right, Forward);
 
+  // ── HL2-style viewmodel CVars: read individually settable offsets ──
+  // Per Source Engine CViewRender::DrawViewModels + CalcViewModelView:
+  //   vm_offset_x/y/z are additive offsets on top of the per-mode base offsets.
+  //   vm_fov controls the viewmodel-to-world FOV ratio (depth compression).
+  //   vm_scale controls the world-space scale factor.
+  //   vm_bob scales the idle bob amplitude. vm_lag controls trailing.
+  //   cl_righthand mirrors the viewmodel across the right axis for left-hand mode.
+  float VM_User_Offset_X = CVar_Get_Float (vm_offset_x);  // Forward/back tweak
+  float VM_User_Offset_Y = CVar_Get_Float (vm_offset_y);  // Right/left tweak
+  float VM_User_Offset_Z = CVar_Get_Float (vm_offset_z);  // Up/down tweak
+  float VM_Bob_Scale     = CVar_Get_Float (vm_bob);
+  int   Is_Right_Hand    = CVar_Get_Int   (cl_righthand);
+
   // Compute the viewmodel offset with idle bob and recoil animations
-  float Bob_Vertical   = sinf (Weapon->Bob_Time * 3.5f) * 0.08f;
-  float Bob_Horizontal = cosf (Weapon->Bob_Time * 1.7f) * 0.04f;
-  float Recoil         = Weapon->Is_Firing ? -0.5f * expf (-Weapon->Fire_Time * 5.f) : 0.f;
+  float Bob_Vertical   = sinf (Weapon->Bob_Time * WEAPON_BOB_RATE_V) * WEAPON_BOB_AMP_V * VM_Bob_Scale;
+  float Bob_Horizontal = cosf (Weapon->Bob_Time * WEAPON_BOB_RATE_H) * WEAPON_BOB_AMP_H * VM_Bob_Scale;
+  float Recoil         = Weapon->Is_Firing ? WEAPON_RECOIL_AMP * expf (-Weapon->Fire_Time * WEAPON_RECOIL_DECAY) : 0.f;
+
+  // Base offsets per mode + user CVar overrides (additive, HL2 viewmodel_offset_x/y/z style)
+  float Fwd_Offset   = (Weapon->Figure.Is_Source ? SOURCE_VIEWMODEL_FWD   : 5.f) + VM_User_Offset_X;
+  float Right_Offset = (Weapon->Figure.Is_Source ? SOURCE_VIEWMODEL_RIGHT : 4.f) + VM_User_Offset_Y;
+  float Up_Offset    = (Weapon->Figure.Is_Source ? SOURCE_VIEWMODEL_UP    : -3.5f) + VM_User_Offset_Z;
+
+  // HL2 cl_righthand: mirror the right offset for left-hand mode (Source: negate Y in view space)
+  float Hand_Sign = Is_Right_Hand ? 1.f : -1.f;
+  Right_Offset *= Hand_Sign;
+  Bob_Horizontal *= Hand_Sign;
 
   // Final weapon position: camera origin + forward/right/up offsets with bob and recoil
-  float Fwd_Offset   = Weapon->Figure.Is_Source ? SOURCE_VIEWMODEL_FWD   : 5.f;
-  float Right_Offset = Weapon->Figure.Is_Source ? SOURCE_VIEWMODEL_RIGHT : 4.f;
-  float Up_Offset    = Weapon->Figure.Is_Source ? SOURCE_VIEWMODEL_UP    : -3.5f;
   vec3 Offset = Add (Camera_Data->Position,
                      Add (Scale (Forward, Fwd_Offset + Recoil),
                           Add (Scale (Right, Right_Offset + Bob_Horizontal),
@@ -11082,17 +11200,25 @@ void Weapon_Update (Figure_Instance *Weapon, const Camera *Camera_Data, float De
                                  + Camera_Basis[Row * 3 + 1] * Tag_Y_Up[1 * 3 + Column]
                                  + Camera_Basis[Row * 3 + 2] * Tag_Y_Up[2 * 3 + Column];
 
-  // Scale the viewmodel down — no depth hack, so we shrink the model in world space
-  float Model_Scale = Weapon->Figure.Is_Source ? SOURCE_VIEWMODEL_SCALE : WEAPON_MODEL_SCALE;
+  // HL2-style viewmodel scale: read from CVar (individually settable, overrides mode default)
+  float Model_Scale = CVar_Get_Float (vm_scale);
 
-  // Viewmodel FOV correction: Source viewmodel_fov (54°) maps into the world FOV (90°)
-  float VM_Fov_Scale = Weapon->Figure.Is_Source ? SOURCE_VIEWMODEL_FOV_RATIO : 1.f;
+  // HL2-style viewmodel FOV correction: vm_fov / world_fov ratio compresses the viewmodel
+  // depth to make it appear rendered at a narrower FOV (Source Engine depth hack equivalent)
+  float World_FOV = CVar_Get_Float (r_fov);
+  if (World_FOV <= 0.f) World_FOV = 90.f;
+  float VM_Fov = CVar_Get_Float (vm_fov);
+  float VM_Fov_Scale = VM_Fov / World_FOV;
+
+  // HL2 cl_righthand: for left-hand mode, mirror the model across the right axis
+  // (Source Engine: ApplyBoneMatrixTransform negates the view-space X axis)
+  float Mirror = Hand_Sign;
 
   // Transform each vertex from model space to world space
   for (uint Index = 0; Index < Weapon->Figure.Vertex_Count; Index++) {
     float Source_X = Weapon->Figure.Vertices[Index].Position[0] * Model_Scale * VM_Fov_Scale;
     float Source_Y = Weapon->Figure.Vertices[Index].Position[1] * Model_Scale; // up
-    float Source_Z = Weapon->Figure.Vertices[Index].Position[2] * Model_Scale; // right
+    float Source_Z = Weapon->Figure.Vertices[Index].Position[2] * Model_Scale * Mirror; // right (mirrored for left-hand)
 
     // Apply the combined rotation and translate by the camera offset
     Weapon->Transformed_Vertices[Index].Position[0] = Rotation[0] * Source_X + Rotation[1] * Source_Y + Rotation[2] * Source_Z + Offset.x;
@@ -11102,7 +11228,7 @@ void Weapon_Update (Figure_Instance *Weapon, const Camera *Camera_Data, float De
     // Rotate the vertex normal by the rotation matrix (no translation)
     float Normal_X = Weapon->Figure.Vertices[Index].Normal[0];
     float Normal_Y = Weapon->Figure.Vertices[Index].Normal[1];
-    float Normal_Z = Weapon->Figure.Vertices[Index].Normal[2];
+    float Normal_Z = Weapon->Figure.Vertices[Index].Normal[2] * Mirror; // Mirror normal too for correct lighting
     Weapon->Transformed_Vertices[Index].Normal[0] = Rotation[0] * Normal_X + Rotation[1] * Normal_Y + Rotation[2] * Normal_Z;
     Weapon->Transformed_Vertices[Index].Normal[1] = Rotation[3] * Normal_X + Rotation[4] * Normal_Y + Rotation[5] * Normal_Z;
     Weapon->Transformed_Vertices[Index].Normal[2] = Rotation[6] * Normal_X + Rotation[7] * Normal_Y + Rotation[8] * Normal_Z;
