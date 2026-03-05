@@ -1583,6 +1583,28 @@ typedef struct {
   int   Has_Previous_Pose;                      // Non-zero after the first frame has been evaluated
 } Animation_Blend_State;
 
+// ── Inverse Kinematics types (must precede Figure_Instance) ──────────────────
+#define IK_MAX_CHAINS    8    // Maximum concurrent IK chains per figure
+#define IK_TWO_BONE      0    // Two-bone analytical IK (legs, arms)
+#define IK_LOOK_AT       1    // Single-bone aim constraint (head, spine)
+
+typedef struct {
+  int   Type;                 // IK_TWO_BONE or IK_LOOK_AT
+  int   Bone_Root;            // Root bone of the chain (hip / shoulder / neck)
+  int   Bone_Mid;             // Middle joint (knee / elbow) — only for IK_TWO_BONE
+  int   Bone_End;             // End effector (foot / hand / head)
+  float Target[3];            // World-space target position (foot plant point, look-at point)
+  float Weight;               // Blend weight 0..1 (0 = animation only, 1 = fully IK-driven)
+  float Angle_Limit;          // Maximum angular deflection in radians (IK_LOOK_AT cone half-angle)
+  int   Enabled;              // Non-zero when this chain should be evaluated
+} IK_Chain;
+
+typedef struct {
+  IK_Chain Chains[IK_MAX_CHAINS];
+  int      Chain_Count;
+  int      Enabled;           // Master enable (0 = skip all IK, for perf or debugging)
+} IK_State;
+
 // The complete articulated figure
 typedef struct {
   Figure_Part       Parts[FIGURE_MAX_PARTS];
@@ -2548,26 +2570,7 @@ void Animation_Blend_Begin_Ragdoll (Animation_Blend_State *State, const float Wo
 // evaluation and before inverse-bind composition. The CPU only uploads IK target positions and chain
 // definitions each frame — the GPU does all the trigonometry.
 
-#define IK_MAX_CHAINS    8    // Maximum concurrent IK chains per figure
-#define IK_TWO_BONE      0    // Two-bone analytical IK (legs, arms)
-#define IK_LOOK_AT       1    // Single-bone aim constraint (head, spine)
-
-typedef struct {
-  int   Type;                 // IK_TWO_BONE or IK_LOOK_AT
-  int   Bone_Root;            // Root bone of the chain (hip / shoulder / neck)
-  int   Bone_Mid;             // Middle joint (knee / elbow) — only for IK_TWO_BONE
-  int   Bone_End;             // End effector (foot / hand / head)
-  float Target[3];            // World-space target position (foot plant point, look-at point)
-  float Weight;               // Blend weight 0..1 (0 = animation only, 1 = fully IK-driven)
-  float Angle_Limit;          // Maximum angular deflection in radians (IK_LOOK_AT cone half-angle)
-  int   Enabled;              // Non-zero when this chain should be evaluated
-} IK_Chain;
-
-typedef struct {
-  IK_Chain Chains[IK_MAX_CHAINS];
-  int      Chain_Count;
-  int      Enabled;           // Master enable (0 = skip all IK, for perf or debugging)
-} IK_State;
+// IK types defined earlier (before Figure_Instance) — see §2 Types section.
 
 // Initialize IK state: no chains, disabled
 void IK_Init (IK_State *State);
