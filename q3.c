@@ -95,6 +95,21 @@ const Quality_Preset QUALITY_PRESETS [QUALITY_COUNT] = {//                      
                                                         [QUALITY_LOW]    = {"Low",    1024, 576, 1,  1,   2,  true, 0.5f},
                                                         [QUALITY_POTATO] = {"Potato",  854, 480, 1,  0,   3,  true, 0.5f}};
 
+// Device capability tiers — detected from VkPhysicalDeviceProperties at init
+typedef enum { DEVICE_TIER_SOFTWARE, DEVICE_TIER_INTEGRATED, DEVICE_TIER_DISCRETE } Device_Tier;
+typedef struct {
+  Device_Tier Tier;
+  const char *Name;
+  uint Max_Texture_Dim;   // VTF textures capped to this (0 = uncapped). Prevents OOM on software renderers.
+  uint Max_Figure_Slots;  // Runtime cap on figure pool (compile-time max FIGURE_POOL_MAX is the ceiling)
+  uint Heap_Slab_MB;      // GPU_Heap default slab size
+} Device_Tier_Preset;
+const Device_Tier_Preset DEVICE_TIERS[] = {
+  [DEVICE_TIER_SOFTWARE]   = {DEVICE_TIER_SOFTWARE,   "Software (lavapipe)", 512,  8,  64},
+  [DEVICE_TIER_INTEGRATED] = {DEVICE_TIER_INTEGRATED, "Integrated GPU",     1024, 16, 128},
+  [DEVICE_TIER_DISCRETE]   = {DEVICE_TIER_DISCRETE,   "Discrete GPU",       0,    64, 256},
+};
+
 // Software renderer safety cap — lavapipe (CPU) crashes above ~5.5M pixels due to internal JIT limits.
 // We cap at 3136x1768 (the highest verified-working resolution) which gives a solid ~5.5M pixel budget.
 #define SOFTWARE_RENDERER_MAX_WIDTH  3136
@@ -232,10 +247,6 @@ const World_Settings WORLD_PRESETS[WORLD_COUNT] = {
 // Vulkan resource limits
 #define SWAPCHAIN_MAX_IMAGES     8    // Maximum number of images in the Vulkan swapchain
 #define DESCRIPTOR_TEXTURE_SLOTS 1536 // Maximum number of bindless texture descriptors available to shaders
-
-// Texture dimension cap — software renderers (lavapipe) exhaust host memory with full-res VTFs.
-// Textures exceeding this dimension are box-filtered down after decode. 0 = no cap (hardware GPU).
-#define TEXTURE_MAX_DIM 512 // Cap to 512x512; set to 0 for uncapped on real GPUs
 
 // OpenAL resource pool limits
 #define MAX_AUDIO_BUFFERS 32 // Maximum number of OpenAL audio buffers (pre-generated or loaded PCM data)
@@ -819,6 +830,9 @@ _Atomic int Quit_Requested; // Set by main thread, read by all threads to initia
 // World and movement state with defaults
 World_Settings Active_World    = WORLD_PRESETS [WORLD_QUAKE3];
 int            Active_Movement = WORLD_QUAKE3;
+
+// Device tier — detected at init from VkPhysicalDeviceProperties, overridable via --tier N
+Device_Tier_Preset Active_Tier = DEVICE_TIERS[DEVICE_TIER_DISCRETE]; // Default: assume discrete until detected
 
 // Windowing state and settings with defaults
 Quality_Level    Active_Quality      = QUALITY_MEDIUM;
@@ -3327,6 +3341,10 @@ int main (int Argc, char **Argv) {
     else if (strcmp (Argv[I], "--no-pbr")         == 0) { No_PBR         = 1; CVar_Set_Int (r_pbr, 0); }
     else if (strcmp (Argv[I], "--no-parallax")    == 0) { No_Parallax    = 1; CVar_Set_Int (r_parallax, 0); }
     else if (strcmp (Argv[I], "--cheap")          == 0) Force_Cheap    = 1;
+    else if (strcmp (Argv[I], "--tier") == 0 and I + 1 < Argc) {
+      int T = atoi (Argv[++I]);
+      if (T >= 0 and T <= DEVICE_TIER_DISCRETE) Active_Tier = DEVICE_TIERS[T];
+    }
     else if (strcmp (Argv[I], "--validation")     == 0) { Use_Validation = 1; CVar_Set_Int (r_validation, 1); }
     else if (strcmp (Argv[I], "--source")         == 0) {Source_Mode     = 1;
                                                          Active_Movement = WORLD_SOURCE;
@@ -3526,9 +3544,10 @@ int main (int Argc, char **Argv) {
     for (uint I = 0; I < Device_Limits.Memory.memoryHeapCount; I++)
       if (Device_Limits.Memory.memoryHeaps[I].size > Largest_Heap)
         Largest_Heap = Device_Limits.Memory.memoryHeaps[I].size;
+    uint64_t Tier_Slab = (uint64_t)Active_Tier.Heap_Slab_MB << 20;
     uint64_t Slab_Size = Largest_Heap / 4;
-    if (Slab_Size > GPU_HEAP_DEFAULT_SIZE) Slab_Size = GPU_HEAP_DEFAULT_SIZE;
-    if (Slab_Size < (64u << 20))           Slab_Size = 64u << 20; // Floor: 64 MB
+    if (Slab_Size > Tier_Slab) Slab_Size = Tier_Slab;
+    if (Slab_Size < (64u << 20)) Slab_Size = 64u << 20; // Floor: 64 MB
     printf ("[heap] largest device heap: %lu MB, default slab: %lu MB\n",
             (unsigned long)(Largest_Heap >> 20), (unsigned long)(Slab_Size >> 20));
     GPU_Heap_Init (&Heap, Slab_Size);
@@ -7960,9 +7979,9 @@ int VTF_Load (const char *Path, uint8_t **Out_Pixels, int *Out_W, int *Out_H) {
   }
   free (File_Data);
 
-  // Box-filter downscale if the texture exceeds TEXTURE_MAX_DIM (saves memory on software renderers)
-#if TEXTURE_MAX_DIM > 0
-  while (Width > TEXTURE_MAX_DIM or Height > TEXTURE_MAX_DIM) {
+  // Box-filter downscale if the texture exceeds the device tier's texture dimension cap
+  { uint Max_Dim = Active_Tier.Max_Texture_Dim;
+  while (Max_Dim > 0 and (Width > (int)Max_Dim or Height > (int)Max_Dim)) {
     int New_W = Width  / 2; if (New_W < 1) New_W = 1;
     int New_H = Height / 2; if (New_H < 1) New_H = 1;
     uint8_t *Downscaled = calloc ((size_t)New_W * New_H * 4, 1);
@@ -7985,7 +8004,7 @@ int VTF_Load (const char *Path, uint8_t **Out_Pixels, int *Out_W, int *Out_H) {
     Width = New_W; Height = New_H;
     *Out_W = Width; *Out_H = Height;
   }
-#endif
+  } // end Max_Dim scope
 
   printf ("[vtf] %s %dx%d fmt=%d\n", Path, Width, Height, Format);
   return 1;
@@ -17288,6 +17307,13 @@ void Vulkan_Pick_Physical_Device () {
           Props.deviceName, VK_API_VERSION_MAJOR (Props.apiVersion),
           VK_API_VERSION_MINOR (Props.apiVersion), VK_API_VERSION_PATCH (Props.apiVersion));
   free (Devices);
+
+  // Detect device tier from physical device type
+  Active_Tier = (Props.deviceType == VK_PHYSICAL_DEVICE_TYPE_CPU)            ? DEVICE_TIERS[DEVICE_TIER_SOFTWARE]
+              : (Props.deviceType == VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU) ? DEVICE_TIERS[DEVICE_TIER_INTEGRATED]
+              :                                                                DEVICE_TIERS[DEVICE_TIER_DISCRETE];
+  printf ("[tier] %s (maxTexDim=%u, figures=%u, slab=%uMB)\n",
+          Active_Tier.Name, Active_Tier.Max_Texture_Dim, Active_Tier.Max_Figure_Slots, Active_Tier.Heap_Slab_MB);
 
   // Safety cap: software renderers (CPU type, e.g. lavapipe) crash above ~5.5M pixels
   if (Props.deviceType == VK_PHYSICAL_DEVICE_TYPE_CPU) {
