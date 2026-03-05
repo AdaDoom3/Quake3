@@ -186,7 +186,15 @@ const World_Settings WORLD_PRESETS[WORLD_COUNT] = {
 #define WEAPON_BOB_AMP_V    0.4f  // Vertical idle bob amplitude (units)
 #define WEAPON_BOB_AMP_H    0.2f  // Horizontal idle bob amplitude (units)
 #define WEAPON_RECOIL_AMP  -1.2f  // Recoil kick magnitude (negative = pull back)
-#define WEAPON_RECOIL_DECAY 5.f   // Recoil exponential decay rate  
+#define WEAPON_RECOIL_DECAY 5.f   // Recoil exponential decay rate
+
+// Source engine viewmodel settings (per CalcViewModelView in Source SDK)
+#define SOURCE_VIEWMODEL_FOV     54.f   // Source viewmodel_fov default (ConVar: 54°)
+#define SOURCE_VIEWMODEL_SCALE   0.45f  // World-space scale factor (no depth hack, so shrink geometry)
+#define SOURCE_VIEWMODEL_FWD     3.f    // Forward offset from eye in engine units
+#define SOURCE_VIEWMODEL_RIGHT   0.5f   // Right offset from eye
+#define SOURCE_VIEWMODEL_UP     -0.5f   // Up offset from eye (negative = below eye level)
+#define SOURCE_VIEWMODEL_FOV_RATIO (SOURCE_VIEWMODEL_FOV / 90.f) // Viewmodel-to-world FOV correction
 
 // Projectile limits
 #define MAX_PROJECTILES 64    // Maximum simultaneous projectiles in flight
@@ -3050,6 +3058,9 @@ int main (int Argc, char **Argv) {
   printf ("[world] %s (height %.0f, eye %.0f, fov %.0f, speed %.0f)\n",
           Active_World.Name, Active_World.Player_Height, Active_World.Eye_Height, Active_World.FOV, Active_World.Max_Speed);
 
+  // Default map for Source mode: csp_aztec.bsp
+  if (Source_Mode and strcmp (Map_Name, DEFAULT_MAP) == 0) Map_Name = "csp_aztec.bsp";
+
   // Verify the map file exists before starting expensive GPU setup
   char Map_Path[256];
   snprintf (Map_Path, sizeof Map_Path, "%smaps/%s", ASSET_ROOT, Map_Name);
@@ -3290,7 +3301,7 @@ int main (int Argc, char **Argv) {
   // Load entity: Source mode defaults to ct_sas, Q3 mode defaults to sarge
   const char *Entity_MDL_Path = Source_MDL_Path;
   if (not Entity_MDL_Path and Source_Mode)
-    Entity_MDL_Path = "/tmp/cspromod_new/cspromod_b105/cspromod/models/player/ct_sas.mdl";
+    Entity_MDL_Path = "/tmp/source_models/sas.stu -x- m4/models/weapons/w_rif_m4a1.mdl";
 
   // Place enemy 120 units forward from spawn (in engine Y-up space: forward = camera's look direction)
   vec3 Enemy_Origin = Spawn_Point.Origin;
@@ -3323,7 +3334,7 @@ int main (int Argc, char **Argv) {
   Figure_Pool_Alloc (&Figures, &Weapon);
   const char *Weapon_MDL_Path = Source_Weapon_Path;
   if (not Weapon_MDL_Path and Source_Mode)
-    Weapon_MDL_Path = "/tmp/v_m4_new/models/v_rif_m4a1.mdl";
+    Weapon_MDL_Path = "/tmp/source_models/sas.stu -x- m4/models/weapons/v_rif_m4a1.mdl";
   Weapon->Figure = Weapon_MDL_Path ? Source_Weapon_Model_Load (Weapon_MDL_Path)
                                    : Weapon_Model_Load ();
   Weapon_Load_Textures (Weapon);
@@ -7190,11 +7201,13 @@ Figure_Instance MDL_Load (Scene *S, const char *Path, vec3 Origin, float Yaw) {
   }
 
   // Load geometry from the VVD and VTX sidecar files (Source engine model pipeline)
-  Vertex *Vertices      = NULL; uint Vertex_Count   = 0;
-  uint   *Indices       = NULL; uint Index_Count    = 0;
-  uint   *Texture_Ids   = NULL; uint Triangle_Count = 0;
-  float   Cosine_Yaw    = cosf (Yaw);
-  float   Sine_Yaw      = sinf (Yaw);
+  Vertex  *Vertices      = NULL; uint Vertex_Count   = 0;
+  uint    *Indices       = NULL; uint Index_Count    = 0;
+  uint    *Texture_Ids   = NULL; uint Triangle_Count = 0;
+  uint8_t *Vert_Bone_Ids = NULL; // Per-vertex bone IDs  [Vertex_Count * SKEL_MAX_BONES_PER_VERT]
+  uint8_t *Vert_Bone_Wts = NULL; // Per-vertex bone weights [Vertex_Count * SKEL_MAX_BONES_PER_VERT]
+  float    Cosine_Yaw    = cosf (Yaw);
+  float    Sine_Yaw      = sinf (Yaw);
 
   // Derive sidecar file paths by replacing the .mdl extension
   char VVD_Path[512], VTX_Path[512];
@@ -7296,9 +7309,11 @@ Figure_Instance MDL_Load (Scene *S, const char *Path, vec3 Origin, float Yaw) {
               uint16_t *Strip_Indices = (uint16_t*)(VTX_Data + Strip_Group_Base + Group_Index_Offset);
               for (int Triangle_Index = 0; Triangle_Index + 2 < Group_Index_Count; Triangle_Index += 3) {
                 uint Vertex_Base = Vertex_Count;
-                Vertices    = realloc (Vertices,    sizeof (Vertex) * (Vertex_Count   + 3));
-                Indices     = realloc (Indices,     sizeof (uint)   * (Index_Count    + 3));
-                Texture_Ids = realloc (Texture_Ids, sizeof (uint)   * (Triangle_Count + 1));
+                Vertices       = realloc (Vertices,       sizeof (Vertex)   * (Vertex_Count   + 3));
+                Indices        = realloc (Indices,        sizeof (uint)     * (Index_Count    + 3));
+                Texture_Ids    = realloc (Texture_Ids,    sizeof (uint)     * (Triangle_Count + 1));
+                Vert_Bone_Ids  = realloc (Vert_Bone_Ids,  SKEL_MAX_BONES_PER_VERT * (Vertex_Count + 3));
+                Vert_Bone_Wts  = realloc (Vert_Bone_Wts,  SKEL_MAX_BONES_PER_VERT * (Vertex_Count + 3));
                 for (int Corner = 0; Corner < 3; Corner++) {
                   int Strip_Vertex = Strip_Indices[Triangle_Index + Corner];
                   int VVD_Index    = Mesh_Vertex_Offset
@@ -7320,6 +7335,19 @@ Figure_Instance MDL_Load (Scene *S, const char *Path, vec3 Origin, float Yaw) {
                     .Position   = {World_X, World_Z, -World_Y},
                     .Normal     = {Source_Vertex->Normal[0], Source_Vertex->Normal[2], -Source_Vertex->Normal[1]},
                     .Texture_UV = {Source_Vertex->Tex_Coord[0], Source_Vertex->Tex_Coord[1]}};
+
+                  // Copy per-vertex bone weights from the VVD data (up to 3 influences)
+                  uint Bone_Stride = Vertex_Count * SKEL_MAX_BONES_PER_VERT;
+                  for (int B = 0; B < SKEL_MAX_BONES_PER_VERT; B++) {
+                    if (B < Source_Vertex->Bone_Count) {
+                      Vert_Bone_Ids[Bone_Stride + B] = Source_Vertex->Bone_Ids[B];
+                      Vert_Bone_Wts[Bone_Stride + B] = (uint8_t)(Source_Vertex->Bone_Weights[B] * 255.f + 0.5f);
+                    } else {
+                      Vert_Bone_Ids[Bone_Stride + B] = 0;
+                      Vert_Bone_Wts[Bone_Stride + B] = 0;
+                    }
+                  }
+
                   Indices[Index_Count++] = Vertex_Base + Corner;
                   Vertex_Count++;
                 }
@@ -7396,11 +7424,16 @@ Figure_Instance MDL_Load (Scene *S, const char *Path, vec3 Origin, float Yaw) {
   Entity_Result.GL_Yaw            = Yaw;
   Entity_Result.Active_Animation  = 0;
 
-  // Allocate bone weight arrays; default every vertex to rigid attachment on bone 0 (100% weight)
-  Entity_Result.Figure.Bone_Ids     = calloc (Vertex_Count * SKEL_MAX_BONES_PER_VERT, 1);
-  Entity_Result.Figure.Bone_Weights = calloc (Vertex_Count * SKEL_MAX_BONES_PER_VERT, 1);
-  for (uint Vert_Index = 0; Vert_Index < Vertex_Count; Vert_Index++)
-    Entity_Result.Figure.Bone_Weights[Vert_Index * SKEL_MAX_BONES_PER_VERT] = 255;
+  // Apply per-vertex bone weights from VVD data (or default to rigid bone 0 for fallback geometry)
+  if (Vert_Bone_Ids and Vert_Bone_Wts) {
+    Entity_Result.Figure.Bone_Ids     = Vert_Bone_Ids;
+    Entity_Result.Figure.Bone_Weights = Vert_Bone_Wts;
+  } else {
+    Entity_Result.Figure.Bone_Ids     = calloc (Vertex_Count * SKEL_MAX_BONES_PER_VERT, 1);
+    Entity_Result.Figure.Bone_Weights = calloc (Vertex_Count * SKEL_MAX_BONES_PER_VERT, 1);
+    for (uint Vert_Index = 0; Vert_Index < Vertex_Count; Vert_Index++)
+      Entity_Result.Figure.Bone_Weights[Vert_Index * SKEL_MAX_BONES_PER_VERT] = 255;
+  }
 
   free (File_Data);
   printf ("[mdl] %s: %d bones, %u verts, %u tris\n",
@@ -9668,15 +9701,26 @@ void Weapon_Load_Textures (Figure_Instance *Weapon) {
       uint Img_W = 0, Img_H = 0;
       uint8_t *Pixels = NULL;
 
-      if (Map_Type == 0 and Index < Weapon->Figure.Surface_Count and Weapon->Figure.Texture_Names[Index][0]) {
+      if ((Map_Type == 0 or Map_Type == 1) and Index < Weapon->Figure.Surface_Count and Weapon->Figure.Texture_Names[Index][0]) {
         // Try loading weapon texture from model's texture name (Source VTF or TGA)
+        // Map_Type 0 = diffuse, Map_Type 1 = normal (append "_normal" suffix)
         char Lower[256]; int Li=0;
         for (const char *C=Weapon->Figure.Texture_Names[Index]; *C and Li<255; C++)
           Lower[Li++] = (*C>='A' and *C<='Z') ? *C+32 : *C;
         Lower[Li]=0;
 
-        // Try VTF from weapon materials directories and cspromod directories
+        char Tex_Name[256];
+        if (Map_Type == 1) {
+          snprintf (Tex_Name, sizeof Tex_Name, "%s_normal", Lower);
+        } else {
+          snprintf (Tex_Name, sizeof Tex_Name, "%s", Lower);
+        }
+
+        // Try VTF from weapon materials directories, custom asset folders, and cspromod directories
         const char *VTF_Dirs[] = {
+          "/tmp/source_models/cstrike/materials/models/weapons/v_models",
+          "/tmp/source_models/cstrike/materials",
+          "/tmp/source_models/sas.stu -x- m4/materials",
           "/tmp/v_m4_new/materials",
           "/tmp/cspromod_new/cspromod_b105/cspromod/materials",
           "/tmp/cspromod_new/cspromod_b105/cspromod/materials/models/weapons/v_models/sas.m4",
@@ -9684,11 +9728,24 @@ void Weapon_Load_Textures (Figure_Instance *Weapon) {
         };
         for (const char **Dir = VTF_Dirs; *Dir and not Pixels; Dir++) {
           char Vtf_Path[512];
-          snprintf(Vtf_Path, sizeof Vtf_Path, "%s/%s.vtf", *Dir, Lower);
+          snprintf(Vtf_Path, sizeof Vtf_Path, "%s/%s.vtf", *Dir, Tex_Name);
           int Vtf_Width=0, Vtf_Height=0; uint8_t *Vtf_Pixels = NULL;
           if (VTF_Load(Vtf_Path, &Vtf_Pixels, &Vtf_Width, &Vtf_Height) and Vtf_Pixels) {
             Pixels=Vtf_Pixels; Img_W=(uint)Vtf_Width; Img_H=(uint)Vtf_Height;
-            printf("[weapon] loaded VTF texture %s (%ux%u)\n", Vtf_Path, Img_W, Img_H);
+            printf("[weapon] loaded VTF %s %s (%ux%u)\n", Map_Type==1 ? "normal" : "diffuse", Vtf_Path, Img_W, Img_H);
+          }
+        }
+        // For normals: if "_normal" failed, try "_n" suffix
+        if (not Pixels and Map_Type == 1) {
+          snprintf (Tex_Name, sizeof Tex_Name, "%s_n", Lower);
+          for (const char **Dir = VTF_Dirs; *Dir and not Pixels; Dir++) {
+            char Vtf_Path[512];
+            snprintf(Vtf_Path, sizeof Vtf_Path, "%s/%s.vtf", *Dir, Tex_Name);
+            int Vtf_Width=0, Vtf_Height=0; uint8_t *Vtf_Pixels = NULL;
+            if (VTF_Load(Vtf_Path, &Vtf_Pixels, &Vtf_Width, &Vtf_Height) and Vtf_Pixels) {
+              Pixels=Vtf_Pixels; Img_W=(uint)Vtf_Width; Img_H=(uint)Vtf_Height;
+              printf("[weapon] loaded VTF normal %s (%ux%u)\n", Vtf_Path, Img_W, Img_H);
+            }
           }
         }
       }
@@ -10786,10 +10843,10 @@ void Weapon_Update (Figure_Instance *Weapon, const Camera *Camera_Data, float De
   float Bob_Horizontal = cosf (Weapon->Bob_Time * 1.7f) * 0.04f;
   float Recoil         = Weapon->Is_Firing ? -0.5f * expf (-Weapon->Fire_Time * 5.f) : 0.f;
 
-  // Final weapon position: camera origin + forward/right/up offsets with bob and recoil ???
-  float Fwd_Offset   = Weapon->Figure.Is_Source ? 3.f  : 5.f;
-  float Right_Offset = Weapon->Figure.Is_Source ? 0.5f : 4.f;
-  float Up_Offset    = Weapon->Figure.Is_Source ? -0.5f: -3.5f;
+  // Final weapon position: camera origin + forward/right/up offsets with bob and recoil
+  float Fwd_Offset   = Weapon->Figure.Is_Source ? SOURCE_VIEWMODEL_FWD   : 5.f;
+  float Right_Offset = Weapon->Figure.Is_Source ? SOURCE_VIEWMODEL_RIGHT : 4.f;
+  float Up_Offset    = Weapon->Figure.Is_Source ? SOURCE_VIEWMODEL_UP    : -3.5f;
   vec3 Offset = Add (Camera_Data->Position,
                      Add (Scale (Forward, Fwd_Offset + Recoil),
                           Add (Scale (Right, Right_Offset + Bob_Horizontal),
@@ -10835,11 +10892,11 @@ void Weapon_Update (Figure_Instance *Weapon, const Camera *Camera_Data, float De
                                  + Camera_Basis[Row * 3 + 1] * Tag_Y_Up[1 * 3 + Column]
                                  + Camera_Basis[Row * 3 + 2] * Tag_Y_Up[2 * 3 + Column];
 
-  // Scale the viewmodel down - no depth hack, so we shrink the model in world space ???
-  float Model_Scale = Weapon->Figure.Is_Source ? 0.45f : WEAPON_MODEL_SCALE;
+  // Scale the viewmodel down — no depth hack, so we shrink the model in world space
+  float Model_Scale = Weapon->Figure.Is_Source ? SOURCE_VIEWMODEL_SCALE : WEAPON_MODEL_SCALE;
 
-  // Viewmodel FOV correction for Source weapons ???
-  float VM_Fov_Scale = Weapon->Figure.Is_Source ? 0.51f : 1.f;
+  // Viewmodel FOV correction: Source viewmodel_fov (54°) maps into the world FOV (90°)
+  float VM_Fov_Scale = Weapon->Figure.Is_Source ? SOURCE_VIEWMODEL_FOV_RATIO : 1.f;
 
   // Transform each vertex from model space to world space
   for (uint Index = 0; Index < Weapon->Figure.Vertex_Count; Index++) {
