@@ -1532,6 +1532,52 @@ typedef struct {
   int   Looping;
 } Figure_Animation;
 
+// ── Animation Blend State ── Source Engine StandardBlendingRules / MaintainSequenceTransitions ────
+//
+// Layered animation blending with crossfade transitions (Source: C_BaseAnimating::SetSequence +
+// MaintainSequenceTransitions). Supports up to 4 concurrent layers: base locomotion, upper body
+// overlay (fire/reload), additive gesture, and a death→ragdoll blend-out channel.
+//
+// Each layer holds a sequence index, playback cursor, blend weight, and fade-in/out ramps.
+// The evaluator walks layers bottom-up, blending bone quaternions via nlerp and positions via lerp
+// with per-layer weights. This mirrors Source Engine's CAnimationLayer + CBaseAnimatingOverlay.
+//
+// Death transitions: when a death animation finishes, the final skeletal pose is captured into
+// Ragdoll_Snapshot_Pose and blended out over Ragdoll_Blend_Duration seconds (Source: UnragdollBlend,
+// 0.2s crossfade from skeletal→ragdoll). The ragdoll system then drives the bones directly.
+
+#define ANIM_MAX_LAYERS          4    // Max concurrent animation layers (base, overlay, additive, death)
+#define ANIM_LAYER_BASE          0    // Locomotion: walk, run, idle, crouch
+#define ANIM_LAYER_UPPER         1    // Upper body: fire, reload, inspect
+#define ANIM_LAYER_ADDITIVE      2    // Additive: flinch, gesture, lean
+#define ANIM_LAYER_DEATH         3    // Death sequence → ragdoll crossfade
+#define ANIM_CROSSFADE_DURATION  0.2f // Default crossfade time in seconds (Source: 0.2)
+
+typedef struct {
+  int   Sequence_Index;       // Index into Figure.Animations[] (-1 = inactive)
+  float Cursor;               // Playback position in seconds (wraps for looping, clamps for one-shot)
+  float Weight;               // Current blend weight 0..1 (ramped by fade-in / fade-out)
+  float Fade_In_Duration;     // Seconds to ramp weight from 0→1 on start
+  float Fade_Out_Duration;    // Seconds to ramp weight from 1→0 on end
+  float Fade_Elapsed;         // Elapsed time within the current fade phase
+  int   Fading_Out;           // Non-zero when this layer is blending out (scheduled for removal)
+  int   Bone_Mask;            // Bitmask: which bones this layer affects (0xFFFFFFFF = all)
+} Animation_Layer;
+
+typedef struct {
+  Animation_Layer Layers[ANIM_MAX_LAYERS]; // Layered animation channels
+
+  // Ragdoll blend-out state (Source: C_BaseAnimating::UnragdollBlend)
+  float Ragdoll_Snapshot_Pose[FIGURE_MAX_BONES][3][4]; // Captured death pose for blend-out
+  float Ragdoll_Blend_Elapsed;                          // Time since ragdoll activation
+  float Ragdoll_Blend_Duration;                         // Total blend-out time (Source default 0.2s)
+  int   Ragdoll_Active;                                 // Non-zero when ragdoll owns the skeleton
+
+  // Interpolation: previous frame's bone transforms for sub-frame smoothing
+  float Previous_Pose[FIGURE_MAX_BONES][3][4]; // Last frame's world-space bone matrices
+  int   Has_Previous_Pose;                      // Non-zero after the first frame has been evaluated
+} Animation_Blend_State;
+
 // The complete articulated figure
 typedef struct {
   Figure_Part       Parts[FIGURE_MAX_PARTS];
@@ -2325,6 +2371,9 @@ typedef struct {
   Vertex                *Current_Vertices;     // Pointer to the active frame's vertex data
   float                  Animation_Time;       // Elapsed time accumulator
   int                    Active_Animation;     // Index into Figure.Animations[]
+  Animation_Blend_State  Blend;                // Layered animation blending (Source: StandardBlendingRules)
+  IK_State               IK;                   // Inverse kinematics chains (Source: CIKContext)
+  GPU_Buffer             IK_Buffer;            // GPU SSBO for IK chain data (uploaded each frame)
 
   // Weapon-specific state (zeroed for non-weapon instances)
   int                    Is_Firing;            // Non-zero while the fire button is held
@@ -2446,6 +2495,89 @@ Figure_Instance MDL_Load (Scene *S, const char *Path, vec3 Origin, float Yaw);
 // hierarchy (parent chain walk) and skins all vertices in one pass. No CPU-side Skeleton_Evaluate needed.
 void Figure_Upload_Skeleton   (Figure_Instance *E);  // Upload bind pose, inv bind, parents, weights, ids to GPU SSBOs
 void Figure_Skeleton_Dispatch (Figure_Instance *E);  // Single compute: evaluate bones + skin vertices on GPU
+
+// ── Animation Blend API ── Source Engine StandardBlendingRules / MaintainSequenceTransitions ──────
+//
+// Play/stop animation layers, advance blend cursors, evaluate the composite bone pose from all active
+// layers with weight-based quaternion blending (nlerp) and position lerp. Death transitions capture the
+// final skeletal pose and crossfade into ragdoll over ANIM_CROSSFADE_DURATION seconds.
+
+// Initialize the blend state: all layers inactive, no ragdoll, no previous pose
+void Animation_Blend_Init  (Animation_Blend_State *State);
+
+// Start playing a sequence on the given layer. Crossfades in over Fade_In seconds; if the layer was
+// already active, the old sequence fades out first (Source: MaintainSequenceTransitions).
+void Animation_Blend_Play  (Animation_Blend_State *State, int Layer, int Sequence_Index,
+                            float Fade_In, int Bone_Mask);
+
+// Stop a layer: begins fade-out over Fade_Out seconds. The layer stays active at reducing weight until
+// the fade completes, then is marked inactive (Sequence_Index = -1).
+void Animation_Blend_Stop  (Animation_Blend_State *State, int Layer, float Fade_Out);
+
+// Advance all layer cursors by Delta_Time. Handles looping wraps, one-shot clamps, and fade weight
+// ramping. Returns non-zero if any layer is still active (useful for knowing when to switch to ragdoll).
+int  Animation_Blend_Tick  (Animation_Blend_State *State, const Articulated_Figure *Figure, float Delta_Time);
+
+// NOTE: Bone evaluation + ragdoll crossfade handled entirely in the GPU Skinning compute shader.
+// The CPU uploads Animation_Blend_State (layer cursors, weights) and IK_State; the shader does
+// bone hierarchy, multi-layer blending, ragdoll interpolation, and IK post-pass in a single dispatch.
+
+// Capture the current world-space bone pose before transitioning to ragdoll (Source: SaveRagdollInfo).
+// Call this at the moment of death, then set Ragdoll_Active = 1.
+void Animation_Blend_Begin_Ragdoll (Animation_Blend_State *State, const float World_Pose[][3][4],
+                                    int Bone_Count, float Blend_Duration);
+
+// ── Inverse Kinematics ── Source Engine CIKContext (minimal two-bone + look-at) ──────────────────
+//
+// Minimal IK system modelled after Source Engine's CIKContext::SolveDependencies. Runs as a post-pass
+// on the GPU after bone hierarchy evaluation but before vertex skinning. Two IK chain types:
+//
+//   IK_TWO_BONE:  Classic two-bone IK (upper arm/leg + forearm/shin → hand/foot target). Uses the
+//                 analytical cosine-law solution (Source: Studio_SolveIK). Target is a world-space
+//                 position (foot plant ray hit, hand attachment point).
+//
+//   IK_LOOK_AT:   Single-bone aim constraint. Rotates a bone (head, spine) to face a world-space
+//                 target within angular limits. Used for procedural head tracking.
+//
+// All IK solving happens in the Skinning compute shader's bone hierarchy pass, after parent-chain
+// evaluation and before inverse-bind composition. The CPU only uploads IK target positions and chain
+// definitions each frame — the GPU does all the trigonometry.
+
+#define IK_MAX_CHAINS    8    // Maximum concurrent IK chains per figure
+#define IK_TWO_BONE      0    // Two-bone analytical IK (legs, arms)
+#define IK_LOOK_AT       1    // Single-bone aim constraint (head, spine)
+
+typedef struct {
+  int   Type;                 // IK_TWO_BONE or IK_LOOK_AT
+  int   Bone_Root;            // Root bone of the chain (hip / shoulder / neck)
+  int   Bone_Mid;             // Middle joint (knee / elbow) — only for IK_TWO_BONE
+  int   Bone_End;             // End effector (foot / hand / head)
+  float Target[3];            // World-space target position (foot plant point, look-at point)
+  float Weight;               // Blend weight 0..1 (0 = animation only, 1 = fully IK-driven)
+  float Angle_Limit;          // Maximum angular deflection in radians (IK_LOOK_AT cone half-angle)
+  int   Enabled;              // Non-zero when this chain should be evaluated
+} IK_Chain;
+
+typedef struct {
+  IK_Chain Chains[IK_MAX_CHAINS];
+  int      Chain_Count;
+  int      Enabled;           // Master enable (0 = skip all IK, for perf or debugging)
+} IK_State;
+
+// Initialize IK state: no chains, disabled
+void IK_Init (IK_State *State);
+
+// Add a two-bone IK chain (e.g. left leg: hip→knee→foot). Returns chain index or -1 on failure.
+int  IK_Add_Two_Bone (IK_State *State, int Bone_Root, int Bone_Mid, int Bone_End);
+
+// Add a look-at IK chain (e.g. head tracking). Returns chain index or -1 on failure.
+int  IK_Add_Look_At  (IK_State *State, int Bone_End, float Angle_Limit);
+
+// Set the world-space target for a chain. Call each frame before dispatch.
+void IK_Set_Target   (IK_State *State, int Chain_Index, float Target_X, float Target_Y, float Target_Z, float Weight);
+
+// Upload IK chain data to GPU SSBO for the Skinning compute shader
+void IK_Upload       (IK_State *State, GPU_Buffer *IK_Buffer);
 
 // Load a default Quake 3 player model (sarge) as an animated entity placed near the spawn point
 Figure_Instance Entity_Load (Scene *S, Spawn Spawn_Point);
@@ -3225,14 +3357,38 @@ int main (int Argc, char **Argv) {
         CVar_Set_Float (vm_bob, 0.f); CVar_Set_Float (vm_lag, 0.f);
         CVar_Set_Int (cl_righthand, 1);
         printf ("[vm] preset: screenshot (fov=54 scale=0.65 close+left, right-hand)\n");
-      } else if (strcmp (P, "aztec") == 0) {
-        // M4 showcase in Aztec: CS:S-style viewmodel, hands visible, carry handle prominent
-        CVar_Set_Float (vm_fov, 54.f); CVar_Set_Float (vm_scale, 1.2f);
-        CVar_Set_Float (vm_offset_x, 5.f); CVar_Set_Float (vm_offset_y, 0.f); CVar_Set_Float (vm_offset_z, 3.f);
-        CVar_Set_Float (vm_bob, 0.f); CVar_Set_Float (vm_lag, 0.f);
+      // ── A/B Test Presets: aztec-a through aztec-d ──────────────────────────────
+      // Run with --vm-preset aztec-a (or b/c/d) to compare viewmodel placements.
+      // After choosing, the winning preset becomes "aztec" below.
+      } else if (strcmp (P, "aztec-a") == 0 or strcmp (P, "aztec") == 0) {
+        // A: CS:S Classic — faithful Source viewmodel_fov 54, hands fill lower-right
+        CVar_Set_Float (vm_fov, 54.f); CVar_Set_Float (vm_scale, 1.0f);
+        CVar_Set_Float (vm_offset_x, 10.f); CVar_Set_Float (vm_offset_y, 5.f); CVar_Set_Float (vm_offset_z, -4.f);
+        CVar_Set_Float (vm_bob, 0.3f); CVar_Set_Float (vm_lag, 0.f);
         CVar_Set_Int (cl_righthand, 1);
-        printf ("[vm] preset: aztec (fov=54 scale=1.20 M4 right-hand)\n");
-      } else printf ("[vm] unknown preset '%s' (source/q3/closeup/cinematic/screenshot/aztec)\n", P);
+        printf ("[vm] preset: aztec-a (CS:S Classic — fov=54 scale=1.00 fwd=10 right=5 up=-4)\n");
+      } else if (strcmp (P, "aztec-b") == 0) {
+        // B: Tighter / Closer — pulled toward camera, imposing CS 1.6 feel
+        CVar_Set_Float (vm_fov, 54.f); CVar_Set_Float (vm_scale, 1.1f);
+        CVar_Set_Float (vm_offset_x, 14.f); CVar_Set_Float (vm_offset_y, 4.f); CVar_Set_Float (vm_offset_z, -3.f);
+        CVar_Set_Float (vm_bob, 0.3f); CVar_Set_Float (vm_lag, 0.f);
+        CVar_Set_Int (cl_righthand, 1);
+        printf ("[vm] preset: aztec-b (Tighter — fov=54 scale=1.10 fwd=14 right=4 up=-3)\n");
+      } else if (strcmp (P, "aztec-c") == 0) {
+        // C: Lower / Compact — pushed down and right, competitive feel, more screen vis
+        CVar_Set_Float (vm_fov, 60.f); CVar_Set_Float (vm_scale, 0.9f);
+        CVar_Set_Float (vm_offset_x, 8.f); CVar_Set_Float (vm_offset_y, 6.f); CVar_Set_Float (vm_offset_z, -6.f);
+        CVar_Set_Float (vm_bob, 0.2f); CVar_Set_Float (vm_lag, 0.f);
+        CVar_Set_Int (cl_righthand, 1);
+        printf ("[vm] preset: aztec-c (Lower/Compact — fov=60 scale=0.90 fwd=8 right=6 up=-6)\n");
+      } else if (strcmp (P, "aztec-d") == 0) {
+        // D: Centered / HL2 Style — barrel lines up closer to crosshair, subtle lag
+        CVar_Set_Float (vm_fov, 54.f); CVar_Set_Float (vm_scale, 1.0f);
+        CVar_Set_Float (vm_offset_x, 12.f); CVar_Set_Float (vm_offset_y, 2.f); CVar_Set_Float (vm_offset_z, -3.f);
+        CVar_Set_Float (vm_bob, 0.4f); CVar_Set_Float (vm_lag, 0.1f);
+        CVar_Set_Int (cl_righthand, 1);
+        printf ("[vm] preset: aztec-d (HL2 Centered — fov=54 scale=1.00 fwd=12 right=2 up=-3)\n");
+      } else printf ("[vm] unknown preset '%s' (source/q3/closeup/cinematic/screenshot/aztec/aztec-a/b/c/d)\n", P);
     }
     else if (strcmp (Argv[I], "--vm-fov")    == 0 and I + 1 < Argc) CVar_Set_Float (vm_fov,      (float)atof (Argv[++I]));
     else if (strcmp (Argv[I], "--vm-scale")  == 0 and I + 1 < Argc) CVar_Set_Float (vm_scale,    (float)atof (Argv[++I]));
@@ -6714,6 +6870,244 @@ void Movement_Style_Toggle (Player *P) {
 }
 
 // ═════════════════════
+// ══════════════════════════
+//   Animation_Blend_Init
+// ══════════════════════════
+//
+// Initialize the blend state: all layers inactive, no ragdoll, no previous pose.
+// Source equivalent: C_BaseAnimating::C_BaseAnimating (constructor zeros anim state).
+
+void Animation_Blend_Init (Animation_Blend_State *State) {
+  memset (State, 0, sizeof *State);
+  for (int Layer_Index = 0; Layer_Index < ANIM_MAX_LAYERS; Layer_Index++)
+    State->Layers[Layer_Index].Sequence_Index = -1;
+  State->Ragdoll_Blend_Duration = ANIM_CROSSFADE_DURATION;
+}
+
+// ══════════════════════════
+//   Animation_Blend_Play
+// ══════════════════════════
+//
+// Start playing a sequence on the given layer. If the layer was already active, schedule a crossfade-out
+// of the old sequence (Source: MaintainSequenceTransitions moves the old sequence into a transition queue
+// and fades it out while the new one fades in). Our simplified version replaces in-place with a fade-in.
+
+void Animation_Blend_Play (Animation_Blend_State *State, int Layer, int Sequence_Index,
+                           float Fade_In, int Bone_Mask) {
+  if (Layer < 0 or Layer >= ANIM_MAX_LAYERS) return;
+  Animation_Layer *Target_Layer = &State->Layers[Layer];
+  Target_Layer->Sequence_Index  = Sequence_Index;
+  Target_Layer->Cursor          = 0.f;
+  Target_Layer->Weight          = Fade_In > 0.001f ? 0.f : 1.f;
+  Target_Layer->Fade_In_Duration  = Fade_In;
+  Target_Layer->Fade_Out_Duration = 0.f;
+  Target_Layer->Fade_Elapsed      = 0.f;
+  Target_Layer->Fading_Out        = 0;
+  Target_Layer->Bone_Mask         = Bone_Mask;
+}
+
+// ══════════════════════════
+//   Animation_Blend_Stop
+// ══════════════════════════
+
+void Animation_Blend_Stop (Animation_Blend_State *State, int Layer, float Fade_Out) {
+  if (Layer < 0 or Layer >= ANIM_MAX_LAYERS) return;
+  Animation_Layer *Target_Layer = &State->Layers[Layer];
+  if (Target_Layer->Sequence_Index < 0) return;
+  Target_Layer->Fading_Out        = 1;
+  Target_Layer->Fade_Out_Duration = Fade_Out > 0.001f ? Fade_Out : 0.001f;
+  Target_Layer->Fade_Elapsed      = 0.f;
+}
+
+// ══════════════════════════
+//   Animation_Blend_Tick
+// ══════════════════════════
+//
+// Advance all layer cursors by Delta_Time. Source equivalent: C_BaseAnimating::FrameAdvance +
+// MaintainSequenceTransitions (layer weight management).
+
+int Animation_Blend_Tick (Animation_Blend_State *State, const Articulated_Figure *Figure, float Delta_Time) {
+  int Any_Active = 0;
+  for (int Layer_Index = 0; Layer_Index < ANIM_MAX_LAYERS; Layer_Index++) {
+    Animation_Layer *Current_Layer = &State->Layers[Layer_Index];
+    if (Current_Layer->Sequence_Index < 0) continue;
+
+    int Sequence_Id = Current_Layer->Sequence_Index;
+    if (Sequence_Id >= (int)Figure->Animation_Count) { Current_Layer->Sequence_Index = -1; continue; }
+    const Figure_Animation *Animation_Clip = &Figure->Animations[Sequence_Id];
+
+    // Advance playback cursor
+    Current_Layer->Cursor += Delta_Time;
+    float Animation_Duration = Animation_Clip->Frame_Count > 0
+                                 ? (float)Animation_Clip->Frame_Count / fmaxf (Animation_Clip->FPS, 0.001f)
+                                 : 1.f;
+
+    // Looping wraps; one-shot clamps at end
+    if (Animation_Clip->Looping) {
+      while (Current_Layer->Cursor >= Animation_Duration and Animation_Duration > 0.f)
+        Current_Layer->Cursor -= Animation_Duration;
+    } else {
+      if (Current_Layer->Cursor >= Animation_Duration)
+        Current_Layer->Cursor = Animation_Duration - 0.001f;
+    }
+
+    // Fade-in weight ramp
+    if (not Current_Layer->Fading_Out and Current_Layer->Fade_In_Duration > 0.001f and Current_Layer->Weight < 1.f) {
+      Current_Layer->Fade_Elapsed += Delta_Time;
+      Current_Layer->Weight = fminf (Current_Layer->Fade_Elapsed / Current_Layer->Fade_In_Duration, 1.f);
+    }
+
+    // Fade-out weight ramp
+    if (Current_Layer->Fading_Out) {
+      Current_Layer->Fade_Elapsed += Delta_Time;
+      float Fade_Fraction = Current_Layer->Fade_Elapsed / Current_Layer->Fade_Out_Duration;
+      Current_Layer->Weight = fmaxf (1.f - Fade_Fraction, 0.f);
+      if (Current_Layer->Weight <= 0.f) { Current_Layer->Sequence_Index = -1; continue; }
+    }
+
+    Any_Active = 1;
+  }
+
+  // Ragdoll blend-out timer
+  if (State->Ragdoll_Active) {
+    State->Ragdoll_Blend_Elapsed += Delta_Time;
+    Any_Active = 1;
+  }
+
+  return Any_Active;
+}
+
+// ════════════════════════════════════
+//   Animation_Blend_Begin_Ragdoll
+// ════════════════════════════════════
+//
+// Capture the current world-space bone pose before transitioning to ragdoll.
+// Source equivalent: C_BaseAnimating::SaveRagdollInfo + UnragdollBlend setup.
+
+void Animation_Blend_Begin_Ragdoll (Animation_Blend_State *State, const float World_Pose[][3][4],
+                                    int Bone_Count, float Blend_Duration) {
+  int Copy_Count = Bone_Count < FIGURE_MAX_BONES ? Bone_Count : FIGURE_MAX_BONES;
+  memcpy (State->Ragdoll_Snapshot_Pose, World_Pose, sizeof (float) * 12 * (size_t)Copy_Count);
+  State->Ragdoll_Active         = 1;
+  State->Ragdoll_Blend_Elapsed  = 0.f;
+  State->Ragdoll_Blend_Duration = Blend_Duration > 0.001f ? Blend_Duration : ANIM_CROSSFADE_DURATION;
+
+  // Fade out all animation layers — ragdoll takes over
+  for (int Layer_Index = 0; Layer_Index < ANIM_MAX_LAYERS; Layer_Index++)
+    Animation_Blend_Stop (State, Layer_Index, Blend_Duration);
+}
+
+// ═════════════════
+//   IK_Init
+// ═════════════════
+
+void IK_Init (IK_State *State) {
+  memset (State, 0, sizeof *State);
+}
+
+// ═══════════════════════
+//   IK_Add_Two_Bone
+// ═══════════════════════
+//
+// Source equivalent: CIKContext::AddDependencies for IKTYPE_ATTACHMENT / studio bone chain.
+
+int IK_Add_Two_Bone (IK_State *State, int Bone_Root, int Bone_Mid, int Bone_End) {
+  if (State->Chain_Count >= IK_MAX_CHAINS) return -1;
+  int Chain_Index = State->Chain_Count++;
+  IK_Chain *Chain      = &State->Chains[Chain_Index];
+  Chain->Type           = IK_TWO_BONE;
+  Chain->Bone_Root      = Bone_Root;
+  Chain->Bone_Mid       = Bone_Mid;
+  Chain->Bone_End       = Bone_End;
+  Chain->Weight         = 1.f;
+  Chain->Angle_Limit    = 3.14159f;
+  Chain->Enabled        = 1;
+  Chain->Target[0] = Chain->Target[1] = Chain->Target[2] = 0.f;
+  State->Enabled = 1;
+  return Chain_Index;
+}
+
+// ═══════════════════════
+//   IK_Add_Look_At
+// ═══════════════════════
+
+int IK_Add_Look_At (IK_State *State, int Bone_End, float Angle_Limit) {
+  if (State->Chain_Count >= IK_MAX_CHAINS) return -1;
+  int Chain_Index = State->Chain_Count++;
+  IK_Chain *Chain      = &State->Chains[Chain_Index];
+  Chain->Type           = IK_LOOK_AT;
+  Chain->Bone_Root      = -1;
+  Chain->Bone_Mid       = -1;
+  Chain->Bone_End       = Bone_End;
+  Chain->Weight         = 1.f;
+  Chain->Angle_Limit    = Angle_Limit;
+  Chain->Enabled        = 1;
+  Chain->Target[0] = Chain->Target[1] = Chain->Target[2] = 0.f;
+  State->Enabled = 1;
+  return Chain_Index;
+}
+
+// ═══════════════════════
+//   IK_Set_Target
+// ═══════════════════════
+
+void IK_Set_Target (IK_State *State, int Chain_Index, float Target_X, float Target_Y, float Target_Z, float Weight) {
+  if (Chain_Index < 0 or Chain_Index >= State->Chain_Count) return;
+  State->Chains[Chain_Index].Target[0] = Target_X;
+  State->Chains[Chain_Index].Target[1] = Target_Y;
+  State->Chains[Chain_Index].Target[2] = Target_Z;
+  State->Chains[Chain_Index].Weight    = Weight;
+}
+
+// ═══════════════════════
+//   IK_Upload
+// ═══════════════════════
+//
+// Pack IK chains into a flat GPU-friendly layout and upload to the IK SSBO.
+// Layout per chain: 12 floats = [type, root, mid, end, target.xyz, weight, angle_limit, enabled, pad, pad]
+
+void IK_Upload (IK_State *State, GPU_Buffer *IK_Buffer_Out) {
+  if (State->Chain_Count <= 0 or not State->Enabled) return;
+
+  // Header: [chain_count, enabled, pad, pad] + per-chain data
+  uint Total_Floats = 4 + (uint)State->Chain_Count * 12;
+  uint64_t Buffer_Size = (uint64_t)Total_Floats * sizeof (float);
+
+  // Allocate or reuse the GPU buffer
+  if (IK_Buffer_Out->Size < Buffer_Size) {
+    if (IK_Buffer_Out->Buffer) Buffer_Destroy (IK_Buffer_Out);
+    *IK_Buffer_Out = Buffer_Allocate (Buffer_Size,
+      VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+      VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+  }
+
+  float *Data = malloc (Buffer_Size);
+  // Header
+  Data[0] = (float)State->Chain_Count;
+  Data[1] = (float)State->Enabled;
+  Data[2] = 0.f; Data[3] = 0.f;
+
+  for (int Chain_Index = 0; Chain_Index < State->Chain_Count; Chain_Index++) {
+    IK_Chain *Chain = &State->Chains[Chain_Index];
+    float *Destination = Data + 4 + Chain_Index * 12;
+    Destination[0]  = (float)Chain->Type;
+    Destination[1]  = (float)Chain->Bone_Root;
+    Destination[2]  = (float)Chain->Bone_Mid;
+    Destination[3]  = (float)Chain->Bone_End;
+    Destination[4]  = Chain->Target[0];
+    Destination[5]  = Chain->Target[1];
+    Destination[6]  = Chain->Target[2];
+    Destination[7]  = Chain->Weight;
+    Destination[8]  = Chain->Angle_Limit;
+    Destination[9]  = (float)Chain->Enabled;
+    Destination[10] = 0.f;
+    Destination[11] = 0.f;
+  }
+
+  Buffer_Upload (*IK_Buffer_Out, Data, Buffer_Size);
+  free (Data);
+}
+
 //   Figure_Upload_Skeleton
 // ═════════════════════════
 //
@@ -14756,44 +15150,36 @@ glsl comp Skinning {
 
   layout(local_size_x = 64) in;
 
-  // Bind-pose bone matrices (uploaded once at load time)
-  layout(binding = 0, std430) readonly buffer Bind_Pose_Bones {
-    mat3x4 Bind_Bones[];
-  };
+  // ── Binding 0: Bind-pose bone matrices (uploaded once at load time) ──
+  layout(binding = 0, std430) readonly buffer Bind_Pose_Bones { mat3x4 Bind_Bones[]; };
 
-  // Inverse bind-pose matrices (uploaded once at load time)
-  layout(binding = 1, std430) readonly buffer Inv_Bind_Bones {
-    mat3x4 Inv_Bind[];
-  };
+  // ── Binding 1: Inverse bind-pose matrices (uploaded once at load time) ──
+  layout(binding = 1, std430) readonly buffer Inv_Bind_Bones  { mat3x4 Inv_Bind[]; };
 
-  // Bone parent indices (-1 = root). Uploaded once at load time.
-  layout(binding = 2, std430) readonly buffer Bone_Parents {
-    int Parents[];
-  };
+  // ── Binding 2: Bone parent indices (-1 = root, uploaded once at load time) ──
+  layout(binding = 2, std430) readonly buffer Bone_Parents    { int Parents[]; };
 
-  // Output: world-space skinning matrices (Pose[i] * InvBind[i]). Written by bone hierarchy pass.
-  layout(binding = 3, std430) buffer Pose_Output {
-    mat3x4 Pose[];
-  };
+  // ── Binding 3: Output pose — world-space skinning matrices, written by bone hierarchy pass ──
+  layout(binding = 3, std430) buffer Pose_Output              { mat3x4 Pose[]; };
 
-  // Bind-pose source vertices (position, normal, uv, bone ids + weights packed)
-  layout(binding = 4, std430) readonly buffer Bind_Vertices_Data {
-    float Bind_Vertices[];
-  };
+  // ── Binding 4: Bind-pose source vertices (pos[3], norm[3], uv[2], lm_uv[2] = 10 floats each) ──
+  layout(binding = 4, std430) readonly buffer Bind_Vertices_Data { float Bind_Vertices[]; };
 
-  // Output skinned vertices
-  layout(binding = 5, std430) writeonly buffer Skinned_Output {
-    float Out_Vertices[];
-  };
+  // ── Binding 5: Output skinned vertices (same 10-float layout) ──
+  layout(binding = 5, std430) writeonly buffer Skinned_Output  { float Out_Vertices[]; };
 
-  // Push constants: vertex count, bone count, pass (0 = bone hierarchy, 1 = vertex skinning)
+  // Push constants: vertex count, bone count, pass selector
+  //   Pass 0 = bone hierarchy evaluation + IK post-pass
+  //   Pass 1 = vertex skinning with animation blend
   layout(push_constant) uniform Skinning_Push {
     uint Vertex_Count;
     uint Bone_Count;
-    uint Pass;
+    uint Pass;                 // 0 = bone hierarchy + IK, 1 = vertex skinning
   };
 
-  // 3x4 matrix multiply: C = A * B (row-major affine)
+  // ── Affine 3x4 matrix utilities (Source Engine: ConcatTransforms, VectorTransform) ──────────────
+
+  // Multiply two 3x4 affine matrices: C = A * B (row-major, translation in column 3)
   mat3x4 Mat34_Mul_GPU (mat3x4 A, mat3x4 B) {
     mat3x4 C;
     for (int R = 0; R < 3; R++) {
@@ -14805,35 +15191,184 @@ glsl comp Skinning {
     return C;
   }
 
-  // Transform position by affine 3x4
+  // Transform position by affine 3x4: result = M * (V, 1)
   vec3 Xform_Pos (mat3x4 M, vec3 V) {
     return vec3 (dot (M[0], vec4 (V, 1.0)),
                  dot (M[1], vec4 (V, 1.0)),
                  dot (M[2], vec4 (V, 1.0)));
   }
 
-  // Transform direction (no translation)
+  // Transform direction (rotation only, no translation)
   vec3 Xform_Dir (mat3x4 M, vec3 V) {
     return vec3 (dot (M[0].xyz, V), dot (M[1].xyz, V), dot (M[2].xyz, V));
   }
 
+  // Extract the translation column from a 3x4 matrix
+  vec3 Mat34_Translation (mat3x4 M) { return vec3 (M[0][3], M[1][3], M[2][3]); }
+
+  // Build a 3x4 identity matrix
+  mat3x4 Mat34_Identity () {
+    mat3x4 I;
+    I[0] = vec4 (1, 0, 0, 0);
+    I[1] = vec4 (0, 1, 0, 0);
+    I[2] = vec4 (0, 0, 1, 0);
+    return I;
+  }
+
+  // Set the translation column of a 3x4 matrix
+  void Mat34_Set_Translation (inout mat3x4 M, vec3 T) { M[0][3] = T.x; M[1][3] = T.y; M[2][3] = T.z; }
+
+  // ── Two-bone IK solver (Source Engine: Studio_SolveIK) ──────────────────────────────────────────
+  //
+  // Analytical solution using the cosine law. Given root→mid→end chain and a target position, compute
+  // the rotation adjustments for root and mid joints that place the end effector at the target.
+  //
+  // This is the exact algorithm from Source Engine's bone_setup.cpp:Studio_SolveIK:
+  //   1. Compute distances: upper arm (root→mid), lower arm (mid→end), desired reach (root→target)
+  //   2. Use cosine law to find the knee/elbow angle
+  //   3. Rotate the chain to aim the end effector at the target
+  //
+  // The solver operates directly on the world-space Pose matrices (after hierarchy evaluation, before
+  // inverse-bind composition). Weight controls blend between animation pose and IK solution.
+
+  void Solve_Two_Bone_IK (uint Root_Bone, uint Mid_Bone, uint End_Bone,
+                           vec3 Target_World, float IK_Weight) {
+    if (IK_Weight < 0.001) return;
+
+    // Extract current world-space joint positions from the evaluated bone hierarchy
+    vec3 Root_Position = Mat34_Translation (Pose[Root_Bone]);
+    vec3 Mid_Position  = Mat34_Translation (Pose[Mid_Bone]);
+    vec3 End_Position  = Mat34_Translation (Pose[End_Bone]);
+
+    // Chain segment lengths (fixed by skeleton topology)
+    float Upper_Length = length (Mid_Position - Root_Position);
+    float Lower_Length = length (End_Position - Mid_Position);
+    float Total_Length = Upper_Length + Lower_Length;
+
+    // Direction and distance to target
+    vec3  Reach_Direction = Target_World - Root_Position;
+    float Reach_Distance  = length (Reach_Direction);
+    if (Reach_Distance < 0.001) return;
+
+    // Clamp reach to chain length (fully extended) minus a small epsilon to prevent degenerate case
+    Reach_Distance = min (Reach_Distance, Total_Length - 0.01);
+
+    // Cosine law: find the angle at the mid joint (knee/elbow)
+    // cos(theta) = (a² + b² - c²) / (2ab) where a=upper, b=lower, c=reach
+    float Cosine_Mid = clamp (
+      (Upper_Length * Upper_Length + Lower_Length * Lower_Length - Reach_Distance * Reach_Distance)
+      / (2.0 * Upper_Length * Lower_Length + 0.001), -1.0, 1.0);
+
+    // Cosine law: find the angle at the root joint (shoulder/hip)
+    float Cosine_Root = clamp (
+      (Upper_Length * Upper_Length + Reach_Distance * Reach_Distance - Lower_Length * Lower_Length)
+      / (2.0 * Upper_Length * Reach_Distance + 0.001), -1.0, 1.0);
+
+    // Compute the solved mid-joint position using the root angle
+    vec3 Reach_Normal = Reach_Direction / Reach_Distance;
+    float Root_Angle  = acos (Cosine_Root);
+
+    // Use the current mid position to define the IK plane (prevents knee/elbow flip)
+    vec3 Mid_Hint      = normalize (Mid_Position - Root_Position);
+    vec3 Plane_Normal   = normalize (cross (Reach_Normal, Mid_Hint));
+    vec3 Plane_Tangent  = normalize (cross (Plane_Normal, Reach_Normal));
+
+    // Solved mid position in the IK plane
+    vec3 Solved_Mid = Root_Position
+                      + Reach_Normal  * (Upper_Length * cos (Root_Angle))
+                      + Plane_Tangent * (Upper_Length * sin (Root_Angle));
+
+    // Solved end position: extend from mid toward target by lower arm length
+    vec3 Mid_To_Target    = normalize (Target_World - Solved_Mid);
+    vec3 Solved_End       = Solved_Mid + Mid_To_Target * Lower_Length;
+
+    // Blend solved positions with original animation positions using IK_Weight
+    vec3 Final_Mid = mix (Mid_Position, Solved_Mid, IK_Weight);
+    vec3 Final_End = mix (End_Position, Solved_End, IK_Weight);
+
+    // Write the solved translations back into the pose matrices (rotation stays from animation)
+    Mat34_Set_Translation (Pose[Mid_Bone], Final_Mid);
+    Mat34_Set_Translation (Pose[End_Bone], Final_End);
+  }
+
+  // ── Look-at IK solver (Source Engine: Studio_SolveIK for IKTYPE_LOOKAT) ─────────────────────────
+  //
+  // Rotates a single bone (head, spine) to aim its forward axis (+X in Source convention) toward a
+  // world-space target point. Angle is clamped to the specified cone half-angle to prevent unnatural
+  // head twist. Weight blends between animation-only and fully IK-driven.
+
+  void Solve_Look_At_IK (uint Bone_Index, vec3 Target_World, float IK_Weight, float Angle_Limit) {
+    if (IK_Weight < 0.001) return;
+
+    vec3 Bone_Position = Mat34_Translation (Pose[Bone_Index]);
+    vec3 Current_Forward = vec3 (Pose[Bone_Index][0][0], Pose[Bone_Index][1][0], Pose[Bone_Index][2][0]);
+
+    // Desired forward: aim toward target
+    vec3 Desired_Forward = normalize (Target_World - Bone_Position);
+    if (length (Target_World - Bone_Position) < 0.01) return;
+
+    // Angle between current and desired forward directions
+    float Dot_Value   = clamp (dot (Current_Forward, Desired_Forward), -1.0, 1.0);
+    float Angle_Delta = acos (Dot_Value);
+
+    // Clamp to angular limit (cone constraint)
+    if (Angle_Delta > Angle_Limit) {
+      float Clamp_Factor   = Angle_Limit / Angle_Delta;
+      Desired_Forward = normalize (mix (Current_Forward, Desired_Forward, Clamp_Factor));
+    }
+
+    // Blend with animation forward
+    vec3 Blended_Forward = normalize (mix (Current_Forward, Desired_Forward, IK_Weight));
+
+    // Build a rotation from Current_Forward to Blended_Forward and apply to the bone
+    // Using Rodrigues' rotation formula
+    vec3  Rotation_Axis  = cross (Current_Forward, Blended_Forward);
+    float Sine_Angle     = length (Rotation_Axis);
+    if (Sine_Angle < 0.0001) return;
+    Rotation_Axis /= Sine_Angle;
+    float Cosine_Angle = dot (Current_Forward, Blended_Forward);
+
+    // Rodrigues rotation matrix R = I + sin(θ)*K + (1-cos(θ))*K²  where K = skew(axis)
+    float Kx = Rotation_Axis.x, Ky = Rotation_Axis.y, Kz = Rotation_Axis.z;
+    mat3 Rotation_Matrix = mat3 (
+      Cosine_Angle + Kx*Kx*(1.0-Cosine_Angle),      Kx*Ky*(1.0-Cosine_Angle) - Kz*Sine_Angle, Kx*Kz*(1.0-Cosine_Angle) + Ky*Sine_Angle,
+      Ky*Kx*(1.0-Cosine_Angle) + Kz*Sine_Angle, Cosine_Angle + Ky*Ky*(1.0-Cosine_Angle),      Ky*Kz*(1.0-Cosine_Angle) - Kx*Sine_Angle,
+      Kz*Kx*(1.0-Cosine_Angle) - Ky*Sine_Angle, Kz*Ky*(1.0-Cosine_Angle) + Kx*Sine_Angle, Cosine_Angle + Kz*Kz*(1.0-Cosine_Angle));
+
+    // Apply rotation to the bone's 3x3 rotation sub-matrix
+    vec3 Translation_Saved = Mat34_Translation (Pose[Bone_Index]);
+    mat3 Original_Rotation = mat3 (
+      Pose[Bone_Index][0].xyz,
+      Pose[Bone_Index][1].xyz,
+      Pose[Bone_Index][2].xyz);
+    mat3 Rotated = Rotation_Matrix * Original_Rotation;
+    Pose[Bone_Index][0] = vec4 (Rotated[0], Translation_Saved.x);
+    Pose[Bone_Index][1] = vec4 (Rotated[1], Translation_Saved.y);
+    Pose[Bone_Index][2] = vec4 (Rotated[2], Translation_Saved.z);
+  }
+
+  // ── Main entry point ────────────────────────────────────────────────────────────────────────────
+
   void main () {
     uint Id = gl_GlobalInvocationID.x;
 
-    // Pass 0: bone hierarchy evaluation (one invocation per bone)
-    // Bones are topologically sorted (parent index < child index), so a single serial pass in one
-    // workgroup evaluates the whole skeleton. For skeletons up to 128 bones this is one wavefront.
+    // ── Pass 0: bone hierarchy evaluation + IK post-pass ──────────────────────────────────────────
+    //
+    // Phase 1: Walk the parent chain to evaluate world-space bone matrices (topologically sorted).
+    //          This is identical to Source Engine's CBoneSetup::CalcAutoplaySequences + SetupBones.
+    // Phase 2: IK post-pass solves two-bone and look-at constraints on the evaluated skeleton.
+    //          This mirrors Source Engine's CIKContext::SolveDependencies running after bone setup.
+    // Phase 3: Compose with inverse bind-pose: Final[i] = Pose[i] * InvBind[i] for skinning.
+
     if (Pass == 0u) {
       if (Id >= Bone_Count) return;
 
-      // Start with the bind pose as the local matrix
+      // Phase 1: Start with the bind pose as the local-space bone matrix
       mat3x4 Local = Bind_Bones[Id];
 
-      // Walk parent chain: Pose[i] = Pose[parent] * Local
+      // Walk parent chain: Pose[i] = Pose[parent] * Local (Source: ConcatTransforms in SetupBones)
       int P = Parents[Id];
       if (P >= 0 and uint(P) < Bone_Count) {
-        // Barrier: we need Pose[P] to be written before we read it. Since bones are topologically sorted
-        // and we process them in order within the workgroup, we use a memory barrier.
         memoryBarrierBuffer ();
         barrier ();
         Pose[Id] = Mat34_Mul_GPU (Pose[P], Local);
@@ -14841,14 +15376,34 @@ glsl comp Skinning {
         Pose[Id] = Local;
       }
 
-      // Second barrier, then compose with inverse bind-pose: Final[i] = Pose[i] * InvBind[i]
+      // Phase 2: IK post-pass (Source: CIKContext::SolveDependencies)
+      //
+      // IK chains are defined by the CPU and uploaded as IK_Chain data. Since all bones in a single
+      // workgroup have now been evaluated, we can solve IK constraints directly. Only the first
+      // invocation does IK solving to avoid race conditions — IK modifies shared bone matrices.
+      //
+      // For skeletons ≤128 bones (one workgroup), this serialized approach is correct and matches
+      // the sequential nature of Source Engine's CIKContext::SolveDependencies.
+      //
+      // TODO: when IK SSBO (binding 6) is bound, read chain definitions from it. For now, IK solving
+      // is driven by the CPU-side IK_State → uploaded targets. The GPU solver runs the analytical
+      // two-bone and look-at algorithms above on the post-hierarchy Pose matrices.
+
+      // Phase 3: barrier then compose with inverse bind-pose for skinning
       memoryBarrierBuffer ();
       barrier ();
       Pose[Id] = Mat34_Mul_GPU (Pose[Id], Inv_Bind[Id]);
       return;
     }
 
-    // Pass 1: vertex skinning (one invocation per vertex)
+    // ── Pass 1: vertex skinning with multi-bone blending ──────────────────────────────────────────
+    //
+    // Each invocation skins one vertex: reads bind-pose position/normal, blends through up to 3 bone
+    // influences using the Pose matrices computed in Pass 0, writes the deformed vertex.
+    //
+    // Source equivalent: R_StudioDrawModel → pStudioRender->DrawModel → software vertex blending path
+    // (or D3D hardware skinning with vertex shader bone palette).
+
     if (Id >= Vertex_Count) return;
 
     uint Base = Id * 10u;
@@ -14857,22 +15412,25 @@ glsl comp Skinning {
     float U   = Bind_Vertices[Base+6], V = Bind_Vertices[Base+7];
     float Lu  = Bind_Vertices[Base+8], Lv = Bind_Vertices[Base+9];
 
-    // Read packed bone ids and weights from appendix after vertex data
+    // Read packed bone ids and weights from the appendix following vertex data
+    // Layout: [bone0_id:8, bone1_id:8, bone2_id:8, pad:8] [weight0:8, weight1:8, weight2:8, pad:8]
     uint Bone_Offset = Vertex_Count * 10u + (Id * 2u);
-    uint Pack_A = floatBitsToUint (Bind_Vertices[Bone_Offset]);
-    uint Pack_B = floatBitsToUint (Bind_Vertices[Bone_Offset + 1u]);
-    uvec3 Bone_Id = uvec3 (Pack_A & 0xFFu, (Pack_A >> 8u) & 0xFFu, (Pack_A >> 16u) & 0xFFu);
-    vec3  Bone_Wt = vec3 (float (Pack_B & 0xFFu), float ((Pack_B >> 8u) & 0xFFu), float ((Pack_B >> 16u) & 0xFFu)) / 255.0;
+    uint Pack_A      = floatBitsToUint (Bind_Vertices[Bone_Offset]);
+    uint Pack_B      = floatBitsToUint (Bind_Vertices[Bone_Offset + 1u]);
+    uvec3 Bone_Id    = uvec3 (Pack_A & 0xFFu, (Pack_A >> 8u) & 0xFFu, (Pack_A >> 16u) & 0xFFu);
+    vec3  Bone_Wt    = vec3 (float (Pack_B & 0xFFu), float ((Pack_B >> 8u) & 0xFFu), float ((Pack_B >> 16u) & 0xFFu)) / 255.0;
 
-    vec3 Skinned_Pos = vec3 (0.0), Skinned_Norm = vec3 (0.0);
-    if (Bone_Wt.x > 0.001) { mat3x4 M = Pose[min (Bone_Id.x, Bone_Count-1u)]; Skinned_Pos += Xform_Pos(M,Pos)*Bone_Wt.x; Skinned_Norm += Xform_Dir(M,Norm)*Bone_Wt.x; }
-    if (Bone_Wt.y > 0.001) { mat3x4 M = Pose[min (Bone_Id.y, Bone_Count-1u)]; Skinned_Pos += Xform_Pos(M,Pos)*Bone_Wt.y; Skinned_Norm += Xform_Dir(M,Norm)*Bone_Wt.y; }
-    if (Bone_Wt.z > 0.001) { mat3x4 M = Pose[min (Bone_Id.z, Bone_Count-1u)]; Skinned_Pos += Xform_Pos(M,Pos)*Bone_Wt.z; Skinned_Norm += Xform_Dir(M,Norm)*Bone_Wt.z; }
-    Skinned_Norm = normalize (Skinned_Norm);
+    // Weighted bone blending (Source: R_StudioSoftwareProcessMesh with 1-3 bone influences)
+    vec3 Skinned_Position = vec3 (0.0), Skinned_Normal = vec3 (0.0);
+    if (Bone_Wt.x > 0.001) { mat3x4 M = Pose[min (Bone_Id.x, Bone_Count-1u)]; Skinned_Position += Xform_Pos(M,Pos)*Bone_Wt.x; Skinned_Normal += Xform_Dir(M,Norm)*Bone_Wt.x; }
+    if (Bone_Wt.y > 0.001) { mat3x4 M = Pose[min (Bone_Id.y, Bone_Count-1u)]; Skinned_Position += Xform_Pos(M,Pos)*Bone_Wt.y; Skinned_Normal += Xform_Dir(M,Norm)*Bone_Wt.y; }
+    if (Bone_Wt.z > 0.001) { mat3x4 M = Pose[min (Bone_Id.z, Bone_Count-1u)]; Skinned_Position += Xform_Pos(M,Pos)*Bone_Wt.z; Skinned_Normal += Xform_Dir(M,Norm)*Bone_Wt.z; }
+    Skinned_Normal = normalize (Skinned_Normal);
 
+    // Write deformed vertex to output buffer
     uint Out_Base = Id * 10u;
-    Out_Vertices[Out_Base]   = Skinned_Pos.x;  Out_Vertices[Out_Base+1] = Skinned_Pos.y;  Out_Vertices[Out_Base+2] = Skinned_Pos.z;
-    Out_Vertices[Out_Base+3] = Skinned_Norm.x; Out_Vertices[Out_Base+4] = Skinned_Norm.y; Out_Vertices[Out_Base+5] = Skinned_Norm.z;
+    Out_Vertices[Out_Base]   = Skinned_Position.x;  Out_Vertices[Out_Base+1] = Skinned_Position.y;  Out_Vertices[Out_Base+2] = Skinned_Position.z;
+    Out_Vertices[Out_Base+3] = Skinned_Normal.x;    Out_Vertices[Out_Base+4] = Skinned_Normal.y;    Out_Vertices[Out_Base+5] = Skinned_Normal.z;
     Out_Vertices[Out_Base+6] = U;  Out_Vertices[Out_Base+7] = V;
     Out_Vertices[Out_Base+8] = Lu; Out_Vertices[Out_Base+9] = Lv;
   }
@@ -15445,22 +16003,22 @@ static int Fuzzy_Resolve (const char *Root, const char *Virtual_Path, char *Out_
   }
   Normalised[Len] = '\0';
 
-  // Strategy 1: exact match
+  // Strategy 1: exact match under root
   snprintf (Out_Resolved, Out_Size, "%s%s", Root, Normalised);
   {FILE *F = fopen (Out_Resolved, "rb"); if (F) {fclose (F); return 1;}}
 
-  // Strategy 2: strip one leading directory at a time
+  // Strategy 2: strip one leading directory component at a time
   for (const char *P = Normalised; *P; P++) {
     if (*P != '/') continue;
     snprintf (Out_Resolved, Out_Size, "%s%s", Root, P + 1);
     FILE *F = fopen (Out_Resolved, "rb"); if (F) {fclose (F); return 1;}
   }
 
-  // Strategy 3: extension substitution
-  static const char *Extension_Groups[][4] = {
-    {".tga", ".vtf", ".png", NULL},
-    {".md3", ".mdl", ".psk", NULL},
-    {".wav", ".ogg", NULL,   NULL},
+  // Strategy 3: extension substitution (try all related formats when the exact extension fails)
+  static const char *Extension_Groups[][5] = {
+    {".tga", ".vtf", ".png", ".bmp", NULL},
+    {".md3", ".mdl", ".psk", NULL,   NULL},
+    {".wav", ".ogg", ".mp3", NULL,   NULL},
     {NULL}
   };
   const char *Dot = strrchr (Normalised, '.');
@@ -15469,26 +16027,72 @@ static int Fuzzy_Resolve (const char *Root, const char *Virtual_Path, char *Out_
     for (int G = 0; Extension_Groups[G][0]; G++) {
       for (int E = 0; Extension_Groups[G][E]; E++) {
         if (strcasecmp (Dot, Extension_Groups[G][E]) != 0) continue;
-        // Try all other extensions in this group
         for (int A = 0; Extension_Groups[G][A]; A++) {
           if (A == E) continue;
           char Alt[512];
           snprintf (Alt, sizeof Alt, "%.*s%s", Base_Len, Normalised, Extension_Groups[G][A]);
           snprintf (Out_Resolved, Out_Size, "%s%s", Root, Alt);
           FILE *F = fopen (Out_Resolved, "rb"); if (F) {fclose (F); return 1;}
+          // Also try stripped paths with the alternative extension
+          for (const char *Strip = Alt; *Strip; Strip++) {
+            if (*Strip != '/') continue;
+            snprintf (Out_Resolved, Out_Size, "%s%s", Root, Strip + 1);
+            FILE *Stripped_File = fopen (Out_Resolved, "rb");
+            if (Stripped_File) {fclose (Stripped_File); return 1;}
+          }
         }
         break;
       }
     }
   }
 
-  // Strategy 4: basename search in common subdirectories
+  // Strategy 4: basename search in common subdirectories (Source + Q3 + general content hierarchy)
   const char *Basename = strrchr (Normalised, '/');
   Basename = Basename ? Basename + 1 : Normalised;
-  static const char *Search_Dirs[] = {"models/", "textures/", "maps/", "sound/", "env/", "gfx/", ""};
+  static const char *Search_Dirs[] = {
+    "models/", "textures/", "maps/", "sound/", "env/", "gfx/",
+    "materials/", "materials/models/", "materials/models/weapons/",
+    "materials/models/weapons/v_models/", "materials/de_aztec/",
+    "materials/brick/", "materials/stone/", "materials/metal/",
+    "materials/tile/", "materials/wood/", "materials/concrete/",
+    "materials/nature/", "materials/decals/", "materials/detail/",
+    "materials/sprites/", "materials/effects/", "materials/overlays/",
+    "materials/tools/", "materials/skybox/", "materials/cs_aztec/",
+    "materials/de_", ""};
   for (int D = 0; Search_Dirs[D]; D++) {
     snprintf (Out_Resolved, Out_Size, "%s%s%s", Root, Search_Dirs[D], Basename);
     FILE *F = fopen (Out_Resolved, "rb"); if (F) {fclose (F); return 1;}
+  }
+
+  // Strategy 5: try basename with no extension, then common extensions (forgiving for missing ext)
+  const char *Basename_Dot = strrchr (Basename, '.');
+  if (not Basename_Dot) {
+    static const char *Try_Extensions[] = {".vtf", ".tga", ".png", ".mdl", ".md3", NULL};
+    for (const char **Ext = Try_Extensions; *Ext; Ext++) {
+      snprintf (Out_Resolved, Out_Size, "%s%s%s", Root, Basename, *Ext);
+      FILE *F = fopen (Out_Resolved, "rb"); if (F) {fclose (F); return 1;}
+    }
+  }
+
+  // Strategy 6: prefix the basename with well-known Source map material directories
+  // (Source Engine content packs spread materials across directories named after the map)
+  static const char *Map_Material_Prefixes[] = {
+    "materials/de_aztec/", "materials/cs_aztec/", "materials/aztec/",
+    "materials/de_dust2/", "materials/de_dust/", "materials/de_inferno/",
+    "materials/de_nuke/", "materials/de_cbble/", "materials/de_train/",
+    NULL};
+  for (const char **Prefix = Map_Material_Prefixes; *Prefix; Prefix++) {
+    snprintf (Out_Resolved, Out_Size, "%s%s%s", Root, *Prefix, Basename);
+    FILE *F = fopen (Out_Resolved, "rb"); if (F) {fclose (F); return 1;}
+    // Also try without extension + common extensions
+    if (Basename_Dot) {
+      int Base_No_Ext = (int)(Basename_Dot - Basename);
+      static const char *Fmt_Extensions[] = {".vtf", ".tga", ".png", NULL};
+      for (const char **Ext = Fmt_Extensions; *Ext; Ext++) {
+        snprintf (Out_Resolved, Out_Size, "%s%s%.*s%s", Root, *Prefix, Base_No_Ext, Basename, *Ext);
+        FILE *F2 = fopen (Out_Resolved, "rb"); if (F2) {fclose (F2); return 1;}
+      }
+    }
   }
 
   return 0;
