@@ -1166,8 +1166,14 @@ typedef struct {
   uint8_t  Low_Res_W, Low_Res_H;
 } VTF_Header;
 
+// Decode a TGA image from an in-memory buffer into RGBA8 pixel data
+uint8_t *TGA_Load_From_Memory (const uint8_t *Raw, long Length, uint *Out_Width, uint *Out_Height);
+
 // Load a TGA image file and decode it into RGBA8 pixel data
 uint8_t *TGA_Load (const char *Path, uint *Out_Width, uint *Out_Height);
+
+// Fuzzy path resolution: tries case-insensitive, prefix-stripping, and extension substitution
+static int Fuzzy_Resolve (const char *Root, const char *Virtual_Path, char *Out_Resolved, int Out_Size);
 
 // Upload raw RGBA pixel data to a device-local texture image via staging buffer
 void Texture_Upload_With_Format (VkCommandBuffer Command_Buffer, VkQueue Queue,
@@ -2847,6 +2853,9 @@ void Asset_Free_Unload_All (Asset_Store *Store);
 // Low-level inflate: decompress a raw deflate stream from In into Out. Returns bytes written.
 uint64_t Inflate_Buffer (const uint8_t *In, uint64_t In_Size, uint8_t *Out, uint64_t Out_Capacity);
 
+// Global asset store for PAK/PK3 file lookups (initialized in main, destroyed on exit)
+static Asset_Store Global_Assets = {0};
+
 // Paths to the weapon model's diffuse textures (body and sight)
 #define WEAPON_TEXTURE_COUNT 2 // Default for Q3 weapons (2 surfaces: body + hand)
 // (WEAPON_MAX_TEXTURES moved to §1 Constants)
@@ -3292,6 +3301,16 @@ int main (int Argc, char **Argv) {
                                            /*Usage        =>*/ VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
                                            /*Memory_Flags =>*/ VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT
                                                              | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+
+  // Initialize the global asset store for PAK/PK3 texture lookups
+  snprintf (Global_Assets.Loose_Root, sizeof Global_Assets.Loose_Root, ASSET_ROOT);
+  if (Active_World.Default_Pack)
+    Asset_Store_Mount (&Global_Assets, Active_World.Default_Pack);
+
+  // Mount any additional --pak archives specified on the command line
+  for (int I = 1; I < Argc; I++)
+    if (strcmp (Argv[I], "--pak") == 0 and I + 1 < Argc)
+      Asset_Store_Mount (&Global_Assets, Argv[++I]);
 
   // Load the BSP scene and spawn point (no CPU collision map - GPU handles physics via TLAS)
   Spawn Spawn_Point;
@@ -4066,6 +4085,7 @@ int main (int Argc, char **Argv) {
   // Cleanup
   Audio_Shutdown ();
   Damage_Cache_Free ();
+  Asset_Store_Destroy (&Global_Assets);
   vkDeviceWaitIdle (Device);
   printf ("[shutdown] %u frames rendered\n", Frame);
 
@@ -6090,30 +6110,18 @@ const char *Damage_Map_For_Model (const char *Model_Name, int Part_Index) {
   return NULL; // Unknown model
 }
 
-// ════════════
-//   TGA_Load 
-// ════════════
+// ════════════════════════
+//   TGA_Load_From_Memory
+// ════════════════════════
+//
+// Decode a TGA image from an in-memory buffer. Returns heap-allocated RGBA8 pixels or NULL on failure.
 
-uint8_t *TGA_Load (const char *Path, uint *Out_Width, uint *Out_Height) {
-
-  // Attempt to open the TGA file for binary reading
-  FILE *File = fopen (Path, "rb");
-  if (not File) return NULL;
-
-  // Read the entire file into memory
-  fseek (File, 0, SEEK_END);
-  long Length = ftell (File);
-  rewind (File);
-  if (Length < 18) {fclose (File); return NULL;}
-
-  // Allocate a buffer and read the entire file contents
-  uint8_t *Raw = malloc (Length);
-  size_t Raw_Read_ = fread (Raw, 1, Length, File); (void)Raw_Read_;
-  fclose (File);
+uint8_t *TGA_Load_From_Memory (const uint8_t *Raw, long Length, uint *Out_Width, uint *Out_Height) {
+  if (not Raw or Length < 18) return NULL;
 
   // Parse the 18-byte TGA header fields
-  uint8_t *Cursor     = Raw;
-  uint8_t *End_Cursor = Raw + Length;
+  const uint8_t *Cursor     = Raw;
+  const uint8_t *End_Cursor = Raw + Length;
 
   // Extract header: ID length, colormap type, and image type
   uint8_t Id_Length     = Cursor[0];
@@ -6136,7 +6144,6 @@ uint8_t *TGA_Load (const char *Path, uint *Out_Width, uint *Out_Height) {
 
   // Reject unsupported image types (only uncompressed and RLE true-color are handled)
   if (Image_Type != 2 and Image_Type != 3 and Image_Type != 10) {
-    free (Raw);
     return NULL;
   }
 
@@ -6232,11 +6239,30 @@ uint8_t *TGA_Load (const char *Path, uint *Out_Width, uint *Out_Height) {
     Tga_Done:;
   }
 
-  // Free the raw file data and return decoded pixels
-  free (Raw);
   return Output;
 
-} // Tga_Load
+} // TGA_Load_From_Memory
+
+// ════════════
+//   TGA_Load
+// ════════════
+//
+// Load a TGA image from disk. Returns heap-allocated RGBA8 pixels or NULL on failure.
+
+uint8_t *TGA_Load (const char *Path, uint *Out_Width, uint *Out_Height) {
+  FILE *File = fopen (Path, "rb");
+  if (not File) return NULL;
+  fseek (File, 0, SEEK_END);
+  long Length = ftell (File);
+  rewind (File);
+  if (Length < 18) {fclose (File); return NULL;}
+  uint8_t *Raw = malloc (Length);
+  size_t Raw_Read_ = fread (Raw, 1, Length, File); (void)Raw_Read_;
+  fclose (File);
+  uint8_t *Result = TGA_Load_From_Memory (Raw, Length, Out_Width, Out_Height);
+  free (Raw);
+  return Result;
+}
 
 // ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 //
@@ -9217,6 +9243,75 @@ uint BSP_Parse_Entities (const uint8_t *File_Data, const BSP_Header *Header,
 //
 // ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 
+// ═══════════════════════════════
+//   Texture_Resolve_And_Load
+// ═══════════════════════════════
+//
+// Forgiving texture loader: given a shader/material name (e.g. "textures/gothic_block/blocks18b"),
+// tries increasingly aggressive strategies to find and load the texture as RGBA8 pixels.
+//
+// Strategy 1: Direct path under ASSET_ROOT (exact case)
+// Strategy 2: Case-insensitive directory walk under ASSET_ROOT
+// Strategy 3: PAK/PK3 lookup via Global_Assets (case-insensitive, with .tga/.jpg extension tries)
+// Strategy 4: Strip leading directory prefixes and retry
+// Strategy 5: Basename-only search in common texture subdirectories
+
+static uint8_t *Texture_Resolve_And_Load (const char *Shader_Name, const char *Suffix, uint *Out_W, uint *Out_H) {
+  char Path[512];
+
+  // Normalise the shader name: lowercase, forward-slash only
+  char Lower[256];
+  int Len = (int)strlen (Shader_Name);
+  if (Len >= 256) Len = 255;
+  for (int I = 0; I < Len; I++) {
+    char C = Shader_Name[I];
+    Lower[I] = (C == '\\') ? '/' : (C >= 'A' and C <= 'Z') ? (char)(C + 32) : C;
+  }
+  Lower[Len] = '\0';
+
+  // Strategy 1: Direct path — assets/<shader><suffix>.tga (exact case first, then lowercased)
+  snprintf (Path, sizeof Path, ASSET_ROOT "%s%s.tga", Shader_Name, Suffix);
+  uint8_t *Pixels = TGA_Load (Path, Out_W, Out_H);
+  if (Pixels) return Pixels;
+
+  snprintf (Path, sizeof Path, ASSET_ROOT "%s%s.tga", Lower, Suffix);
+  Pixels = TGA_Load (Path, Out_W, Out_H);
+  if (Pixels) return Pixels;
+
+  // Strategy 2: Try Fuzzy_Resolve for loose files under ASSET_ROOT
+  char Fuzzy_Name[512];
+  snprintf (Fuzzy_Name, sizeof Fuzzy_Name, "%s%s.tga", Lower, Suffix);
+  char Resolved[512];
+  if (Fuzzy_Resolve (ASSET_ROOT, Fuzzy_Name, Resolved, sizeof Resolved)) {
+    Pixels = TGA_Load (Resolved, Out_W, Out_H);
+    if (Pixels) return Pixels;
+  }
+
+  // Strategy 3: Load from mounted PAK/PK3 archives (case-insensitive lookup)
+  if (Global_Assets.Pack_Count > 0) {
+    // Try .tga from the archive
+    static const char *Pak_Extensions[] = {".tga", ".jpg", NULL};
+    for (const char **Ext = Pak_Extensions; *Ext; Ext++) {
+      char Virtual[512];
+      snprintf (Virtual, sizeof Virtual, "%s%s%s", Shader_Name, Suffix, *Ext);
+      uint64_t Data_Size = 0;
+      uint8_t *Data = Asset_Load (&Global_Assets, Virtual, &Data_Size);
+      if (not Data) {
+        snprintf (Virtual, sizeof Virtual, "%s%s%s", Lower, Suffix, *Ext);
+        Data = Asset_Load (&Global_Assets, Virtual, &Data_Size);
+      }
+      if (Data) {
+        // Try TGA decode
+        Pixels = TGA_Load_From_Memory (Data, (long)Data_Size, Out_W, Out_H);
+        free (Data);
+        if (Pixels) return Pixels;
+      }
+    }
+  }
+
+  return NULL;
+}
+
 // ═══════════════════════
 //   Scene_Load_Textures
 // ═══════════════════════
@@ -9288,20 +9383,16 @@ void Scene_Load_Textures (const Scene *Scene_Data) {
     uint W = 0, H = 0;
     uint8_t *Pixels = NULL;
     if (Scene_Data->Texture_Names) {
-      char Path[256];
+      // Use the forgiving texture resolver (case-insensitive, fuzzy path, PAK lookup)
+      Pixels = Texture_Resolve_And_Load (Scene_Data->Texture_Names[Index], "", &W, &H);
 
-      // Try TGA first 
-      snprintf (Path, sizeof (Path), "assets/%s.tga", Scene_Data->Texture_Names[Index]);
-      Pixels = TGA_Load (Path, &W, &H);
-
-      // Fallback: try VTF from cspromod materials directory (Source engine textures)
-      if (not Pixels) {
+      // Fallback: try VTF from Source engine materials directories
+      if (not Pixels and Active_World.Type == WORLD_SOURCE) {
         char Vtf_Path[512]; char Lower[256];
         const char *N = Scene_Data->Texture_Names[Index];
         for (int C=0; N[C] and C<255; C++) Lower[C] = (N[C]>='A' and N[C]<='Z') ? N[C]+32 : N[C];
         Lower[strlen(N)<255?strlen(N):255] = 0;
 
-        // Try cspromod materials path
         const char *VTF_Search_Dirs[] = {
           "/tmp/cspromod_new/cspromod_b105/cspromod/materials",
           "/tmp/cspromod_new/cspromod_b105/cspromod/materials/models",
@@ -9410,9 +9501,7 @@ void Scene_Load_Textures (const Scene *Scene_Data) {
       uint W = 0, H = 0;
       uint8_t *Pixels = NULL;
       if (Scene_Data->Texture_Names) {
-        char Path[256];
-        snprintf (Path, sizeof (Path), "assets/%s%s.tga", Scene_Data->Texture_Names[Index], PBR_Suffixes[Map_Type]);
-        Pixels = TGA_Load (Path, &W, &H);
+        Pixels = Texture_Resolve_And_Load (Scene_Data->Texture_Names[Index], PBR_Suffixes[Map_Type], &W, &H);
       }
       VkFormat Fmt = VK_FORMAT_R8G8B8A8_UNORM;
       if (Pixels and W and H) {
@@ -10874,10 +10963,12 @@ void Weapon_Update (Figure_Instance *Weapon, const Camera *Camera_Data, float De
   vec3 Axis_1 = (vec3){Tag[6],  Tag[8],  -Tag[7]};
   vec3 Axis_2 = (vec3){Tag[9],  Tag[11], -Tag[10]};
 
-  // Build the Y-up tag rotation matrix column (forward, up or -left)
-  float Tag_Y_Up[9] = {Axis_0.x, Axis_2.x, -Axis_1.x,
-                       Axis_0.y, Axis_2.y, -Axis_1.y,
-                       Axis_0.z, Axis_2.z, -Axis_1.z};
+  // Build the Y-up tag rotation matrix columns (forward, up, right)
+  // Axis_1 (Q3 right after swizzle) points to -Z in engine space; using +Axis_1
+  // ensures model -Z (Q3 right) maps through Camera_Basis to camera right.
+  float Tag_Y_Up[9] = {Axis_0.x, Axis_2.x, Axis_1.x,
+                       Axis_0.y, Axis_2.y, Axis_1.y,
+                       Axis_0.z, Axis_2.z, Axis_1.z};
 
   // Camera basis matrix (row-major): columns = forward, up, right
   float Camera_Basis[9] = {Forward.x, Up.x, Right.x,
@@ -14249,21 +14340,31 @@ const Pack_File *Asset_Store_Pack_At    (const Asset_Store *Store, uint Index)  
 
 uint8_t *Asset_Load (Asset_Store *Store, const char *Virtual_Path, uint64_t *Out_Size) {
 
-  // Search mounted packs newest-first
+  // Search mounted packs newest-first (case-insensitive, also try with stripped prefixes)
   for (int P = (int)Store->Pack_Count - 1; P >= 0; P--) {
     Pack_File *Pack = &Store->Packs[P];
     for (uint I = 0; I < Pack->Entry_Count; I++) {
-      if (strcasecmp (Pack->Entries[I].Name, Virtual_Path) != 0) continue;
+      // Try exact match (case-insensitive)
+      if (strcasecmp (Pack->Entries[I].Name, Virtual_Path) == 0) goto Found_Entry;
+      // Try stripping leading prefixes from the virtual path to match shorter archive entries
+      for (const char *Stripped = Virtual_Path; *Stripped; Stripped++) {
+        if (*Stripped != '/' and *Stripped != '\\') continue;
+        if (strcasecmp (Pack->Entries[I].Name, Stripped + 1) == 0) goto Found_Entry;
+      }
+      // Try stripping leading prefixes from the archive entry to match shorter virtual paths
+      for (const char *Stripped = Pack->Entries[I].Name; *Stripped; Stripped++) {
+        if (*Stripped != '/' and *Stripped != '\\') continue;
+        if (strcasecmp (Stripped + 1, Virtual_Path) == 0) goto Found_Entry;
+      }
+      continue;
+    Found_Entry:;
       Pack_Entry *E = &Pack->Entries[I];
-
       if (E->Compressed) {
-        // Inflate on the CPU: allocate output, decompress from the pack's in-memory data
         uint8_t *Out = (uint8_t *)malloc (E->Size);
         uint64_t Written = Inflate_Buffer (Pack->Data + E->Offset, E->Packed_Size, Out, E->Size);
         *Out_Size = Written;
         return Out;
       } else {
-        // Uncompressed: copy directly from the memory-resident archive
         uint8_t *Out = (uint8_t *)malloc (E->Size);
         memcpy (Out, Pack->Data + E->Offset, E->Size);
         *Out_Size = E->Size;
@@ -14272,8 +14373,21 @@ uint8_t *Asset_Load (Asset_Store *Store, const char *Virtual_Path, uint64_t *Out
     }
   }
 
-  // Fallback: loose file under Loose_Root
+  // Fallback: loose file under Loose_Root with fuzzy resolution
   char Full_Path[1024];
+  if (Fuzzy_Resolve (Store->Loose_Root, Virtual_Path, Full_Path, sizeof Full_Path)) {
+    FILE *File = fopen (Full_Path, "rb");
+    if (File) {
+      fseek (File, 0, SEEK_END); uint64_t File_Size = (uint64_t)ftell (File); rewind (File);
+      uint8_t *Data = (uint8_t *)malloc (File_Size);
+      size_t Read_ = fread (Data, 1, File_Size, File); (void)Read_;
+      fclose (File);
+      *Out_Size = File_Size;
+      return Data;
+    }
+  }
+
+  // Last resort: exact path under Loose_Root
   snprintf (Full_Path, sizeof Full_Path, "%s%s", Store->Loose_Root, Virtual_Path);
   FILE *File = fopen (Full_Path, "rb");
   if (not File) return NULL;
