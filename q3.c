@@ -10764,6 +10764,7 @@ void Scene_Load_Textures (const Scene *Scene_Data) {
       Diffuse_W[Index] = W;
       Diffuse_H[Index] = H;
       Textures_Loaded++;
+      if (Textures_Loaded % 10 == 0) printf ("[textures] loaded %u diffuse...\n", Textures_Loaded);
     } else {
       free (Pixels);
 
@@ -11316,7 +11317,7 @@ void Weapon_Load_Textures (Figure_Instance *Weapon) {
           const char *Mat_Name = Weapon->Figure.Texture_Names[Index];
           uint8_t Best_R = Weapon_PBR_Fallbacks[2][0]; // default roughness
           uint8_t Best_M = Weapon_PBR_Fallbacks[3][0]; // default metalness
-          for (const Weapon_PBR_Class *Cls = Weapon_PBR_Table; Cls->Keyword; Cls++) {
+          for (const Weapon_PBR_Class *Cls = Weapon_PBR_Table; Cls->Keyword and Mat_Name and Mat_Name[0]; Cls++) {
             if (strcasestr (Mat_Name, Cls->Keyword)) {
               Best_R = Cls->Roughness;
               Best_M = Cls->Metalness;
