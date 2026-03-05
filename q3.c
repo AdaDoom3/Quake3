@@ -93,6 +93,11 @@ const Quality_Preset QUALITY_PRESETS [QUALITY_COUNT] = {//                      
                                                         [QUALITY_LOW]    = {"Low",    1024, 576, 1,  1,   2,  true, 0.5f},
                                                         [QUALITY_POTATO] = {"Potato",  854, 480, 1,  0,   3,  true, 0.5f}};
 
+// Software renderer safety cap — lavapipe (CPU) crashes above ~5.5M pixels due to internal JIT limits.
+// We cap at 3136x1768 (the highest verified-working resolution) which gives a solid ~5.5M pixel budget.
+#define SOFTWARE_RENDERER_MAX_WIDTH  3136
+#define SOFTWARE_RENDERER_MAX_HEIGHT 1768
+
 // World settings
 //
 // Each asset group has a dominant coordinate convention, player scale, and camera model. The active world determines physics extents, 
@@ -258,6 +263,150 @@ const World_Settings WORLD_PRESETS[WORLD_COUNT] = {
 #define TAA_MOVE_HI      0.99 // Moving blend base at high motion
 // SHADER_TUNING_END
 
+// ── PBR Material Heuristics ───────────────────────────────────────────────────────────────
+//
+// When no PBR maps exist on disk, we assign roughness and metalness based on texture name
+// pattern matching. Values are 0-255 mapping to 0.0-1.0. Patterns are matched against the
+// material's shader name; case-insensitive entries use strcasestr, case-sensitive use strstr.
+//
+// Convention: R = roughness byte (255 = 1.0), M = metalness byte (255 = 1.0)
+
+typedef struct { const char *Pattern; uint8_t R, M; bool Case_Insensitive; } PBR_Heuristic;
+
+#define PBR_DEFAULT_ROUGHNESS 191  // 0.75 — moderate stone fallback
+#define PBR_DEFAULT_METALNESS   0  // 0.00
+
+static const PBR_Heuristic PBR_HEURISTICS[] = {
+  // ── Q3 gothic / base textures (case-sensitive strstr) ──────────────────
+  // Stone / brick / block
+  {"gothic_block",           204,   0, false}, // R=0.80 rough stone
+  {"gothic_wall/street",     204,   0, false},
+  {"proto_brik",             209,   0, false}, // R=0.82 brick
+  {"gothic_wall",            191,   0, false}, // R=0.75 generic wall
+  // Metal trim / rust
+  {"pitted_rust",            166, 153, false}, // R=0.65 M=0.60 corroded
+  {"deeprust",               191, 128, false}, // R=0.75 M=0.50 heavy rust
+  {"dirty_pewter",           140, 166, false}, // R=0.55 M=0.65 dirty pewter (must precede "pewter")
+  {"pewter",                 102, 179, false}, // R=0.40 M=0.70 clean pewter
+  {"border7",                153,  89, false}, // R=0.60 M=0.35 mixed trim
+  {"baseboard",              153,  89, false},
+  // Tech walls
+  {"atech",                  115, 128, false}, // R=0.45 M=0.50 brushed panel
+  {"ceilingtech",            140,  77, false}, // R=0.55 M=0.30 ceiling panel
+  // Wood
+  {"wood",                   204,   0, false}, // R=0.80 dry wood
+  // Floor
+  {"gothic_floor",           166,   0, false}, // R=0.65 worn floor stone
+  {"floor",                  166,   0, false},
+  // Light panels
+  {"light",                   77,   0, false}, // R=0.30 smooth glass cover
+  {"xlight",                  77,   0, false},
+  // Skull / bone
+  {"skull",                  191,  13, false}, // R=0.75 M=0.05 bone
+  // Lava
+  {"lava",                    26,   0, false}, // R=0.10 molten liquid
+  // SFX
+  {"sfx/flame",               26,   0, false}, // R=0.10 emissive
+  {"sfx/beam",                26,   0, false},
+  {"flameflare",              26,   0, false},
+  // Window / glass
+  {"window",                  51,  26, false}, // R=0.20 M=0.10 smooth glass
+  // Torch
+  {"torch",                  153,  77, false}, // R=0.60 M=0.30 metal+wood
+  // Player
+  {"players/",               179,  20, false}, // R=0.70 M=0.08 cloth+armor
+  // Weapons
+  {"weapons",                 77, 217, false}, // R=0.30 M=0.85 gun steel
+
+  // ── Generic textures (case-insensitive strcasestr) ─────────────────────
+  // Stone walls and floors
+  {"stonewall",              210,   0, true},  // R=0.82 rough stone wall
+  {"stone3",                 210,   0, true},
+  {"stonefloor",             178,   0, true},  // R=0.70 worn stone floor
+  {"stonestep",              178,   0, true},
+  {"stonetrim",              166,   0, true},  // R=0.65 carved stone trim
+  {"column",                 166,   0, true},
+  {"carving",                153,   0, true},  // R=0.60 smooth carved stone
+  // Grass / dirt / sand
+  {"grass",                  230,   0, true},  // R=0.90 vegetation
+  {"foliage",                230,   0, true},
+  {"dirt",                   217,   0, true},  // R=0.85 loose ground
+  {"mud",                    217,   0, true},
+  {"sand",                   204,   0, true},  // R=0.80 sandy ground
+  // Wood (generic)
+  {"plank",                  204,   0, true},  // R=0.80 dry wood
+  {"crate",                  191,   0, true},  // R=0.75 wooden crate
+  {"box",                    191,   0, true},
+  {"door",                   178,  13, true},  // R=0.70 M=0.05 wood+metal
+  // Metal (Source maps)
+  {"metal",                  102, 204, true},  // R=0.40 M=0.80 brushed
+  {"steel",                  102, 204, true},
+  {"iron",                   102, 204, true},
+  {"grate",                  128, 179, true},  // R=0.50 M=0.70 industrial
+  {"chain",                  128, 179, true},
+  {"fence",                  128, 179, true},
+  {"rust",                   191, 128, true},  // R=0.75 M=0.50 corroded
+  // Concrete / brick / tile / plaster
+  {"concrete",               191,   0, true},  // R=0.75
+  {"cement",                 191,   0, true},
+  {"brick",                  204,   0, true},  // R=0.80
+  {"tile",                   140,   0, true},  // R=0.55 smooth tile
+  {"plaster",                166,   0, true},  // R=0.65
+  {"stucco",                 166,   0, true},
+  // Glass / water
+  {"glass",                   38,  26, true},  // R=0.15 M=0.10
+  {"water",                   13,   0, true},  // R=0.05 water surface
+  // Sky
+  {"backdrop",               255,   0, true},  // R=1.00 diffuse sky
+  {"sky",                    255,   0, true},
+};
+#define PBR_HEURISTIC_COUNT (sizeof PBR_HEURISTICS / sizeof PBR_HEURISTICS[0])
+
+// ── Impulse Bindings ──────────────────────────────────────────────────────────────────────
+//
+// Default input bindings for game actions, following the Ada Impulse generic pattern.
+// Each impulse maps a named action to a primary key, alternate key, and mouse button.
+// The Input_Field offset allows the polling loop to write into the Input struct by index.
+//
+//   Name          Primary Key          Alternate Key         Mouse Button      Input_Field offset
+
+typedef struct {
+  const char  *Name;         // Action name ("forward", "jump", etc.)
+  int          Primary;      // SDL_SCANCODE_* for primary key
+  int          Alternate;    // SDL_SCANCODE_* for alternate key (0 = none)
+  int          Mouse_Button; // SDL_BUTTON_* for mouse (0 = none)
+  int          Field_Offset; // offsetof(Input, Field) for direct write
+} Impulse_Binding;
+
+#define IMPULSE_BINDINGS_LIST \
+  /* Movement */                                                                                \
+  {"forward",  SDL_SCANCODE_W,     SDL_SCANCODE_UP,    0,              offsetof(Input, Forward)},\
+  {"back",     SDL_SCANCODE_S,     SDL_SCANCODE_DOWN,  0,              offsetof(Input, Back)},   \
+  {"left",     SDL_SCANCODE_A,     SDL_SCANCODE_LEFT,  0,              offsetof(Input, Left)},   \
+  {"right",    SDL_SCANCODE_D,     SDL_SCANCODE_RIGHT, 0,              offsetof(Input, Right)},  \
+  /* Actions */                                                                                 \
+  {"jump",     SDL_SCANCODE_SPACE, 0,                  0,              offsetof(Input, Jump)},   \
+  {"crouch",   SDL_SCANCODE_LCTRL, SDL_SCANCODE_C,     0,              offsetof(Input, Crouch)}, \
+  {"fire",     0,                  0,                  SDL_BUTTON_LEFT, offsetof(Input, Fire)},
+
+// NOTE: Impulse_Binding requires the Input struct (§2) and SDL scancodes. The actual const
+// array is instantiated after the Input struct definition — see DEFAULT_IMPULSE_BINDINGS below.
+
+// ── CVar Defaults ─────────────────────────────────────────────────────────────────────────
+//
+// Default values for engine console variables.  CVar_Register_All reads these at startup.
+// All CVar defaults that reference gameplay constants (GRAVITY, GROUND_FRICTION, etc.)
+// are resolved through the #defines above.
+
+// Video defaults
+#define CVAR_DEFAULT_WIDTH          1280
+#define CVAR_DEFAULT_HEIGHT          720
+#define CVAR_DEFAULT_RENDER_SCALE   0.75f
+#define CVAR_DEFAULT_SPP              0      // 0 = use quality preset
+#define CVAR_DEFAULT_DENOISE_PASSES   3
+#define CVAR_DEFAULT_FOV              0      // 0 = auto from world preset
+#define CVAR_DEFAULT_SENSITIVITY    1.0f
+
 // ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 //
 // §2. Types
@@ -269,6 +418,10 @@ typedef struct {
   int   Forward, Back, Left, Right, Jump, Fire, Crouch; // Binary key states: 1 if held, 0 otherwise
   float Delta_X, Delta_Y;                               // Mouse displacement in pixels since last frame
 } Input;
+
+// Instantiate the impulse binding table from the spec (§1) now that Input is defined
+static const Impulse_Binding DEFAULT_IMPULSE_BINDINGS[] = { IMPULSE_BINDINGS_LIST };
+#define IMPULSE_BINDING_COUNT (sizeof DEFAULT_IMPULSE_BINDINGS / sizeof DEFAULT_IMPULSE_BINDINGS[0])
 
 // Windowing and Cursor
 typedef enum {GAME_PLAYING,    GAME_MENU}                      Game_Mode_Kind;
@@ -2742,6 +2895,14 @@ const Model_Damage_Entry DAMAGE_MAP_REGISTRY[DAMAGE_MODEL_COUNT] = {
 //
 // ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 
+// Forward declarations for globals and functions defined after main()
+Input_Ring                Input_Ring_Buffer;
+Snapshot_Double_Buffer    Snapshot_Buffer;
+void CVar_Register_All   (void);
+void Input_Ring_Push      (Input_Ring *Ring, const Input *In);
+void Snapshot_Init        (Snapshot_Double_Buffer *SB);
+void Snapshot_Destroy     (Snapshot_Double_Buffer *SB);
+
 int main (int Argc, char **Argv) {
 
   // Command-line flags
@@ -4722,13 +4883,13 @@ void Gamepad_Handle_Event (const SDL_Event *Event) {
 // from the config file, then command-line flags override individual CVars.
 
 void CVar_Register_All (void) {
-  // ── Video CVars ────────────────────────────────────────────────────────────────────────
-  r_width          = CVar_Register_Int   ("r_width",          "Window width in pixels",              CVAR_ARCHIVE, 1280, 320, 7680);
-  r_height         = CVar_Register_Int   ("r_height",         "Window height in pixels",             CVAR_ARCHIVE, 720,  240, 4320);
+  // ── Video CVars (defaults from §1. Settings: CVAR_DEFAULT_*) ─────────────────────────
+  r_width          = CVar_Register_Int   ("r_width",          "Window width in pixels",              CVAR_ARCHIVE, CVAR_DEFAULT_WIDTH, 320, 7680);
+  r_height         = CVar_Register_Int   ("r_height",         "Window height in pixels",             CVAR_ARCHIVE, CVAR_DEFAULT_HEIGHT, 240, 4320);
   r_quality        = CVar_Register_Int   ("r_quality",        "Quality preset (0=ultra..4=potato)",  CVAR_ARCHIVE, QUALITY_MEDIUM, 0, QUALITY_COUNT - 1);
-  r_render_scale   = CVar_Register_Float ("r_render_scale",   "Internal RT render scale",            CVAR_ARCHIVE, 0.75f, 0.25f, 2.0f);
-  r_spp            = CVar_Register_Int   ("r_spp",            "Samples per pixel (0=use preset)",    CVAR_ARCHIVE, 0, 0, 8);
-  r_denoise_passes = CVar_Register_Int   ("r_denoise_passes", "A-trous wavelet denoise iterations",  CVAR_ARCHIVE, 3, 0, 8);
+  r_render_scale   = CVar_Register_Float ("r_render_scale",   "Internal RT render scale",            CVAR_ARCHIVE, CVAR_DEFAULT_RENDER_SCALE, 0.25f, 2.0f);
+  r_spp            = CVar_Register_Int   ("r_spp",            "Samples per pixel (0=use preset)",    CVAR_ARCHIVE, CVAR_DEFAULT_SPP, 0, 8);
+  r_denoise_passes = CVar_Register_Int   ("r_denoise_passes", "A-trous wavelet denoise iterations",  CVAR_ARCHIVE, CVAR_DEFAULT_DENOISE_PASSES, 0, 8);
   r_checkerboard   = CVar_Register_Int   ("r_checkerboard",   "Temporal checkerboard ray dispatch",  CVAR_ARCHIVE, 1, 0, 1);
   r_postprocess    = CVar_Register_Int   ("r_postprocess",    "Enable post-processing pass",         CVAR_ARCHIVE, 1, 0, 1);
   r_parallax       = CVar_Register_Int   ("r_parallax",       "Enable parallax occlusion mapping",   CVAR_ARCHIVE, 1, 0, 1);
@@ -4736,9 +4897,9 @@ void CVar_Register_All (void) {
   r_validation     = CVar_Register_Int   ("r_validation",     "Enable Vulkan validation layers",     CVAR_NONE,    0, 0, 1);
   r_fullscreen     = CVar_Register_Int   ("r_fullscreen",     "Fullscreen mode (0=windowed 1=full)", CVAR_ARCHIVE, 0, 0, 1);
   r_exposure       = CVar_Register_Float ("r_exposure",       "Tonemapping exposure multiplier",     CVAR_ARCHIVE, STYLE.Exposure, 0.1f, 10.0f);
-  r_fov            = CVar_Register_Float ("r_fov",            "Vertical FOV override (0=auto)",      CVAR_ARCHIVE, 0, 0, 170);
+  r_fov            = CVar_Register_Float ("r_fov",            "Vertical FOV override (0=auto)",      CVAR_ARCHIVE, CVAR_DEFAULT_FOV, 0, 170);
 
-  // ── World CVars ────────────────────────────────────────────────────────────────────────
+  // ── World CVars (defaults from §1. Settings: GRAVITY, GROUND_FRICTION, etc.) ────────
   w_preset         = CVar_Register_Int   ("w_preset",         "World preset (0=q3 1=source 2=unreal)", CVAR_ARCHIVE, WORLD_QUAKE3, 0, WORLD_COUNT - 1);
   w_gravity        = CVar_Register_Float ("w_gravity",        "Gravity (units/s²)",                    CVAR_NONE, GRAVITY, 0, 10000);
   w_max_speed      = CVar_Register_Float ("w_max_speed",      "Max run speed (units/s)",               CVAR_NONE, MAXIMUM_SPEED, 0, 5000);
@@ -4754,7 +4915,7 @@ void CVar_Register_All (void) {
   a_enabled        = CVar_Register_Int   ("a_enabled",        "Audio enabled",                       CVAR_ARCHIVE, 1, 0, 1);
 
   // ── Input CVars ────────────────────────────────────────────────────────────────────────
-  in_sensitivity   = CVar_Register_Float ("in_sensitivity",   "Mouse sensitivity multiplier",        CVAR_ARCHIVE, 1.0f, 0.01f, 100.0f);
+  in_sensitivity   = CVar_Register_Float ("in_sensitivity",   "Mouse sensitivity multiplier",        CVAR_ARCHIVE, CVAR_DEFAULT_SENSITIVITY, 0.01f, 100.0f);
   in_invert_y      = CVar_Register_Int   ("in_invert_y",      "Invert mouse Y axis",                 CVAR_ARCHIVE, 0, 0, 1);
 
   // ── Shader Tuning CVars (rt_ prefix) ── ARCHIVE | LATCH: shader recompile needed ──────
@@ -4814,8 +4975,6 @@ void Thread_Sleep_Until (uint64_t Target_Ticks) {
 // Main thread (producer) writes input snapshots; game thread (consumer) reads them.
 // Lock-free: Write and Read indices are atomic.  Ring size is a power of 2 for fast masking.
 
-Input_Ring  Input_Ring_Buffer;
-
 void Input_Ring_Push (Input_Ring *Ring, const Input *In) {
   uint W = atomic_load_explicit (&Ring->Write, memory_order_relaxed);
   Ring->Slots[W & (INPUT_RING_SIZE - 1)] = *In;
@@ -4842,8 +5001,6 @@ int Input_Ring_Drain (Input_Ring *Ring, Input *Out) {
 // ═══════════════════════════════════════════════════════════════════════════════════════════
 //   Game Snapshot Double-Buffer — Game produces, Render consumes
 // ═══════════════════════════════════════════════════════════════════════════════════════════
-
-Snapshot_Double_Buffer Snapshot_Buffer;
 
 void Snapshot_Init (Snapshot_Double_Buffer *SB) {
   memset (SB, 0, sizeof *SB);
@@ -9071,148 +9228,18 @@ void Scene_Load_Textures (const Scene *Scene_Data) {
 
   for (uint I = 0; I < Material_Count; I++) {
 
-    // Default: moderate stone (R = 0.75, M=0.0)
-    Material_PBR[I][0] = 191;  Material_PBR[I][1] = 0;
+    // Default: moderate stone (see PBR_DEFAULT_ROUGHNESS / PBR_DEFAULT_METALNESS in §1)
+    Material_PBR[I][0] = PBR_DEFAULT_ROUGHNESS;
+    Material_PBR[I][1] = PBR_DEFAULT_METALNESS;
     if (not Scene_Data->Texture_Names) continue;
     const char *N = Scene_Data->Texture_Names[I];
 
-    // Stone / brick / block: rough, non-metallic
-    if (strstr (N, "gothic_block") or strstr (N, "gothic_wall/street"))
-      {Material_PBR[I][0] = 204; Material_PBR[I][1] = 0;} // R = 0.80, M = 0.00 - Rough stone
-    else if (strstr (N, "proto_brik"))
-      {Material_PBR[I][0] = 209; Material_PBR[I][1] = 0;} // R = 0.82, M = 0.00 - Brick
-    else if (strstr (N, "gothic_wall"))
-      {Material_PBR[I][0] = 191; Material_PBR[I][1] = 0;} // R = 0.75, M = 0.00 - Generic wall
-
-    // Metal trim / rust
-    else if (strstr (N, "pitted_rust"))
-      {Material_PBR[I][0] = 166; Material_PBR[I][1] = 153;} // R = 0.65, M = 0.60 - Corroded metal
-    else if (strstr (N, "deeprust"))
-      {Material_PBR[I][0] = 191; Material_PBR[I][1] = 128;} // R = 0.75, M = 0.50 - Heavy rust
-    else if (strstr (N, "pewter"))
-      {Material_PBR[I][0] = strstr(N,"dirty") ? 140 : 102;  
-       Material_PBR[I][1] = strstr(N,"dirty") ? 166 : 179;} 
-    else if (strstr (N, "border7") or strstr (N, "baseboard"))
-      {Material_PBR[I][0] = 153; Material_PBR[I][1] = 89;}    // R = 0.60, M = 0.35 - Mixed trim
-
-    // Tech walls
-    else if (strstr (N, "atech"))
-      {Material_PBR[I][0] = 115; Material_PBR[I][1] = 128;} // R = 0.45, M = 0.50 - Brushed metal panels
-    else if (strstr (N, "ceilingtech"))
-      {Material_PBR[I][0] = 140; Material_PBR[I][1] = 77;} // R = 0.55, M = 0.30 - Ceiling panel
-
-    // Wood
-    else if (strstr (N, "wood"))
-      {Material_PBR[I][0] = 204; Material_PBR[I][1] = 0;} // R = 0.80, M = 0.00 - Dry wood
-
-    // Floor
-    else if (strstr (N, "gothic_floor")
-         or strstr (N, "floor"))
-      {Material_PBR[I][0] = 166; Material_PBR[I][1] = 0;} // R = 0.65, M = 0.00 - Worn floor stone
-
-    // Light panels (EMISSIVE - PBR values less important)
-    else if (strstr (N, "light")
-         or strstr (N, "xlight"))
-      {Material_PBR[I][0] = 77;  Material_PBR[I][1] = 0;} // R = 0.30, M = 0.00 - Smooth glass cover
-
-    // Skull / bone decorations
-    else if (strstr (N, "skull"))
-      {Material_PBR[I][0] = 191; Material_PBR[I][1] = 13;} // R = 0.75, M = 0.05 - Bone
-
-    // Lava
-    else if (strstr (N, "lava"))
-      {Material_PBR[I][0] = 26;  Material_PBR[I][1] = 0;} // R = 0.10, M = 0.00 - Molten liquid
-
-    // SFX (flames, beams, flares)
-    else if (strstr (N, "sfx/flame")
-          or strstr (N, "sfx/beam")
-          or strstr (N, "flameflare"))
-      {Material_PBR[I][0] = 26;  Material_PBR[I][1] = 0;} // R = 0.10, M = 0.00 - Emissive effect
-
-    // Window / glass
-    else if (strstr (N, "window"))
-      {Material_PBR[I][0] = 51;  Material_PBR[I][1] = 26;} // R = 0.20, M = 0.10 - Smooth glass
-
-    // Torch model
-    else if (strstr (N, "torch"))
-      {Material_PBR[I][0] = 153; Material_PBR[I][1] = 77;} // R = 0.60, M = 0.30 - Metal + wood
-
-    // Player skin (cloth + leather + armor plates)
-    else if (strstr (N, "players/"))
-      {Material_PBR[I][0] = 179; Material_PBR[I][1] = 20;} // R = 0.70, M = 0.08 - Mostly cloth, hint of metal
-
-    // Weapon metal
-    else if (strstr (N, "weapons"))
-      {Material_PBR[I][0] = 77;  Material_PBR[I][1] = 217;} // R = 0.30, M = 0.85 - Gun steel
-
-    // Stone walls and floors (rough, non-metallic)
-    else if (strcasestr (N, "stonewall")
-          or strcasestr (N, "stone3"))
-      {Material_PBR[I][0] = 210; Material_PBR[I][1] = 0;} // R = 0.82, M = 0.00 - Rough stone wall
-    else if (strcasestr (N, "stonefloor")
-          or strcasestr (N, "stonestep"))
-      {Material_PBR[I][0] = 178; Material_PBR[I][1] = 0;} // R = 0.70, M = 0.00 - Worn stone floor
-    else if (strcasestr (N, "stonetrim")
-          or strcasestr (N, "column"))
-      {Material_PBR[I][0] = 166; Material_PBR[I][1] = 0;} // R = 0.65, M = 0.00 - Carved stone trim
-    else if (strcasestr (N, "carving"))
-      {Material_PBR[I][0] = 153; Material_PBR[I][1] = 0;} // R = 0.60, M = 0.00 - Smooth carved stone
-
-    // Grass, dirt, sand (very rough, non-metallic)
-    else if (strcasestr (N, "grass")
-          or strcasestr (N, "foliage"))
-      {Material_PBR[I][0] = 230; Material_PBR[I][1] = 0;} // R = 0.90, M = 0.00 - Vegetation
-    else if (strcasestr (N, "dirt")
-          or strcasestr (N, "mud"))
-      {Material_PBR[I][0] = 217; Material_PBR[I][1] = 0;} // R = 0.85, M = 0.00 - Loose ground
-    else if (strcasestr (N, "sand"))
-      {Material_PBR[I][0] = 204; Material_PBR[I][1] = 0;} // R = 0.80, M = 0.00 - Sandy ground
-
-    // Wood (moderate rough, non-metallic)
-    else if (strcasestr (N, "wood")
-          or strcasestr (N, "plank"))
-      {Material_PBR[I][0] = 204; Material_PBR[I][1] = 0;} // R = 0.80, M = 0.00 - Dry wood
-    else if (strcasestr (N, "crate")
-           or strcasestr (N, "box"))
-      {Material_PBR[I][0] = 191; Material_PBR[I][1] = 0;} // R = 0.75, M = 0.00 - Wooden crate
-    else if (strcasestr (N, "door"))
-      {Material_PBR[I][0] = 178; Material_PBR[I][1] = 13;} // R = 0.70, M = 0.05 - Wood + metal hardware
-
-    // Metal (Source maps - pipes, grates, etc.)
-    else if (strcasestr (N, "metal")
-          or strcasestr (N, "steel")
-          or strcasestr (N, "iron"))
-      {Material_PBR[I][0] = 102; Material_PBR[I][1] = 204;} // R = 0.40, M = 0.80 - Brushed metal
-    else if (strcasestr (N, "grate")
-         or strcasestr (N, "chain")
-         or strcasestr (N, "fence"))
-      {Material_PBR[I][0] = 128; Material_PBR[I][1] = 179;} // R = 0.50, M = 0.70 - Industrial metal
-    else if (strcasestr (N, "rust"))
-      {Material_PBR[I][0] = 191; Material_PBR[I][1] = 128;} // R = 0.75, M = 0.50 - Corroded
-
-    // Concrete / brick / tile / plaster (moderate rough, non-metallic)
-    else if (strcasestr (N, "concrete")
-          or strcasestr (N, "cement"))
-      {Material_PBR[I][0] = 191; Material_PBR[I][1] = 0;} // R = 0.75, M = 0.00 - Concrete
-    else if (strcasestr (N, "brick"))
-      {Material_PBR[I][0] = 204; Material_PBR[I][1] = 0;} // R = 0.80, M = 0.00 - Brick
-    else if (strcasestr (N, "tile"))
-      {Material_PBR[I][0] = 140; Material_PBR[I][1] = 0;} // R = 0.55, M = 0.00 - Smooth tile
-    else if (strcasestr (N, "plaster")
-          or strcasestr (N, "stucco"))
-      {Material_PBR[I][0] = 166; Material_PBR[I][1] = 0;} // R = 0.65, M = 0.00 - Wall plaster
-
-    // Glass / water
-    else if (strcasestr (N, "glass")
-          or strcasestr (N, "window"))
-      {Material_PBR[I][0] = 38;  Material_PBR[I][1] = 26;} // R = 0.15, M = 0.10 - Smooth glass
-    else if (strcasestr (N, "water"))
-      {Material_PBR[I][0] = 13;  Material_PBR[I][1] = 0;} // R = 0.05, M = 0.00 - Water surface
-
-    // Backdrop / sky (non-physical, doesn't matter much)
-    else if (strcasestr (N, "backdrop")
-          or strcasestr (N, "sky"))
-      {Material_PBR[I][0] = 255; Material_PBR[I][1] = 0;} // R = 1.00, M = 0.00 - Diffuse sky
+    // Match against the PBR_HEURISTICS table (defined in §1. Settings)
+    for (uint J = 0; J < PBR_HEURISTIC_COUNT; J++) {
+      const PBR_Heuristic *H = &PBR_HEURISTICS[J];
+      const char *Match = H->Case_Insensitive ? strcasestr (N, H->Pattern) : strstr (N, H->Pattern);
+      if (Match) { Material_PBR[I][0] = H->R; Material_PBR[I][1] = H->M; break; }
+    }
   }
 
   // Initialize PBR loading counters
@@ -14688,12 +14715,17 @@ Input Poll_Input () {
   // Sample keyboard state only in game mode with active input
   if (not In_Menu and Input_Active) {
     const uint8_t *Keyboard = SDL_GetKeyboardState (NULL);
-    Input_Data.Forward = Keyboard[SDL_SCANCODE_W]     or Keyboard[SDL_SCANCODE_UP];
-    Input_Data.Back    = Keyboard[SDL_SCANCODE_S]     or Keyboard[SDL_SCANCODE_DOWN];
-    Input_Data.Left    = Keyboard[SDL_SCANCODE_A]     or Keyboard[SDL_SCANCODE_LEFT];
-    Input_Data.Right   = Keyboard[SDL_SCANCODE_D]     or Keyboard[SDL_SCANCODE_RIGHT];
-    Input_Data.Jump    = Keyboard[SDL_SCANCODE_SPACE];
-    Input_Data.Crouch  = Keyboard[SDL_SCANCODE_LCTRL] or Keyboard[SDL_SCANCODE_C];
+    uint32_t Mouse_Buttons  = SDL_GetMouseState (NULL, NULL);
+
+    // Evaluate impulse bindings from the spec table (§1. Settings → DEFAULT_IMPULSE_BINDINGS)
+    for (uint B = 0; B < IMPULSE_BINDING_COUNT; B++) {
+      const Impulse_Binding *IB = &DEFAULT_IMPULSE_BINDINGS[B];
+      int Held = 0;
+      if (IB->Primary   and Keyboard[IB->Primary])   Held = 1;
+      if (IB->Alternate and Keyboard[IB->Alternate]) Held = 1;
+      if (IB->Mouse_Button and (Mouse_Buttons & SDL_BUTTON(IB->Mouse_Button))) Held = 1;
+      *(int *)((char *)&Input_Data + IB->Field_Offset) = Held;
+    }
 
     // Merge gamepad input from first connected controller (player 1)
     if (Input_State.Gamepad_Count > 0) {
@@ -14835,6 +14867,17 @@ void Vulkan_Pick_Physical_Device () {
           Props.deviceName, VK_API_VERSION_MAJOR (Props.apiVersion),
           VK_API_VERSION_MINOR (Props.apiVersion), VK_API_VERSION_PATCH (Props.apiVersion));
   free (Devices);
+
+  // Safety cap: software renderers (CPU type, e.g. lavapipe) crash above ~5.5M pixels
+  if (Props.deviceType == VK_PHYSICAL_DEVICE_TYPE_CPU) {
+    if (Width > SOFTWARE_RENDERER_MAX_WIDTH or Height > SOFTWARE_RENDERER_MAX_HEIGHT) {
+      printf ("[vulkan] software renderer detected — clamping resolution from %dx%d to %dx%d\n",
+              Width, Height, SOFTWARE_RENDERER_MAX_WIDTH, SOFTWARE_RENDERER_MAX_HEIGHT);
+      if (Width  > SOFTWARE_RENDERER_MAX_WIDTH)  Width  = SOFTWARE_RENDERER_MAX_WIDTH;
+      if (Height > SOFTWARE_RENDERER_MAX_HEIGHT) Height = SOFTWARE_RENDERER_MAX_HEIGHT;
+      SDL_SetWindowSize (Window, Width, Height);
+    }
+  }
 
   // Search for a queue family that supports both graphics and surface presentation
   uint Family_Count;
