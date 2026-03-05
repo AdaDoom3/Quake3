@@ -1235,7 +1235,7 @@ void   Arena_Destroy (Arena *A);
 #define GPU_HEAP_MAX_SLABS     32        // Max VkDeviceMemory allocations (well under driver 4096 limit)
 #define GPU_HEAP_MAX_BLOCKS    4096      // Max sub-allocation blocks across all slabs
 #define GPU_HEAP_DEFAULT_SIZE  (256u<<20) // 256 MB default slab
-#define GPU_HEAP_FL_BITS       28        // First-level classes: log2(256MB) = 28
+#define GPU_HEAP_FL_BITS       32        // First-level classes: supports blocks up to 2^31 = 2 GB (must be > log2(max slab))
 #define GPU_HEAP_SL_BITS       4         // Second-level subdivisions per class (16 bins per power-of-two)
 #define GPU_HEAP_SL_COUNT      (1u << GPU_HEAP_SL_BITS) // 16
 #define GPU_HEAP_MIN_SIZE      64        // Minimum block size (alignment floor)
@@ -2048,6 +2048,7 @@ _Static_assert (GPU_HEAP_SL_COUNT      == 16,      "GPU_HEAP_SL_COUNT must be 16
 _Static_assert (GPU_HEAP_FL_BITS       <= 32,      "GPU_HEAP_FL_BITS must fit in a uint32_t FL_Bitmap");
 _Static_assert (GPU_HEAP_MIN_SIZE      >= 64,      "GPU_HEAP_MIN_SIZE must be >= 64 to accommodate alignment padding splits");
 _Static_assert (GPU_HEAP_DEFAULT_SIZE  >= (1u<<20), "GPU_HEAP_DEFAULT_SIZE must be >= 1 MB for meaningful sub-allocation");
+_Static_assert (GPU_HEAP_FL_BITS > 28,              "GPU_HEAP_FL_BITS must be > log2(256MB) = 28 to avoid out-of-bounds TLSF bitmap access for 256MB slabs");
 _Static_assert (sizeof (GPU_Heap_Block) == 32,     "GPU_Heap_Block must be 32 bytes (2 uint64_t + 5 int16_t + 2 uint8_t, padded to 8-byte alignment)");
 
 // ── Engine data structure invariants ─────────────────────────────────────────
@@ -3621,6 +3622,9 @@ int main (int Argc, char **Argv) {
   CVar_Set_Float (w_accelerate,     Is_Source ? 5.5f : GROUND_ACCELERATE);
   CVar_Set_Float (w_air_accelerate, Is_Source ? 10.f : AIR_ACCELERATE);
   CVar_Set_Float (w_overbounce,     Is_Source ? 1.f : OVERBOUNCE);
+  CVar_Set_Float (w_view_height,    Active_World.Eye_Height - Active_World.Player_Height * 0.5f);
+  CVar_Set_Float (w_crouch_height,  Active_World.Crouch_Eye_Height - Active_World.Crouch_Height * 0.5f);
+  CVar_Set_Float (w_step_size,      Active_World.Step_Size);
   printf ("[quality] preset: %s (%dx%d @ %.0f%% scale, %d SPP)\n",
           Preset->Name, Width, Height, Active_Render_Scale * 100.f, Override_SPP ? Override_SPP : Preset->SPP);
   printf ("[world] %s (height %.0f, eye %.0f, fov %.0f, speed %.0f)\n",
@@ -3883,7 +3887,7 @@ int main (int Argc, char **Argv) {
 
   // Place enemy 120 units forward from spawn (in engine Y-up space: forward = camera's look direction)
   vec3 Enemy_Origin = Spawn_Point.Origin;
-  if (Entity_MDL_Path) {
+  {
     float Spawn_Yaw = 1.5707963f - Spawn_Point.Angle * 3.14159f / 180.f;
     float Fwd_X = sinf(Spawn_Yaw), Fwd_Z = -cosf(Spawn_Yaw);
     Enemy_Origin.x += Fwd_X * 120.f;
@@ -4027,7 +4031,6 @@ int main (int Argc, char **Argv) {
   uint Active_SPP = Override_SPP ? (uint)Override_SPP : (uint)QUALITY_PRESETS[Active_Quality].SPP;
 
   // Log diagnostic output
-  printf ("[init] ready - entering game loop\n");
 
   // Physics-only test mode: run with --physics-test to skip rendering and simulate movement - Test code !!!
   if (Physics_Test) {
@@ -4600,8 +4603,8 @@ int main (int Argc, char **Argv) {
     Audio_Update_Footsteps (&Physics, Delta_Time);
 
     // Update the camera from the physics result - add View_Height to get eye position
-    Cam.Position.y += Physics.View_Height; // Raise camera to eye level
     Cam.Position    = Physics.Position;
+    Cam.Position.y += Physics.View_Height; // Raise camera to eye level
     Cam.Yaw         = Physics.Yaw;
     Cam.Pitch       = Physics.Pitch;
     Cam.Frame       = Frame;
@@ -5153,11 +5156,12 @@ GPU_Buffer Buffer_Allocate (uint64_t Size, VkBufferUsageFlags Usage, VkMemoryPro
   VK_CHECK (vkBindBufferMemory (Device, Result.Buffer, Result.Memory, Result.Offset));
 
   // Retrieve the 64-bit device address if this buffer will be referenced from shaders
-  if (Usage & VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT)
+  if (Usage & VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT) {
     Result.Address = vkGetBufferDeviceAddress (/*device =>*/ Device,
                                                /*pInfo  =>*/ &(VkBufferDeviceAddressInfo){
                                                  .sType  = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO,
                                                  .buffer = Result.Buffer});
+  }
   return Result;
 }
 
@@ -5182,7 +5186,6 @@ GPU_Buffer Buffer_Stage_Upload (VkCommandBuffer    Command_Buffer,
                                 VkQueue            Queue,
                                 const void *Data, uint64_t Size,
                                 VkBufferUsageFlags Usage) {
-
   // Allocate a host-visible staging buffer and fill it with the source data
   GPU_Buffer Staging = Buffer_Allocate (/*Size         =>*/ Size,
                                         /*Usage        =>*/ VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
@@ -6141,7 +6144,6 @@ int GPU_Heap_Alloc (GPU_Heap *H, uint64_t Size, uint64_t Alignment, int Is_Image
     }
   }
 
-  // Output
   B->Is_Image = (uint8_t)Is_Image;
   GPU_Heap_Slab *S = &H->Slabs[B->Slab];
   *Out_Memory = S->Memory;
@@ -6701,7 +6703,7 @@ GPU_Image Image_Storage_Create (uint Width, uint Height) {
 static GPU_Buffer Texture_Batch_Staging [TEXTURE_BATCH_MAX];
 static int        Texture_Batch_Count = 0;
 static int        Texture_Batch_Active = 0;
-static int        Texture_Upload_Total = 0; // Monotonic count of all texture uploads (debugging)
+
 
 void Texture_Upload_Begin (VkCommandBuffer Command_Buffer) {
   Texture_Batch_Count  = 0;
@@ -6730,16 +6732,6 @@ void Texture_Upload_Record (VkCommandBuffer Command_Buffer,
   assert (Texture_Batch_Active                   and "Texture_Upload_Record: batch not active — call Texture_Upload_Begin first");
   assert (Command_Buffer                         and "Texture_Upload_Record: Command_Buffer is VK_NULL_HANDLE");
 
-  int Upload_Id = ++Texture_Upload_Total;
-  printf ("[upload #%d] %ux%u fmt=%d, heap: %u/%u blocks, %u/%u slabs\n",
-          Upload_Id, Width, Height, Format, Heap.Block_Count, GPU_HEAP_MAX_BLOCKS,
-          Heap.Slab_Count, GPU_HEAP_MAX_SLABS);
-  fflush (stdout);
-
-  // Step-by-step diagnostic to isolate crash point (remove when bug is fixed)
-  #define UPLOAD_STEP(Step) do { printf ("  [step %d] %s\n", Step, #Step); fflush (stdout); } while (0)
-  UPLOAD_STEP(1); // before vkCreateImage
-
   // Create the texture image with sampled and transfer-destination usage
   VkImage Image;
   VK_CHECK (vkCreateImage (/*device      =>*/ Device,
@@ -6757,7 +6749,6 @@ void Texture_Upload_Record (VkCommandBuffer Command_Buffer,
                              .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED},
                            /*pAllocator  =>*/ NULL,
                            /*pImage      =>*/ &Image));
-  UPLOAD_STEP(2); // after vkCreateImage
 
   // Sub-allocate device-local memory from the TLSF heap.
   // Postcondition: Img_Block >= 0 guarantees Memory and Img_Offset are valid.
@@ -6795,9 +6786,7 @@ void Texture_Upload_Record (VkCommandBuffer Command_Buffer,
     return;
   }
   assert (Memory != VK_NULL_HANDLE and "GPU_Heap_Alloc returned success but Memory is VK_NULL_HANDLE");
-  UPLOAD_STEP(3); // after GPU_Heap_Alloc
   VK_CHECK (vkBindImageMemory (Device, Image, Memory, Img_Offset));
-  UPLOAD_STEP(4); // after vkBindImageMemory
 
   // Stage the pixel data through a host-visible buffer (retained until flush)
   uint64_t Byte_Size = (uint64_t)Width * Height * 4;
@@ -6805,9 +6794,7 @@ void Texture_Upload_Record (VkCommandBuffer Command_Buffer,
                                         /*Usage        =>*/ VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
                                         /*Memory_Flags =>*/ VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT
                                                           | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
-  UPLOAD_STEP(5); // after Buffer_Allocate
   Buffer_Upload (Staging, Pixels, Byte_Size);
-  UPLOAD_STEP(6); // after Buffer_Upload
   if (Texture_Batch_Count < TEXTURE_BATCH_MAX)
     Texture_Batch_Staging[Texture_Batch_Count++] = Staging;
 
@@ -6821,7 +6808,6 @@ void Texture_Upload_Record (VkCommandBuffer Command_Buffer,
                         /*Source_Stage       =>*/ VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
                         /*Destination_Stage  =>*/ VK_PIPELINE_STAGE_TRANSFER_BIT);
 
-  UPLOAD_STEP(7); // after first barrier
   // Record the buffer → image copy
   vkCmdCopyBufferToImage (/*commandBuffer  =>*/ Command_Buffer,
                           /*srcBuffer      =>*/ Staging.Buffer,
@@ -6832,7 +6818,6 @@ void Texture_Upload_Record (VkCommandBuffer Command_Buffer,
                             .imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
                             .imageExtent      = {Width, Height, 1}});
 
-  UPLOAD_STEP(8); // after copy
   // Record layout transition: TRANSFER_DST → SHADER_READ_ONLY
   Image_Layout_Barrier (/*Command_Buffer     =>*/ Command_Buffer,
                         /*Image              =>*/ Image,
@@ -6843,7 +6828,6 @@ void Texture_Upload_Record (VkCommandBuffer Command_Buffer,
                         /*Source_Stage       =>*/ VK_PIPELINE_STAGE_TRANSFER_BIT,
                         /*Destination_Stage  =>*/ VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR);
 
-  UPLOAD_STEP(9); // after second barrier
   // Create the image view immediately (no GPU work — pure API object)
   VkImageView Image_View;
   VK_CHECK (vkCreateImageView (/*device      =>*/ Device,
@@ -6871,9 +6855,7 @@ void Texture_Upload_Record (VkCommandBuffer Command_Buffer,
 void Texture_Upload_Flush (VkCommandBuffer Command_Buffer, VkQueue Queue) {
   if (not Texture_Batch_Active) return;
   if (Texture_Batch_Count == 0) { Texture_Batch_Active = 0; return; }
-  printf ("  [flush] ending cmd buffer...\n"); fflush(stdout);
   VK_CHECK (vkEndCommandBuffer (Command_Buffer));
-  printf ("  [flush] submitting...\n"); fflush(stdout);
   VK_CHECK (vkQueueSubmit (/*queue       =>*/ Queue,
                            /*submitCount =>*/ 1,
                            /*pSubmits    =>*/ &(VkSubmitInfo){
@@ -6881,12 +6863,9 @@ void Texture_Upload_Flush (VkCommandBuffer Command_Buffer, VkQueue Queue) {
                              .commandBufferCount = 1,
                              .pCommandBuffers    = &Command_Buffer},
                            /*fence       =>*/ VK_NULL_HANDLE));
-  printf ("  [flush] waiting idle...\n"); fflush(stdout);
   VK_CHECK (vkQueueWaitIdle (Queue));
-  printf ("  [flush] destroying %d staging buffers...\n", Texture_Batch_Count); fflush(stdout);
   for (int I = 0; I < Texture_Batch_Count; I++)
     Buffer_Destroy (&Texture_Batch_Staging[I]);
-  printf ("[textures] batch flush: %d staging buffers released\n", Texture_Batch_Count);
   Texture_Batch_Count  = 0;
   Texture_Batch_Active = 0;
 }
@@ -11076,6 +11055,11 @@ void Weapon_Load_Textures (Figure_Instance *Weapon) {
 // ════════════════════════════
 
 Acceleration_Structure Build_World_Bottom_Level (const Scene *Scene_Data) {
+  assert (Scene_Data->Vertices       and "Build_World_Bottom_Level: Vertices is NULL");
+  assert (Scene_Data->Indices        and "Build_World_Bottom_Level: Indices is NULL");
+  assert (Scene_Data->Vertex_Count   and "Build_World_Bottom_Level: Vertex_Count is 0");
+  assert (Scene_Data->Index_Count    and "Build_World_Bottom_Level: Index_Count is 0");
+  assert (Scene_Data->Triangle_Count and "Build_World_Bottom_Level: Triangle_Count is 0");
 
   // Upload scene vertex, index, and material data to device-local GPU buffers for BLAS construction and shader access
   Vertex_Buffer = Buffer_Stage_Upload (/*Command_Buffer =>*/ Command_Buffer,
@@ -11103,6 +11087,7 @@ Acceleration_Structure Build_World_Bottom_Level (const Scene *Scene_Data) {
                                                        | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
 
   // Upload the material color array
+  assert (Scene_Data->Materials and "Materials is NULL");
   Buffer_Upload (Material_Buffer, Scene_Data->Materials, sizeof (vec4) * Scene_Data->Material_Count);
 
   // Define the triangle geometry referencing the uploaded vertex and index buffers
@@ -12922,7 +12907,7 @@ void Physics_Resources_Create (const Player *Initial_State) {
     .Pitch       = Initial_State->Pitch,
     .View_Height = DEFAULT_VIEW_HEIGHT,
     .Shape       = SHAPE_CAPSULE,
-    .Extents     = {PLAYER_HALF_EXTENTS[0], PLAYER_HALF_EXTENTS[1], PLAYER_HALF_EXTENTS[2]},
+    .Extents     = {Active_World.Player_Width, Active_World.Player_Height * 0.5f, Active_World.Player_Width},
     .Spine       = PLAYER_CAPSULE_SPINE};
   Buffer_Upload (Player_State_Buffer, &Initial_GPU_State, sizeof Initial_GPU_State);
 
