@@ -13315,9 +13315,15 @@ glsl rchit Closest_Hit {
   
     // Apply per-instance lighting model
     if (Is_Weapon) {
-      vec3 Direct    = (Diffuse + Specular) * Lr * NL;
-      vec3 Weapon_Full  = Direct * 1.0 + Indirect_Diffuse * 1.2 + Traced_Specular * 0.5;
-      vec3 Weapon_Cheap = Ambient_Irradiance * Albedo * 2.5 + Albedo * max(NL, 0.3);
+      // Source viewmodels: dark tactical textures (sRGB ~33/255 → linear ~0.015) need
+      // aggressive fill lighting to be visible in a ray tracer without Source's ambient cube.
+      // Lift the albedo into a visible range with a pow curve (simulates gamma-aware fill).
+      vec3 Lifted  = pow (Albedo, vec3 (0.5));  // gamma lift: (0.015)^0.5 ≈ 0.12
+      float VN     = max (dot (Normal, -gl_WorldRayDirectionEXT), 0.0); // view-facing factor
+      vec3 Direct  = (Diffuse + Specular) * Lr * NL;
+      vec3 Fill    = Lifted * (VN * 0.4 + 0.6) * 0.5;  // hemisphere fill using lifted albedo
+      vec3 Weapon_Full  = Direct * 1.5 + Indirect_Diffuse * 1.5 + Traced_Specular * 0.5 + Fill;
+      vec3 Weapon_Cheap = Fill + Lifted * max (NL, 0.3) * 0.4;
       Color = mix (Weapon_Full, Weapon_Cheap, Budget);
 
     // Figure (non-weapon): direct sun + shadows + hemisphere ambient, no lightmap
