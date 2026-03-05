@@ -8024,6 +8024,7 @@ Figure_Instance MDL_Load (Scene *S, const char *Path, vec3 Origin, float Yaw) {
 
   // Read VVD (vertex data sidecar)
   FILE       *VVD_File         = fopen (VVD_Path, "rb");
+  FILE       *VTX_File         = NULL;
   VVD_Vertex *VVD_Vertices     = NULL;
   int         VVD_Vertex_Count = 0;
   if (VVD_File) {
@@ -8047,7 +8048,7 @@ Figure_Instance MDL_Load (Scene *S, const char *Path, vec3 Origin, float Yaw) {
   }
 
   // Read VTX (triangle strip sidecar) and extract an indexed triangle list
-  FILE *VTX_File = fopen (VTX_Path, "rb");
+  VTX_File = fopen (VTX_Path, "rb");
   if (VTX_File and VVD_Vertices) {
     fseek (VTX_File, 0, SEEK_END); long VTX_File_Size = ftell (VTX_File); rewind (VTX_File);
     uint8_t *VTX_Data       = malloc (VTX_File_Size);
@@ -8329,6 +8330,7 @@ Articulated_Figure Source_Weapon_Model_Load (const char *Path) {
 
   // Read VVD (vertex data sidecar)
   FILE       *VVD_File         = fopen (VVD_Path, "rb");
+  FILE       *VTX_File         = NULL;
   VVD_Vertex *VVD_Vertices     = NULL;
   int         VVD_Vertex_Count = 0;
   if (VVD_File) {
@@ -8603,7 +8605,7 @@ Articulated_Figure Source_Weapon_Model_Load (const char *Path) {
   }
 
   // Read VTX (triangle strip sidecar) and extract skinned geometry
-  FILE *VTX_File = fopen (VTX_Path, "rb");
+  VTX_File = fopen (VTX_Path, "rb");
   if (VTX_File and VVD_Vertices) {
     fseek (VTX_File, 0, SEEK_END); long VTX_File_Size = ftell (VTX_File); rewind (VTX_File);
     uint8_t *VTX_Data        = malloc (VTX_File_Size);
