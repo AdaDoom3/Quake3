@@ -8,3 +8,5 @@ reference/SDL2/
 *.png
 screenshot*
 assets/cspromod_b105/
+assets/materials/cspromod/
+assets/materials/models/props/
