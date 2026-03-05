@@ -883,6 +883,7 @@ Projectile_Pool Projectiles;
 
 // Shader binding table (SBT) alignment and handle sizes
 VkPhysicalDeviceRayTracingPipelinePropertiesKHR Raytracing_Properties;
+VkPhysicalDeviceAccelerationStructurePropertiesKHR Accel_Structure_Properties;
 
 // Queried device limits — populated once during Vulkan_Create_Logical_Device, used throughout
 struct {
@@ -890,10 +891,14 @@ struct {
   VkPhysicalDeviceMemoryProperties     Memory;        // Memory types and heaps
   uint                                 Texture_Slots; // Clamped DESCRIPTOR_TEXTURE_SLOTS (≤ maxPerStageDescriptorSampledImages)
   uint                                 Max_Ray_Recursion; // maxRayRecursionDepth from RT properties
+  int                                  Unified_Memory;    // 1 if DEVICE_LOCAL is also HOST_VISIBLE (software driver / iGPU)
 } Device_Limits;
 
 // BLAS for world geometry and TLAS combining all instances
-Acceleration_Structure Bottom_Level, Top_Level; 
+Acceleration_Structure Bottom_Level, Top_Level;
+#define MAX_WORLD_BLAS 64
+Acceleration_Structure World_BLAS[MAX_WORLD_BLAS]; // Chunked world BLAS array (split for driver compatibility)
+uint                   World_BLAS_Count = 0;       // Number of active world BLAS entries
 
 // GPU storage images and scene data buffers
 GPU_Buffer Vertex_Buffer, Index_Buffer, Material_Buffer; // Scene geometry and material data on GPU
@@ -2604,7 +2609,7 @@ void Movement_Style_Toggle (Player *P);
 
 // Build the world geometry's bottom-level acceleration structure (BLAS). Uploads the scene vertex, index, and material buffers to the GPU,
 // then constructs a single BLAS geometry entry covering all triangles. Uses PREFER_FAST_TRACE since the world is static.
-Acceleration_Structure Build_World_Bottom_Level (const Scene *Scene_Data);
+void Build_World_Bottom_Level (Scene *Scene_Data);
 
 // Initialize a figure's BLAS: allocate vertex/index/texture-id GPU buffers, build initial BLAS with ALLOW_UPDATE for per-frame refit
 void Figure_BLAS_Initialize (Figure_Instance *F);
@@ -2615,8 +2620,8 @@ void Figure_BLAS_Rebuild (Figure_Instance *F);
 // Pre-allocate the top-level acceleration structure (TLAS) for up to Maximum_Instances instance entries
 void Top_Level_Initialize (uint Maximum_Instances);
 
-// Rebuild the TLAS each frame from the world BLAS plus all active figures in the pool
-void Top_Level_Rebuild (Acceleration_Structure *World, Figure_Pool *Pool);
+// Rebuild the TLAS each frame from the world BLAS chunk(s) plus all active figures in the pool
+void Top_Level_Rebuild (Figure_Pool *Pool);
 
 // ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 //
@@ -3760,9 +3765,13 @@ int main (int Argc, char **Argv) {
           No_PBR ? "DISABLED" : "enabled", No_Parallax ? "DISABLED" : "enabled");
 
   // Build acceleration structures (BLAS for world + all figures, then TLAS)
-  Acceleration_Structure World_Bottom_Level = Build_World_Bottom_Level (&Scene_Data);
+  printf ("[init] building world BLAS (%u tris)...\n", Scene_Data.Triangle_Count); fflush (stdout);
+  Build_World_Bottom_Level (&Scene_Data);
+  printf ("[init] world BLAS built (%u chunks). Initializing weapon BLAS...\n", World_BLAS_Count); fflush (stdout);
   Figure_BLAS_Initialize (Weapon);
+  printf ("[init] weapon BLAS built. Initializing enemy BLAS...\n"); fflush (stdout);
   Figure_BLAS_Initialize (Enemy);
+  printf ("[init] enemy BLAS built.\n"); fflush (stdout);
 
   // Player body shares enemy's BLAS and buffers (same geometry, different transform + ray mask)
   Player_Body->Bottom_Level      = Enemy->Bottom_Level;
@@ -3771,16 +3780,22 @@ int main (int Argc, char **Argv) {
   Player_Body->Texture_Id_Buffer = Enemy->Texture_Id_Buffer;
   Player_Body->Texture_Base_Index = Enemy->Texture_Base_Index;
 
-  Top_Level_Initialize (1 + FIGURE_POOL_MAX);
-  Top_Level_Rebuild (&World_Bottom_Level, &Figures);
+  printf ("[init] building TLAS...\n"); fflush (stdout);
+  Top_Level_Initialize (MAX_WORLD_BLAS + FIGURE_POOL_MAX);
+  Top_Level_Rebuild (&Figures);
+  printf ("[init] TLAS built. Creating RT pipeline...\n"); fflush (stdout);
 
   // Create the ray tracing pipeline, shader binding table, and descriptors
   Raytracing_Pipeline_Create ();
+  printf ("[init] RT pipeline created. Creating SBT...\n"); fflush (stdout);
   Shader_Binding_Table_Create ();
+  printf ("[init] SBT created. Creating descriptors...\n"); fflush (stdout);
   Descriptor_Set_Create (&Figures);
+  printf ("[init] descriptors created. Creating postprocess pipeline...\n"); fflush (stdout);
 
   // Create the post-processing pipeline (reads color + depth, writes color)
   Postprocess_Pipeline_Create ();
+  printf ("[init] postprocess pipeline created.\n"); fflush (stdout);
 
   // Create the a-trous spatial denoiser
   Denoise_Ping_Image = Image_Storage_Create (Render_Width, Render_Height);
@@ -3818,13 +3833,11 @@ int main (int Argc, char **Argv) {
   }
   Denoise_Pipeline_Create ();
 
-  // Create the GPU skeletal skinning pipeline (used by Source MDL entities)
+  printf ("[init] creating skinning pipeline...\n"); fflush (stdout);
   Skinning_Pipeline_Create ();
-
-  // Create the GPU Bezier tessellation pipeline (used by Q3 BSP curved surfaces)
+  printf ("[init] creating tessellation pipeline...\n"); fflush (stdout);
   Tessellation_Pipeline_Create ();
-
-  // Create the GPU physics pipeline and resources (with hull binding)
+  printf ("[init] creating physics pipeline...\n"); fflush (stdout);
   Physics_Pipeline_Create ();
 
   // Compute world-relative spawn offset
@@ -3833,10 +3846,13 @@ int main (int Argc, char **Argv) {
   Player Initial_Player = {
     .Position = {Spawn_Point.Origin.x, Spawn_Point.Origin.y + Capsule_Y, Spawn_Point.Origin.z},
     .Yaw      = 1.5707963f - Spawn_Point.Angle * 3.14159f / 180.f}; // M_PI/2 - Angle: Q3 angle 0 = +X = our yaw π/2
+  printf ("[init] creating physics resources...\n"); fflush (stdout);
   Physics_Resources_Create (&Initial_Player);
 
   // Initialize the audio system (OpenAL with synthesized sounds)
+  printf ("[init] initializing audio...\n"); fflush (stdout);
   Audio_Init ();
+  printf ("[init] audio done\n"); fflush (stdout);
 
   // Apply runtime mode flags
   Skip_Postprocess = No_Postprocess;
@@ -3844,8 +3860,10 @@ int main (int Argc, char **Argv) {
   // Default SPP = 1 for maximum speed; override with --spp N
   uint Active_SPP = Override_SPP ? (uint)Override_SPP : (uint)QUALITY_PRESETS[Active_Quality].SPP;
 
-  // Log diagnostic output
-  printf ("[init] ready - entering game loop\n");
+  // Synchronize before entering game loop (flush any pending async driver work)
+  printf ("[init] synchronizing device...\n"); fflush (stdout);
+  vkDeviceWaitIdle (Device);
+  printf ("[init] ready - entering game loop\n"); fflush (stdout);
 
   // Physics-only test mode: run with --physics-test to skip rendering and simulate movement - Test code !!!
   if (Physics_Test) {
@@ -3907,12 +3925,16 @@ int main (int Argc, char **Argv) {
     float Fixed_Dt = 1.f / 60.f;
 
     // Warm up for testing - Test code !!!
-    printf ("[benchmark] warming up (5 frames)...\n");
+    printf ("[benchmark] warming up (5 frames)...\n"); fflush (stdout);
     {
+      printf ("[warmup] fence wait...\n"); fflush (stdout);
       VK_CHECK (vkWaitForFences (Device, 1, &Fence, VK_TRUE, UINT64_MAX));
+      printf ("[warmup] weapon update...\n"); fflush (stdout);
       Weapon_Update (Weapon, &Bench_Cam, Fixed_Dt, 0);
+      printf ("[warmup] weapon BLAS rebuild...\n"); fflush (stdout);
       Figure_BLAS_Rebuild (Weapon);
-      Top_Level_Rebuild (&World_Bottom_Level, &Figures);
+      printf ("[warmup] TLAS rebuild...\n"); fflush (stdout);
+      Top_Level_Rebuild (&Figures);
       mat4 Bench_View = View (Bench_Cam.Position, Bench_Cam.Yaw, Bench_Cam.Pitch);
       mat4 Bench_Proj = Perspective (Vertical_FOV, (float)Width / Height, 0.1f, 10000.f);
       mat4 Bench_Inv_Proj = Inverse_Projection (Bench_Proj);
@@ -3985,7 +4007,7 @@ int main (int Argc, char **Argv) {
         Enemy->Current_Vertices = Enemy->Figure.Frame_Vertices[(int)(Enemy->Animation_Time * Enemy->Figure.Animations[0].FPS) % Enemy->Figure.Animations[0].Frame_Count];
       }
       Figure_BLAS_Rebuild (Enemy);
-      Top_Level_Rebuild (&World_Bottom_Level, &Figures);
+      Top_Level_Rebuild (&Figures);
       Camera_Upload (&Bench_Cam, Vertical_FOV, Weapon->Texture_Base_Index, PBR_Stride, Active_SPP);
 
       // Build view and projection matrices
@@ -4475,7 +4497,7 @@ int main (int Argc, char **Argv) {
     Player_Body->Bottom_Level = Enemy->Bottom_Level;  // Share rebuilt BLAS
 
     // Rebuild the top-level acceleration structure
-    Top_Level_Rebuild (&World_Bottom_Level, &Figures);
+    Top_Level_Rebuild (&Figures);
 
     // Adaptive quality budget — frame-time targets per quality tier (seconds)
     float Target_Frame_Time;
@@ -4611,11 +4633,13 @@ int main (int Argc, char **Argv) {
 
   // Acceleration structures
   vkDestroyAccelerationStructure (Device, Top_Level.Handle, NULL);
-  vkDestroyAccelerationStructure (Device, Bottom_Level.Handle, NULL);
   Buffer_Destroy (&Top_Level.Buffer);
   Buffer_Destroy (&Top_Level_Instance_Buffer);
   Buffer_Destroy (&Top_Level_Scratch_Buffer);
-  Buffer_Destroy (&Bottom_Level.Buffer);
+  for (uint W = 0; W < World_BLAS_Count; W++) {
+    vkDestroyAccelerationStructure (Device, World_BLAS[W].Handle, NULL);
+    Buffer_Destroy (&World_BLAS[W].Buffer);
+  }
 
   // Player body shares enemy's Vulkan resources — clear its handles to prevent double-free
   memset (Player_Body, 0, sizeof *Player_Body);
@@ -4914,7 +4938,7 @@ GPU_Buffer Buffer_Allocate (uint64_t Size, VkBufferUsageFlags Usage, VkMemoryPro
     &Req2);
   VkMemoryRequirements Req = Req2.memoryRequirements;
 
-  if (Dedicated_Req.requiresDedicatedAllocation or Dedicated_Req.prefersDedicatedAllocation) {
+  if (Dedicated_Req.requiresDedicatedAllocation or Dedicated_Req.prefersDedicatedAllocation or Device_Limits.Unified_Memory) {
     // Bypass TLSF — allocate a dedicated VkDeviceMemory for this buffer.
     // Buffer_Upload handles map/unmap for standalone allocations (Heap_Block == -1).
     uint MT = Find_Memory_Type (Req.memoryTypeBits, Memory_Flags);
@@ -4970,7 +4994,32 @@ GPU_Buffer Buffer_Stage_Upload (VkCommandBuffer    Command_Buffer,
                                 const void *Data, uint64_t Size,
                                 VkBufferUsageFlags Usage) {
 
-  // Allocate a host-visible staging buffer and fill it with the source data
+  // On unified memory drivers (e.g. lavapipe), DEVICE_LOCAL memory is also HOST_VISIBLE.
+  // In that case, staging through a separate buffer causes vkCmdCopyBuffer to overlap
+  // within the same VkDeviceMemory (TLSF sub-allocation), which is a validation error and
+  // crashes lavapipe. Detect this and use direct host-visible upload instead.
+  VkMemoryPropertyFlags Dest_Flags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+  int Unified_Memory = 0;
+  for (uint I = 0; I < Device_Limits.Memory.memoryTypeCount; I++) {
+    VkMemoryPropertyFlags F = Device_Limits.Memory.memoryTypes[I].propertyFlags;
+    if ((F & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) and (F & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT)) {
+      Unified_Memory = 1;
+      Dest_Flags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT | VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+      break;
+    }
+  }
+
+  if (Unified_Memory) {
+    // Unified memory path: allocate device-local+host-visible buffer and upload directly (no staging copy)
+    GPU_Buffer Destination = Buffer_Allocate (/*Size         =>*/ Size,
+                                              /*Usage        =>*/ Usage
+                                                                | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
+                                              /*Memory_Flags =>*/ Dest_Flags);
+    Buffer_Upload (Destination, Data, Size);
+    return Destination;
+  }
+
+  // Discrete GPU path: staging buffer copy via command buffer
   GPU_Buffer Staging = Buffer_Allocate (/*Size         =>*/ Size,
                                         /*Usage        =>*/ VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
                                         /*Memory_Flags =>*/ VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT
@@ -11049,37 +11098,52 @@ void Weapon_Load_Textures (Figure_Instance *Weapon) {
 //   Build_World_Bottom_Level
 // ════════════════════════════
 
-Acceleration_Structure Build_World_Bottom_Level (const Scene *Scene_Data) {
+void Build_World_Bottom_Level (Scene *Scene_Data) {
 
-  // Upload scene vertex, index, and material data to device-local GPU buffers for BLAS construction and shader access
-  Vertex_Buffer = Buffer_Stage_Upload (/*Command_Buffer =>*/ Command_Buffer,
-                                       /*Queue          =>*/ Queue,
-                                       /*Data           =>*/ Scene_Data->Vertices,
-                                       /*Size           =>*/ sizeof (Vertex) * Scene_Data->Vertex_Count,
-                                       /*Usage          =>*/ VK_BUFFER_USAGE_VERTEX_BUFFER_BIT
-                                                           | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
-                                                           | VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR);
+  // Upload scene vertex, index, and material data to device-local GPU buffers
+  printf ("[blas] uploading %u vertices (%zu bytes), %u indices (%zu bytes)...\n",
+          Scene_Data->Vertex_Count, sizeof(Vertex) * Scene_Data->Vertex_Count,
+          Scene_Data->Index_Count, sizeof(uint) * Scene_Data->Index_Count); fflush (stdout);
+  Vertex_Buffer = Buffer_Stage_Upload (Command_Buffer, Queue, Scene_Data->Vertices,
+                                       sizeof (Vertex) * Scene_Data->Vertex_Count,
+                                       VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
+                                       | VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR);
 
-  // Upload the index buffer to device-local memory for BLAS construction and shader access
-  Index_Buffer = Buffer_Stage_Upload (/*Command_Buffer =>*/ Command_Buffer,
-                                      /*Queue          =>*/ Queue,
-                                      /*Data           =>*/ Scene_Data->Indices,
-                                      /*Size           =>*/ sizeof (uint) * Scene_Data->Index_Count,
-                                      /*Usage          =>*/ VK_BUFFER_USAGE_INDEX_BUFFER_BIT
-                                                          | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
-                                                          | VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR);
+  Index_Buffer = Buffer_Stage_Upload (Command_Buffer, Queue, Scene_Data->Indices,
+                                      sizeof (uint) * Scene_Data->Index_Count,
+                                      VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
+                                      | VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR);
 
-  // Allocate a host-visible material buffer for per-surface RGBA tints that shaders can reference via buffer device address
-  Material_Buffer = Buffer_Allocate (/*Size         =>*/ sizeof (vec4) * Scene_Data->Material_Count,
-                                     /*Usage        =>*/ VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
-                                                       | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
-                                     /*Memory_Flags =>*/ VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT
-                                                       | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
-
-  // Upload the material color array
+  Material_Buffer = Buffer_Allocate (sizeof (vec4) * Scene_Data->Material_Count,
+                                     VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
+                                     VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
   Buffer_Upload (Material_Buffer, Scene_Data->Materials, sizeof (vec4) * Scene_Data->Material_Count);
 
-  // Define the triangle geometry referencing the uploaded vertex and index buffers
+  // Validate index buffer — clamp out-of-range indices to prevent driver crashes
+  uint Bad_Indices = 0;
+  for (uint I = 0; I < Scene_Data->Index_Count; I++) {
+    if (Scene_Data->Indices[I] >= Scene_Data->Vertex_Count) { Scene_Data->Indices[I] = 0; Bad_Indices++; }
+  }
+  if (Bad_Indices) printf ("[blas] WARNING: clamped %u out-of-range indices\n", Bad_Indices);
+
+  // Sanitize degenerate vertices (NaN/Inf crash BVH builders)
+  uint Bad_Verts = 0;
+  for (uint I = 0; I < Scene_Data->Vertex_Count; I++) {
+    float *P = (float*)&Scene_Data->Vertices[I];
+    for (int J = 0; J < 3; J++)
+      if (P[J] != P[J] or P[J] > 1e18f or P[J] < -1e18f) { P[J] = 0.f; Bad_Verts++; }
+  }
+  if (Bad_Verts) printf ("[blas] WARNING: sanitized %u degenerate vertex components\n", Bad_Verts);
+  fflush (stdout);
+
+  // Build a single BLAS covering all world triangles. Use dedicated VkDeviceMemory for the BLAS buffer
+  // and scratch buffer to avoid TLSF sub-allocator fragmentation corrupting lavapipe's BVH builder.
+  uint Primitive_Count = Scene_Data->Triangle_Count;
+  printf ("[blas] building single world BLAS: %u triangles, %u vertices\n", Primitive_Count, Scene_Data->Vertex_Count);
+  fflush (stdout);
+
+  World_BLAS_Count = 1;
+
   VkAccelerationStructureGeometryKHR Geometry = {
     .sType        = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR,
     .geometryType = VK_GEOMETRY_TYPE_TRIANGLES_KHR,
@@ -11093,7 +11157,6 @@ Acceleration_Structure Build_World_Bottom_Level (const Scene *Scene_Data) {
       .indexType                = VK_INDEX_TYPE_UINT32,
       .indexData.deviceAddress  = Index_Buffer.Address}};
 
-  // Query the required buffer sizes for the acceleration structure and scratch memory
   VkAccelerationStructureBuildGeometryInfoKHR Build_Info = {
     .sType         = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR,
     .type          = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR,
@@ -11101,79 +11164,90 @@ Acceleration_Structure Build_World_Bottom_Level (const Scene *Scene_Data) {
     .geometryCount = 1,
     .pGeometries   = &Geometry};
 
-  // Query required acceleration structure and scratch buffer sizes from the driver for the given triangle geometry
-  uint Primitive_Count = Scene_Data->Triangle_Count;
   VkAccelerationStructureBuildSizesInfoKHR Build_Sizes = {.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR};
-  vkGetAccelerationStructureBuildSizes (/*device    =>*/ Device,
-                                        /*buildType =>*/ VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR,
-                                        /*pBuildInfo =>*/ &Build_Info,
-                                        /*pMaxPrimitiveCounts =>*/ &Primitive_Count,
-                                        /*pSizeInfo =>*/ &Build_Sizes);
+  vkGetAccelerationStructureBuildSizes (Device, VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR,
+                                        &Build_Info, &Primitive_Count, &Build_Sizes);
 
-  // Allocate the acceleration structure buffer and create the BLAS object
-  Acceleration_Structure Result = {0};
-  Result.Buffer = Buffer_Allocate (/*Size         =>*/ Build_Sizes.accelerationStructureSize,
-                                   /*Usage        =>*/ VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR
-                                                     | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
-                                   /*Memory_Flags =>*/ VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+  printf ("[blas] AS size=%llu, scratch=%llu\n",
+          (unsigned long long)Build_Sizes.accelerationStructureSize,
+          (unsigned long long)Build_Sizes.buildScratchSize); fflush (stdout);
 
-  // Create the bottom-level acceleration structure object backed by the allocated buffer
-  VK_CHECK (vkCreateAccelerationStructure (/*device      =>*/ Device,
-                                           /*pCreateInfo =>*/ &(VkAccelerationStructureCreateInfoKHR){
-                                             .sType  = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_CREATE_INFO_KHR,
-                                             .buffer = Result.Buffer.Buffer,
-                                             .size   = Build_Sizes.accelerationStructureSize,
-                                             .type   = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR},
-                                           /*pAllocator  =>*/ NULL,
-                                           /*pStructure  =>*/ &Result.Handle));
+  // Dedicated BLAS buffer allocation (bypasses TLSF heap to prevent sub-allocation corruption on software drivers)
+  World_BLAS[0] = (Acceleration_Structure){0};
+  VK_CHECK (vkCreateBuffer (Device, &(VkBufferCreateInfo){
+    .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+    .size  = Build_Sizes.accelerationStructureSize,
+    .usage = VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT},
+    NULL, &World_BLAS[0].Buffer.Buffer));
+  World_BLAS[0].Buffer.Size = Build_Sizes.accelerationStructureSize;
+  World_BLAS[0].Buffer.Heap_Block = -1;
 
-  // Allocate temporary scratch memory for the build operation (freed after the build completes)
-  GPU_Buffer Scratch = Buffer_Allocate (/*Size         =>*/ Build_Sizes.buildScratchSize,
-                                        /*Usage        =>*/ VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
-                                                          | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
-                                        /*Memory_Flags =>*/ VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+  VkMemoryRequirements Mem_Req;
+  vkGetBufferMemoryRequirements (Device, World_BLAS[0].Buffer.Buffer, &Mem_Req);
+  uint MT = Find_Memory_Type (Mem_Req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+  VK_CHECK (vkAllocateMemory (Device, &(VkMemoryAllocateInfo){
+    .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .allocationSize = Mem_Req.size, .memoryTypeIndex = MT,
+    .pNext = &(VkMemoryAllocateFlagsInfo){.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_FLAGS_INFO,
+                                          .flags = VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT}},
+    NULL, &World_BLAS[0].Buffer.Memory));
+  VK_CHECK (vkBindBufferMemory (Device, World_BLAS[0].Buffer.Buffer, World_BLAS[0].Buffer.Memory, 0));
 
-  // Finalize the build info with the destination structure and scratch address
-  Build_Info.dstAccelerationStructure  = Result.Handle;
+  VK_CHECK (vkCreateAccelerationStructure (Device,
+    &(VkAccelerationStructureCreateInfoKHR){
+      .sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_CREATE_INFO_KHR,
+      .buffer = World_BLAS[0].Buffer.Buffer,
+      .size   = Build_Sizes.accelerationStructureSize,
+      .type   = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR},
+    NULL, &World_BLAS[0].Handle));
+
+  // Dedicated scratch buffer
+  GPU_Buffer Scratch = {.Heap_Block = -1};
+  VK_CHECK (vkCreateBuffer (Device, &(VkBufferCreateInfo){
+    .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+    .size  = Build_Sizes.buildScratchSize,
+    .usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT},
+    NULL, &Scratch.Buffer));
+  Scratch.Size = Build_Sizes.buildScratchSize;
+  vkGetBufferMemoryRequirements (Device, Scratch.Buffer, &Mem_Req);
+  VK_CHECK (vkAllocateMemory (Device, &(VkMemoryAllocateInfo){
+    .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .allocationSize = Mem_Req.size, .memoryTypeIndex = MT,
+    .pNext = &(VkMemoryAllocateFlagsInfo){.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_FLAGS_INFO,
+                                          .flags = VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT}},
+    NULL, &Scratch.Memory));
+  VK_CHECK (vkBindBufferMemory (Device, Scratch.Buffer, Scratch.Memory, 0));
+  Scratch.Address = vkGetBufferDeviceAddress (Device,
+    &(VkBufferDeviceAddressInfo){.sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO, .buffer = Scratch.Buffer});
+
+  Build_Info.dstAccelerationStructure  = World_BLAS[0].Handle;
   Build_Info.scratchData.deviceAddress = Scratch.Address;
 
-  // Set up the build range covering all triangles in one geometry
   VkAccelerationStructureBuildRangeInfoKHR Range = {.primitiveCount = Primitive_Count};
   const VkAccelerationStructureBuildRangeInfoKHR *Range_Pointer = &Range;
 
-  // Record and submit a one-shot command buffer to build the BLAS on the GPU
+  // Record and submit the BLAS build
   VK_CHECK (vkResetCommandBuffer (Command_Buffer, 0));
-  VK_CHECK (vkBeginCommandBuffer (/*commandBuffer =>*/ Command_Buffer,
-                                  /*pBeginInfo    =>*/ &(VkCommandBufferBeginInfo){
-                                    .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
-                                    .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT}));
-
-  // Record the BLAS build command into the command buffer
-  vkCmdBuildAccelerationStructures (/*commandBuffer =>*/ Command_Buffer,
-                                    /*infoCount     =>*/ 1,
-                                    /*pInfos        =>*/ &Build_Info,
-                                    /*ppBuildRangeInfos =>*/ &Range_Pointer);
+  VK_CHECK (vkBeginCommandBuffer (Command_Buffer,
+    &(VkCommandBufferBeginInfo){.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+                                .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT}));
+  vkCmdBuildAccelerationStructures (Command_Buffer, 1, &Build_Info, &Range_Pointer);
   VK_CHECK (vkEndCommandBuffer (Command_Buffer));
-  VK_CHECK (vkQueueSubmit (/*queue       =>*/ Queue,
-                           /*submitCount =>*/ 1,
-                           /*pSubmits    =>*/ &(VkSubmitInfo){
-                             .sType              = VK_STRUCTURE_TYPE_SUBMIT_INFO,
-                             .commandBufferCount = 1,
-                             .pCommandBuffers    = &Command_Buffer},
-                           /*fence       =>*/ VK_NULL_HANDLE));
 
-  // Wait for the build to complete before querying the device address
+  printf ("[blas] submitting build...\n"); fflush (stdout);
+  VK_CHECK (vkQueueSubmit (Queue, 1,
+    &(VkSubmitInfo){.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+                    .commandBufferCount = 1, .pCommandBuffers = &Command_Buffer},
+    VK_NULL_HANDLE));
   VK_CHECK (vkQueueWaitIdle (Queue));
+  printf ("[blas] world BLAS built: %u tris, AS=%llu bytes\n",
+          Primitive_Count, (unsigned long long)Build_Sizes.accelerationStructureSize); fflush (stdout);
 
-  // Query the device address of the built BLAS for referencing from the TLAS instance data
-  Result.Address = vkGetAccelerationStructureDeviceAddress (/*device =>*/ Device,
-                     /*pInfo  =>*/ &(VkAccelerationStructureDeviceAddressInfoKHR){
-                       .sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_DEVICE_ADDRESS_INFO_KHR,
-                       .accelerationStructure = Result.Handle});
+  // Query device address for TLAS
+  World_BLAS[0].Address = vkGetAccelerationStructureDeviceAddress (Device,
+    &(VkAccelerationStructureDeviceAddressInfoKHR){
+      .sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_DEVICE_ADDRESS_INFO_KHR,
+      .accelerationStructure = World_BLAS[0].Handle});
 
-  // Free the scratch buffer (no longer needed after the build)
   Buffer_Destroy (&Scratch);
-  return Result;
 
 } // Build_World_Bottom_Level
 
@@ -11465,22 +11539,25 @@ void Top_Level_Initialize (uint Maximum_Instances) {
 //   Top_Level_Rebuild
 // ═════════════════════
 
-void Top_Level_Rebuild (Acceleration_Structure *World, Figure_Pool *Pool) {
+void Top_Level_Rebuild (Figure_Pool *Pool) {
 
-  // Instance 0: world geometry (identity transform, visible to all rays)
-  VkAccelerationStructureInstanceKHR Instances[1 + FIGURE_POOL_MAX];
-  memset (&Instances[0], 0, sizeof Instances[0]);
-  Instances[0].transform.matrix[0][0]         = 1.f;
-  Instances[0].transform.matrix[1][1]         = 1.f;
-  Instances[0].transform.matrix[2][2]         = 1.f;
-  Instances[0].mask                           = 0xFF;
-  Instances[0].instanceCustomIndex            = 0;
-  Instances[0].flags                          = VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR;
-  Instances[0].accelerationStructureReference = World->Address;
-  uint N = 1;
+  // World geometry instances: one per BLAS chunk (all identity transform, visible to all rays)
+  VkAccelerationStructureInstanceKHR Instances[MAX_WORLD_BLAS + FIGURE_POOL_MAX];
+  uint N = 0;
+  for (uint W = 0; W < World_BLAS_Count; W++) {
+    memset (&Instances[N], 0, sizeof Instances[N]);
+    Instances[N].transform.matrix[0][0]         = 1.f;
+    Instances[N].transform.matrix[1][1]         = 1.f;
+    Instances[N].transform.matrix[2][2]         = 1.f;
+    Instances[N].mask                           = 0xFF;
+    Instances[N].instanceCustomIndex            = 0;
+    Instances[N].flags                          = VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR;
+    Instances[N].accelerationStructureReference = World_BLAS[W].Address;
+    N++;
+  }
 
   // Append one TLAS instance per active figure from the pool
-  for (uint I = 0; I < FIGURE_POOL_MAX and N < 1 + FIGURE_POOL_MAX; I++) {
+  for (uint I = 0; I < FIGURE_POOL_MAX and N < MAX_WORLD_BLAS + FIGURE_POOL_MAX; I++) {
     if (not Pool->Active[I]) continue;
     Figure_Instance *F = &Pool->Slots[I];
     if (not F->Bottom_Level.Handle) continue;
@@ -17170,8 +17247,10 @@ void Vulkan_Create_Logical_Device () {
   // Retrieve the queue handle from the newly created device
   vkGetDeviceQueue (Device, Queue_Family_Index, 0, &Queue);
 
-  // Query the physical device's ray tracing pipeline properties for SBT layout
+  // Query the physical device's ray tracing pipeline and acceleration structure properties
+  Accel_Structure_Properties.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_PROPERTIES_KHR;
   Raytracing_Properties.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_PIPELINE_PROPERTIES_KHR;
+  Raytracing_Properties.pNext = &Accel_Structure_Properties;
   VkPhysicalDeviceProperties2 Device_Properties = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2,
                                                    .pNext = &Raytracing_Properties};
   vkGetPhysicalDeviceProperties2 (Physical_Device, &Device_Properties);
@@ -17188,6 +17267,16 @@ void Vulkan_Create_Logical_Device () {
   Device_Limits.Max_Ray_Recursion = Raytracing_Properties.maxRayRecursionDepth;
   if (Device_Limits.Max_Ray_Recursion > 2) Device_Limits.Max_Ray_Recursion = 2;
 
+  // Detect unified memory (DEVICE_LOCAL is also HOST_VISIBLE). Software drivers like lavapipe and
+  // integrated GPUs with shared memory use this. When detected, Buffer_Allocate bypasses the TLSF
+  // sub-allocator to avoid memory overlap bugs in driver BVH builders.
+  Device_Limits.Unified_Memory = 0;
+  for (uint I = 0; I < Device_Limits.Memory.memoryTypeCount; I++) {
+    VkMemoryPropertyFlags F = Device_Limits.Memory.memoryTypes[I].propertyFlags;
+    if ((F & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) and (F & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT))
+      { Device_Limits.Unified_Memory = 1; break; }
+  }
+
   // Report key device limits for diagnostics
   printf ("[limits] maxImageDimension2D=%u, maxPushConstants=%u, maxStorageBufferRange=%u\n",
           Device_Limits.Core.limits.maxImageDimension2D,
@@ -17200,6 +17289,10 @@ void Vulkan_Create_Logical_Device () {
           Max_Samplers, Device_Limits.Texture_Slots);
   printf ("[limits] maxRayRecursionDepth=%u (using %u)\n",
           Raytracing_Properties.maxRayRecursionDepth, Device_Limits.Max_Ray_Recursion);
+  printf ("[limits] AS maxPrimitiveCount=%llu, maxGeometryCount=%llu, maxInstanceCount=%llu\n",
+          (unsigned long long)Accel_Structure_Properties.maxPrimitiveCount,
+          (unsigned long long)Accel_Structure_Properties.maxGeometryCount,
+          (unsigned long long)Accel_Structure_Properties.maxInstanceCount);
   printf ("[limits] bufferImageGranularity=%lu, nonCoherentAtomSize=%lu\n",
           (unsigned long)Device_Limits.Core.limits.bufferImageGranularity,
           (unsigned long)Device_Limits.Core.limits.nonCoherentAtomSize);
