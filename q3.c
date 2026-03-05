@@ -191,10 +191,10 @@ const World_Settings WORLD_PRESETS[WORLD_COUNT] = {
 
 // Source engine viewmodel settings (per CalcViewModelView in Source SDK)
 #define SOURCE_VIEWMODEL_FOV     54.f   // Source viewmodel_fov default (ConVar: 54°)
-#define SOURCE_VIEWMODEL_SCALE   0.45f  // World-space scale factor (no depth hack, so shrink geometry)
-#define SOURCE_VIEWMODEL_FWD     3.f    // Forward offset from eye in engine units
-#define SOURCE_VIEWMODEL_RIGHT   0.5f   // Right offset from eye
-#define SOURCE_VIEWMODEL_UP     -0.5f   // Up offset from eye (negative = below eye level)
+#define SOURCE_VIEWMODEL_SCALE   0.70f  // World-space scale factor (larger than real Source — compensates for no depth hack in RT)
+#define SOURCE_VIEWMODEL_FWD     8.f    // Forward offset from eye in engine units (increased for RT visibility)
+#define SOURCE_VIEWMODEL_RIGHT   1.5f   // Right offset from eye (moderate — not too far)
+#define SOURCE_VIEWMODEL_UP     -3.0f   // Up offset from eye (negative = below eye level)
 #define SOURCE_VIEWMODEL_FOV_RATIO (SOURCE_VIEWMODEL_FOV / 90.f) // Viewmodel-to-world FOV correction
 
 // HL2-style viewmodel CVars — individually tunable per ConVar, with presets as commands
@@ -203,7 +203,7 @@ const World_Settings WORLD_PRESETS[WORLD_COUNT] = {
 #define CVAR_DEFAULT_VM_OFFSET_X  0.f     // viewmodel_offset_x: forward/back offset from eye
 #define CVAR_DEFAULT_VM_OFFSET_Y  0.f     // viewmodel_offset_y: right/left offset from eye
 #define CVAR_DEFAULT_VM_OFFSET_Z  0.f     // viewmodel_offset_z: up/down offset from eye
-#define CVAR_DEFAULT_VM_SCALE     0.45f   // viewmodel_scale: world-space scale factor
+#define CVAR_DEFAULT_VM_SCALE     0.70f   // viewmodel_scale: world-space scale factor (larger for RT — no depth hack)
 #define CVAR_DEFAULT_VM_BOB       1.f     // viewmodel_bob: bob amplitude multiplier (0=disabled)
 #define CVAR_DEFAULT_VM_LAG       0.f     // viewmodel_lag: camera-trailing lag factor (0=no lag, Source ~0.2)
 #define CVAR_DEFAULT_CL_RIGHTHAND 1       // cl_righthand: 1=right-hand, 0=left-hand (mirror viewmodel)
@@ -898,9 +898,14 @@ GPU_Buffer Camera_Uniform_Buffer;                        // Uniform buffer for t
 GPU_Buffer Texture_Id_Buffer;                            // Per-triangle texture index buffer
 
 // Skeletal animation pipeline state (shared by all skeletal entities)
-VkPipeline            Skinning_Pipeline; 
+VkPipeline            Skinning_Pipeline;
 VkPipelineLayout      Skinning_Pipeline_Layout;
 VkDescriptorSetLayout Skinning_Descriptor_Layout;
+
+// GPU Bezier tessellation pipeline state
+VkPipeline            Tessellation_Pipeline;
+VkPipelineLayout      Tessellation_Pipeline_Layout;
+VkDescriptorSetLayout Tessellation_Descriptor_Layout;
 
 // Command recording and CPU-GPU synchronization
 VkCommandPool   Command_Pool;              // Command pool for allocating command buffers
@@ -1788,6 +1793,48 @@ typedef struct {
   int  Flags, Contents; // Surface flags (e.g. translucent) and content flags (e.g. solid, water)
 } BSP_Shader;
 
+// ── Static size assertions for every file-format struct ─────────────────────
+// These catch layout mismatches from compiler changes, platform differences,
+// or accidental field edits.  Sizes must match the on-disk binary format.
+//
+// Valve VTF texture format
+_Static_assert (sizeof (VTF_Header)      == 68,  "VTF_Header must be 68 bytes (VTF 7.1–7.5)");
+// Quake 3 MD3 model format
+_Static_assert (sizeof (MD3_Surface)     == 108, "MD3_Surface must be 108 bytes");
+_Static_assert (sizeof (MD3_Tag)         == 112, "MD3_Tag must be 112 bytes (64 name + 3 origin + 9 axis)");
+// Source Engine MDL format (Studio Model v44–49)
+_Static_assert (sizeof (MDL_Header)      == 240, "MDL_Header must be 240 bytes");
+_Static_assert (sizeof (MDL_Bone)        == 216, "MDL_Bone must be 216 bytes");
+_Static_assert (sizeof (MDL_Body_Part)   == 16,  "MDL_Body_Part must be 16 bytes");
+_Static_assert (sizeof (MDL_Model)       == 172, "MDL_Model must be 172 bytes");
+_Static_assert (sizeof (MDL_Mesh)        == 116, "MDL_Mesh must be 116 bytes");
+// Source Engine VVD vertex data
+_Static_assert (sizeof (VVD_Header)      == 64,  "VVD_Header must be 64 bytes");
+_Static_assert (sizeof (VVD_Vertex)      == 48,  "VVD_Vertex must be 48 bytes");
+// Source Engine VTX optimized model
+_Static_assert (sizeof (VTX_Header)      == 36,  "VTX_Header must be 36 bytes");
+_Static_assert (sizeof (VTX_Body_Part)   == 8,   "VTX_Body_Part must be 8 bytes");
+_Static_assert (sizeof (VTX_Model)       == 8,   "VTX_Model must be 8 bytes");
+_Static_assert (sizeof (VTX_LOD)         == 12,  "VTX_LOD must be 12 bytes");
+// Note: VTX_Mesh (packed 9), VTX_Strip_Group (packed 25), VTX_Vertex (packed 9)
+// are parsed via manual byte offsets in the VTX loader, not via sizeof.
+// Quake 3 IBSP format (version 46)
+_Static_assert (sizeof (BSP_Lump)        == 8,   "BSP_Lump must be 8 bytes");
+_Static_assert (sizeof (BSP_Header)      == 144, "BSP_Header must be 144 bytes (8 + 17*8)");
+_Static_assert (sizeof (BSP_Vertex)      == 44,  "BSP_Vertex must be 44 bytes");
+_Static_assert (sizeof (BSP_Face)        == 104, "BSP_Face must be 104 bytes");
+_Static_assert (sizeof (BSP_Shader)      == 72,  "BSP_Shader must be 72 bytes");
+// Source Engine VBSP format (version 19–21)
+_Static_assert (sizeof (VBSP_Lump)       == 16,  "VBSP_Lump must be 16 bytes");
+_Static_assert (sizeof (VBSP_Header)     == 1036,"VBSP_Header must be 1036 bytes (8 + 64*16 + 4)");
+_Static_assert (sizeof (VBSP_Vertex)     == 12,  "VBSP_Vertex must be 12 bytes");
+_Static_assert (sizeof (VBSP_Edge)       == 4,   "VBSP_Edge must be 4 bytes");
+_Static_assert (sizeof (VBSP_Face)       == 56,  "VBSP_Face must be 56 bytes");
+_Static_assert (sizeof (VBSP_Tex_Info)   == 72,  "VBSP_Tex_Info must be 72 bytes (2*4 floats + 2 ints)");
+_Static_assert (sizeof (VBSP_Tex_Data)   == 32,  "VBSP_Tex_Data must be 32 bytes");
+_Static_assert (sizeof (VBSP_Disp_Info)  == 176, "VBSP_Disp_Info must be 176 bytes");
+_Static_assert (sizeof (VBSP_Disp_Vert)  == 20,  "VBSP_Disp_Vert must be 20 bytes");
+
 // Per-frame camera state uploaded to the GPU as a uniform buffer
 typedef struct {
   vec3  Position, Velocity;               // World-space eye position and movement velocity
@@ -2324,15 +2371,6 @@ Vertex VBSP_Convert (float X, float Y, float Z, float Nx, float Ny, float Nz, fl
 // Convert a BSP vertex from Quake 3's Z-up coordinate system to our Y-up system: (x, y, z) becomes (x, z, -y).
 Vertex Convert_BSP_Vertex (const BSP_Vertex *Source);
 
-// Evaluate a quadratic Bézier curve at parameter t given three control points.
-vec3 Bezier_Evaluate (vec3 Control_A, vec3 Control_B, vec3 Control_C, float Parameter);
-
-// Tessellate a Bezier patch surface from its control grid into triangles. The patch is subdivided into a grid of sub-patches (each defined
-// by a 3 by 3 control point block), and each sub-patch is evaluated at TESSELLATION_LEVEL intervals to produce a smooth triangle mesh.
-uint BSP_Tessellate_Patch (const BSP_Vertex *Control_Grid, int Patch_Width, int Patch_Height,
-                           Vertex **Inout_Vertices, uint *Inout_Vertex_Count,
-                           uint   **Inout_Indices,  uint *Inout_Index_Count);
-
 // Parse the BSP entity lump to find the first info_player_deathmatch spawn point. Returns the origin (swizzled to Y-up) and facing angle.
 Spawn BSP_Find_Spawn (const uint8_t *File_Data, const BSP_Header *Header);
 
@@ -2572,6 +2610,14 @@ void Postprocess_Pipeline_Create ();
 // Create the GPU skeletal skinning compute pipeline for Source MDL bone-driven animation
 void Skinning_Pipeline_Create ();
 
+// Create the GPU Bezier tessellation compute pipeline
+void Tessellation_Pipeline_Create ();
+
+// Tessellate Bezier patches on the GPU: uploads control points, dispatches compute, reads back vertices/indices
+uint GPU_Tessellate_Patches (const BSP_Vertex *Control_Grid, int Patch_Width, int Patch_Height,
+                              Vertex **Inout_Vertices, uint *Inout_Vertex_Count,
+                              uint   **Inout_Indices,  uint *Inout_Index_Count);
+
 // ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 //
 // §13. Audio
@@ -2706,6 +2752,9 @@ glsl comp Post_Process;
 
 // GPU skeletal skinning: transforms bind-pose vertices by bone matrices in a compute shader
 glsl comp Skinning;
+
+// GPU Bezier tessellation: evaluates bi-quadratic Bezier patches in parallel on the GPU
+glsl comp Tessellation;
 
 // ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 //
@@ -3108,10 +3157,10 @@ int main (int Argc, char **Argv) {
     else if (strcmp (Argv[I], "--vm-preset") == 0 and I + 1 < Argc) {
       const char *P = Argv[++I];
       if (strcmp (P, "source") == 0) {
-        CVar_Set_Float (vm_fov, 54.f); CVar_Set_Float (vm_scale, 0.45f);
+        CVar_Set_Float (vm_fov, 54.f); CVar_Set_Float (vm_scale, 0.70f);
         CVar_Set_Float (vm_offset_x, 0.f); CVar_Set_Float (vm_offset_y, 0.f); CVar_Set_Float (vm_offset_z, 0.f);
         CVar_Set_Float (vm_bob, 1.f); CVar_Set_Float (vm_lag, 0.f);
-        printf ("[vm] preset: source (fov=54 scale=0.45)\n");
+        printf ("[vm] preset: source (fov=54 scale=0.70)\n");
       } else if (strcmp (P, "q3") == 0) {
         CVar_Set_Float (vm_fov, 90.f); CVar_Set_Float (vm_scale, 0.50f);
         CVar_Set_Float (vm_offset_x, 0.f); CVar_Set_Float (vm_offset_y, 0.f); CVar_Set_Float (vm_offset_z, 0.f);
@@ -3563,6 +3612,9 @@ int main (int Argc, char **Argv) {
 
   // Create the GPU skeletal skinning pipeline (used by Source MDL entities)
   Skinning_Pipeline_Create ();
+
+  // Create the GPU Bezier tessellation pipeline (used by Q3 BSP curved surfaces)
+  Tessellation_Pipeline_Create ();
 
   // Create the GPU physics pipeline and resources (with hull binding)
   Physics_Pipeline_Create ();
@@ -4258,6 +4310,9 @@ int main (int Argc, char **Argv) {
   vkDestroyPipeline            (Device, Skinning_Pipeline, NULL);
   vkDestroyPipelineLayout      (Device, Skinning_Pipeline_Layout, NULL);
   vkDestroyDescriptorSetLayout (Device, Skinning_Descriptor_Layout, NULL);
+  vkDestroyPipeline            (Device, Tessellation_Pipeline, NULL);
+  vkDestroyPipelineLayout      (Device, Tessellation_Pipeline_Layout, NULL);
+  vkDestroyDescriptorSetLayout (Device, Tessellation_Descriptor_Layout, NULL);
   vkDestroyPipeline            (Device, Pipeline, NULL);
   vkDestroyPipelineLayout      (Device, Pipeline_Layout, NULL);
   vkDestroyDescriptorPool      (Device, Descriptor_Pool, NULL);
@@ -8148,19 +8203,6 @@ Vertex Convert_BSP_Vertex (const BSP_Vertex *Source) {
   };
 }
 
-// ═══════════════════
-//   Bezier_Evaluate
-// ═══════════════════
-
-vec3 Bezier_Evaluate (vec3 Control_A, vec3 Control_B, vec3 Control_C, float Parameter) {
-
-  // Evaluate the quadratic Bezier curve: B(t) = (1 - t)^2 * A + 2(1 - t) t * B + t^2 * C
-  float Inverse = 1.f - Parameter;
-  return Add (Add (Scale (Control_A,       Inverse   * Inverse),
-                   Scale (Control_B, 2.f * Inverse   * Parameter)),
-                   Scale (Control_C,       Parameter * Parameter));
-}
-
 // ════════════════════════
 //   Scene_Load_From_VBSP
 // ════════════════════════
@@ -8553,108 +8595,6 @@ Scene Scene_Load_From_VBSP (const char *Path, Spawn *Out_Spawn) {
   return S;
 } // Scene_Load_From_VBSP
 
-// ════════════════════════
-//   BSP_Tessellate_Patch
-// ════════════════════════
-
-uint BSP_Tessellate_Patch (const BSP_Vertex *Control_Grid, int Patch_Width, int Patch_Height,
-                           Vertex **Inout_Vertices, uint *Inout_Vertex_Count,
-                           uint    **Inout_Indices, uint *Inout_Index_Count) {
-
-  // Compute how many 3x3 sub-patches exist in the control grid
-  int Grid_Columns = (Patch_Width  - 1) / 2;
-  int Grid_Rows    = (Patch_Height - 1) / 2;
-
-  // Tessellation resolution: number of subdivisions per sub-patch edge
-  int Level  = TESSELLATION_LEVEL;
-  int Stride = Level + 1;
-
-  // Compute the total vertices and indices this patch will produce and grow the output arrays
-  uint Added_Vertices = (uint)(Grid_Columns * Grid_Rows * Stride * Stride);
-  uint Added_Indices  = (uint)(Grid_Columns * Grid_Rows * Level * Level * 6);
-
-  // Grow the output vertex and index arrays to hold the tessellated patch geometry
-  *Inout_Vertices = realloc (*Inout_Vertices, sizeof (Vertex) * (*Inout_Vertex_Count + Added_Vertices));
-  *Inout_Indices  = realloc (*Inout_Indices,  sizeof (uint)   * (*Inout_Index_Count  + Added_Indices));
-
-  // Track the insertion points for new vertices and indices
-  uint Vertex_Base  = *Inout_Vertex_Count;
-  uint Index_Cursor = *Inout_Index_Count;
-
-  // Iterate over each 3x3 sub-patch in the control grid
-  for (int Patch_Y = 0; Patch_Y < Grid_Rows; Patch_Y++) for (int Patch_X = 0; Patch_X < Grid_Columns; Patch_X++) {
-    vec3 Control_Position [3][3];
-    vec3 Control_Normal   [3][3];
-    vec3 Control_Texture  [3][3];
-    vec3 Control_Lightmap [3][3];
-
-    // Extract the 3x3 control points for this sub-patch, applying coordinate swizzle
-    for (int Row = 0; Row < 3; Row++)
-      for (int Column = 0; Column < 3; Column++) {
-        const BSP_Vertex *Vertex_Source = &Control_Grid[(Patch_Y * 2 + Row) * Patch_Width + (Patch_X * 2 + Column)];
-        Control_Position[Row][Column]   = Make (Vertex_Source->Position[0],        Vertex_Source->Position[2], -Vertex_Source->Position[1]);
-        Control_Normal[Row][Column]     = Make (Vertex_Source->Normal[0],          Vertex_Source->Normal[2],   -Vertex_Source->Normal[1]);
-        Control_Texture[Row][Column]    = Make (Vertex_Source->Texture_Coords[0],  Vertex_Source->Texture_Coords[1],  0);
-        Control_Lightmap[Row][Column]   = Make (Vertex_Source->Lightmap_Coords[0], Vertex_Source->Lightmap_Coords[1], 0);
-      }
-
-    // Compute the base vertex offset for this sub-patch in the output array
-    uint Patch_Base = Vertex_Base + (uint)((Patch_Y * Grid_Columns + Patch_X) * Stride * Stride);
-
-    // Evaluate the bi-quadratic Bezier surface at each tessellation grid point
-    for (int Vertical = 0; Vertical <= Level; Vertical++) {
-      float Parameter_V = (float)Vertical / Level;
-      vec3 Row_Position[3], Row_Normal[3], Row_Texture[3], Row_Lightmap[3];
-
-      // First pass: evaluate each row of control points along the V parameter
-      for (int Row = 0; Row < 3; Row++) {
-        Row_Position[Row] = Bezier_Evaluate (Control_Position [Row][0], Control_Position [Row][1], Control_Position [Row][2], Parameter_V);
-        Row_Normal[Row]   = Bezier_Evaluate (Control_Normal   [Row][0], Control_Normal   [Row][1], Control_Normal   [Row][2], Parameter_V);
-        Row_Texture[Row]  = Bezier_Evaluate (Control_Texture  [Row][0], Control_Texture  [Row][1], Control_Texture  [Row][2], Parameter_V);
-        Row_Lightmap[Row] = Bezier_Evaluate (Control_Lightmap [Row][0], Control_Lightmap [Row][1], Control_Lightmap [Row][2], Parameter_V);
-      }
-
-      // Second pass: evaluate the intermediate row results along the U parameter
-      for (int Horizontal = 0; Horizontal <= Level; Horizontal++) {
-        float Parameter_U = (float)Horizontal / Level;
-        vec3 Normal   = Normalize
-                          (Bezier_Evaluate (Row_Normal   [0], Row_Normal   [1], Row_Normal   [2], Parameter_U));
-        vec3 Position = Bezier_Evaluate    (Row_Position [0], Row_Position [1], Row_Position [2], Parameter_U);
-        vec3 Texture  = Bezier_Evaluate    (Row_Texture  [0], Row_Texture  [1], Row_Texture  [2], Parameter_U);
-        vec3 Lightmap = Bezier_Evaluate    (Row_Lightmap [0], Row_Lightmap [1], Row_Lightmap [2], Parameter_U);
-
-        // Evaluate the bi-quadratic Bezier surface and store the interpolated vertex
-        (*Inout_Vertices)[Patch_Base + Vertical * Stride + Horizontal] = (Vertex){
-          .Normal      = {Normal.x,   Normal.y,   Normal.z},
-          .Position    = {Position.x, Position.y, Position.z},
-          .Texture_UV  = {Texture.x,  Texture.y},
-          .Lightmap_UV = {Lightmap.x, Lightmap.y},
-        };
-      }
-    }
-
-    // Generate two triangles for each quad in the tessellated grid
-    for (int Vertical = 0; Vertical < Level; Vertical++) for (int Horizontal = 0; Horizontal < Level; Horizontal++) {
-      uint Index_A = Patch_Base + Vertical * Stride + Horizontal;
-      uint Index_B = Index_A + 1;
-      uint Index_C = Patch_Base + (Vertical + 1) * Stride + Horizontal;
-      uint Index_D = Index_C + 1;
-      (*Inout_Indices)[Index_Cursor++] = Index_A;
-      (*Inout_Indices)[Index_Cursor++] = Index_C;
-      (*Inout_Indices)[Index_Cursor++] = Index_B;
-      (*Inout_Indices)[Index_Cursor++] = Index_B;
-      (*Inout_Indices)[Index_Cursor++] = Index_C;
-      (*Inout_Indices)[Index_Cursor++] = Index_D;
-    }
-  }
-
-  // Advance the output counts by the number of vertices and indices added
-  *Inout_Vertex_Count += Added_Vertices;
-  *Inout_Index_Count  += Added_Indices;
-  return Added_Indices / 3;
-
-} // BSP_Tessellate_Patch
-
 // ═══════════════════════
 //   Scene_Load_From_BSP
 // ═══════════════════════
@@ -8804,14 +8744,14 @@ Scene Scene_Load_From_BSP (const char *Path, Spawn *Out_Spawn) {
       uint Previous_Vertex_Count   = Vertex_Count;
       uint Previous_Triangle_Count = Triangle_Count;
 
-      // Tessellate the Bezier patch and assign shader indices to the new triangles
-      Triangle_Count += BSP_Tessellate_Patch (/*Control_Grid       =>*/ &Raw_Vertices[Face->First_Vertex],
-                                              /*Patch_Width        =>*/ Face->Patch_Width,
-                                              /*Patch_Height       =>*/ Face->Patch_Height,
-                                              /*Inout_Vertices     =>*/ &Vertices,
-                                              /*Inout_Vertex_Count =>*/ &Vertex_Count,
-                                              /*Inout_Indices      =>*/ &Indices,
-                                              /*Inout_Index_Count  =>*/ &Index_Count);
+      // Tessellate the Bezier patch on the GPU and assign shader indices to the new triangles
+      Triangle_Count += GPU_Tessellate_Patches (/*Control_Grid       =>*/ &Raw_Vertices[Face->First_Vertex],
+                                                /*Patch_Width        =>*/ Face->Patch_Width,
+                                                /*Patch_Height       =>*/ Face->Patch_Height,
+                                                /*Inout_Vertices     =>*/ &Vertices,
+                                                /*Inout_Vertex_Count =>*/ &Vertex_Count,
+                                                /*Inout_Indices      =>*/ &Indices,
+                                                /*Inout_Index_Count  =>*/ &Index_Count);
 
       // Assign shader indices to the newly tessellated triangles
       uint Patch_Triangles = Triangle_Count - Previous_Triangle_Count;
@@ -9026,9 +8966,10 @@ Scene_Environment Environment_Infer_From_Scene (const Scene *S) {
     printf ("[environment] Source skyname: %s\n", S->Sky_Name);
     // Try to load skybox _up face for zenith color
     const char *VTF_Search_Dirs[] = {
+      "/tmp/cspromod_new/materials",
       "/tmp/cspromod_new/cspromod_b105/cspromod/materials",
-      "/tmp/v_m4/materials",
       "assets/materials",
+      "/tmp/v_m4/materials",
       NULL
     };
     char Sky_Rel[128];
@@ -9551,10 +9492,13 @@ void Scene_Load_Textures (const Scene *Scene_Data) {
         Lower[strlen(N)<255?strlen(N):255] = 0;
 
         const char *VTF_Search_Dirs[] = {
-          "/tmp/cspromod_new/cspromod_b105/cspromod/materials",
+          "/tmp/cspromod_new/materials",                             // Extracted CSPromod materials
+          "/tmp/cspromod_new/materials/models",                     // CSPromod model materials
+          "/tmp/cspromod_new/cspromod_b105/cspromod/materials",     // Legacy path (nested extraction)
           "/tmp/cspromod_new/cspromod_b105/cspromod/materials/models",
+          "assets/materials",                                       // Local assets
+          "assets/materials/models",
           "/tmp/v_m4_new/materials",
-          "assets/materials",
           NULL
         };
         for (const char **Dir = VTF_Search_Dirs; *Dir and not Pixels; Dir++) {
@@ -9659,6 +9603,22 @@ void Scene_Load_Textures (const Scene *Scene_Data) {
       uint8_t *Pixels = NULL;
       if (Scene_Data->Texture_Names) {
         Pixels = Texture_Resolve_And_Load (Scene_Data->Texture_Names[Index], PBR_Suffixes[Map_Type], &W, &H);
+
+        // Source BSP normal maps: try VTF with _normal suffix from extracted materials
+        if (not Pixels and Map_Type == 1 and Active_World.Type == WORLD_SOURCE) {
+          char Lower[256];
+          const char *N = Scene_Data->Texture_Names[Index];
+          for (int C=0; N[C] and C<255; C++) Lower[C] = (N[C]>='A' and N[C]<='Z') ? N[C]+32 : N[C];
+          Lower[strlen(N)<255?strlen(N):255] = 0;
+          const char *Norm_Dirs[] = {"/tmp/cspromod_new/materials", "assets/materials", NULL};
+          const char *Norm_Suffixes[] = {"_normal", "_n", NULL};
+          for (const char **Sfx = Norm_Suffixes; *Sfx and not Pixels; Sfx++)
+            for (const char **Dir = Norm_Dirs; *Dir and not Pixels; Dir++) {
+              char Vtf[512]; snprintf(Vtf,512,"%s/%s%s.vtf",*Dir,Lower,*Sfx);
+              int Vw=0, Vh=0; uint8_t *Vp = NULL;
+              if (VTF_Load(Vtf,&Vp,&Vw,&Vh) and Vp) { Pixels=Vp; W=(uint)Vw; H=(uint)Vh; }
+            }
+        }
       }
       VkFormat Fmt = VK_FORMAT_R8G8B8A8_UNORM;
       if (Pixels and W and H) {
@@ -14389,6 +14349,120 @@ glsl comp Post_Process {
   }
 } // Denoise
 
+// ═══════════════════
+//   Tessellation
+// ═══════════════════
+//
+// GPU Bezier patch tessellation: evaluates bi-quadratic Bezier surfaces in parallel.
+// Each invocation computes one tessellated vertex from a 3x3 control point block.
+// Replaces the CPU BSP_Tessellate_Patch function with a fully GPU-parallel version.
+
+glsl comp Tessellation {
+  #version 460
+
+  layout(local_size_x = 64) in;
+
+  // Input: control points packed as 10 floats each (pos[3], normal[3], uv[2], lightmap_uv[2])
+  layout(binding = 0, std430) readonly buffer Control_Points_Data {
+    float Control_Points[];
+  };
+
+  // Output: tessellated vertices in the same 10-float layout
+  layout(binding = 1, std430) writeonly buffer Tessellated_Vertices_Data {
+    float Tess_Vertices[];
+  };
+
+  // Push constants: tessellation parameters
+  layout(push_constant) uniform Tess_Push {
+    uint Patch_Count;      // Total number of 3x3 sub-patches
+    uint Level;            // Tessellation subdivisions per edge
+    uint Stride;           // Level + 1
+    uint Grid_Columns;     // Sub-patches per row in the original control grid
+    uint Ctrl_Grid_Width;  // Full control grid width in control points
+  };
+
+  // Quadratic Bezier: B(t) = (1-t)^2 * A + 2(1-t)t * B + t^2 * C
+  vec3 Bezier (vec3 A, vec3 B, vec3 C, float T) {
+    float Inv = 1.0 - T;
+    return A * (Inv * Inv) + B * (2.0 * Inv * T) + C * (T * T);
+  }
+
+  // Read a control point's field (pos/normal/uv/lmuv) at grid index
+  vec3 Read_CP (uint Cp_Index, uint Field_Offset) {
+    uint Base = Cp_Index * 10u + Field_Offset;
+    return vec3 (Control_Points[Base], Control_Points[Base + 1u], Control_Points[Base + 2u]);
+  }
+  vec2 Read_CP2 (uint Cp_Index, uint Field_Offset) {
+    uint Base = Cp_Index * 10u + Field_Offset;
+    return vec2 (Control_Points[Base], Control_Points[Base + 1u]);
+  }
+
+  void main () {
+    uint Id = gl_GlobalInvocationID.x;
+
+    // Each invocation produces one output vertex. Decode which sub-patch and which grid point.
+    uint Verts_Per_Patch = Stride * Stride;
+    uint Total_Verts = Patch_Count * Verts_Per_Patch;
+    if (Id >= Total_Verts) return;
+
+    uint Patch_Index = Id / Verts_Per_Patch;
+    uint Local_Id    = Id % Verts_Per_Patch;
+    uint Local_V     = Local_Id / Stride;  // vertical index within tessellated grid
+    uint Local_U     = Local_Id % Stride;  // horizontal index within tessellated grid
+
+    float Param_V = float (Local_V) / float (Level);
+    float Param_U = float (Local_U) / float (Level);
+
+    // Decode sub-patch position in the original control grid
+    uint Patch_Y = Patch_Index / Grid_Columns;
+    uint Patch_X = Patch_Index % Grid_Columns;
+
+    // Read the 3x3 control points for this sub-patch
+    vec3 CP_Pos[3][3], CP_Norm[3][3], CP_Tex[3][3], CP_LM[3][3];
+    for (int Row = 0; Row < 3; Row++)
+      for (int Col = 0; Col < 3; Col++) {
+        uint Grid_Index = (Patch_Y * 2u + uint (Row)) * Ctrl_Grid_Width + (Patch_X * 2u + uint (Col));
+        CP_Pos [Row][Col] = Read_CP (Grid_Index, 0u);
+        CP_Norm[Row][Col] = Read_CP (Grid_Index, 3u);
+        CP_Tex [Row][Col] = Read_CP (Grid_Index, 6u);
+        CP_LM  [Row][Col] = Read_CP (Grid_Index, 6u); // lightmap UVs share the same offset for now (overwritten below)
+      }
+    // Re-read lightmap UVs from the correct offset (8)
+    for (int Row = 0; Row < 3; Row++)
+      for (int Col = 0; Col < 3; Col++) {
+        uint Grid_Index = (Patch_Y * 2u + uint (Row)) * Ctrl_Grid_Width + (Patch_X * 2u + uint (Col));
+        CP_LM[Row][Col] = vec3 (Read_CP2 (Grid_Index, 8u), 0.0);
+      }
+
+    // Bi-quadratic Bezier evaluation: first evaluate rows along V, then columns along U
+    vec3 Row_Pos[3], Row_Norm[3], Row_Tex[3], Row_LM[3];
+    for (int R = 0; R < 3; R++) {
+      Row_Pos [R] = Bezier (CP_Pos [R][0], CP_Pos [R][1], CP_Pos [R][2], Param_V);
+      Row_Norm[R] = Bezier (CP_Norm[R][0], CP_Norm[R][1], CP_Norm[R][2], Param_V);
+      Row_Tex [R] = Bezier (CP_Tex [R][0], CP_Tex [R][1], CP_Tex [R][2], Param_V);
+      Row_LM  [R] = Bezier (CP_LM  [R][0], CP_LM  [R][1], CP_LM  [R][2], Param_V);
+    }
+
+    vec3 Final_Pos  = Bezier (Row_Pos [0], Row_Pos [1], Row_Pos [2], Param_U);
+    vec3 Final_Norm = normalize (Bezier (Row_Norm[0], Row_Norm[1], Row_Norm[2], Param_U));
+    vec3 Final_Tex  = Bezier (Row_Tex [0], Row_Tex [1], Row_Tex [2], Param_U);
+    vec3 Final_LM   = Bezier (Row_LM  [0], Row_LM  [1], Row_LM  [2], Param_U);
+
+    // Write output vertex (10 floats: pos[3], normal[3], uv[2], lightmap_uv[2])
+    uint Out_Base = Id * 10u;
+    Tess_Vertices[Out_Base]     = Final_Pos.x;
+    Tess_Vertices[Out_Base + 1u] = Final_Pos.y;
+    Tess_Vertices[Out_Base + 2u] = Final_Pos.z;
+    Tess_Vertices[Out_Base + 3u] = Final_Norm.x;
+    Tess_Vertices[Out_Base + 4u] = Final_Norm.y;
+    Tess_Vertices[Out_Base + 5u] = Final_Norm.z;
+    Tess_Vertices[Out_Base + 6u] = Final_Tex.x;
+    Tess_Vertices[Out_Base + 7u] = Final_Tex.y;
+    Tess_Vertices[Out_Base + 8u] = Final_LM.x;
+    Tess_Vertices[Out_Base + 9u] = Final_LM.y;
+  }
+} // Tessellation
+
 // ═════════════
 //   Skinning
 // ═════════════
@@ -14576,6 +14650,186 @@ void Skinning_Pipeline_Create () {
 
   vkDestroyShaderModule (Device, Skinning_Module, NULL);
   printf ("[skinning] GPU skeletal skinning pipeline created\n");
+}
+
+// ═══════════════════════════════════
+//   Tessellation_Pipeline_Create
+// ═══════════════════════════════════
+
+void Tessellation_Pipeline_Create () {
+
+  // 2 SSBOs: control points (readonly), tessellated vertices (writeonly)
+  VkDescriptorSetLayoutBinding Bindings[2];
+  for (int I = 0; I < 2; I++)
+    Bindings[I] = (VkDescriptorSetLayoutBinding){.binding = (uint)I, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                                                  .descriptorCount = 1, .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT};
+  VK_CHECK (vkCreateDescriptorSetLayout (Device,
+    &(VkDescriptorSetLayoutCreateInfo){
+      .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+      .flags = VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR,
+      .bindingCount = 2, .pBindings = Bindings},
+    NULL, &Tessellation_Descriptor_Layout));
+
+  // Push constants: 5 uints = 20 bytes (patch_count, level, stride, grid_columns, ctrl_grid_width)
+  VkPushConstantRange Push_Range = {.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT, .offset = 0, .size = 20};
+
+  VK_CHECK (vkCreatePipelineLayout (Device,
+    &(VkPipelineLayoutCreateInfo){
+      .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+      .setLayoutCount = 1, .pSetLayouts = &Tessellation_Descriptor_Layout,
+      .pushConstantRangeCount = 1, .pPushConstantRanges = &Push_Range},
+    NULL, &Tessellation_Pipeline_Layout));
+
+  VkShaderModule Tess_Module = Shader_Module_Load (Shader_Path (Tessellation));
+
+  VK_CHECK (vkCreateComputePipelines (Device, Pipeline_Cache, 1,
+    &(VkComputePipelineCreateInfo){
+      .sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
+      .stage = {.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+                .stage = VK_SHADER_STAGE_COMPUTE_BIT, .module = Tess_Module, .pName = "main"},
+      .layout = Tessellation_Pipeline_Layout},
+    NULL, &Tessellation_Pipeline));
+
+  vkDestroyShaderModule (Device, Tess_Module, NULL);
+  printf ("[tessellation] GPU Bezier tessellation pipeline created\n");
+}
+
+// ═══════════════════════════
+//   GPU_Tessellate_Patches
+// ═══════════════════════════
+//
+// Replaces the CPU BSP_Tessellate_Patch function. Uploads control points to the GPU,
+// dispatches the Tessellation compute shader, reads back the tessellated vertices,
+// and generates indices on the CPU (deterministic grid pattern).
+
+uint GPU_Tessellate_Patches (const BSP_Vertex *Control_Grid, int Patch_Width, int Patch_Height,
+                              Vertex **Inout_Vertices, uint *Inout_Vertex_Count,
+                              uint   **Inout_Indices,  uint *Inout_Index_Count) {
+
+  int Grid_Columns = (Patch_Width  - 1) / 2;
+  int Grid_Rows    = (Patch_Height - 1) / 2;
+  int Level  = TESSELLATION_LEVEL;
+  int Stride_Val = Level + 1;
+  uint Patch_Count   = (uint)(Grid_Columns * Grid_Rows);
+  uint Verts_Per_Patch = (uint)(Stride_Val * Stride_Val);
+  uint Total_Verts   = Patch_Count * Verts_Per_Patch;
+  uint Total_Indices = Patch_Count * (uint)(Level * Level * 6);
+
+  if (Patch_Count == 0) return 0;
+
+  // Pack control points into a flat float array (10 floats per point: pos[3], normal[3], uv[2], lightmap_uv[2])
+  uint Ctrl_Point_Count = (uint)(Patch_Width * Patch_Height);
+  uint64_t Ctrl_Size = (uint64_t)Ctrl_Point_Count * 10 * sizeof (float);
+  float *Ctrl_Data = malloc (Ctrl_Size);
+  for (uint I = 0; I < Ctrl_Point_Count; I++) {
+    // Swizzle Q3 Z-up to engine Y-up: (x,y,z) -> (x,z,-y)
+    Ctrl_Data[I * 10 + 0] = Control_Grid[I].Position[0];
+    Ctrl_Data[I * 10 + 1] = Control_Grid[I].Position[2];
+    Ctrl_Data[I * 10 + 2] = -Control_Grid[I].Position[1];
+    Ctrl_Data[I * 10 + 3] = Control_Grid[I].Normal[0];
+    Ctrl_Data[I * 10 + 4] = Control_Grid[I].Normal[2];
+    Ctrl_Data[I * 10 + 5] = -Control_Grid[I].Normal[1];
+    Ctrl_Data[I * 10 + 6] = Control_Grid[I].Texture_Coords[0];
+    Ctrl_Data[I * 10 + 7] = Control_Grid[I].Texture_Coords[1];
+    Ctrl_Data[I * 10 + 8] = Control_Grid[I].Lightmap_Coords[0];
+    Ctrl_Data[I * 10 + 9] = Control_Grid[I].Lightmap_Coords[1];
+  }
+
+  // Allocate GPU buffers for control points (input) and tessellated vertices (output)
+  VkMemoryPropertyFlags Mem_Flags = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+  uint64_t Out_Size = (uint64_t)Total_Verts * 10 * sizeof (float);
+  GPU_Buffer Ctrl_Buffer = Buffer_Allocate (Ctrl_Size, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, Mem_Flags);
+  GPU_Buffer Tess_Buffer = Buffer_Allocate (Out_Size,  VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, Mem_Flags);
+  Buffer_Upload (Ctrl_Buffer, Ctrl_Data, Ctrl_Size);
+  free (Ctrl_Data);
+
+  // Record and submit the compute dispatch
+  VkCommandBuffer Cmd;
+  VK_CHECK (vkAllocateCommandBuffers (Device,
+    &(VkCommandBufferAllocateInfo){.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+      .commandPool = Command_Pool, .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY, .commandBufferCount = 1}, &Cmd));
+  VK_CHECK (vkBeginCommandBuffer (Cmd,
+    &(VkCommandBufferBeginInfo){.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+      .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT}));
+
+  vkCmdBindPipeline (Cmd, VK_PIPELINE_BIND_POINT_COMPUTE, Tessellation_Pipeline);
+
+  VkDescriptorBufferInfo Infos[2] = {
+    {Ctrl_Buffer.Buffer, 0, VK_WHOLE_SIZE},
+    {Tess_Buffer.Buffer, 0, VK_WHOLE_SIZE}};
+  VkWriteDescriptorSet Writes[2];
+  for (int I = 0; I < 2; I++)
+    Writes[I] = (VkWriteDescriptorSet){.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstBinding = (uint)I,
+      .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .pBufferInfo = &Infos[I]};
+
+  PFN_vkCmdPushDescriptorSetKHR Push_Desc =
+    (PFN_vkCmdPushDescriptorSetKHR)vkGetDeviceProcAddr (Device, "vkCmdPushDescriptorSetKHR");
+  Push_Desc (Cmd, VK_PIPELINE_BIND_POINT_COMPUTE, Tessellation_Pipeline_Layout, 0, 2, Writes);
+
+  uint Push[5] = {Patch_Count, (uint)Level, (uint)Stride_Val, (uint)Grid_Columns, (uint)Patch_Width};
+  vkCmdPushConstants (Cmd, Tessellation_Pipeline_Layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, 20, Push);
+  vkCmdDispatch (Cmd, (Total_Verts + 63) / 64, 1, 1);
+
+  VK_CHECK (vkEndCommandBuffer (Cmd));
+  VK_CHECK (vkQueueSubmit (Queue, 1, &(VkSubmitInfo){.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+    .commandBufferCount = 1, .pCommandBuffers = &Cmd}, VK_NULL_HANDLE));
+  vkQueueWaitIdle (Queue);
+
+  // Read back tessellated vertices from GPU and convert to Vertex structs
+  uint Vertex_Base = *Inout_Vertex_Count;
+  *Inout_Vertices = realloc (*Inout_Vertices, sizeof (Vertex) * (Vertex_Base + Total_Verts));
+  *Inout_Indices  = realloc (*Inout_Indices,  sizeof (uint)   * (*Inout_Index_Count + Total_Indices));
+
+  // Read from the mapped GPU buffer
+  float *Tess_Data;
+  if (Tess_Buffer.Heap_Block >= 0) {
+    GPU_Heap_Slab *S = &Heap.Slabs[Heap.Blocks[Tess_Buffer.Heap_Block].Slab];
+    Tess_Data = (float *)(S->Mapped + Tess_Buffer.Offset);
+  } else {
+    VK_CHECK (vkMapMemory (Device, Tess_Buffer.Memory, 0, Out_Size, 0, (void **)&Tess_Data));
+  }
+
+  for (uint I = 0; I < Total_Verts; I++) {
+    uint Base = I * 10;
+    (*Inout_Vertices)[Vertex_Base + I] = (Vertex){
+      .Position    = {Tess_Data[Base], Tess_Data[Base + 1], Tess_Data[Base + 2]},
+      .Normal      = {Tess_Data[Base + 3], Tess_Data[Base + 4], Tess_Data[Base + 5]},
+      .Texture_UV  = {Tess_Data[Base + 6], Tess_Data[Base + 7]},
+      .Lightmap_UV = {Tess_Data[Base + 8], Tess_Data[Base + 9]}};
+  }
+
+  if (Tess_Buffer.Heap_Block < 0) vkUnmapMemory (Device, Tess_Buffer.Memory);
+
+  // Generate indices on CPU (deterministic grid pattern — no GPU needed)
+  uint Index_Cursor = *Inout_Index_Count;
+  for (uint P = 0; P < Patch_Count; P++) {
+    uint Patch_Base = Vertex_Base + P * Verts_Per_Patch;
+    for (int V = 0; V < Level; V++) for (int H = 0; H < Level; H++) {
+      uint A = Patch_Base + (uint)V * (uint)Stride_Val + (uint)H;
+      uint B = A + 1;
+      uint C = Patch_Base + (uint)(V + 1) * (uint)Stride_Val + (uint)H;
+      uint D = C + 1;
+      (*Inout_Indices)[Index_Cursor++] = A;
+      (*Inout_Indices)[Index_Cursor++] = C;
+      (*Inout_Indices)[Index_Cursor++] = B;
+      (*Inout_Indices)[Index_Cursor++] = B;
+      (*Inout_Indices)[Index_Cursor++] = C;
+      (*Inout_Indices)[Index_Cursor++] = D;
+    }
+  }
+
+  *Inout_Vertex_Count += Total_Verts;
+  *Inout_Index_Count  += Total_Indices;
+
+  // Free GPU buffers
+  if (Ctrl_Buffer.Heap_Block >= 0) GPU_Heap_Free (&Heap, Ctrl_Buffer.Heap_Block);
+  else { vkFreeMemory (Device, Ctrl_Buffer.Memory, NULL); }
+  vkDestroyBuffer (Device, Ctrl_Buffer.Buffer, NULL);
+  if (Tess_Buffer.Heap_Block >= 0) GPU_Heap_Free (&Heap, Tess_Buffer.Heap_Block);
+  else { vkFreeMemory (Device, Tess_Buffer.Memory, NULL); }
+  vkDestroyBuffer (Device, Tess_Buffer.Buffer, NULL);
+
+  return Total_Indices / 3;
 }
 
 // ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
