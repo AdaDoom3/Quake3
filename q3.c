@@ -1744,6 +1744,12 @@ typedef struct {
   uint8_t    *Bone_Ids;
   uint8_t    *Bone_Weights;
 
+  // Pre-sampled animation keyframes: local bone transforms per frame per animation.
+  // Layout: Keyframes[anim][frame * Bone_Count + bone] = mat3x4 (12 floats).
+  // Heap-allocated per animation; NULL entries = no keyframe data for that animation.
+  float      *Keyframes[FIGURE_MAX_ANIMS];       // [frame * Bone_Count + bone][3][4] per animation
+  int         Keyframe_Counts[FIGURE_MAX_ANIMS];  // Number of frames sampled per animation
+
   int         Is_Source;   // 1 = Source MDL skeletal, 0 = MD3 vertex animation
 } Articulated_Figure;
 
@@ -1785,6 +1791,9 @@ Articulated_Figure Weapon_Model_Load ();
 
 // Load a Source engine MDL model as a held weapon (viewmodel). Parses MDL + VVD + VTX sidecars, applies idle-pose skinning.
 Articulated_Figure Source_Weapon_Model_Load (const char *Path);
+
+// MDL animation pre-sampling: extract all frames of all animations into local bone matrices.
+void MDL_Presample_Animations (Articulated_Figure *Figure, const uint8_t *File_Data, long File_Size, const MDL_Header *Header);
 
 // Assemble a composite Q3 player model (lower + upper + head + weapon) at a given animation frame into merged geometry arrays.
 void Entity_Assemble_Frame (int Legs_Frame, int Torso_Frame,
@@ -2701,10 +2710,18 @@ Scene Scene_Load_From_VBSP (const char *Path, Spawn *Out_Spawn);
 // MDL skeletal model loading: parses Source engine .mdl + .vvd + .vtx into an Entity with bone data.
 Figure_Instance MDL_Load (Scene *S, const char *Path, vec3 Origin, float Yaw);
 
-// GPU skeletal animation: uploads bone hierarchy to GPU once at load time. Per-frame: a single compute dispatch evaluates the bone
-// hierarchy (parent chain walk) and skins all vertices in one pass. No CPU-side Skeleton_Evaluate needed.
+// GPU skeletal animation: uploads bone hierarchy to GPU once at load time. Per-frame: CPU evaluates
+// bone local transforms from animation blend state, uploads to GPU, then compute shader does hierarchy
+// walk + IK + vertex skinning.
 void Figure_Upload_Skeleton   (Figure_Instance *E);  // Upload bind pose, inv bind, parents, weights, ids to GPU SSBOs
 void Figure_Skeleton_Dispatch (Figure_Instance *E);  // Single compute: evaluate bones + skin vertices on GPU
+
+// CPU-side skeletal animation evaluation: samples keyframes, interpolates, blends across layers.
+// Writes the resulting local bone transforms into Out_Local[bone][3][4].
+void Figure_Evaluate_Bones (Figure_Instance *E, float Delta_Time, float Out_Local[][3][4]);
+
+// Upload per-frame local bone transforms and dispatch GPU skinning.
+void Figure_Animate_Skeleton (Figure_Instance *E, float Delta_Time);
 
 // ── Animation Blend API ── Source Engine StandardBlendingRules / MaintainSequenceTransitions ──────
 //
@@ -3928,6 +3945,17 @@ int main (int Argc, char **Argv) {
   Weapon->Ray_Mask = 0x01;  // Excluded from shadow rays
   Weapon->TLAS_Transform[0][0] = 1.f; Weapon->TLAS_Transform[1][1] = 1.f; Weapon->TLAS_Transform[2][2] = 1.f;
 
+  // Initialize skeletal animation blend state and play idle on the base layer
+  if (Weapon->Figure.Is_Source and Weapon->Figure.Animation_Count > 0) {
+    Animation_Blend_Init (&Weapon->Blend);
+    // Find the idle animation (activity 185 = ACT_VM_IDLE, or name contains "idle")
+    int Idle_Seq = 0;
+    for (uint I = 0; I < Weapon->Figure.Animation_Count; I++)
+      if (strstr (Weapon->Figure.Animations[I].Name, "idle")) { Idle_Seq = (int)I; break; }
+    Animation_Blend_Play (&Weapon->Blend, ANIM_LAYER_BASE, Idle_Seq, 0.f, 0xFFFFFFFF);
+    printf ("[weapon] playing animation '%s' on base layer\n", Weapon->Figure.Animations[Idle_Seq].Name);
+  }
+
   // Allocate a player body slot (shares enemy BLAS, shadow-only)
   Figure_Instance *Player_Body;
   Figure_Pool_Alloc (&Figures, &Player_Body);
@@ -4163,11 +4191,16 @@ int main (int Argc, char **Argv) {
 
       // Update scene state for this frame
       Bench_Cam.Frame = (uint)F;
+      if (Weapon->Figure.Is_Source and Weapon->Figure.Bone_Count > 0)
+        Figure_Animate_Skeleton (Weapon, Fixed_Dt);
       Weapon_Update (Weapon, &Bench_Cam, Fixed_Dt, 0);
       Figure_BLAS_Rebuild (Weapon);
-      Enemy->Animation_Time += Fixed_Dt;
-      if (Enemy->Figure.Animations[0].Frame_Count > 0 and Enemy->Figure.Frame_Vertices) {
-        Enemy->Current_Vertices = Enemy->Figure.Frame_Vertices[(int)(Enemy->Animation_Time * Enemy->Figure.Animations[0].FPS) % Enemy->Figure.Animations[0].Frame_Count];
+      if (Enemy->Figure.Is_Source and Enemy->Figure.Bone_Count > 0) {
+        Figure_Animate_Skeleton (Enemy, Fixed_Dt);
+      } else {
+        Enemy->Animation_Time += Fixed_Dt;
+        if (Enemy->Figure.Animations[0].Frame_Count > 0 and Enemy->Figure.Frame_Vertices)
+          Enemy->Current_Vertices = Enemy->Figure.Frame_Vertices[(int)(Enemy->Animation_Time * Enemy->Figure.Animations[0].FPS) % Enemy->Figure.Animations[0].Frame_Count];
       }
       Figure_BLAS_Rebuild (Enemy);
       Top_Level_Rebuild (&World_Bottom_Level, &Figures);
@@ -4633,15 +4666,21 @@ int main (int Argc, char **Argv) {
         printf ("\r[vm A/B] >>> %s <<<                    \n", VM_AB_Names[VM_AB_Test_Index]);
     }
 
-    // Animate and rebuild the weapon viewmodel
+    // Animate skeletal models and rebuild viewmodel
+    if (Weapon->Figure.Is_Source and Weapon->Figure.Bone_Count > 0)
+      Figure_Animate_Skeleton (Weapon, Delta_Time);
     Weapon_Update (Weapon, &Cam, Delta_Time, In.Fire);
     Figure_BLAS_Rebuild (Weapon);
 
-    // Advance enemy idle animation and rebuild BLAS
-    Enemy->Animation_Time += Delta_Time;
-    if (Enemy->Figure.Animations[0].Frame_Count > 0 and Enemy->Figure.Frame_Vertices) {
-      int Frame_Index = (int)(Enemy->Animation_Time * Enemy->Figure.Animations[0].FPS) % Enemy->Figure.Animations[0].Frame_Count;
-      Enemy->Current_Vertices = Enemy->Figure.Frame_Vertices[Frame_Index];
+    // Advance enemy animation and rebuild BLAS
+    if (Enemy->Figure.Is_Source and Enemy->Figure.Bone_Count > 0) {
+      Figure_Animate_Skeleton (Enemy, Delta_Time);
+    } else {
+      Enemy->Animation_Time += Delta_Time;
+      if (Enemy->Figure.Animations[0].Frame_Count > 0 and Enemy->Figure.Frame_Vertices) {
+        int Frame_Index = (int)(Enemy->Animation_Time * Enemy->Figure.Animations[0].FPS) % Enemy->Figure.Animations[0].Frame_Count;
+        Enemy->Current_Vertices = Enemy->Figure.Frame_Vertices[Frame_Index];
+      }
     }
     Figure_BLAS_Rebuild (Enemy);
 
@@ -7471,6 +7510,188 @@ void IK_Upload (IK_State *State, GPU_Buffer *IK_Buffer_Out) {
   free (Data);
 }
 
+// ═══════════════════════════
+//   Figure_Evaluate_Bones
+// ═══════════════════════════
+//
+// CPU-side skeletal animation evaluation. Samples pre-computed keyframes from the blend state,
+// interpolates between adjacent frames (LERP for position, NLERP for rotation), and blends
+// across active layers. Output: local-space bone transforms in Out_Local[bone][3][4].
+//
+// Source Engine equivalent: C_BaseAnimating::SetupBones (CPU portion before GPU dispatch).
+
+void Figure_Evaluate_Bones (Figure_Instance *E, float Delta_Time, float Out_Local[][3][4]) {
+  Articulated_Figure *F = &E->Figure;
+  int BC = F->Bone_Count;
+  if (BC <= 0) return;
+
+  // Tick the blend state to advance all layer cursors and weights
+  Animation_Blend_Tick (&E->Blend, F, Delta_Time);
+
+  // Start with bind pose as the default
+  for (int B = 0; B < BC; B++)
+    memcpy (Out_Local[B], F->Bind_Pose[B], sizeof (float) * 12);
+
+  // Accumulate weighted contributions from each active blend layer
+  float Total_Weight = 0.f;
+  int   Any_Active   = 0;
+
+  for (int Layer_Idx = 0; Layer_Idx < ANIM_MAX_LAYERS; Layer_Idx++) {
+    Animation_Layer *Layer = &E->Blend.Layers[Layer_Idx];
+    if (Layer->Sequence_Index < 0 or Layer->Weight < 0.001f) continue;
+    int Seq = Layer->Sequence_Index;
+    if (Seq >= (int)F->Animation_Count) continue;
+    if (not F->Keyframes[Seq]) continue;
+
+    const Figure_Animation *Anim = &F->Animations[Seq];
+    int Frame_Count = F->Keyframe_Counts[Seq];
+    if (Frame_Count <= 0) continue;
+
+    // Compute the fractional frame index from the cursor
+    float Duration = Frame_Count > 0 ? (float)Frame_Count / fmaxf (Anim->FPS, 0.001f) : 1.f;
+    float Normalized = Duration > 0.f ? Layer->Cursor / Duration : 0.f;
+    if (Normalized < 0.f) Normalized = 0.f;
+    if (Normalized >= 1.f) Normalized = Anim->Looping ? fmodf (Normalized, 1.f) : 1.f - 1e-6f;
+    float Frame_Float = Normalized * (float)Frame_Count;
+    int   Frame_A = (int)Frame_Float;
+    int   Frame_B = Frame_A + 1;
+    float Frac    = Frame_Float - (float)Frame_A;
+
+    // Clamp or wrap frame indices
+    if (Anim->Looping) {
+      Frame_A = Frame_A % Frame_Count;
+      Frame_B = Frame_B % Frame_Count;
+    } else {
+      if (Frame_A >= Frame_Count) Frame_A = Frame_Count - 1;
+      if (Frame_B >= Frame_Count) Frame_B = Frame_Count - 1;
+    }
+
+    const float *KF_A = F->Keyframes[Seq] + Frame_A * BC * 12;
+    const float *KF_B = F->Keyframes[Seq] + Frame_B * BC * 12;
+    float W = Layer->Weight;
+
+    // Blend each bone: LERP the 3x4 matrices (position LERP + rotation approximate via matrix LERP)
+    // For the first active layer, directly set; for subsequent layers, blend on top.
+    if (not Any_Active) {
+      // First layer: set directly (weighted against bind pose if weight < 1)
+      for (int B = 0; B < BC; B++) {
+        const float *A = KF_A + B * 12;
+        const float *Bm = KF_B + B * 12;
+        float *O = (float*)Out_Local[B];
+        for (int I = 0; I < 12; I++) {
+          float Interp = A[I] + (Bm[I] - A[I]) * Frac;
+          O[I] = F->Bind_Pose[B][I/4][I%4] + (Interp - F->Bind_Pose[B][I/4][I%4]) * W;
+        }
+      }
+    } else {
+      // Subsequent layers: additive blend (layer weight blends between current and this layer's pose)
+      for (int B = 0; B < BC; B++) {
+        const float *A = KF_A + B * 12;
+        const float *Bm = KF_B + B * 12;
+        float *O = (float*)Out_Local[B];
+        for (int I = 0; I < 12; I++) {
+          float Interp = A[I] + (Bm[I] - A[I]) * Frac;
+          O[I] = O[I] + (Interp - O[I]) * W;
+        }
+      }
+    }
+
+    Total_Weight += W;
+    Any_Active = 1;
+  }
+}
+
+// ══════════════════════════════
+//   Figure_Animate_Skeleton
+// ══════════════════════════════
+//
+// High-level per-frame skeletal animation: evaluate bones on CPU, compute skinning matrices,
+// skin vertices on CPU. Updates E->Current_Vertices with the deformed mesh.
+//
+// Source Engine equivalent: C_BaseAnimating::SetupBones → R_StudioDrawModel.
+
+void Figure_Animate_Skeleton (Figure_Instance *E, float Delta_Time) {
+  Articulated_Figure *F = &E->Figure;
+  if (F->Bone_Count <= 0 or F->Vertex_Count == 0) return;
+  if (not F->Is_Source) return;  // MD3 uses vertex animation, not skeletal
+  int BC = F->Bone_Count;
+
+  // Phase 1: Evaluate local bone transforms from the animation blend state
+  float Local[FIGURE_MAX_BONES][3][4];
+  Figure_Evaluate_Bones (E, Delta_Time, Local);
+
+  // Phase 2: Forward kinematic chain — World[i] = World[parent] * Local[i]
+  float World[FIGURE_MAX_BONES][3][4];
+  for (int B = 0; B < BC; B++) {
+    int P = F->Bone_Parents[B];
+    if (P >= 0 and P < B) {
+      for (int R = 0; R < 3; R++)
+        for (int C = 0; C < 4; C++)
+          World[B][R][C] = World[P][R][0] * Local[B][0][C]
+                         + World[P][R][1] * Local[B][1][C]
+                         + World[P][R][2] * Local[B][2][C]
+                         + (C == 3 ? World[P][R][3] : 0);
+    } else {
+      memcpy (World[B], Local[B], sizeof (float) * 12);
+    }
+  }
+
+  // Phase 3: Compose with inverse bind-pose: Skin[i] = World[i] * InvBind[i]
+  float Skin[FIGURE_MAX_BONES][3][4];
+  for (int B = 0; B < BC; B++)
+    for (int R = 0; R < 3; R++)
+      for (int C = 0; C < 4; C++)
+        Skin[B][R][C] = World[B][R][0] * F->Inv_Bind[B][0][C]
+                       + World[B][R][1] * F->Inv_Bind[B][1][C]
+                       + World[B][R][2] * F->Inv_Bind[B][2][C]
+                       + (C == 3 ? World[B][R][3] : 0);
+
+  // Phase 4: Skin each vertex using weighted bone influences
+  Vertex *Bind = F->Frame_Vertices[0] ? F->Frame_Vertices[0] : F->Vertices;
+  if (not E->Transformed_Vertices)
+    E->Transformed_Vertices = malloc (sizeof (Vertex) * F->Vertex_Count);
+
+  for (uint V = 0; V < F->Vertex_Count; V++) {
+    float Px = 0, Py = 0, Pz = 0;
+    float Nx = 0, Ny = 0, Nz = 0;
+    float Total_W = 0;
+
+    for (int I = 0; I < SKEL_MAX_BONES_PER_VERT; I++) {
+      int   Bone_Id = F->Bone_Ids     ? F->Bone_Ids    [V * SKEL_MAX_BONES_PER_VERT + I] : 0;
+      float W       = F->Bone_Weights ? F->Bone_Weights[V * SKEL_MAX_BONES_PER_VERT + I] / 255.f : (I == 0 ? 1.f : 0.f);
+      if (W < 0.001f) continue;
+      if (Bone_Id >= BC) Bone_Id = 0;
+
+      float Bx = Bind[V].Position[0], By = Bind[V].Position[1], Bz = Bind[V].Position[2];
+      Px += (Skin[Bone_Id][0][0]*Bx + Skin[Bone_Id][0][1]*By + Skin[Bone_Id][0][2]*Bz + Skin[Bone_Id][0][3]) * W;
+      Py += (Skin[Bone_Id][1][0]*Bx + Skin[Bone_Id][1][1]*By + Skin[Bone_Id][1][2]*Bz + Skin[Bone_Id][1][3]) * W;
+      Pz += (Skin[Bone_Id][2][0]*Bx + Skin[Bone_Id][2][1]*By + Skin[Bone_Id][2][2]*Bz + Skin[Bone_Id][2][3]) * W;
+
+      float Bnx = Bind[V].Normal[0], Bny = Bind[V].Normal[1], Bnz = Bind[V].Normal[2];
+      Nx += (Skin[Bone_Id][0][0]*Bnx + Skin[Bone_Id][0][1]*Bny + Skin[Bone_Id][0][2]*Bnz) * W;
+      Ny += (Skin[Bone_Id][1][0]*Bnx + Skin[Bone_Id][1][1]*Bny + Skin[Bone_Id][1][2]*Bnz) * W;
+      Nz += (Skin[Bone_Id][2][0]*Bnx + Skin[Bone_Id][2][1]*Bny + Skin[Bone_Id][2][2]*Bnz) * W;
+      Total_W += W;
+    }
+
+    // Normalize
+    if (Total_W > 0.001f) { Px /= Total_W; Py /= Total_W; Pz /= Total_W; Nx /= Total_W; Ny /= Total_W; Nz /= Total_W; }
+    float NL = sqrtf (Nx*Nx + Ny*Ny + Nz*Nz);
+    if (NL > 1e-6f) { Nx /= NL; Ny /= NL; Nz /= NL; }
+
+    E->Transformed_Vertices[V] = Bind[V];  // Copy UVs etc.
+    E->Transformed_Vertices[V].Position[0] = Px;
+    E->Transformed_Vertices[V].Position[1] = Py;
+    E->Transformed_Vertices[V].Position[2] = Pz;
+    E->Transformed_Vertices[V].Normal[0]   = Nx;
+    E->Transformed_Vertices[V].Normal[1]   = Ny;
+    E->Transformed_Vertices[V].Normal[2]   = Nz;
+  }
+
+  // Update Current_Vertices to point at the skinned result
+  E->Current_Vertices = E->Transformed_Vertices;
+}
+
 //   Figure_Upload_Skeleton
 // ═════════════════════════
 //
@@ -7481,12 +7702,12 @@ void Figure_Upload_Skeleton (Figure_Instance *E) {
   if (E->Figure.Bone_Count <= 0) return;
   uint BC = (uint)E->Figure.Bone_Count;
 
-  // Bind pose matrices (3x4 row-major, BC entries)
-  E->Bone_Buffer = Buffer_Stage_Upload (/*Command_Buffer =>*/ Command_Buffer,
-                                        /*Queue          =>*/ Queue,
-                                        /*Data           =>*/ E->Figure.Bind_Pose,
-                                        /*Size           =>*/ sizeof (float) * 12 * BC,
-                                        /*Usage          =>*/ VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+  // Bind pose / per-frame local bone matrices (HOST_VISIBLE for per-frame CPU writes)
+  E->Bone_Buffer = Buffer_Allocate (/*Size         =>*/ sizeof (float) * 12 * BC,
+                                    /*Usage        =>*/ VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                                    /*Memory_Flags =>*/ VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT
+                                                      | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+  Buffer_Upload (E->Bone_Buffer, E->Figure.Bind_Pose, sizeof (float) * 12 * BC);
 
   // Inverse bind pose matrices
   E->Inv_Bind_Buffer = Buffer_Stage_Upload (/*Command_Buffer =>*/ Command_Buffer,
@@ -8544,12 +8765,276 @@ Figure_Instance MDL_Load (Scene *S, const char *Path, vec3 Origin, float Yaw) {
       Entity_Result.Figure.Bone_Weights[Vert_Index * SKEL_MAX_BONES_PER_VERT] = 255;
   }
 
+  // Pre-sample all animation sequences before freeing the raw MDL data
+  MDL_Presample_Animations (&Entity_Result.Figure, File_Data, File_Size, Header);
+
   free (File_Data);
-  printf ("[mdl] %s: %d bones, %u verts, %u tris\n",
-          Path, Entity_Result.Figure.Bone_Count, Vertex_Count, Triangle_Count);
+  printf ("[mdl] %s: %d bones, %u verts, %u tris, %u anims\n",
+          Path, Entity_Result.Figure.Bone_Count, Vertex_Count, Triangle_Count,
+          Entity_Result.Figure.Animation_Count);
   return Entity_Result;
 
 } // MDL_Load
+
+
+// ══════════════════════════════
+//   MDL_Extract_Anim_Value
+// ══════════════════════════════
+//
+// Source SDK: ExtractAnimValue — decode one axis of one bone's animation at a given frame.
+// The animation value stream is RLE-encoded:
+//   [header: {valid, total}] [valid × int16_t samples] [repeat...]
+// For frame F in a section: if F < valid, use sample[F]; else use sample[valid-1] (hold last).
+// Returns the decoded value multiplied by Scale, plus the bind-pose Base.
+
+float MDL_Extract_Anim_Value (const uint8_t *Anim_Value, int Frame, float Scale, float Base) {
+  if (not Anim_Value) return Base;
+
+  // Walk the RLE stream to find the segment containing Frame
+  const uint8_t *Cursor = Anim_Value;
+  for (;;) {
+    uint8_t Valid = Cursor[0];
+    uint8_t Total = Cursor[1];
+    if (Total == 0) return Base;  // End of stream or corrupt data
+
+    if (Frame < Total) {
+      // This segment contains our frame
+      int Sample_Index = Frame < Valid ? Frame : Valid - 1;
+      int16_t Sample = *(const int16_t*)(Cursor + 2 + Sample_Index * 2);
+      return Base + Sample * Scale;
+    }
+    // Advance past this segment: 2-byte header + Valid * 2-byte samples
+    Frame -= Total;
+    Cursor += 2 + Valid * 2;
+  }
+}
+
+// ══════════════════════════════════
+//   MDL_Sample_Bone_At_Frame
+// ══════════════════════════════════
+//
+// Sample one bone's local transform from MDL animation data at a specific frame.
+// Writes a 3x4 row-major affine matrix to Out[3][4].
+// Requires: the bone's bind-pose data (MDL_Bone*), the raw animation entry for this bone
+// (Animation_Cursor, Anim_Flags, Data), and the header.
+
+void MDL_Sample_Bone_At_Frame (float Out[3][4],
+                                       const MDL_Bone *Bone,
+                                       const uint8_t *Animation_Entry,
+                                       int Anim_Flags, int Frame) {
+  int Data_Offset = 4;  // Skip 4-byte mstudioanim_t header
+
+  // Start with bind-pose defaults
+  float Qx = Bone->Quat[0], Qy = Bone->Quat[1], Qz = Bone->Quat[2], Qw = Bone->Quat[3];
+  float Pos[3] = {Bone->Position.x, Bone->Position.y, Bone->Position.z};
+  int Got_Rotation = 0;
+
+  // RAWROT (0x02): Quaternion48 — frame-independent raw rotation
+  if (Anim_Flags & 0x02) {
+    const uint16_t *Q48 = (const uint16_t*)(Animation_Entry + Data_Offset);
+    Qx = ((int)Q48[0] - 32768) * (1.0f / 32768.0f);
+    Qy = ((int)Q48[1] - 32768) * (1.0f / 32768.0f);
+    Qz = ((int)(Q48[2] & 0x7FFF) - 16384) * (1.0f / 16384.0f);
+    int W_Neg = (Q48[2] >> 15) & 1;
+    float W_Sq = 1.0f - Qx*Qx - Qy*Qy - Qz*Qz;
+    Qw = W_Sq > 0 ? sqrtf(W_Sq) : 0;
+    if (W_Neg) Qw = -Qw;
+    Got_Rotation = 1;
+    Data_Offset += 6;
+  }
+
+  // RAWROT2 (0x20): Quaternion64 — frame-independent raw rotation (higher precision)
+  if (Anim_Flags & 0x20) {
+    uint64_t Packed = 0;
+    memcpy(&Packed, Animation_Entry + Data_Offset, 8);
+    Qx = ((int)(Packed & 0x1FFFFF) - 1048576) * (1.0f / 1048576.5f);
+    Qy = ((int)((Packed >> 21) & 0x1FFFFF) - 1048576) * (1.0f / 1048576.5f);
+    Qz = ((int)((Packed >> 42) & 0x1FFFFF) - 1048576) * (1.0f / 1048576.5f);
+    int W_Neg = (Packed >> 63) & 1;
+    float W_Sq = 1.0f - Qx*Qx - Qy*Qy - Qz*Qz;
+    Qw = W_Sq > 0 ? sqrtf(W_Sq) : 0;
+    if (W_Neg) Qw = -Qw;
+    Got_Rotation = 1;
+    Data_Offset += 8;
+  }
+
+  // RAWPOS (0x01): Vector48 — frame-independent raw position (3x float16)
+  if (Anim_Flags & 0x01) {
+    const uint16_t *V48 = (const uint16_t*)(Animation_Entry + Data_Offset);
+    for (int Axis = 0; Axis < 3; Axis++) {
+      uint16_t H    = V48[Axis];
+      int      Sign = (H >> 15) & 1;
+      int      Exp  = (H >> 10) & 0x1F;
+      int      Mant = H & 0x3FF;
+      float    Value;
+      if (Exp == 0)       Value = (Mant / 1024.0f) * (1.0f / 16384.0f);
+      else if (Exp == 31) Value = Mant ? 0.0f : (Sign ? -1e30f : 1e30f);
+      else                Value = (1.0f + Mant / 1024.0f) * powf(2.0f, Exp - 15.0f);
+      if (Sign) Value = -Value;
+      Pos[Axis] = Value;
+    }
+    Data_Offset += 6;
+  }
+
+  // ANIMROT (0x08): RLE per-axis Euler rotation (frame-dependent)
+  if ((Anim_Flags & 0x08) and not Got_Rotation) {
+    const uint8_t *VPB = Animation_Entry + Data_Offset;
+    const int16_t *Offsets = (const int16_t*)VPB;
+    float Rot[3] = {Bone->Rot.x, Bone->Rot.y, Bone->Rot.z};
+    float Rot_Scale[3] = {Bone->Rot_Scale.x, Bone->Rot_Scale.y, Bone->Rot_Scale.z};
+    for (int Axis = 0; Axis < 3; Axis++)
+      if (Offsets[Axis] > 0)
+        Rot[Axis] = MDL_Extract_Anim_Value(VPB + Offsets[Axis], Frame, Rot_Scale[Axis], Rot[Axis]);
+    // AngleQuaternion: x=roll, y=pitch, z=yaw
+    float SR, CR, SP, CP, SY2, CY2;
+    SY2 = sinf(Rot[2]*0.5f); CY2 = cosf(Rot[2]*0.5f);
+    SP  = sinf(Rot[1]*0.5f); CP  = cosf(Rot[1]*0.5f);
+    SR  = sinf(Rot[0]*0.5f); CR  = cosf(Rot[0]*0.5f);
+    Qx = SR*CP*CY2 - CR*SP*SY2;
+    Qy = CR*SP*CY2 + SR*CP*SY2;
+    Qz = CR*CP*SY2 - SR*SP*CY2;
+    Qw = CR*CP*CY2 + SR*SP*SY2;
+    Got_Rotation = 1;
+    Data_Offset += 6;
+  } else if (Anim_Flags & 0x08) {
+    Data_Offset += 6;
+  }
+
+  // ANIMPOS (0x04): RLE per-axis position (frame-dependent)
+  if (Anim_Flags & 0x04) {
+    if (not (Anim_Flags & 0x01)) {
+      const uint8_t *VPB = Animation_Entry + Data_Offset;
+      const int16_t *Offsets = (const int16_t*)VPB;
+      float Pos_Scale[3] = {Bone->Position_Scale.x, Bone->Position_Scale.y, Bone->Position_Scale.z};
+      for (int Axis = 0; Axis < 3; Axis++)
+        if (Offsets[Axis] > 0)
+          Pos[Axis] = MDL_Extract_Anim_Value(VPB + Offsets[Axis], Frame, Pos_Scale[Axis], Pos[Axis]);
+    }
+    Data_Offset += 6;
+  }
+
+  // Normalize quaternion
+  float QL = sqrtf(Qx*Qx + Qy*Qy + Qz*Qz + Qw*Qw);
+  if (QL > 1e-6f) { Qx/=QL; Qy/=QL; Qz/=QL; Qw/=QL; }
+
+  // Convert quaternion to 3x4 matrix
+  float TX = Qx+Qx, TY = Qy+Qy, TZ = Qz+Qz;
+  float AXX=Qx*TX, AXY=Qx*TY, AXZ=Qx*TZ;
+  float AYY=Qy*TY, AYZ=Qy*TZ, AZZ=Qz*TZ;
+  float AWX=Qw*TX, AWY=Qw*TY, AWZ=Qw*TZ;
+  Out[0][0]=1-(AYY+AZZ); Out[0][1]=AXY-AWZ;     Out[0][2]=AXZ+AWY;     Out[0][3]=Pos[0];
+  Out[1][0]=AXY+AWZ;     Out[1][1]=1-(AXX+AZZ); Out[1][2]=AYZ-AWX;     Out[1][3]=Pos[1];
+  Out[2][0]=AXZ-AWY;     Out[2][1]=AYZ+AWX;     Out[2][2]=1-(AXX+AYY); Out[2][3]=Pos[2];
+}
+
+// ═══════════════════════════════════
+//   MDL_Presample_Animations
+// ═══════════════════════════════════
+//
+// Pre-sample all frames of all animations from an MDL file. Stores local bone transforms
+// per frame per animation in Figure->Keyframes[anim]. This avoids runtime RLE parsing.
+// File_Data must still be valid (not yet freed).
+
+void MDL_Presample_Animations (Articulated_Figure *Figure,
+                                       const uint8_t *File_Data, long File_Size,
+                                       const MDL_Header *Header) {
+  int Bone_Count = Figure->Bone_Count;
+  if (Bone_Count <= 0 or Header->Animation_Count <= 0) return;
+
+  // Walk all sequences to populate Figure->Animations[] and link to animation descriptors
+  int Anim_Count = Header->Animation_Count < FIGURE_MAX_ANIMS ? Header->Animation_Count : FIGURE_MAX_ANIMS;
+  int Seq_Count  = Header->Sequence_Count  < FIGURE_MAX_ANIMS ? Header->Sequence_Count  : FIGURE_MAX_ANIMS;
+
+  // Parse sequences into Figure->Animations[]
+  Figure->Animation_Count = 0;
+  for (int Seq = 0; Seq < Seq_Count; Seq++) {
+    const uint8_t *Seq_Data = File_Data + Header->Sequence_Offset + Seq * 212;
+    if (Seq_Data + 212 > File_Data + File_Size) break;
+    int Label_Offset = *(const int*)(Seq_Data + 4);
+    const char *Seq_Name = (const char*)(Seq_Data + Label_Offset);
+    int Activity = *(const int*)(Seq_Data + 16);
+    int Anim_Idx_Offset = *(const int*)(Seq_Data + 60);
+    int Anim_Idx = *(const short*)(Seq_Data + Anim_Idx_Offset);
+    if (Anim_Idx < 0 or Anim_Idx >= Anim_Count) continue;
+
+    // Get frame count from the animation descriptor
+    const uint8_t *Anim_Desc = File_Data + Header->Animation_Offset + Anim_Idx * 100;
+    if (Anim_Desc + 100 > File_Data + File_Size) continue;
+    int Num_Frames = *(const int*)(Anim_Desc + 16);
+    if (Num_Frames <= 0) Num_Frames = 1;
+
+    // Determine FPS from the sequence data (offset 8+4 = fps at offset 168 in seqdesc)
+    // Source seqdesc fps is at offset 168: float fps
+    float FPS = 30.f;
+    if (Seq_Data + 172 <= File_Data + File_Size)
+      FPS = *(const float*)(Seq_Data + 168);
+    if (FPS <= 0.f) FPS = 30.f;
+
+    int Is_Looping = (*(const int*)(Seq_Data + 12)) & 1; // flags bit 0 = looping
+
+    int Anim_Slot = (int)Figure->Animation_Count;
+    if (Anim_Slot >= FIGURE_MAX_ANIMS) break;
+
+    snprintf(Figure->Animations[Anim_Slot].Name, 64, "%s", Seq_Name);
+    Figure->Animations[Anim_Slot].First_Frame = 0;
+    Figure->Animations[Anim_Slot].Frame_Count = Num_Frames;
+    Figure->Animations[Anim_Slot].FPS = FPS;
+    Figure->Animations[Anim_Slot].Looping = Is_Looping;
+
+    // Allocate keyframe storage: Num_Frames * Bone_Count * 12 floats
+    size_t KF_Size = (size_t)Num_Frames * Bone_Count * 12 * sizeof(float);
+    Figure->Keyframes[Anim_Slot] = malloc(KF_Size);
+    Figure->Keyframe_Counts[Anim_Slot] = Num_Frames;
+
+    // Sample each frame
+    int Anim_Index_Offset = *(const int*)(Anim_Desc + 56);
+    const uint8_t *Anim_Start = Anim_Desc + Anim_Index_Offset;
+
+    for (int Frame = 0; Frame < Num_Frames; Frame++) {
+      // Start each frame with bind-pose defaults for all bones
+      float *Frame_Data = Figure->Keyframes[Anim_Slot] + Frame * Bone_Count * 12;
+      for (int B = 0; B < Bone_Count; B++)
+        memcpy(Frame_Data + B * 12, Figure->Bind_Pose[B], 12 * sizeof(float));
+
+      // Walk the animation entry linked list and override bones that have animation data
+      const uint8_t *Cursor = Anim_Start;
+      for (;;) {
+        if (Cursor < File_Data or Cursor >= File_Data + File_Size - 4) break;
+        int Bone_Idx    = Cursor[0];
+        int Flags       = Cursor[1];
+        int16_t Next_Off = *(const int16_t*)(Cursor + 2);
+
+        if (Bone_Idx < Bone_Count) {
+          const MDL_Bone *Bone = (const MDL_Bone*)(File_Data + Header->Bone_Offset
+                                                   + Bone_Idx * sizeof(MDL_Bone));
+          float Local[3][4];
+          MDL_Sample_Bone_At_Frame(Local, Bone, Cursor, Flags, Frame);
+          memcpy(Frame_Data + Bone_Idx * 12, Local, 12 * sizeof(float));
+        }
+
+        if (Next_Off == 0) break;
+        Cursor += Next_Off;
+      }
+    }
+
+    printf("[anim] seq[%d] '%s': %d frames @ %.0f fps, activity=%d%s\n",
+           Anim_Slot, Seq_Name, Num_Frames, FPS, Activity, Is_Looping ? " (loop)" : "");
+    Figure->Animation_Count++;
+  }
+
+  // If no sequences found, create a single-frame bind-pose animation
+  if (Figure->Animation_Count == 0) {
+    snprintf(Figure->Animations[0].Name, 64, "idle");
+    Figure->Animations[0].Frame_Count = 1;
+    Figure->Animations[0].FPS = 1.f;
+    Figure->Animations[0].Looping = 1;
+    Figure->Keyframes[0] = malloc((size_t)Bone_Count * 12 * sizeof(float));
+    Figure->Keyframe_Counts[0] = 1;
+    for (int B = 0; B < Bone_Count; B++)
+      memcpy(Figure->Keyframes[0] + B * 12, Figure->Bind_Pose[B], 12 * sizeof(float));
+    Figure->Animation_Count = 1;
+  }
+}
 
 
 // ════════════════════════════
@@ -8586,6 +9071,21 @@ Articulated_Figure Source_Weapon_Model_Load (const char *Path) {
     const char *Material_Name = (const char*)(Material_Entry + Name_Offset);
     snprintf (Result.Texture_Names[Material_Index], 64, "%s", Material_Name);
     printf ("[weapon] material[%u]: %s\n", Material_Index, Material_Name);
+  }
+
+  // Parse bones: build bind-pose matrices, parent hierarchy, and inverse bind-pose
+  Result.Bone_Count = Header->Bone_Count < FIGURE_MAX_BONES ? Header->Bone_Count : FIGURE_MAX_BONES;
+  for (int B = 0; B < Result.Bone_Count; B++) {
+    const MDL_Bone *Bone = (const MDL_Bone*)(File_Data + Header->Bone_Offset + B * sizeof(MDL_Bone));
+    Result.Bone_Parents[B] = Bone->Parent;
+    float Qx = Bone->Quat[0], Qy = Bone->Quat[1], Qz = Bone->Quat[2], Qw = Bone->Quat[3];
+    float TX = Qx+Qx, TY = Qy+Qy, TZ = Qz+Qz;
+    float XX=Qx*TX, XY=Qx*TY, XZ=Qx*TZ, YY=Qy*TY, YZ=Qy*TZ, ZZ=Qz*TZ;
+    float WX=Qw*TX, WY=Qw*TY, WZ=Qw*TZ;
+    Result.Bind_Pose[B][0][0]=1-(YY+ZZ); Result.Bind_Pose[B][0][1]=XY-WZ;     Result.Bind_Pose[B][0][2]=XZ+WY;     Result.Bind_Pose[B][0][3]=Bone->Position.x;
+    Result.Bind_Pose[B][1][0]=XY+WZ;     Result.Bind_Pose[B][1][1]=1-(XX+ZZ); Result.Bind_Pose[B][1][2]=YZ-WX;     Result.Bind_Pose[B][1][3]=Bone->Position.y;
+    Result.Bind_Pose[B][2][0]=XZ-WY;     Result.Bind_Pose[B][2][1]=YZ+WX;     Result.Bind_Pose[B][2][2]=1-(XX+YY); Result.Bind_Pose[B][2][3]=Bone->Position.z;
+    memcpy(Result.Inv_Bind[B], Bone->Pose_To_Bone, sizeof(float) * 12);
   }
 
   // Construct sidecar file paths by replacing the .mdl extension
@@ -8936,9 +9436,12 @@ Articulated_Figure Source_Weapon_Model_Load (const char *Path) {
               uint16_t *Strip_Indices = (uint16_t*)(VTX_Data + Group_Base + Group_Index_Offset);
               for (int Triangle_Index = 0; Triangle_Index + 2 < Group_Index_Count; Triangle_Index += 3) {
                 uint Vertex_Base = Result.Vertex_Count;
-                Result.Vertices     = realloc (Result.Vertices,     sizeof (Vertex) * (Result.Vertex_Count   + 3));
-                Result.Indices      = realloc (Result.Indices,      sizeof (uint)   * (Result.Index_Count    + 3));
-                Result.Texture_Ids  = realloc (Result.Texture_Ids,  sizeof (uint)   * (Result.Triangle_Count + 1));
+                Result.Vertices              = realloc (Result.Vertices,              sizeof (Vertex) * (Result.Vertex_Count   + 3));
+                Result.Frame_Vertices[0]     = realloc (Result.Frame_Vertices[0],     sizeof (Vertex) * (Result.Vertex_Count   + 3));
+                Result.Indices               = realloc (Result.Indices,               sizeof (uint)   * (Result.Index_Count    + 3));
+                Result.Texture_Ids           = realloc (Result.Texture_Ids,           sizeof (uint)   * (Result.Triangle_Count + 1));
+                Result.Bone_Ids              = realloc (Result.Bone_Ids,              SKEL_MAX_BONES_PER_VERT * (Result.Vertex_Count + 3));
+                Result.Bone_Weights          = realloc (Result.Bone_Weights,          SKEL_MAX_BONES_PER_VERT * (Result.Vertex_Count + 3));
                 for (int Corner = 0; Corner < 3; Corner++) {
                   int Strip_Vertex = Strip_Indices[Triangle_Index + Corner];
                   int VVD_Index    = Mesh_Vertex_Offset
@@ -8947,7 +9450,20 @@ Articulated_Figure Source_Weapon_Model_Load (const char *Path) {
                   if (VVD_Index < 0 or VVD_Index >= VVD_Vertex_Count) VVD_Index = 0;
                   const VVD_Vertex *Source_Vertex = &VVD_Vertices[VVD_Index];
 
-                  // Apply weighted skeletal skinning: blend the bind-pose vertex through each bone's skin matrix
+                  // Store bind-pose (unskinned) vertex for runtime animation re-skinning
+                  Result.Frame_Vertices[0][Result.Vertex_Count] = (Vertex){
+                    .Position   = {Source_Vertex->Position[0], Source_Vertex->Position[1], Source_Vertex->Position[2]},
+                    .Normal     = {Source_Vertex->Normal[0],   Source_Vertex->Normal[1],   Source_Vertex->Normal[2]},
+                    .Texture_UV = {Source_Vertex->Tex_Coord[0], Source_Vertex->Tex_Coord[1]}};
+
+                  // Store per-vertex bone influences for runtime skinning
+                  uint VI = Result.Vertex_Count;
+                  for (int BI = 0; BI < SKEL_MAX_BONES_PER_VERT; BI++) {
+                    Result.Bone_Ids    [VI * SKEL_MAX_BONES_PER_VERT + BI] = BI < Source_Vertex->Bone_Count ? Source_Vertex->Bone_Ids[BI] : 0;
+                    Result.Bone_Weights[VI * SKEL_MAX_BONES_PER_VERT + BI] = BI < Source_Vertex->Bone_Count ? (uint8_t)(Source_Vertex->Bone_Weights[BI] * 255.f) : 0;
+                  }
+
+                  // Apply weighted skeletal skinning for idle-pose display
                   float Skinned_Position[3] = {Source_Vertex->Position[0], Source_Vertex->Position[1], Source_Vertex->Position[2]};
                   float Skinned_Normal  [3] = {Source_Vertex->Normal[0],   Source_Vertex->Normal[1],   Source_Vertex->Normal[2]  };
                   if (Has_Skinning) {
@@ -8988,8 +9504,7 @@ Articulated_Figure Source_Weapon_Model_Load (const char *Path) {
                     }
                   }
 
-                  // Store in Source-native coordinates (X=forward, Y=left, Z=up)
-                  // Weapon_Update will map these to camera space at render time.
+                  // Store skinned vertex in Source-native coordinates (X=forward, Y=left, Z=up)
                   Result.Vertices[Result.Vertex_Count] = (Vertex){
                     .Position   = {Skinned_Position[0],  Skinned_Position[1],  Skinned_Position[2]},
                     .Normal     = {Skinned_Normal  [0],  Skinned_Normal  [1],  Skinned_Normal  [2]},
@@ -9007,11 +9522,19 @@ Articulated_Figure Source_Weapon_Model_Load (const char *Path) {
     }
     #undef VTX_BOUNDS
     free (VTX_Data);
+
+    // Frame_Vertices[0] is populated during the VTX loop with bind-pose (unskinned) positions.
+    // Figure_Animate_Skeleton uses these as the source for per-frame re-skinning.
   } else {
     if (VTX_File) fclose (VTX_File);
   }
   free (VVD_Vertices);
+
+  // Pre-sample all animation sequences before freeing the raw MDL data
+  MDL_Presample_Animations (&Result, File_Data, File_Size, Header);
   free (File_Data);
+
+  Result.Total_Frame_Count = 1;  // Frame_Vertices[0] = bind-pose vertices
 
   // Source viewmodels include the hands; set a single-frame identity tag transform
   snprintf (Result.Tags[0].Name, 64, "tag_weapon");
@@ -9019,11 +9542,6 @@ Articulated_Figure Source_Weapon_Model_Load (const char *Path) {
   memset (Result.Tags[0].Transforms[0], 0, sizeof (float) * 12);
   Result.Tags[0].Transforms[0][3] = 1; Result.Tags[0].Transforms[0][7] = 1; Result.Tags[0].Transforms[0][11] = 1;
   Result.Tag_Count = 1;
-  Result.Animation_Count = 1;
-  snprintf (Result.Animations[0].Name, 64, "idle");
-  Result.Animations[0].Frame_Count = 1;
-  Result.Animations[0].FPS         = 1.f;
-  Result.Animations[0].Looping     = 1;
 
   printf ("[weapon] Source MDL: %u verts, %u tris from %s\n",
           Result.Vertex_Count, Result.Triangle_Count, Path);
@@ -12229,6 +12747,9 @@ void Weapon_Update (Figure_Instance *Weapon, const Camera *Camera_Data, float De
   // Source MDL: vertices stored in Source-native coords (X=forward, Y=left, Z=up).
   //   Map to camera: Source +X → Forward, Source -Y → Right, Source +Z → Up.
   // MD3: vertices in tag_weapon-relative coords; tag rotation handles the mapping.
+  // Use Current_Vertices (animated/skinned) if available, else static Figure.Vertices.
+  const Vertex *Src_Verts = Weapon->Current_Vertices ? Weapon->Current_Vertices : Weapon->Figure.Vertices;
+
   for (uint Index = 0; Index < Weapon->Figure.Vertex_Count; Index++) {
     float Source_X, Source_Y, Source_Z;
     float Normal_X, Normal_Y, Normal_Z;
@@ -12237,9 +12758,9 @@ void Weapon_Update (Figure_Instance *Weapon, const Camera *Camera_Data, float De
       // After idle-pose skinning, bounds: X[0,22] Y[-4,9] Z[-9,-1].
       // Barrel extends in +X (forward), hands spread in Y, arms hang in -Z.
       // Map: Source +X → camera Forward, Source -Y → camera Right, Source +Z → camera Up.
-      float Src_Fwd   =  Weapon->Figure.Vertices[Index].Position[0] * Model_Scale;
-      float Src_Right = -Weapon->Figure.Vertices[Index].Position[1] * Model_Scale;
-      float Src_Up    =  Weapon->Figure.Vertices[Index].Position[2] * Model_Scale;
+      float Src_Fwd   =  Src_Verts[Index].Position[0] * Model_Scale;
+      float Src_Right = -Src_Verts[Index].Position[1] * Model_Scale;
+      float Src_Up    =  Src_Verts[Index].Position[2] * Model_Scale;
 
       Src_Right *= Mirror;
 
@@ -12248,21 +12769,21 @@ void Weapon_Update (Figure_Instance *Weapon, const Camera *Camera_Data, float De
       Source_Y = Src_Up;
       Source_Z = Src_Right;
 
-      float N_Fwd   =  Weapon->Figure.Vertices[Index].Normal[0];
-      float N_Right = -Weapon->Figure.Vertices[Index].Normal[1] * Mirror;
-      float N_Up    =  Weapon->Figure.Vertices[Index].Normal[2];
+      float N_Fwd   =  Src_Verts[Index].Normal[0];
+      float N_Right = -Src_Verts[Index].Normal[1] * Mirror;
+      float N_Up    =  Src_Verts[Index].Normal[2];
       Normal_X = N_Fwd;
       Normal_Y = N_Up;
       Normal_Z = N_Right;
     } else {
       // MD3: original mapping (tag_weapon rotation handles the coordinate mapping)
-      Source_X = Weapon->Figure.Vertices[Index].Position[0] * Model_Scale * VM_Fov_Scale;
-      Source_Y = Weapon->Figure.Vertices[Index].Position[1] * Model_Scale;
-      Source_Z = Weapon->Figure.Vertices[Index].Position[2] * Model_Scale * Mirror;
+      Source_X = Src_Verts[Index].Position[0] * Model_Scale * VM_Fov_Scale;
+      Source_Y = Src_Verts[Index].Position[1] * Model_Scale;
+      Source_Z = Src_Verts[Index].Position[2] * Model_Scale * Mirror;
 
-      Normal_X = Weapon->Figure.Vertices[Index].Normal[0];
-      Normal_Y = Weapon->Figure.Vertices[Index].Normal[1];
-      Normal_Z = Weapon->Figure.Vertices[Index].Normal[2] * Mirror;
+      Normal_X = Src_Verts[Index].Normal[0];
+      Normal_Y = Src_Verts[Index].Normal[1];
+      Normal_Z = Src_Verts[Index].Normal[2] * Mirror;
     }
 
     // Apply the combined rotation (Camera_Basis * Tag_Y_Up) and translate by the camera offset
@@ -12276,8 +12797,8 @@ void Weapon_Update (Figure_Instance *Weapon, const Camera *Camera_Data, float De
     Weapon->Transformed_Vertices[Index].Normal[2] = Rotation[6] * Normal_X + Rotation[7] * Normal_Y + Rotation[8] * Normal_Z;
 
     // Pass texture coordinates through unchanged
-    Weapon->Transformed_Vertices[Index].Texture_UV[0] = Weapon->Figure.Vertices[Index].Texture_UV[0];
-    Weapon->Transformed_Vertices[Index].Texture_UV[1] = Weapon->Figure.Vertices[Index].Texture_UV[1];
+    Weapon->Transformed_Vertices[Index].Texture_UV[0] = Src_Verts[Index].Texture_UV[0];
+    Weapon->Transformed_Vertices[Index].Texture_UV[1] = Src_Verts[Index].Texture_UV[1];
   }
 
 } // Weapon_Update
