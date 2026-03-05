@@ -6649,10 +6649,14 @@ uint8_t *TGA_Load_From_Memory (const uint8_t *Raw, long Length, uint *Out_Width,
     return NULL;
   }
 
-  // Allocate the output RGBA pixel buffer
+  // Allocate the output RGBA pixel buffer (with overflow check)
   uint    Columns     = Image_Width;
   uint    Rows        = Image_Height;
-  uint8_t *Output     = malloc (Columns * Rows * 4);
+  if (Columns == 0 or Rows == 0 or Columns > 16384 or Rows > 16384) return NULL;
+  size_t  Pixel_Bytes = (size_t)Columns * Rows * 4;
+  if (Pixel_Bytes / 4 / Columns != Rows) return NULL;  // overflow check
+  uint8_t *Output     = malloc (Pixel_Bytes);
+  if (not Output) return NULL;
           *Out_Width  = Columns;
           *Out_Height = Rows;
 
@@ -6757,8 +6761,9 @@ uint8_t *TGA_Load (const char *Path, uint *Out_Width, uint *Out_Height) {
   fseek (File, 0, SEEK_END);
   long Length = ftell (File);
   rewind (File);
-  if (Length < 18) {fclose (File); return NULL;}
+  if (Length < 18 or Length > 256*1024*1024) {fclose (File); return NULL;}
   uint8_t *Raw = malloc (Length);
+  if (not Raw) {fclose (File); return NULL;}
   size_t Raw_Read_ = fread (Raw, 1, Length, File); (void)Raw_Read_;
   fclose (File);
   uint8_t *Result = TGA_Load_From_Memory (Raw, Length, Out_Width, Out_Height);
@@ -6815,15 +6820,18 @@ void Tag_Compose (const float *A, const float *B, float *C) {
 // ═════════════════
 
 uint8_t *MD3_Load_File (const char *Path, long *Out_Size) {
+  *Out_Size = 0;
   FILE *F = fopen (Path, "rb");
   if (not F) return NULL;
   fseek (F, 0, SEEK_END);
   *Out_Size = ftell (F);
   rewind (F);
+  if (*Out_Size < 12) { fclose (F); *Out_Size = 0; return NULL; }
   uint8_t *Data = malloc (*Out_Size);
+  if (not Data) { fclose (F); *Out_Size = 0; return NULL; }
   size_t Data_Read_ = fread (Data, 1, *Out_Size, F); (void)Data_Read_;
   fclose (F);
-  if (*(uint *)Data != MD3_MAGIC) { free (Data); return NULL;}
+  if (Data_Read_ < 4 or *(uint *)Data != MD3_MAGIC) { free (Data); *Out_Size = 0; return NULL; }
   return Data;
 }
 
@@ -7426,9 +7434,10 @@ Articulated_Figure Weapon_Model_Load () {
   long File_Size = ftell (File);
   rewind (File);
   uint8_t *Body_Data = malloc (File_Size);
+  if (not Body_Data) { fclose (File); printf ("[weapon] out of memory\n"); return Result; }
   size_t Body_Read_ = fread (Body_Data, 1, File_Size, File); (void)Body_Read_;
   fclose (File);
-  assert (*(uint *)Body_Data == MD3_MAGIC);
+  if (File_Size < 12 or *(uint *)Body_Data != MD3_MAGIC) { free (Body_Data); printf ("[weapon] invalid MD3\n"); return Result; }
 
   // Read body header fields: surface count, tag count, and their offsets
   int Body_Surface_Count   = *(int *)(Body_Data + 84);
@@ -7486,9 +7495,10 @@ Articulated_Figure Weapon_Model_Load () {
     File_Size = ftell (File);
     rewind (File);
     uint8_t *Barrel_Data = malloc (File_Size);
+    if (not Barrel_Data) { fclose (File); goto Skip_Barrel; }
     size_t Barrel_Read_ = fread (Barrel_Data, 1, File_Size, File); (void)Barrel_Read_;
     fclose (File);
-    assert (*(uint *)Barrel_Data == MD3_MAGIC);
+    if (File_Size < 104 or *(uint *)Barrel_Data != MD3_MAGIC) { free (Barrel_Data); goto Skip_Barrel; }
 
     // Read the barrel model's surface count and offset
     int Barrel_Surface_Count   = *(int *)(Barrel_Data + 84);
@@ -7514,6 +7524,7 @@ Articulated_Figure Weapon_Model_Load () {
             Result.Tags[0].Transforms[0][1],
             Result.Tags[0].Transforms[0][2]);
   }
+  Skip_Barrel:;
 
   // Load the hand model for tag_weapon animation frames (no hand geometry - weapon-only viewmodel)
   File = fopen ("assets/models/weapons2/machinegun/machinegun_hand.md3", "rb");
@@ -7522,9 +7533,10 @@ Articulated_Figure Weapon_Model_Load () {
     File_Size = ftell (File);
     rewind (File);
     uint8_t *Hand_Data = malloc (File_Size);
+    if (not Hand_Data) { fclose (File); goto Skip_Hand; }
     size_t Hand_Read_ = fread (Hand_Data, 1, File_Size, File); (void)Hand_Read_;
     fclose (File);
-    assert (*(uint *)Hand_Data == MD3_MAGIC);
+    if (File_Size < 104 or *(uint *)Hand_Data != MD3_MAGIC) { free (Hand_Data); goto Skip_Hand; }
 
     // Extract the hand model's frame count and per-frame tag_weapon transforms
     int Hand_Frame_Count = *(int *)(Hand_Data + 76);
@@ -7557,6 +7569,7 @@ Articulated_Figure Weapon_Model_Load () {
     free (Hand_Data);
     printf ("[weapon] hand: %u animation frames (no hand geometry)\n", Anim_Frames);
   }
+  Skip_Hand:;
 
   // Report the loaded weapon geometry statistics
   printf ("[weapon] loaded: %u vertices, %u triangles, %u surfaces\n",
@@ -7804,20 +7817,25 @@ Figure_Instance Entity_Load (Scene *S, Spawn Spawn_Point) {
 // ═══════════
 
 int VTF_Load (const char *Path, uint8_t **Out_Pixels, int *Out_W, int *Out_H) {
+  *Out_Pixels = NULL; *Out_W = 0; *Out_H = 0;
   FILE *File = fopen (Path, "rb");
   if (not File) return 0;
   fseek (File, 0, SEEK_END); long File_Size = ftell (File); rewind (File);
-  uint8_t *File_Data    = malloc (File_Size);
-  size_t   Bytes_Read_  = fread (File_Data, 1, File_Size, File); (void)Bytes_Read_;
+  if (File_Size < (long)sizeof(VTF_Header) + 4) { fclose(File); return 0; }
+  uint8_t *File_Data = malloc (File_Size);
+  if (not File_Data) { fclose (File); return 0; }
+  size_t Bytes_Read_ = fread (File_Data, 1, File_Size, File); (void)Bytes_Read_;
   fclose (File);
-  if (*(uint*)File_Data != VTF_MAGIC) { free (File_Data); return 0; }
+  if (Bytes_Read_ < (size_t)File_Size or *(uint*)File_Data != VTF_MAGIC) { free (File_Data); return 0; }
   const VTF_Header *Header = (const VTF_Header*)File_Data;
   int Width  = Header->Width;
   int Height = Header->Height;
   int Format = Header->High_Res_Format;
+  if (Width <= 0 or Height <= 0 or Width > 8192 or Height > 8192) { free (File_Data); return 0; }
   *Out_W      = Width;
   *Out_H      = Height;
-  *Out_Pixels = calloc (Width * Height * 4, 1);
+  *Out_Pixels = calloc ((size_t)Width * Height * 4, 1);
+  if (not *Out_Pixels) { free (File_Data); *Out_W = 0; *Out_H = 0; return 0; }
 
   // Skip past the file header and the low-res thumbnail to reach full-resolution mip 0
   uint Data_Offset = Header->Header_Size;
@@ -7825,7 +7843,9 @@ int VTF_Load (const char *Path, uint8_t **Out_Pixels, int *Out_W, int *Out_H) {
     Data_Offset += ((Header->Low_Res_W + 3) / 4) * ((Header->Low_Res_H + 3) / 4) * 8;
 
   // Skip lower mip levels (VTF stores mips smallest-first; mip 0 is the full-size image)
-  for (int Mip_Level = Header->Mipmap_Count - 1; Mip_Level > 0; Mip_Level--) {
+  int Mipmap_Count = Header->Mipmap_Count;
+  if (Mipmap_Count < 0 or Mipmap_Count > 16) Mipmap_Count = 1;
+  for (int Mip_Level = Mipmap_Count - 1; Mip_Level > 0; Mip_Level--) {
     int Mip_Width  = Width  >> Mip_Level; if (Mip_Width  < 1) Mip_Width  = 1;
     int Mip_Height = Height >> Mip_Level; if (Mip_Height < 1) Mip_Height = 1;
     switch (Format) {
@@ -7840,6 +7860,12 @@ int VTF_Load (const char *Path, uint8_t **Out_Pixels, int *Out_W, int *Out_H) {
         Data_Offset += Mip_Width * Mip_Height * (VTF_Bpp (Format) ? VTF_Bpp (Format) : 4);
         break;
     }
+  }
+  // Bounds check: ensure we don't read past the file
+  if (Data_Offset >= (uint)File_Size) {
+    fprintf (stderr, "[vtf] WARN: data offset %u exceeds file size %ld for %s\n", Data_Offset, File_Size, Path);
+    free (*Out_Pixels); *Out_Pixels = NULL; *Out_W = 0; *Out_H = 0;
+    free (File_Data); return 0;
   }
   const uint8_t *Source_Pixels = File_Data + Data_Offset;
   uint8_t       *Output_Pixels = *Out_Pixels;
@@ -7917,8 +7943,10 @@ Figure_Instance MDL_Load (Scene *S, const char *Path, vec3 Origin, float Yaw) {
   FILE *File = fopen (Path, "rb");
   if (not File) { printf ("[mdl] cannot open %s\n", Path); return Entity_Result; }
   fseek (File, 0, SEEK_END); long File_Size = ftell (File); rewind (File);
-  uint8_t *File_Data   = malloc (File_Size);
-  size_t   Bytes_Read_ = fread (File_Data, 1, File_Size, File); (void)Bytes_Read_;
+  if (File_Size < (long)sizeof(MDL_Header)) { fclose (File); printf ("[mdl] file too small: %s\n", Path); return Entity_Result; }
+  uint8_t *File_Data = malloc (File_Size);
+  if (not File_Data) { fclose (File); printf ("[mdl] out of memory: %s\n", Path); return Entity_Result; }
+  size_t Bytes_Read_ = fread (File_Data, 1, File_Size, File); (void)Bytes_Read_;
   fclose (File);
   const MDL_Header *Header = (const MDL_Header*)File_Data;
   if (Header->Magic != MDL_MAGIC_IDST
@@ -8221,8 +8249,10 @@ Articulated_Figure Source_Weapon_Model_Load (const char *Path) {
   FILE *File = fopen (Path, "rb");
   if (not File) { printf ("[weapon] cannot open Source MDL %s\n", Path); return Result; }
   fseek (File, 0, SEEK_END); long File_Size = ftell (File); rewind (File);
-  uint8_t *File_Data   = malloc (File_Size);
-  size_t   Bytes_Read_ = fread (File_Data, 1, File_Size, File); (void)Bytes_Read_;
+  if (File_Size < (long)sizeof(MDL_Header)) { fclose (File); printf ("[weapon] file too small: %s\n", Path); return Result; }
+  uint8_t *File_Data = malloc (File_Size);
+  if (not File_Data) { fclose (File); printf ("[weapon] out of memory: %s\n", Path); return Result; }
+  size_t Bytes_Read_ = fread (File_Data, 1, File_Size, File); (void)Bytes_Read_;
   fclose (File);
   const MDL_Header *Header = (const MDL_Header*)File_Data;
   if (Header->Magic != MDL_MAGIC_IDST) {
@@ -8238,8 +8268,12 @@ Articulated_Figure Source_Weapon_Model_Load (const char *Path) {
 
   // Resolve each material entry's name via its relative offset and store for texture lookup
   for (uint Material_Index = 0; Material_Index < Result.Surface_Count; Material_Index++) {
-    const uint8_t *Material_Entry = File_Data + Header->Material_Offset + Material_Index * 64;
+    long Entry_Pos = (long)Header->Material_Offset + Material_Index * 64;
+    if (Entry_Pos < 0 or Entry_Pos + 64 > File_Size) { printf ("[weapon] material entry out of bounds\n"); break; }
+    const uint8_t *Material_Entry = File_Data + Entry_Pos;
     int         Name_Offset   = *(const int*)Material_Entry;
+    long Name_Pos = (long)(Material_Entry - File_Data) + Name_Offset;
+    if (Name_Pos < 0 or Name_Pos >= File_Size - 1) { printf ("[weapon] material name out of bounds\n"); continue; }
     const char *Material_Name = (const char*)(Material_Entry + Name_Offset);
     snprintf (Result.Texture_Names[Material_Index], 64, "%s", Material_Name);
     printf ("[weapon] material[%u]: %s\n", Material_Index, Material_Name);
@@ -8474,7 +8508,7 @@ Articulated_Figure Source_Weapon_Model_Load (const char *Path) {
         Local[Anim_Bone_Index][1][0] = AXY+AWZ;     Local[Anim_Bone_Index][1][1] = 1-(AXX+AZZ); Local[Anim_Bone_Index][1][2] = AYZ-AWX;     Local[Anim_Bone_Index][1][3] = Position[1];
         Local[Anim_Bone_Index][2][0] = AXZ-AWY;     Local[Anim_Bone_Index][2][1] = AYZ+AWX;     Local[Anim_Bone_Index][2][2] = 1-(AXX+AYY); Local[Anim_Bone_Index][2][3] = Position[2];
       }
-      if (Next_Entry_Offset == 0) break;
+      if (Next_Entry_Offset <= 0) break;  // Guard against negative offsets causing infinite loops
       Animation_Cursor += Next_Entry_Offset;
     }
 
@@ -8866,14 +8900,26 @@ Scene Scene_Load_From_VBSP (const char *Path, Spawn *Out_Spawn) {
 
   // Allocate and load the file data
   fseek (File, 0, SEEK_END); long File_Size = ftell (File); rewind (File);
-  uint8_t *File_Data   = malloc (File_Size);
-  size_t   Bytes_Read_ = fread (File_Data, 1, File_Size, File); (void)Bytes_Read_;
+  if (File_Size < (long)sizeof(VBSP_Header)) {
+    fprintf (stderr, "[error] VBSP file too small: %s (%ld bytes)\n", Path, File_Size);
+    fclose (File); return (Scene){0};
+  }
+  uint8_t *File_Data = malloc (File_Size);
+  if (not File_Data) {
+    fprintf (stderr, "[error] out of memory loading VBSP: %s (%ld bytes)\n", Path, File_Size);
+    fclose (File); return (Scene){0};
+  }
+  size_t Bytes_Read_ = fread (File_Data, 1, File_Size, File); (void)Bytes_Read_;
   fclose (File);
 
   // Validate the BSP header magic and version
   const VBSP_Header *Header = (const VBSP_Header*)File_Data;
-  assert (Header->Magic == VBSP_MAGIC
-          and (Header->Version >= VBSP_VERSION_19 and Header->Version <= VBSP_VERSION_21));
+  if (Header->Magic != VBSP_MAGIC
+      or not (Header->Version >= VBSP_VERSION_19 and Header->Version <= VBSP_VERSION_21)) {
+    fprintf (stderr, "[error] invalid VBSP header in %s (magic=0x%X version=%d)\n",
+             Path, Header->Magic, Header->Version);
+    free (File_Data); return (Scene){0};
+  }
 
   // Locate lump base pointers
   const VBSP_Vertex   *Verts      = (const VBSP_Vertex*)   (File_Data + Header->Lumps [VBSP_VERTICES].Offset);
@@ -8909,6 +8955,10 @@ Scene Scene_Load_From_VBSP (const char *Path, Spawn *Out_Spawn) {
   S.Material_Count = Tex_Data_N;
   S.Materials      = calloc (Tex_Data_N, sizeof (vec4));
   S.Texture_Names  = calloc (Tex_Data_N, 64);
+  if (not S.Materials or not S.Texture_Names) {
+    fprintf (stderr, "[error] out of memory allocating %u materials\n", Tex_Data_N);
+    free (S.Materials); free (S.Texture_Names); free (File_Data); return (Scene){0};
+  }
   for (uint Tex_Index = 0; Tex_Index < Tex_Data_N; Tex_Index++) {
     uint        Name_Id = (uint)Tex_Datas[Tex_Index].Name_Id;
     const char *Name    = (Name_Id < Str_Table_N and (uint)Str_Table[Name_Id] < Str_Data_N)
@@ -8948,9 +8998,18 @@ Scene Scene_Load_From_VBSP (const char *Path, Spawn *Out_Spawn) {
   }
 
   // Allocate geometry buffers sized for the worst-case triangle count
+  if (Total_Tris == 0 or Total_Tris > 50000000u) {
+    fprintf (stderr, "[error] VBSP triangle count out of range: %u\n", Total_Tris);
+    free (S.Materials); free (S.Texture_Names); free (File_Data); free (Mat_Skip); return (Scene){0};
+  }
   S.Vertices     = malloc (sizeof (Vertex) * Total_Tris * 3);
   S.Indices      = malloc (sizeof (uint)   * Total_Tris * 3);
   S.Texture_Ids  = malloc (sizeof (uint)   * Total_Tris);
+  if (not S.Vertices or not S.Indices or not S.Texture_Ids) {
+    fprintf (stderr, "[error] out of memory for %u triangles\n", Total_Tris);
+    free (S.Vertices); free (S.Indices); free (S.Texture_Ids);
+    free (S.Materials); free (S.Texture_Names); free (File_Data); free (Mat_Skip); return (Scene){0};
+  }
   S.Vertex_Count = S.Index_Count = S.Triangle_Count = 0;
 
   // Second pass: emit fan-triangulated face geometry
@@ -9263,7 +9322,15 @@ Scene Scene_Load_From_BSP (const char *Path, Spawn *Out_Spawn) {
   rewind (File);              
 
   // Allocate the buffer and read the file in one go
+  if (File_Size < (long)sizeof(BSP_Header)) {
+    fprintf (stderr, "[error] BSP file too small: %s (%ld bytes)\n", Path, File_Size);
+    fclose (File); return (Scene){0};
+  }
   uint8_t *File_Data = malloc (File_Size);
+  if (not File_Data) {
+    fprintf (stderr, "[error] out of memory loading BSP: %s (%ld bytes)\n", Path, File_Size);
+    fclose (File); return (Scene){0};
+  }
   size_t File_Read_ = fread (File_Data, 1, File_Size, File); (void)File_Read_;
 
   // Close the file handle
@@ -9271,7 +9338,11 @@ Scene Scene_Load_From_BSP (const char *Path, Spawn *Out_Spawn) {
 
   // Validate the BSP magic number and version
   BSP_Header *Header = (BSP_Header *)(File_Data);
-  assert (Header->Magic == BSP_MAGIC and Header->Version == BSP_VERSION);
+  if (Header->Magic != BSP_MAGIC or Header->Version != BSP_VERSION) {
+    fprintf (stderr, "[error] invalid BSP header in %s (magic=0x%X version=%d)\n",
+             Path, Header->Magic, Header->Version);
+    free (File_Data); return (Scene){0};
+  }
 
   // Locate the raw lump data for vertices, indices, faces, and shaders
   BSP_Vertex *Raw_Vertices      = (BSP_Vertex *) (File_Data + Header->Lumps [BSP_VERTICES].Offset);
@@ -10056,6 +10127,241 @@ static uint8_t *Texture_Resolve_And_Load (const char *Shader_Name, const char *S
   return NULL;
 }
 
+// ═══════════════════════════════════════
+//   Procedural Tileable Texture Generator
+// ═══════════════════════════════════════
+//
+// Generates tileable noise-based textures for missing materials. Uses a simple value noise
+// approach with multiple octaves to create natural-looking surface patterns seeded from the
+// material name. Each texture category (stone, grass, water, ivy, etc.) gets a distinct
+// pattern style matching the visual characteristics of Source Engine / CS:S aztec textures.
+
+static float Noise_Hash2D (int X, int Y, uint Seed) {
+  uint H = Seed;
+  H ^= (uint)X * 374761393u;
+  H ^= (uint)Y * 668265263u;
+  H = (H ^ (H >> 13)) * 1274126177u;
+  return (float)(H & 0xFFFFFF) / (float)0xFFFFFF;
+}
+
+static float Noise_Smooth2D (float X, float Y, uint Seed) {
+  int IX = (int)floorf(X), IY = (int)floorf(Y);
+  float FX = X - floorf(X), FY = Y - floorf(Y);
+  // Smoothstep interpolation for tileable blending
+  FX = FX * FX * (3.0f - 2.0f * FX);
+  FY = FY * FY * (3.0f - 2.0f * FY);
+  float A = Noise_Hash2D(IX,   IY,   Seed);
+  float B = Noise_Hash2D(IX+1, IY,   Seed);
+  float C = Noise_Hash2D(IX,   IY+1, Seed);
+  float D = Noise_Hash2D(IX+1, IY+1, Seed);
+  return A + (B-A)*FX + (C-A)*FY + (A-B-C+D)*FX*FY;
+}
+
+// Multi-octave fractal noise, tileable over [0, Period)
+static float Noise_FBM_Tileable (float X, float Y, uint Seed, int Octaves, float Period) {
+  float Value = 0.0f, Amplitude = 1.0f, Frequency = 1.0f, Max_Amp = 0.0f;
+  for (int Oct = 0; Oct < Octaves; Oct++) {
+    float NX = fmodf(X * Frequency, Period * Frequency);
+    float NY = fmodf(Y * Frequency, Period * Frequency);
+    if (NX < 0) NX += Period * Frequency;
+    if (NY < 0) NY += Period * Frequency;
+    // Sample at all four wrap-around points for seamless tiling
+    float P = Period * Frequency;
+    float V00 = Noise_Smooth2D(NX,     NY,     Seed + Oct * 7919);
+    float V10 = Noise_Smooth2D(NX + P, NY,     Seed + Oct * 7919);
+    float V01 = Noise_Smooth2D(NX,     NY + P, Seed + Oct * 7919);
+    float V11 = Noise_Smooth2D(NX + P, NY + P, Seed + Oct * 7919);
+    float BX = NX / P, BY = NY / P;
+    float V = V00 * (1-BX) * (1-BY) + V10 * BX * (1-BY) + V01 * (1-BX) * BY + V11 * BX * BY;
+    Value += V * Amplitude;
+    Max_Amp += Amplitude;
+    Amplitude *= 0.5f;
+    Frequency *= 2.0f;
+  }
+  return Value / Max_Amp;
+}
+
+// Clamp uint8
+static uint8_t Clamp8 (float V) { return V < 0 ? 0 : V > 255 ? 255 : (uint8_t)V; }
+
+// Texture pattern types
+enum { TEX_STONE=0, TEX_GRASS, TEX_WATER, TEX_IVY, TEX_DIRT, TEX_WOOD, TEX_BRICK, TEX_METAL,
+       TEX_CONCRETE, TEX_SAND, TEX_GENERIC };
+
+static int Classify_Material (const char *Name) {
+  if (strcasestr(Name,"ivy") or strcasestr(Name,"vine"))       return TEX_IVY;
+  if (strcasestr(Name,"grass") or strcasestr(Name,"foliage"))  return TEX_GRASS;
+  if (strcasestr(Name,"water") or strcasestr(Name,"liquid"))   return TEX_WATER;
+  if (strcasestr(Name,"stone") or strcasestr(Name,"rock") or strcasestr(Name,"cliff")) return TEX_STONE;
+  if (strcasestr(Name,"dirt") or strcasestr(Name,"ground") or strcasestr(Name,"mud"))  return TEX_DIRT;
+  if (strcasestr(Name,"wood") or strcasestr(Name,"plank") or strcasestr(Name,"timber")) return TEX_WOOD;
+  if (strcasestr(Name,"brick"))                                return TEX_BRICK;
+  if (strcasestr(Name,"metal") or strcasestr(Name,"steel"))    return TEX_METAL;
+  if (strcasestr(Name,"concrete") or strcasestr(Name,"cement")) return TEX_CONCRETE;
+  if (strcasestr(Name,"sand"))                                 return TEX_SAND;
+  return TEX_GENERIC;
+}
+
+// Generate a procedural tileable texture. Returns malloc'd RGBA pixels at *Out_W x *Out_H.
+static uint8_t *Generate_Procedural_Texture (const char *Material_Name, uint *Out_W, uint *Out_H) {
+  // Determine texture size: 128x128 is fast to generate and sufficient for stand-ins
+  uint W = 128, H = 128;
+  *Out_W = W; *Out_H = H;
+  uint8_t *Pixels = malloc(W * H * 4);
+  if (not Pixels) return NULL;
+
+  // Seed from material name for deterministic results
+  uint Seed = 5381;
+  for (const char *C = Material_Name; *C; C++) Seed = Seed * 33 + (uint8_t)*C;
+
+  int Type = Classify_Material(Material_Name);
+  float Period = (float)W;  // Tile period = texture width
+
+  for (uint Y = 0; Y < H; Y++) {
+    for (uint X = 0; X < W; X++) {
+      uint8_t *P = &Pixels[(Y * W + X) * 4];
+      float FX = (float)X, FY = (float)Y;
+      float N1 = Noise_FBM_Tileable(FX, FY, Seed,      5, Period);
+      float N2 = Noise_FBM_Tileable(FX, FY, Seed+1000, 3, Period);
+      float N3 = Noise_FBM_Tileable(FX*2.0f, FY*2.0f, Seed+2000, 4, Period*2.0f);
+
+      switch (Type) {
+        case TEX_STONE: {
+          // Dark mossy stone: base gray-brown with green moss patches (aztec style)
+          float Base = 0.35f + N1 * 0.30f;  // 0.35-0.65 range -> dark stone
+          float Moss = N2 > 0.55f ? (N2 - 0.55f) * 2.2f : 0.0f;
+          float Crack = N3 < 0.15f ? 0.8f : 1.0f;  // dark cracks
+          P[0] = Clamp8((Base * 145.0f - Moss * 30.0f) * Crack);  // R: reduced by moss
+          P[1] = Clamp8((Base * 140.0f + Moss * 25.0f) * Crack);  // G: boosted by moss
+          P[2] = Clamp8((Base * 130.0f - Moss * 20.0f) * Crack);  // B: reduced by moss
+          P[3] = 255;
+        } break;
+
+        case TEX_GRASS: {
+          // Lush green grass with variation, matching aztec jungle floor
+          float Base = 0.5f + N1 * 0.35f;
+          float Blade = N3 * 0.3f;  // high-frequency blade detail
+          P[0] = Clamp8((50.0f + Base * 50.0f + Blade * 20.0f));
+          P[1] = Clamp8((90.0f + Base * 70.0f + Blade * 30.0f));
+          P[2] = Clamp8((30.0f + Base * 35.0f + Blade * 10.0f));
+          P[3] = 255;
+        } break;
+
+        case TEX_WATER: {
+          // Murky blue-green river water with caustic-like patterns
+          float Wave = sinf(FX * 0.08f + N1 * 6.0f) * 0.5f + 0.5f;
+          float Depth = 0.4f + N2 * 0.3f;
+          P[0] = Clamp8(30.0f + Wave * 25.0f + Depth * 20.0f);
+          P[1] = Clamp8(70.0f + Wave * 35.0f + Depth * 30.0f + N1 * 20.0f);
+          P[2] = Clamp8(100.0f + Wave * 40.0f + Depth * 35.0f + N1 * 25.0f);
+          P[3] = 220;  // slightly translucent
+        } break;
+
+        case TEX_IVY: {
+          // Green ivy/vine on stone background
+          float Stone_BG = 0.4f + N1 * 0.2f;
+          float Ivy_Mask = N2 > 0.35f ? 1.0f : 0.0f;
+          float Leaf_Detail = N3 * 0.3f;
+          if (Ivy_Mask > 0.5f) {
+            // Ivy leaf
+            P[0] = Clamp8(40.0f + Leaf_Detail * 30.0f + N1 * 20.0f);
+            P[1] = Clamp8(80.0f + Leaf_Detail * 50.0f + N1 * 30.0f);
+            P[2] = Clamp8(25.0f + Leaf_Detail * 15.0f + N1 * 10.0f);
+          } else {
+            // Stone background showing through
+            P[0] = Clamp8(Stone_BG * 160.0f);
+            P[1] = Clamp8(Stone_BG * 150.0f);
+            P[2] = Clamp8(Stone_BG * 140.0f);
+          }
+          P[3] = 255;
+        } break;
+
+        case TEX_DIRT: {
+          // Brown earth/dirt with pebble detail
+          float Base = 0.5f + N1 * 0.3f;
+          float Pebble = N3 > 0.7f ? 1.15f : 1.0f;
+          P[0] = Clamp8(Base * 155.0f * Pebble);
+          P[1] = Clamp8(Base * 125.0f * Pebble);
+          P[2] = Clamp8(Base * 90.0f * Pebble);
+          P[3] = 255;
+        } break;
+
+        case TEX_WOOD: {
+          // Wood grain pattern
+          float Grain = sinf((FY + N1 * 15.0f) * 0.3f) * 0.5f + 0.5f;
+          float Ring = sinf(sqrtf(FX*FX*0.01f + FY*FY*0.04f) + N2 * 3.0f) * 0.5f + 0.5f;
+          float Base = 0.6f + Grain * 0.2f + Ring * 0.1f;
+          P[0] = Clamp8(Base * 170.0f);
+          P[1] = Clamp8(Base * 130.0f);
+          P[2] = Clamp8(Base * 85.0f);
+          P[3] = 255;
+        } break;
+
+        case TEX_BRICK: {
+          // Brick pattern with mortar lines
+          float Row = floorf(FY / 16.0f);
+          float Offset = fmodf(Row, 2.0f) > 0.5f ? 16.0f : 0.0f;
+          float Mortar_Y = fmodf(FY, 16.0f) < 2.0f ? 0.7f : 1.0f;
+          float Mortar_X2 = fmodf(FX + Offset, 32.0f) < 2.0f ? 0.7f : 1.0f;
+          float M = fminf(Mortar_Y, Mortar_X2);
+          float Var = N1 * 0.15f;
+          P[0] = Clamp8((155.0f + Var * 60.0f) * M);
+          P[1] = Clamp8((95.0f + Var * 30.0f) * M);
+          P[2] = Clamp8((75.0f + Var * 20.0f) * M);
+          P[3] = 255;
+        } break;
+
+        case TEX_METAL: {
+          // Brushed metal with scratches
+          float Base = 0.55f + N1 * 0.2f;
+          float Scratch = N3 > 0.85f ? 1.2f : 1.0f;
+          float V = Base * 160.0f * Scratch;
+          P[0] = Clamp8(V - 5.0f);
+          P[1] = Clamp8(V);
+          P[2] = Clamp8(V + 5.0f);
+          P[3] = 255;
+        } break;
+
+        case TEX_CONCRETE: {
+          // Rough concrete with aggregate
+          float Base = 0.55f + N1 * 0.25f;
+          float Agg = N3 > 0.6f ? 1.1f : 1.0f;
+          float V = Base * 175.0f * Agg;
+          P[0] = Clamp8(V);
+          P[1] = Clamp8(V - 3.0f);
+          P[2] = Clamp8(V - 8.0f);
+          P[3] = 255;
+        } break;
+
+        case TEX_SAND: {
+          // Sandy terrain
+          float Base = 0.6f + N1 * 0.25f;
+          float Grain = N3 * 0.1f;
+          P[0] = Clamp8(Base * 210.0f + Grain * 20.0f);
+          P[1] = Clamp8(Base * 195.0f + Grain * 15.0f);
+          P[2] = Clamp8(Base * 155.0f + Grain * 10.0f);
+          P[3] = 255;
+        } break;
+
+        default: {  // TEX_GENERIC
+          // Hash-seeded neutral procedural texture
+          float Base = 0.5f + N1 * 0.3f;
+          uint8_t R0 = 120 + (Seed & 63);
+          uint8_t G0 = 115 + ((Seed >> 8) & 63);
+          uint8_t B0 = 110 + ((Seed >> 16) & 63);
+          P[0] = Clamp8(Base * (float)R0 / 0.65f);
+          P[1] = Clamp8(Base * (float)G0 / 0.65f);
+          P[2] = Clamp8(Base * (float)B0 / 0.65f);
+          P[3] = 255;
+        } break;
+      }
+    }
+  }
+
+  printf ("  [PROC-TEX] Generated %ux%u tileable '%s' (type=%d)\n", W, H, Material_Name, Type);
+  return Pixels;
+}
+
 // ═══════════════════════
 //   Scene_Load_Textures
 // ═══════════════════════
@@ -10081,8 +10387,14 @@ void Scene_Load_Textures (const Scene *Scene_Data) {
   Texture_Images      = calloc (PBR_Slots, sizeof (VkImage));
   Texture_Memories    = calloc (PBR_Slots, sizeof (VkDeviceMemory));
   Texture_Heap_Blocks = malloc (PBR_Slots * sizeof (int));
-  for (uint I = 0; I < PBR_Slots; I++) Texture_Heap_Blocks[I] = -1;
   Texture_Views       = calloc (PBR_Slots, sizeof (VkImageView));
+  if (not Texture_Images or not Texture_Memories or not Texture_Heap_Blocks or not Texture_Views) {
+    fprintf (stderr, "[error] out of memory allocating texture arrays for %u materials\n", Material_Count);
+    free (Texture_Images); free (Texture_Memories); free (Texture_Heap_Blocks); free (Texture_Views);
+    Texture_Images = NULL; Texture_Memories = NULL; Texture_Heap_Blocks = NULL; Texture_Views = NULL;
+    return;
+  }
+  for (uint I = 0; I < PBR_Slots; I++) Texture_Heap_Blocks[I] = -1;
 
   // PBR map suffixes: [0] = Diffuse (no suffix), [1] = Normal, [2] = Roughness, [3] = Metalness, [4] = Emissive, [5] = Height
   const char *PBR_Suffixes[] = {"", "_n", "_r", "_m", "_e", "_h"};
@@ -10172,72 +10484,39 @@ void Scene_Load_Textures (const Scene *Scene_Data) {
     } else {
       free (Pixels);
 
-      // Generate stand-in diffuse color from material name keywords
-      uint8_t Stand_In[4] = {180, 180, 180, 255}; // default: neutral gray
-      if (Scene_Data->Texture_Names) {
-        const char *Material_Name = Scene_Data->Texture_Names[Index];
-
-        // Use case-insensitive keyword matching to assign plausible colors
-        if      (strcasestr(Material_Name,"concrete") or strcasestr(Material_Name,"cement"))
-          { Stand_In[0]=175; Stand_In[1]=170; Stand_In[2]=165;}
-        else if (strcasestr(Material_Name,"metal") or strcasestr(Material_Name,"steel"))
-          { Stand_In[0]=140; Stand_In[1]=140; Stand_In[2]=145;}
-        else if (strcasestr(Material_Name,"wood") or strcasestr(Material_Name,"plank") or strcasestr(Material_Name,"timber"))
-          { Stand_In[0]=160; Stand_In[1]=120; Stand_In[2]=80;}
-        else if (strcasestr(Material_Name,"brick"))
-          { Stand_In[0]=160; Stand_In[1]=100; Stand_In[2]=80;}
-        else if (strcasestr(Material_Name,"grass") or strcasestr(Material_Name,"foliage") or strcasestr(Material_Name,"leaf"))
-          { Stand_In[0]=90;  Stand_In[1]=140; Stand_In[2]=70;}
-        else if (strcasestr(Material_Name,"dirt") or strcasestr(Material_Name,"ground") or strcasestr(Material_Name,"mud"))
-          { Stand_In[0]=140; Stand_In[1]=115; Stand_In[2]=85;}
-        else if (strcasestr(Material_Name,"sand"))
-          { Stand_In[0]=200; Stand_In[1]=185; Stand_In[2]=145;}
-        else if (strcasestr(Material_Name,"rock") or strcasestr(Material_Name,"cliff") or strcasestr(Material_Name,"stone"))
-          { Stand_In[0]=145; Stand_In[1]=140; Stand_In[2]=135;}
-        else if (strcasestr(Material_Name,"plaster") or strcasestr(Material_Name,"stucco"))
-          { Stand_In[0]=210; Stand_In[1]=200; Stand_In[2]=185;}
-        else if (strcasestr(Material_Name,"glass") or strcasestr(Material_Name,"window"))
-          { Stand_In[0]=160; Stand_In[1]=185; Stand_In[2]=200;}
-        else if (strcasestr(Material_Name,"water"))
-          { Stand_In[0]=60;  Stand_In[1]=100; Stand_In[2]=140;}
-        else if (strcasestr(Material_Name,"tile") or strcasestr(Material_Name,"floor"))
-          { Stand_In[0]=170; Stand_In[1]=165; Stand_In[2]=160;}
-        else if (strcasestr(Material_Name,"roof") or strcasestr(Material_Name,"shingle"))
-          { Stand_In[0]=130; Stand_In[1]=90;  Stand_In[2]=70;}
-        else if (strcasestr(Material_Name,"paint") or strcasestr(Material_Name,"decal"))
-          { Stand_In[0]=190; Stand_In[1]=185; Stand_In[2]=175;}
-        else if (strcasestr(Material_Name,"asphalt") or strcasestr(Material_Name,"road"))
-          { Stand_In[0]=85;  Stand_In[1]=85;  Stand_In[2]=85;}
-        else if (strcasestr(Material_Name,"door"))
-          { Stand_In[0]=130; Stand_In[1]=100; Stand_In[2]=75;}
-        else if (strcasestr(Material_Name,"fence") or strcasestr(Material_Name,"chain") or strcasestr(Material_Name,"wire"))
-          { Stand_In[0]=120; Stand_In[1]=120; Stand_In[2]=120;}
-        else if (strcasestr(Material_Name,"pipe") or strcasestr(Material_Name,"duct") or strcasestr(Material_Name,"vent"))
-          { Stand_In[0]=110; Stand_In[1]=115; Stand_In[2]=120;}
-        else if (strcasestr(Material_Name,"crate") or strcasestr(Material_Name,"box"))
-          { Stand_In[0]=155; Stand_In[1]=130; Stand_In[2]=90;}
-        else if (strcasestr(Material_Name,"rust"))
-          { Stand_In[0]=150; Stand_In[1]=90;  Stand_In[2]=60;}
-
-        // Hash-based fallback: deterministic neutral color from material name
-        else {          
-          uint Hash = 5381;
-          for (const char *C = Material_Name; *C; C++) Hash = Hash * 33 + (uint8_t)*C;
-          Stand_In[0] = 120 + (Hash & 63);        // 120-183 range
-          Stand_In[1] = 115 + ((Hash >> 8) & 63);  // neutral tones
-          Stand_In[2] = 110 + ((Hash >> 16) & 63);
-        }
+      // Generate procedural tileable texture from material name
+      const char *Mat_Name = Scene_Data->Texture_Names ? Scene_Data->Texture_Names[Index] : "unknown";
+      uint Proc_W = 0, Proc_H = 0;
+      uint8_t *Proc_Pixels = Generate_Procedural_Texture(Mat_Name, &Proc_W, &Proc_H);
+      if (Proc_Pixels and Proc_W and Proc_H) {
+        Texture_Upload_With_Format (/*Command_Buffer =>*/ Command_Buffer,
+                                    /*Queue          =>*/ Queue,
+                                    /*Pixels         =>*/ Proc_Pixels,
+                                    /*Width          =>*/ Proc_W,
+                                    /*Height         =>*/ Proc_H,
+                                    /*Format         =>*/ VK_FORMAT_R8G8B8A8_SRGB,
+                                    /*Out_Image      =>*/ &Texture_Images[Slot],
+                                    /*Out_Memory     =>*/ &Texture_Memories[Slot],
+                                    /*Out_View       =>*/ &Texture_Views[Slot],
+                                    /*Out_Heap_Block =>*/ &Texture_Heap_Blocks[Slot]);
+        Diffuse_Pixels[Index] = Proc_Pixels;  // retain for PBR derivation
+        Diffuse_W[Index] = Proc_W;
+        Diffuse_H[Index] = Proc_H;
+      } else {
+        // Ultimate fallback: 1x1 gray pixel
+        free(Proc_Pixels);
+        uint8_t Gray[4] = {150, 150, 150, 255};
+        Texture_Upload_With_Format (/*Command_Buffer =>*/ Command_Buffer,
+                                    /*Queue          =>*/ Queue,
+                                    /*Pixels         =>*/ Gray,
+                                    /*Width          =>*/ 1,
+                                    /*Height         =>*/ 1,
+                                    /*Format         =>*/ VK_FORMAT_R8G8B8A8_SRGB,
+                                    /*Out_Image      =>*/ &Texture_Images[Slot],
+                                    /*Out_Memory     =>*/ &Texture_Memories[Slot],
+                                    /*Out_View       =>*/ &Texture_Views[Slot],
+                                    /*Out_Heap_Block =>*/ &Texture_Heap_Blocks[Slot]);
       }
-      Texture_Upload_With_Format (/*Command_Buffer =>*/ Command_Buffer,
-                                  /*Queue          =>*/ Queue,
-                                  /*Pixels         =>*/ Stand_In,
-                                  /*Width          =>*/ 1,
-                                  /*Height         =>*/ 1,
-                                  /*Format         =>*/ VK_FORMAT_R8G8B8A8_SRGB,
-                                  /*Out_Image      =>*/ &Texture_Images[Slot],
-                                  /*Out_Memory     =>*/ &Texture_Memories[Slot],
-                                  /*Out_View       =>*/ &Texture_Views[Slot],
-                                  /*Out_Heap_Block =>*/ &Texture_Heap_Blocks[Slot]);
     }
   }
 
