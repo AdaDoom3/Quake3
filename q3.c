@@ -47,6 +47,7 @@
 #include <AL/al.h>
 #include <AL/alc.h>
 #include <AL/efx.h>
+#include <zlib.h>
 
 // GLSL Similar Types
 typedef unsigned int uint; 
@@ -191,10 +192,10 @@ const World_Settings WORLD_PRESETS[WORLD_COUNT] = {
 
 // Source engine viewmodel settings (per CalcViewModelView in Source SDK)
 #define SOURCE_VIEWMODEL_FOV     54.f   // Source viewmodel_fov default (ConVar: 54°)
-#define SOURCE_VIEWMODEL_SCALE   0.70f  // World-space scale factor (larger than real Source — compensates for no depth hack in RT)
-#define SOURCE_VIEWMODEL_FWD     8.f    // Forward offset from eye in engine units (increased for RT visibility)
-#define SOURCE_VIEWMODEL_RIGHT   1.5f   // Right offset from eye (moderate — not too far)
-#define SOURCE_VIEWMODEL_UP     -3.0f   // Up offset from eye (negative = below eye level)
+#define SOURCE_VIEWMODEL_SCALE   1.20f  // World-space scale factor (tuned for RT visibility without depth hack)
+#define SOURCE_VIEWMODEL_FWD     8.f    // Forward offset from eye (push barrel into view)
+#define SOURCE_VIEWMODEL_RIGHT   4.f    // Right offset from eye
+#define SOURCE_VIEWMODEL_UP     -3.f    // Up offset from eye (drop hands down)
 #define SOURCE_VIEWMODEL_FOV_RATIO (SOURCE_VIEWMODEL_FOV / 90.f) // Viewmodel-to-world FOV correction
 
 // HL2-style viewmodel CVars — individually tunable per ConVar, with presets as commands
@@ -1915,6 +1916,10 @@ typedef enum {
   ENTITY_PROP_DYNAMIC, // Animated/dynamic prop
   ENTITY_PROP_PHYSICS, // Physics-enabled prop
 
+  // Phyx entities — lightweight physics objects with SIGGRAPH-simple modes
+  // (PBD/XPBD "easy wins": Macklin 2016 position-based dynamics, Müller 2007 shape matching)
+  ENTITY_PHYX,         // Generic phyx entity (mode determined by Phyx_Mode field)
+
   // Triggers
   ENTITY_TRIGGER,          // Generic trigger volume
   ENTITY_TRIGGER_ONCE,     // Fires once then disables
@@ -2036,6 +2041,28 @@ typedef enum {
   OBJECTIVE_HOLD,
   OBJECTIVE_KIND_COUNT
 } Objective_Kind;
+
+// Phyx motion modes — each mode maps to a simple, well-understood solver primitive.
+// Named after the SIGGRAPH lineage: PBD (Müller 2007), XPBD (Macklin 2016), shape matching (Müller 2005).
+//
+//   PHYX_STATIC     — Infinite mass, never moves. Participates in collision only.
+//   PHYX_DYNAMIC    — Verlet point mass: gravity + collision + restitution. The "hello world" of physics.
+//   PHYX_KINEMATIC  — Scripted path (linear lerp between Origin and Target). Zero-cost animation.
+//   PHYX_BALLISTIC  — Projectile arc: initial velocity + gravity, no drag. Clean parabola.
+//   PHYX_PENDULUM   — Single-constraint PBD: pivot + distance constraint. Classic SIGGRAPH demo.
+//   PHYX_SPRING     — Damped spring (Hooke's law): anchor + rest length + stiffness + damping.
+//   PHYX_BUOYANT    — Simple buoyancy: submerged fraction * displaced water weight. Archimedes easy win.
+//
+typedef enum {
+  PHYX_STATIC    = 0, // Immovable collider
+  PHYX_DYNAMIC   = 1, // Gravity + Verlet integration + bounce
+  PHYX_KINEMATIC = 2, // Scripted linear path (Origin → Target)
+  PHYX_BALLISTIC = 3, // Parabolic arc (initial velocity + gravity, no drag)
+  PHYX_PENDULUM  = 4, // PBD distance constraint from pivot (single-point pendulum)
+  PHYX_SPRING    = 5, // Damped Hooke's law spring (anchor + rest_length + k + c)
+  PHYX_BUOYANT   = 6, // Archimedes buoyancy (water plane + displaced volume)
+  PHYX_MODE_COUNT
+} Phyx_Mode;
 
 // Common entity attributes
 typedef struct {
@@ -2241,6 +2268,21 @@ typedef struct {
       vec3 Color;     // Sun color (linear 0..1)
       vec3 Ambient;   // Ambient color (linear 0..1)
     } env;
+
+    // when ENTITY_PHYX =>
+    struct {
+      Phyx_Mode Mode;           // Physics motion mode (see Phyx_Mode enum)
+      float     Mass;           // Mass in kg (0 = infinite for PHYX_STATIC)
+      float     Restitution;    // Bounce coefficient (0..1, 0.5 = half energy)
+      float     Friction;       // Surface friction coefficient
+      vec3      Velocity;       // Initial velocity (PHYX_DYNAMIC, PHYX_BALLISTIC)
+      vec3      Anchor;         // Pivot/anchor point (PHYX_PENDULUM, PHYX_SPRING)
+      float     Rest_Length;    // Rest length for spring/pendulum constraint
+      float     Stiffness;      // Spring constant k (PHYX_SPRING, N/m)
+      float     Damping;        // Damping coefficient c (PHYX_SPRING, Ns/m)
+      float     Water_Level;    // Y coordinate of water surface (PHYX_BUOYANT)
+      float     Displaced_Vol;  // Displaced volume m³ for buoyancy (PHYX_BUOYANT)
+    } phyx;
   };
 } BSP_Entity;
 
@@ -3176,7 +3218,21 @@ int main (int Argc, char **Argv) {
         CVar_Set_Float (vm_offset_x, 1.f); CVar_Set_Float (vm_offset_y, -2.f); CVar_Set_Float (vm_offset_z, 0.f);
         CVar_Set_Float (vm_bob, 0.1f); CVar_Set_Float (vm_lag, 0.2f);
         printf ("[vm] preset: cinematic (fov=45 scale=0.50 left-biased)\n");
-      } else printf ("[vm] unknown preset '%s' (source/q3/closeup/cinematic)\n", P);
+      } else if (strcmp (P, "screenshot") == 0) {
+        // Close to camera, shifted left — HL2 CalcViewModelView style with tighter FOV
+        CVar_Set_Float (vm_fov, 54.f); CVar_Set_Float (vm_scale, 0.65f);
+        CVar_Set_Float (vm_offset_x, 3.f); CVar_Set_Float (vm_offset_y, -3.f); CVar_Set_Float (vm_offset_z, -1.f);
+        CVar_Set_Float (vm_bob, 0.f); CVar_Set_Float (vm_lag, 0.f);
+        CVar_Set_Int (cl_righthand, 1);
+        printf ("[vm] preset: screenshot (fov=54 scale=0.65 close+left, right-hand)\n");
+      } else if (strcmp (P, "aztec") == 0) {
+        // M4 showcase in Aztec: CS:S-style viewmodel, hands visible, carry handle prominent
+        CVar_Set_Float (vm_fov, 54.f); CVar_Set_Float (vm_scale, 1.2f);
+        CVar_Set_Float (vm_offset_x, 5.f); CVar_Set_Float (vm_offset_y, 0.f); CVar_Set_Float (vm_offset_z, 3.f);
+        CVar_Set_Float (vm_bob, 0.f); CVar_Set_Float (vm_lag, 0.f);
+        CVar_Set_Int (cl_righthand, 1);
+        printf ("[vm] preset: aztec (fov=54 scale=1.20 M4 right-hand)\n");
+      } else printf ("[vm] unknown preset '%s' (source/q3/closeup/cinematic/screenshot/aztec)\n", P);
     }
     else if (strcmp (Argv[I], "--vm-fov")    == 0 and I + 1 < Argc) CVar_Set_Float (vm_fov,      (float)atof (Argv[++I]));
     else if (strcmp (Argv[I], "--vm-scale")  == 0 and I + 1 < Argc) CVar_Set_Float (vm_scale,    (float)atof (Argv[++I]));
@@ -3773,7 +3829,9 @@ int main (int Argc, char **Argv) {
       Weapon_Update (Weapon, &Bench_Cam, Fixed_Dt, 0);
       Figure_BLAS_Rebuild (Weapon);
       Enemy->Animation_Time += Fixed_Dt;
-      Enemy->Current_Vertices = Enemy->Figure.Frame_Vertices[(int)(Enemy->Animation_Time * Enemy->Figure.Animations[0].FPS) % Enemy->Figure.Animations[0].Frame_Count];
+      if (Enemy->Figure.Animations[0].Frame_Count > 0 and Enemy->Figure.Frame_Vertices) {
+        Enemy->Current_Vertices = Enemy->Figure.Frame_Vertices[(int)(Enemy->Animation_Time * Enemy->Figure.Animations[0].FPS) % Enemy->Figure.Animations[0].Frame_Count];
+      }
       Figure_BLAS_Rebuild (Enemy);
       Top_Level_Rebuild (&World_Bottom_Level, &Figures);
       Camera_Upload (&Bench_Cam, Vertical_FOV, Weapon->Texture_Base_Index, PBR_Stride, Active_SPP);
@@ -4026,53 +4084,109 @@ int main (int Argc, char **Argv) {
       } else
         vkMapMemory (Device, Readback.Memory, 0, Pixel_Size, 0, (void **)&Pixels_F16);
 
-      // Write pixel data to TGA file
-      FILE *TGA = fopen (Screenshot_Path, "wb");
-      if (TGA) {
-
-        // TGA header (18 bytes)
-        uint8_t Header[18] = {0};
-        Header[2]  = 2;    // Uncompressed true-color
-        Header[16] = 32;   // 32 bpp (BGRA)
-        Header[17] = 0x20; // Top-left origin
-        Header[12] = Render_Width & 0xFF;  Header[13] = (Render_Width  >> 8) & 0xFF;
-        Header[14] = Render_Height & 0xFF; Header[15] = (Render_Height >> 8) & 0xFF;
-        fwrite (Header, 1, 18, TGA);
-
-        // Write pixels: fp16 linear > clamp > linear-to-sRGB > 8-bit BGRA for TGA
-        for (int Y = 0; Y < Render_Height; Y++) {
-          for (int X = 0; X < Render_Width; X++) {
-            uint16_t *P = Pixels_F16 + (Y * Render_Width + X) * 4;
-
-            // Convert fp16 to float (use half-to-float bit manipulation)
-            uint8_t BGRA[4];
-            for (int C = 0; C < 3; C++) {
-
-              // IEEE 754 fp16 to fp32 conversion
-              uint16_t H    = P[C];
-              uint32_t Sign = (uint32_t)(H >> 15) << 31;
-              uint32_t Exp  = (H >> 10) & 0x1F;
-              uint32_t Man  = H & 0x3FF;
-
-              // Convert fp16 fields to fp32: handle denormals, max exponent clamping, and normal values
-              float V;
-              if (Exp == 0) V = (Man == 0) ? 0.0f : (float)Man / 1024.0f * (1.0f / 16384.0f);
-              else if (Exp == 31) V = 1.0f;
-              else {uint32_t F = Sign | ((Exp + 112) << 23) | (Man << 13); memcpy (&V, &F, 4);}
-
-              // Clamp and apply sRGB gamma
-              if (V < 0.0f) V = 0.0f;
-              if (V > 1.0f) V = 1.0f;
-              float S = (V <= 0.0031308f) ? V * 12.92f : 1.055f * powf (V, 1.0f / 2.4f) - 0.055f;
-              BGRA[2 - C] = (uint8_t)(S * 255.0f + 0.5f);  // RGB > BGR for TGA
-            }
-            BGRA[3] = 255;
-            fwrite (BGRA, 1, 4, TGA);
+      // Convert fp16 framebuffer to 8-bit RGBA
+      uint8_t *RGBA = (uint8_t *)malloc ((size_t)Render_Width * Render_Height * 4);
+      for (int Y = 0; Y < Render_Height; Y++) {
+        for (int X = 0; X < Render_Width; X++) {
+          uint16_t *P = Pixels_F16 + (Y * Render_Width + X) * 4;
+          uint8_t  *D = RGBA + (Y * Render_Width + X) * 4;
+          for (int C = 0; C < 3; C++) {
+            uint16_t H    = P[C];
+            uint32_t Sign = (uint32_t)(H >> 15) << 31;
+            uint32_t Exp  = (H >> 10) & 0x1F;
+            uint32_t Man  = H & 0x3FF;
+            float V;
+            if (Exp == 0) V = (Man == 0) ? 0.0f : (float)Man / 1024.0f * (1.0f / 16384.0f);
+            else if (Exp == 31) V = 1.0f;
+            else {uint32_t F = Sign | ((Exp + 112) << 23) | (Man << 13); memcpy (&V, &F, 4);}
+            if (V < 0.0f) V = 0.0f;
+            if (V > 1.0f) V = 1.0f;
+            float S = (V <= 0.0031308f) ? V * 12.92f : 1.055f * powf (V, 1.0f / 2.4f) - 0.055f;
+            D[C] = (uint8_t)(S * 255.0f + 0.5f);
           }
+          D[3] = 255;
         }
-        fclose (TGA);
-        printf ("[screenshot] saved %dx%d to %s\n", Render_Width, Render_Height, Screenshot_Path);
       }
+
+      // Detect format by extension: .png uses PNG, everything else uses TGA
+      size_t Path_Len = strlen (Screenshot_Path);
+      int Use_PNG = (Path_Len >= 4 and strcasecmp (Screenshot_Path + Path_Len - 4, ".png") == 0);
+
+      FILE *Out = fopen (Screenshot_Path, "wb");
+      if (Out) {
+        if (Use_PNG) {
+          // Write PNG using zlib for IDAT compression
+          // PNG signature
+          uint8_t PNG_Sig[8] = {137,80,78,71,13,10,26,10};
+          fwrite (PNG_Sig, 1, 8, Out);
+
+          // Helper: write a PNG chunk (type + data + CRC)
+          #define PNG_CHUNK(Type, Data, Len) do { \
+            uint32_t _L = (uint32_t)(Len); \
+            uint8_t _LB[4] = {(_L>>24)&0xFF, (_L>>16)&0xFF, (_L>>8)&0xFF, _L&0xFF}; \
+            fwrite (_LB, 1, 4, Out); \
+            fwrite (Type, 1, 4, Out); \
+            if (_L > 0) fwrite (Data, 1, _L, Out); \
+            uint32_t _CRC = (uint32_t)crc32 (0L, Z_NULL, 0); \
+            _CRC = (uint32_t)crc32 (_CRC, (const Bytef *)(Type), 4); \
+            if (_L > 0) _CRC = (uint32_t)crc32 (_CRC, (const Bytef *)(Data), _L); \
+            uint8_t _CB[4] = {(_CRC>>24)&0xFF, (_CRC>>16)&0xFF, (_CRC>>8)&0xFF, _CRC&0xFF}; \
+            fwrite (_CB, 1, 4, Out); \
+          } while (0)
+
+          // IHDR chunk (13 bytes)
+          uint8_t IHDR[13];
+          uint32_t W = (uint32_t)Render_Width, H = (uint32_t)Render_Height;
+          IHDR[0]=(W>>24)&0xFF; IHDR[1]=(W>>16)&0xFF; IHDR[2]=(W>>8)&0xFF; IHDR[3]=W&0xFF;
+          IHDR[4]=(H>>24)&0xFF; IHDR[5]=(H>>16)&0xFF; IHDR[6]=(H>>8)&0xFF; IHDR[7]=H&0xFF;
+          IHDR[8]=8; IHDR[9]=6; IHDR[10]=0; IHDR[11]=0; IHDR[12]=0; // 8-bit RGBA, deflate, no interlace
+          PNG_CHUNK ("IHDR", IHDR, 13);
+
+          // Build raw scanlines: filter byte (0=None) + RGBA row data
+          size_t Raw_Row  = 1 + (size_t)Render_Width * 4;
+          size_t Raw_Size = Raw_Row * Render_Height;
+          uint8_t *Raw = (uint8_t *)malloc (Raw_Size);
+          for (int Y = 0; Y < Render_Height; Y++) {
+            Raw[Y * Raw_Row] = 0; // filter: None
+            memcpy (Raw + Y * Raw_Row + 1, RGBA + Y * Render_Width * 4, (size_t)Render_Width * 4);
+          }
+
+          // Compress with zlib
+          uLongf Compressed_Size = compressBound ((uLong)Raw_Size);
+          uint8_t *Compressed = (uint8_t *)malloc (Compressed_Size);
+          compress2 (Compressed, &Compressed_Size, Raw, (uLong)Raw_Size, Z_DEFAULT_COMPRESSION);
+          free (Raw);
+
+          // IDAT chunk
+          PNG_CHUNK ("IDAT", Compressed, (size_t)Compressed_Size);
+          free (Compressed);
+
+          // IEND chunk (0 bytes)
+          PNG_CHUNK ("IEND", (uint8_t *)"", 0);
+          #undef PNG_CHUNK
+
+          printf ("[screenshot] saved PNG %dx%d to %s\n", Render_Width, Render_Height, Screenshot_Path);
+        } else {
+          // TGA output (BGRA)
+          uint8_t Header[18] = {0};
+          Header[2]  = 2;    // Uncompressed true-color
+          Header[16] = 32;   // 32 bpp (BGRA)
+          Header[17] = 0x20; // Top-left origin
+          Header[12] = Render_Width & 0xFF;  Header[13] = (Render_Width  >> 8) & 0xFF;
+          Header[14] = Render_Height & 0xFF; Header[15] = (Render_Height >> 8) & 0xFF;
+          fwrite (Header, 1, 18, Out);
+          for (int Y = 0; Y < Render_Height; Y++) {
+            for (int X = 0; X < Render_Width; X++) {
+              uint8_t *S = RGBA + (Y * Render_Width + X) * 4;
+              uint8_t BGRA[4] = {S[2], S[1], S[0], S[3]};
+              fwrite (BGRA, 1, 4, Out);
+            }
+          }
+          printf ("[screenshot] saved TGA %dx%d to %s\n", Render_Width, Render_Height, Screenshot_Path);
+        }
+        fclose (Out);
+      }
+      free (RGBA);
 
       // Clean up readback resources
       if (Readback.Heap_Block < 0) vkUnmapMemory (Device, Readback.Memory);
@@ -4164,7 +4278,7 @@ int main (int Argc, char **Argv) {
 
     // Advance enemy idle animation and rebuild BLAS
     Enemy->Animation_Time += Delta_Time;
-    {
+    if (Enemy->Figure.Animations[0].Frame_Count > 0 and Enemy->Figure.Frame_Vertices) {
       int Frame_Index = (int)(Enemy->Animation_Time * Enemy->Figure.Animations[0].FPS) % Enemy->Figure.Animations[0].Frame_Count;
       Enemy->Current_Vertices = Enemy->Figure.Frame_Vertices[Frame_Index];
     }
@@ -7741,7 +7855,40 @@ Articulated_Figure Source_Weapon_Model_Load (const char *Path) {
     free (VVD_Data);
   }
 
-  // Compute skeletal skinning matrices from the idle animation (sequence 0, frame 0).
+  // Find the idle animation by scanning sequences for the best idle candidate.
+  // Source MDL sequences (mstudioseqdesc_t, 212 bytes each) contain:
+  //   offset 0:  baseptr (int)
+  //   offset 4:  labelindex (int) — relative offset to sequence name
+  //   offset 8:  activitynameindex (int)
+  //   offset 12: flags (int)
+  //   offset 16: activity (int)  — ACT_VM_IDLE = 185
+  //   offset 20: actweight (int)
+  //   offset 24: numevents (int), offset 28: eventindex (int)
+  //   offset 32: bbmin (Vector, 12B), offset 44: bbmax (Vector, 12B)
+  //   offset 56: numblends (int)
+  //   offset 60: animindexindex (int) — relative offset to animation index array
+  // The animation index for a single-blend sequence: *(int*)(seqdesc + seqdesc->animindexindex)
+  int Idle_Anim_Index = 0, Idle_Found = 0;
+  if (Header->Sequence_Count > 0) {
+    printf ("[weapon] sequences: %d (searching for idle)\n", Header->Sequence_Count);
+    for (int Seq = 0; Seq < Header->Sequence_Count and Seq < 64; Seq++) {
+      const uint8_t *Seq_Data = File_Data + Header->Sequence_Offset + Seq * 212;
+      if (Seq_Data + 212 > File_Data + File_Size) break;
+      int Label_Offset = *(const int*)(Seq_Data + 4);
+      const char *Seq_Name = (const char*)(Seq_Data + Label_Offset);
+      int Activity = *(const int*)(Seq_Data + 16);
+      int Anim_Idx_Offset = *(const int*)(Seq_Data + 60);
+      int Anim_Idx = *(const short*)(Seq_Data + Anim_Idx_Offset);
+      printf ("[weapon]   seq[%d]: '%s' activity=%d anim=%d\n", Seq, Seq_Name, Activity, Anim_Idx);
+      if (not Idle_Found and (Activity == 185 or strstr (Seq_Name, "idle"))) {
+        Idle_Anim_Index = Anim_Idx;
+        Idle_Found = 1;
+        printf ("[weapon]   -> using seq[%d] '%s' (anim %d) as idle\n", Seq, Seq_Name, Anim_Idx);
+      }
+    }
+  }
+
+  // Compute skeletal skinning matrices from the idle animation.
   // This bakes the natural weapon-holding pose into the vertex positions at load time.
   float Skin_Matrices[128][3][4];
   int   Has_Skinning = 0;
@@ -7764,9 +7911,17 @@ Articulated_Figure Source_Weapon_Model_Load (const char *Path) {
       Local[Bone_Index][2][0] = XZ-WY;     Local[Bone_Index][2][1] = YZ+WX;     Local[Bone_Index][2][2] = 1-(XX+YY); Local[Bone_Index][2][3] = Bone->Position.z;
     }
 
-    // Walk the animation 0 data stream and override bind-pose transforms with frame 0 values
-    const uint8_t *Anim_Desc           = File_Data + Header->Animation_Offset;
-    int            Animation_Index_Offset = *(const int*)(Anim_Desc + 56); // animindex field at byte 56 of animdesc_t
+    // Walk the idle animation data stream and override bind-pose transforms with frame 0 values.
+    // Source animation data: mstudioanimdesc_t (100 bytes), with animindex at offset 56.
+    // Each per-bone entry (mstudioanim_t): bone[1], flags[1], nextoffset[2], then variable data.
+    // Flags: RAWPOS=0x01 (Vector48, 6B), RAWROT=0x02 (Quaternion48, 6B), ANIMPOS=0x04 (valueptr, 6B),
+    //        ANIMROT=0x08 (valueptr, 6B), RAWROT2=0x20 (Quaternion64, 8B).
+    if (Idle_Anim_Index >= Header->Animation_Count) Idle_Anim_Index = 0;
+    const uint8_t *Anim_Desc           = File_Data + Header->Animation_Offset + Idle_Anim_Index * 100;
+    int            Animation_Index_Offset = *(const int*)(Anim_Desc + 56); // animindex at byte 56
+    int            Anim_Num_Frames     = *(const int*)(Anim_Desc + 16);    // numframes at byte 16
+    printf ("[weapon] using animation %d, animindex offset=%d, frames=%d\n",
+            Idle_Anim_Index, Animation_Index_Offset, Anim_Num_Frames);
     const uint8_t *Animation_Cursor    = Anim_Desc + Animation_Index_Offset;
     for (;;) {
       if (Animation_Cursor < File_Data or Animation_Cursor >= File_Data + File_Size - 4) break;
@@ -7776,69 +7931,145 @@ Articulated_Figure Source_Weapon_Model_Load (const char *Path) {
       if (Anim_Bone_Index < Total_Bone_Count) {
         const MDL_Bone *Bone = (const MDL_Bone*)(File_Data + Header->Bone_Offset
                                                  + Anim_Bone_Index * sizeof (MDL_Bone));
-        int Data_Offset = 4;
-        if (Anim_Flags & 0x02) Data_Offset += 6; // RAWROT
-        if (Anim_Flags & 0x20) Data_Offset += 8; // RAWROT2
-        if (Anim_Flags & 0x01) Data_Offset += 6; // RAWPOS
-        float Rotation[3] = {Bone->Rot.x,      Bone->Rot.y,      Bone->Rot.z     };
-        float Position[3] = {Bone->Position.x,  Bone->Position.y, Bone->Position.z};
+        int Data_Offset = 4;  // Skip the 4-byte mstudioanim_t header
 
-        // ANIMROT: decode compressed per-axis rotation deltas and apply them
-        if (Anim_Flags & 0x08) {
-          const int16_t *Rotation_Pointer = (const int16_t*)(Animation_Cursor + Data_Offset);
-          float Rotation_Scale[3] = {Bone->Rot_Scale.x,      Bone->Rot_Scale.y,      Bone->Rot_Scale.z     };
-          float Rotation_Base [3] = {Bone->Rot.x,            Bone->Rot.y,            Bone->Rot.z           };
-          for (int Axis_Index = 0; Axis_Index < 3; Axis_Index++)
-            if (Rotation_Pointer[Axis_Index]) {
-              const uint8_t *Value_Pointer = (const uint8_t*)&Rotation_Pointer[Axis_Index]
-                                             + Rotation_Pointer[Axis_Index];
-              Rotation[Axis_Index] = Rotation_Base[Axis_Index]
-                                     + *(const int16_t*)(Value_Pointer + 2) * Rotation_Scale[Axis_Index];
-            }
+        // Start with bind-pose defaults
+        float Anim_Quat_X = Bone->Quat[0], Anim_Quat_Y = Bone->Quat[1];
+        float Anim_Quat_Z = Bone->Quat[2], Anim_Quat_W = Bone->Quat[3];
+        float Position[3] = {Bone->Position.x, Bone->Position.y, Bone->Position.z};
+        int   Got_Rotation = 0;
+
+        // RAWROT (0x02): Quaternion48 — Source Engine compressed_vector.h
+        // Layout: x:16 unsigned, y:16 unsigned, z:15 unsigned, wneg:1
+        // Decode: x = (raw_x - 32768) / 32768.0, y = (raw_y - 32768) / 32768.0
+        //         z = (raw_z - 16384) / 16384.0, w = sqrt(1 - x² - y² - z²) * (wneg ? -1 : 1)
+        if (Anim_Flags & 0x02) {
+          const uint16_t *Q48 = (const uint16_t*)(Animation_Cursor + Data_Offset);
+          Anim_Quat_X = ((int)Q48[0] - 32768) * (1.0f / 32768.0f);
+          Anim_Quat_Y = ((int)Q48[1] - 32768) * (1.0f / 32768.0f);
+          Anim_Quat_Z = ((int)(Q48[2] & 0x7FFF) - 16384) * (1.0f / 16384.0f);
+          int W_Neg   = (Q48[2] >> 15) & 1;
+          float W_Sq  = 1.0f - Anim_Quat_X*Anim_Quat_X - Anim_Quat_Y*Anim_Quat_Y - Anim_Quat_Z*Anim_Quat_Z;
+          Anim_Quat_W = W_Sq > 0 ? sqrtf(W_Sq) : 0;
+          if (W_Neg) Anim_Quat_W = -Anim_Quat_W;
+          Got_Rotation = 1;
           Data_Offset += 6;
         }
 
-        // ANIMPOS: decode compressed per-axis position deltas and apply them
+        // RAWROT2 (0x20): Quaternion64 — Source Engine compressed_vector.h
+        // Layout: x:21, y:21, z:21, wneg:1 (64 bits total, little-endian)
+        // Decode: comp = (raw - 1048576) / 1048576.5, w = sqrt(1 - x² - y² - z²) * sign
+        if (Anim_Flags & 0x20) {
+          const uint8_t *Q64 = Animation_Cursor + Data_Offset;
+          uint64_t Packed = 0;
+          memcpy(&Packed, Q64, 8);
+          Anim_Quat_X = ((int)(Packed & 0x1FFFFF) - 1048576) * (1.0f / 1048576.5f);
+          Anim_Quat_Y = ((int)((Packed >> 21) & 0x1FFFFF) - 1048576) * (1.0f / 1048576.5f);
+          Anim_Quat_Z = ((int)((Packed >> 42) & 0x1FFFFF) - 1048576) * (1.0f / 1048576.5f);
+          int W_Neg   = (Packed >> 63) & 1;
+          float W_Sq  = 1.0f - Anim_Quat_X*Anim_Quat_X - Anim_Quat_Y*Anim_Quat_Y - Anim_Quat_Z*Anim_Quat_Z;
+          Anim_Quat_W = W_Sq > 0 ? sqrtf(W_Sq) : 0;
+          if (W_Neg) Anim_Quat_W = -Anim_Quat_W;
+          Got_Rotation = 1;
+          Data_Offset += 8;
+        }
+
+        // RAWPOS (0x01): Vector48 — 3x float16 (the actual position for this bone)
+        if (Anim_Flags & 0x01) {
+          const uint16_t *V48 = (const uint16_t*)(Animation_Cursor + Data_Offset);
+          for (int Axis = 0; Axis < 3; Axis++) {
+            uint16_t H     = V48[Axis];
+            int      Sign  = (H >> 15) & 1;
+            int      Exp   = (H >> 10) & 0x1F;
+            int      Mant  = H & 0x3FF;
+            float    Value;
+            if (Exp == 0)       Value = (Mant / 1024.0f) * (1.0f / 16384.0f); // denorm
+            else if (Exp == 31) Value = Mant ? 0.0f : (Sign ? -1e30f : 1e30f); // inf/nan
+            else                Value = (1.0f + Mant / 1024.0f) * powf(2.0f, Exp - 15.0f);
+            if (Sign) Value = -Value;
+            Position[Axis] = Value;
+          }
+          Data_Offset += 6;
+        }
+
+        // ANIMROT (0x08): mstudioanim_valueptr_t — per-axis RLE Euler rotation
+        // Source SDK: pRotV() points to the valueptr_t right after the raw rotation data.
+        //   valueptr_t.offset[i] is relative to the START of the valueptr_t struct itself.
+        //   ExtractAnimValue(frame=0, pAnimvalue, scale, angle) extracts frame 0 sample.
+        //   angle += baseRot, then AngleQuaternion(angle, q).
+        if ((Anim_Flags & 0x08) and not Got_Rotation) {
+          const uint8_t *Value_Ptr_Base = Animation_Cursor + Data_Offset;
+          const int16_t *Offsets        = (const int16_t*)Value_Ptr_Base;
+          float Rot[3] = {Bone->Rot.x, Bone->Rot.y, Bone->Rot.z};
+          float Rot_Scale[3] = {Bone->Rot_Scale.x, Bone->Rot_Scale.y, Bone->Rot_Scale.z};
+          for (int Axis = 0; Axis < 3; Axis++)
+            if (Offsets[Axis] > 0) {
+              const uint8_t *Anim_Value = Value_Ptr_Base + Offsets[Axis]; // relative to struct start
+              // mstudioanimvalue_t[0] = {valid, total}, [1] = first sample value
+              int16_t Sample = *(const int16_t*)(Anim_Value + 2);
+              Rot[Axis] += Sample * Rot_Scale[Axis];
+            }
+          // Source AngleQuaternion(RadianEuler): note x=roll, y=pitch, z=yaw
+          float SR, CR, SP, CP, SY2, CY2;
+          SY2 = sinf (Rot[2] * 0.5f); CY2 = cosf (Rot[2] * 0.5f);
+          SP  = sinf (Rot[1] * 0.5f); CP  = cosf (Rot[1] * 0.5f);
+          SR  = sinf (Rot[0] * 0.5f); CR  = cosf (Rot[0] * 0.5f);
+          Anim_Quat_X = SR*CP*CY2 - CR*SP*SY2;
+          Anim_Quat_Y = CR*SP*CY2 + SR*CP*SY2;
+          Anim_Quat_Z = CR*CP*SY2 - SR*SP*CY2;
+          Anim_Quat_W = CR*CP*CY2 + SR*SP*SY2;
+          Got_Rotation = 1;
+          Data_Offset += 6;
+        } else if (Anim_Flags & 0x08) {
+          Data_Offset += 6;
+        }
+
+        // ANIMPOS (0x04): mstudioanim_valueptr_t — per-axis RLE position
+        // Source SDK: pPosV() = pData() + (ANIMROT ? sizeof(valueptr_t) : 0)
+        //   ExtractAnimValue(frame=0) → pos[axis] = sample * posscale[axis]
+        //   pos += basePos (non-delta mode)
         if (Anim_Flags & 0x04) {
-          const int16_t *Position_Pointer = (const int16_t*)(Animation_Cursor + Data_Offset);
-          float Position_Scale[3] = {Bone->Position_Scale.x, Bone->Position_Scale.y, Bone->Position_Scale.z};
-          float Position_Base [3] = {Bone->Position.x,       Bone->Position.y,       Bone->Position.z      };
-          for (int Axis_Index = 0; Axis_Index < 3; Axis_Index++)
-            if (Position_Pointer[Axis_Index]) {
-              const uint8_t *Value_Pointer = (const uint8_t*)&Position_Pointer[Axis_Index]
-                                             + Position_Pointer[Axis_Index];
-              Position[Axis_Index] = Position_Base[Axis_Index]
-                                     + *(const int16_t*)(Value_Pointer + 2) * Position_Scale[Axis_Index];
-            }
+          if (not (Anim_Flags & 0x01)) {
+            const uint8_t *Value_Ptr_Base = Animation_Cursor + Data_Offset;
+            const int16_t *Offsets        = (const int16_t*)Value_Ptr_Base;
+            float Pos_Scale[3] = {Bone->Position_Scale.x, Bone->Position_Scale.y, Bone->Position_Scale.z};
+            for (int Axis = 0; Axis < 3; Axis++)
+              if (Offsets[Axis] > 0) {
+                const uint8_t *Anim_Value = Value_Ptr_Base + Offsets[Axis];
+                int16_t Sample = *(const int16_t*)(Anim_Value + 2);
+                Position[Axis] += Sample * Pos_Scale[Axis];
+              }
+          }
           Data_Offset += 6;
         }
 
-        // Convert the resulting Euler angles (XYZ order) to a normalised unit quaternion
-        float Cos_X = cosf (Rotation[0] * 0.5f), Sin_X = sinf (Rotation[0] * 0.5f);
-        float Cos_Y = cosf (Rotation[1] * 0.5f), Sin_Y = sinf (Rotation[1] * 0.5f);
-        float Cos_Z = cosf (Rotation[2] * 0.5f), Sin_Z = sinf (Rotation[2] * 0.5f);
-        float Anim_Quat_W = Cos_X*Cos_Y*Cos_Z + Sin_X*Sin_Y*Sin_Z;
-        float Anim_Quat_X = Sin_X*Cos_Y*Cos_Z - Cos_X*Sin_Y*Sin_Z;
-        float Anim_Quat_Y = Cos_X*Sin_Y*Cos_Z + Sin_X*Cos_Y*Sin_Z;
-        float Anim_Quat_Z = Cos_X*Cos_Y*Sin_Z - Sin_X*Sin_Y*Cos_Z;
-        float Quat_Length = sqrtf (Anim_Quat_X*Anim_Quat_X + Anim_Quat_Y*Anim_Quat_Y
-                                   + Anim_Quat_Z*Anim_Quat_Z + Anim_Quat_W*Anim_Quat_W);
-        if (Quat_Length > 1e-6f) {
-          Anim_Quat_X /= Quat_Length; Anim_Quat_Y /= Quat_Length;
-          Anim_Quat_Z /= Quat_Length; Anim_Quat_W /= Quat_Length;
-        }
-        float A_Two_X = Anim_Quat_X + Anim_Quat_X;
-        float A_Two_Y = Anim_Quat_Y + Anim_Quat_Y;
-        float A_Two_Z = Anim_Quat_Z + Anim_Quat_Z;
-        float AXX = Anim_Quat_X*A_Two_X, AXY = Anim_Quat_X*A_Two_Y, AXZ = Anim_Quat_X*A_Two_Z;
-        float AYY = Anim_Quat_Y*A_Two_Y, AYZ = Anim_Quat_Y*A_Two_Z, AZZ = Anim_Quat_Z*A_Two_Z;
-        float AWX = Anim_Quat_W*A_Two_X, AWY = Anim_Quat_W*A_Two_Y, AWZ = Anim_Quat_W*A_Two_Z;
-        Local[Anim_Bone_Index][0][0] = 1-(AYY+AZZ); Local[Anim_Bone_Index][0][1] = AXY-AWZ;      Local[Anim_Bone_Index][0][2] = AXZ+AWY;      Local[Anim_Bone_Index][0][3] = Position[0];
-        Local[Anim_Bone_Index][1][0] = AXY+AWZ;     Local[Anim_Bone_Index][1][1] = 1-(AXX+AZZ);  Local[Anim_Bone_Index][1][2] = AYZ-AWX;      Local[Anim_Bone_Index][1][3] = Position[1];
-        Local[Anim_Bone_Index][2][0] = AXZ-AWY;     Local[Anim_Bone_Index][2][1] = AYZ+AWX;       Local[Anim_Bone_Index][2][2] = 1-(AXX+AYY); Local[Anim_Bone_Index][2][3] = Position[2];
+        // If we didn't get a rotation from any animation data, use the bind-pose quaternion
+        // which was already initialized from Bone->Quat above.
+
+        // Normalise the quaternion
+        float QL = sqrtf(Anim_Quat_X*Anim_Quat_X + Anim_Quat_Y*Anim_Quat_Y
+                         + Anim_Quat_Z*Anim_Quat_Z + Anim_Quat_W*Anim_Quat_W);
+        if (QL > 1e-6f) { Anim_Quat_X/=QL; Anim_Quat_Y/=QL; Anim_Quat_Z/=QL; Anim_Quat_W/=QL; }
+
+        // Convert quaternion to 3x4 matrix and set local bone transform
+        float TX = Anim_Quat_X+Anim_Quat_X, TY = Anim_Quat_Y+Anim_Quat_Y, TZ = Anim_Quat_Z+Anim_Quat_Z;
+        float AXX=Anim_Quat_X*TX, AXY=Anim_Quat_X*TY, AXZ=Anim_Quat_X*TZ;
+        float AYY=Anim_Quat_Y*TY, AYZ=Anim_Quat_Y*TZ, AZZ=Anim_Quat_Z*TZ;
+        float AWX=Anim_Quat_W*TX, AWY=Anim_Quat_W*TY, AWZ=Anim_Quat_W*TZ;
+        Local[Anim_Bone_Index][0][0] = 1-(AYY+AZZ); Local[Anim_Bone_Index][0][1] = AXY-AWZ;     Local[Anim_Bone_Index][0][2] = AXZ+AWY;     Local[Anim_Bone_Index][0][3] = Position[0];
+        Local[Anim_Bone_Index][1][0] = AXY+AWZ;     Local[Anim_Bone_Index][1][1] = 1-(AXX+AZZ); Local[Anim_Bone_Index][1][2] = AYZ-AWX;     Local[Anim_Bone_Index][1][3] = Position[1];
+        Local[Anim_Bone_Index][2][0] = AXZ-AWY;     Local[Anim_Bone_Index][2][1] = AYZ+AWX;     Local[Anim_Bone_Index][2][2] = 1-(AXX+AYY); Local[Anim_Bone_Index][2][3] = Position[2];
       }
       if (Next_Entry_Offset == 0) break;
       Animation_Cursor += Next_Entry_Offset;
+    }
+
+    // Debug: print bone names and check which were animated
+    for (int B = 0; B < Total_Bone_Count and B < 10; B++) {
+      const MDL_Bone *DB = (const MDL_Bone*)(File_Data + Header->Bone_Offset + B * sizeof(MDL_Bone));
+      const char *BN = (const char*)((const uint8_t*)DB + DB->Name_Offset);
+      printf ("[weapon]   bone[%d]: '%s' parent=%d pos=(%.2f,%.2f,%.2f)\n",
+              B, BN, DB->Parent, Local[B][0][3], Local[B][1][3], Local[B][2][3]);
     }
 
     // Forward pass: World[i] = World[parent] * Local[i]
@@ -8000,10 +8231,11 @@ Articulated_Figure Source_Weapon_Model_Load (const char *Path) {
                     }
                   }
 
-                  // Swizzle to (barrel=-Y, up=+Z, right=+X) for Weapon_Update
+                  // Store in Source-native coordinates (X=forward, Y=left, Z=up)
+                  // Weapon_Update will map these to camera space at render time.
                   Result.Vertices[Result.Vertex_Count] = (Vertex){
-                    .Position   = {-Skinned_Position[1],  Skinned_Position[2],  Skinned_Position[0]},
-                    .Normal     = {-Skinned_Normal  [1],  Skinned_Normal  [2],  Skinned_Normal  [0]},
+                    .Position   = {Skinned_Position[0],  Skinned_Position[1],  Skinned_Position[2]},
+                    .Normal     = {Skinned_Normal  [0],  Skinned_Normal  [1],  Skinned_Normal  [2]},
                     .Texture_UV = {Source_Vertex->Tex_Coord[0], Source_Vertex->Tex_Coord[1]}};
                   Result.Indices[Result.Index_Count++] = Vertex_Base + Corner;
                   Result.Vertex_Count++;
@@ -10315,7 +10547,15 @@ void Figure_BLAS_Rebuild (Figure_Instance *Fig) {
   // Re-upload the appropriate vertex source to the GPU buffer
   const void *Vertex_Source = Fig->Transformed_Vertices ? (const void *)Fig->Transformed_Vertices
                                                            : (const void *)Fig->Current_Vertices;
-  if (Vertex_Source) Buffer_Upload (Fig->Vertex_Buffer, Vertex_Source, sizeof (Vertex) * Fig->Figure.Vertex_Count);
+  if (Vertex_Source) {
+    uint64_t Upload_Size = sizeof (Vertex) * Fig->Figure.Vertex_Count;
+    // Verify the vertex buffer is large enough for the upload
+    if (Upload_Size > Fig->Vertex_Buffer.Size) {
+      fprintf (stderr, "[figure] ERROR: vertex upload %lu > buffer %lu (verts=%u)\n",
+               (unsigned long)Upload_Size, (unsigned long)Fig->Vertex_Buffer.Size, Fig->Figure.Vertex_Count);
+    }
+    Buffer_Upload (Fig->Vertex_Buffer, Vertex_Source, Upload_Size);
+  }
 
   // Refit the BLAS with the updated vertex positions
   VkAccelerationStructureGeometryKHR Geometry = {
@@ -10331,14 +10571,19 @@ void Figure_BLAS_Rebuild (Figure_Instance *Fig) {
       .indexType                = VK_INDEX_TYPE_UINT32,
       .indexData.deviceAddress  = Fig->Index_Buffer.Address}};
 
-  // BLAS refit (MODE_UPDATE) instead of full rebuild. The figure mesh topology never changes - only vertex positions move...
+  // Full BLAS rebuild each frame instead of refit (MODE_UPDATE).
+  // Viewmodel weapons move from model-space origin to camera-relative world positions — hundreds of units per frame.
+  // MODE_UPDATE (refit) preserves the BVH tree topology and only updates leaf AABBs, which degrades catastrophically
+  // when vertices move far from their original positions (the BVH nodes keep stale bounds, causing ray misses).
+  // HL2 Source Engine equivalent: CModelRender::DrawModelExecute rebuilds the BLAS-equivalent each frame for viewmodels.
+  // Full rebuild is the correct approach and costs negligible time on modern GPUs (< 0.1ms for 10K-tri weapon models).
   VkAccelerationStructureBuildGeometryInfoKHR Build_Info = {
     .sType                     = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR,
     .type                      = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR,
     .flags                     = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_BUILD_BIT_KHR
                                | VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_UPDATE_BIT_KHR,
-    .mode                      = VK_BUILD_ACCELERATION_STRUCTURE_MODE_UPDATE_KHR,
-    .srcAccelerationStructure  = Fig->Bottom_Level.Handle,
+    .mode                      = VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR,
+    .srcAccelerationStructure  = VK_NULL_HANDLE,
     .dstAccelerationStructure  = Fig->Bottom_Level.Handle,
     .scratchData.deviceAddress = Fig->Bottom_Level_Scratch.Address,
     .geometryCount             = 1,
@@ -11118,6 +11363,7 @@ void Weapon_Update (Figure_Instance *Weapon, const Camera *Camera_Data, float De
                           Add (Scale (Right, Right_Offset + Bob_Horizontal),
                                Scale (Up,   Up_Offset + Bob_Vertical))));
 
+
   // Find the tag_weapon tag index (convention: last tag with name "tag_weapon")
   int Weapon_Tag = -1;
   for (uint I = 0; I < Weapon->Figure.Tag_Count; I++)
@@ -11135,30 +11381,36 @@ void Weapon_Update (Figure_Instance *Weapon, const Camera *Camera_Data, float De
   static const float Identity_Tag[12] = {0,0,0, 1,0,0, 0,1,0, 0,0,1};
   const float *Tag = Weapon_Tag >= 0 ? Weapon->Figure.Tags[Weapon_Tag].Transforms[Frame_Index] : Identity_Tag;
 
-  // Swizzle each tag axis from Quake 3 Z-up to Y-up: (x,y,z) becomes (x,z,-y)
-  vec3 Axis_0 = (vec3){Tag[3],  Tag[5],  -Tag[4]};
-  vec3 Axis_1 = (vec3){Tag[6],  Tag[8],  -Tag[7]};
-  vec3 Axis_2 = (vec3){Tag[9],  Tag[11], -Tag[10]};
-
-  // Build the Y-up tag rotation matrix columns (forward, up, right)
-  // Axis_1 (Q3 right after swizzle) points to -Z in engine space; using +Axis_1
-  // ensures model -Z (Q3 right) maps through Camera_Basis to camera right.
-  float Tag_Y_Up[9] = {Axis_0.x, Axis_2.x, Axis_1.x,
-                       Axis_0.y, Axis_2.y, Axis_1.y,
-                       Axis_0.z, Axis_2.z, Axis_1.z};
-
+  // Build the rotation matrix that maps model-space axes to world-space camera axes.
   // Camera basis matrix (row-major): columns = forward, up, right
   float Camera_Basis[9] = {Forward.x, Up.x, Right.x,
                            Forward.y, Up.y, Right.y,
                            Forward.z, Up.z, Right.z};
 
-  // Combined rotation = Camera_Basis * Tag_Y_Up
   float Rotation[9];
-  for (int Row = 0; Row < 3; Row++)
-    for (int Column = 0; Column < 3; Column++)
-      Rotation[Row * 3 + Column] = Camera_Basis[Row * 3 + 0] * Tag_Y_Up[0 * 3 + Column]
-                                 + Camera_Basis[Row * 3 + 1] * Tag_Y_Up[1 * 3 + Column]
-                                 + Camera_Basis[Row * 3 + 2] * Tag_Y_Up[2 * 3 + Column];
+  if (Weapon->Figure.Is_Source) {
+    // Source MDL: no tag rotation needed. Camera_Basis columns are (Forward, Up, Right),
+    // and our vertex loop feeds (Src_Fwd, Src_Up, Src_Right) as (X, Y, Z).
+    // So Rotation = Camera_Basis directly (identity tag).
+    memcpy (Rotation, Camera_Basis, sizeof Rotation);
+  } else {
+    // MD3: swizzle each tag axis from Quake 3 Z-up to Y-up: (x,y,z) → (x,z,-y)
+    vec3 Axis_0 = (vec3){Tag[3],  Tag[5],  -Tag[4]};
+    vec3 Axis_1 = (vec3){Tag[6],  Tag[8],  -Tag[7]};
+    vec3 Axis_2 = (vec3){Tag[9],  Tag[11], -Tag[10]};
+
+    // Build the Y-up tag rotation matrix columns (forward, up, right)
+    float Tag_Y_Up[9] = {Axis_0.x, Axis_2.x, Axis_1.x,
+                         Axis_0.y, Axis_2.y, Axis_1.y,
+                         Axis_0.z, Axis_2.z, Axis_1.z};
+
+    // Combined rotation = Camera_Basis * Tag_Y_Up
+    for (int Row = 0; Row < 3; Row++)
+      for (int Column = 0; Column < 3; Column++)
+        Rotation[Row * 3 + Column] = Camera_Basis[Row * 3 + 0] * Tag_Y_Up[0 * 3 + Column]
+                                   + Camera_Basis[Row * 3 + 1] * Tag_Y_Up[1 * 3 + Column]
+                                   + Camera_Basis[Row * 3 + 2] * Tag_Y_Up[2 * 3 + Column];
+  }
 
   // HL2-style viewmodel scale: read from CVar (individually settable, overrides mode default)
   float Model_Scale = CVar_Get_Float (vm_scale);
@@ -11174,21 +11426,52 @@ void Weapon_Update (Figure_Instance *Weapon, const Camera *Camera_Data, float De
   // (Source Engine: ApplyBoneMatrixTransform negates the view-space X axis)
   float Mirror = Hand_Sign;
 
-  // Transform each vertex from model space to world space
+  // Transform each vertex from model space to world space.
+  // Source MDL: vertices stored in Source-native coords (X=forward, Y=left, Z=up).
+  //   Map to camera: Source +X → Forward, Source -Y → Right, Source +Z → Up.
+  // MD3: vertices in tag_weapon-relative coords; tag rotation handles the mapping.
   for (uint Index = 0; Index < Weapon->Figure.Vertex_Count; Index++) {
-    float Source_X = Weapon->Figure.Vertices[Index].Position[0] * Model_Scale * VM_Fov_Scale;
-    float Source_Y = Weapon->Figure.Vertices[Index].Position[1] * Model_Scale; // up
-    float Source_Z = Weapon->Figure.Vertices[Index].Position[2] * Model_Scale * Mirror; // right (mirrored for left-hand)
+    float Source_X, Source_Y, Source_Z;
+    float Normal_X, Normal_Y, Normal_Z;
+    if (Weapon->Figure.Is_Source) {
+      // Source viewmodel in Source-native coords: X=forward, Y=left, Z=up.
+      // After idle-pose skinning, bounds: X[0,22] Y[-4,9] Z[-9,-1].
+      // Barrel extends in +X (forward), hands spread in Y, arms hang in -Z.
+      // Map: Source +X → camera Forward, Source -Y → camera Right, Source +Z → camera Up.
+      float Src_Fwd   =  Weapon->Figure.Vertices[Index].Position[0] * Model_Scale;
+      float Src_Right = -Weapon->Figure.Vertices[Index].Position[1] * Model_Scale;
+      float Src_Up    =  Weapon->Figure.Vertices[Index].Position[2] * Model_Scale;
 
-    // Apply the combined rotation and translate by the camera offset
+      Src_Right *= Mirror;
+
+      // Camera basis columns: col0=Forward, col1=Up, col2=Right
+      Source_X = Src_Fwd;
+      Source_Y = Src_Up;
+      Source_Z = Src_Right;
+
+      float N_Fwd   =  Weapon->Figure.Vertices[Index].Normal[0];
+      float N_Right = -Weapon->Figure.Vertices[Index].Normal[1] * Mirror;
+      float N_Up    =  Weapon->Figure.Vertices[Index].Normal[2];
+      Normal_X = N_Fwd;
+      Normal_Y = N_Up;
+      Normal_Z = N_Right;
+    } else {
+      // MD3: original mapping (tag_weapon rotation handles the coordinate mapping)
+      Source_X = Weapon->Figure.Vertices[Index].Position[0] * Model_Scale * VM_Fov_Scale;
+      Source_Y = Weapon->Figure.Vertices[Index].Position[1] * Model_Scale;
+      Source_Z = Weapon->Figure.Vertices[Index].Position[2] * Model_Scale * Mirror;
+
+      Normal_X = Weapon->Figure.Vertices[Index].Normal[0];
+      Normal_Y = Weapon->Figure.Vertices[Index].Normal[1];
+      Normal_Z = Weapon->Figure.Vertices[Index].Normal[2] * Mirror;
+    }
+
+    // Apply the combined rotation (Camera_Basis * Tag_Y_Up) and translate by the camera offset
     Weapon->Transformed_Vertices[Index].Position[0] = Rotation[0] * Source_X + Rotation[1] * Source_Y + Rotation[2] * Source_Z + Offset.x;
     Weapon->Transformed_Vertices[Index].Position[1] = Rotation[3] * Source_X + Rotation[4] * Source_Y + Rotation[5] * Source_Z + Offset.y;
     Weapon->Transformed_Vertices[Index].Position[2] = Rotation[6] * Source_X + Rotation[7] * Source_Y + Rotation[8] * Source_Z + Offset.z;
 
-    // Rotate the vertex normal by the rotation matrix (no translation)
-    float Normal_X = Weapon->Figure.Vertices[Index].Normal[0];
-    float Normal_Y = Weapon->Figure.Vertices[Index].Normal[1];
-    float Normal_Z = Weapon->Figure.Vertices[Index].Normal[2] * Mirror; // Mirror normal too for correct lighting
+    // Rotate the vertex normal (no translation)
     Weapon->Transformed_Vertices[Index].Normal[0] = Rotation[0] * Normal_X + Rotation[1] * Normal_Y + Rotation[2] * Normal_Z;
     Weapon->Transformed_Vertices[Index].Normal[1] = Rotation[3] * Normal_X + Rotation[4] * Normal_Y + Rotation[5] * Normal_Z;
     Weapon->Transformed_Vertices[Index].Normal[2] = Rotation[6] * Normal_X + Rotation[7] * Normal_Y + Rotation[8] * Normal_Z;
@@ -11197,6 +11480,7 @@ void Weapon_Update (Figure_Instance *Weapon, const Camera *Camera_Data, float De
     Weapon->Transformed_Vertices[Index].Texture_UV[0] = Weapon->Figure.Vertices[Index].Texture_UV[0];
     Weapon->Transformed_Vertices[Index].Texture_UV[1] = Weapon->Figure.Vertices[Index].Texture_UV[1];
   }
+
 } // Weapon_Update
 
 // ════════════════════
