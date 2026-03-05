@@ -193,9 +193,9 @@ const World_Settings WORLD_PRESETS[WORLD_COUNT] = {
 // Source engine viewmodel settings (per CalcViewModelView in Source SDK)
 #define SOURCE_VIEWMODEL_FOV     54.f   // Source viewmodel_fov default (ConVar: 54°)
 #define SOURCE_VIEWMODEL_SCALE   1.20f  // World-space scale factor (tuned for RT visibility without depth hack)
-#define SOURCE_VIEWMODEL_FWD     13.f   // Forward offset from eye (push barrel into view)
-#define SOURCE_VIEWMODEL_RIGHT   1.5f   // Right offset from eye
-#define SOURCE_VIEWMODEL_UP      0.0f   // Up offset from eye
+#define SOURCE_VIEWMODEL_FWD     8.f    // Forward offset from eye (push barrel into view)
+#define SOURCE_VIEWMODEL_RIGHT   4.f    // Right offset from eye
+#define SOURCE_VIEWMODEL_UP     -3.f    // Up offset from eye (drop hands down)
 #define SOURCE_VIEWMODEL_FOV_RATIO (SOURCE_VIEWMODEL_FOV / 90.f) // Viewmodel-to-world FOV correction
 
 // HL2-style viewmodel CVars — individually tunable per ConVar, with presets as commands
@@ -11434,27 +11434,24 @@ void Weapon_Update (Figure_Instance *Weapon, const Camera *Camera_Data, float De
     float Source_X, Source_Y, Source_Z;
     float Normal_X, Normal_Y, Normal_Z;
     if (Weapon->Figure.Is_Source) {
-      // Source viewmodel coordinates after idle-pose bone skinning.
-      // Vertex bounds: X[-20,-3], Y[-13,+9], Z[-16,-1]
-      // Barrel points in -Y, weapon body extends in -X, hands hang in -Z.
-      // For right-hand mode: flip X to put weapon on right side of screen.
-      // Camera mapping: Forward = -Y, Right = -X, Up = +Z
-      float Src_Fwd   = -Weapon->Figure.Vertices[Index].Position[1] * Model_Scale;
-      float Src_Right = -Weapon->Figure.Vertices[Index].Position[0] * Model_Scale;
+      // Source viewmodel in Source-native coords: X=forward, Y=left, Z=up.
+      // After idle-pose skinning, bounds: X[0,22] Y[-4,9] Z[-9,-1].
+      // Barrel extends in +X (forward), hands spread in Y, arms hang in -Z.
+      // Map: Source +X → camera Forward, Source -Y → camera Right, Source +Z → camera Up.
+      float Src_Fwd   =  Weapon->Figure.Vertices[Index].Position[0] * Model_Scale;
+      float Src_Right = -Weapon->Figure.Vertices[Index].Position[1] * Model_Scale;
       float Src_Up    =  Weapon->Figure.Vertices[Index].Position[2] * Model_Scale;
 
-      // Apply handedness mirror on the right axis
       Src_Right *= Mirror;
 
-      // Camera basis: col0=Forward, col1=Up, col2=Right
+      // Camera basis columns: col0=Forward, col1=Up, col2=Right
       Source_X = Src_Fwd;
       Source_Y = Src_Up;
       Source_Z = Src_Right;
 
-      float N_Fwd   = -Weapon->Figure.Vertices[Index].Normal[1];
-      float N_Right = -Weapon->Figure.Vertices[Index].Normal[0];
+      float N_Fwd   =  Weapon->Figure.Vertices[Index].Normal[0];
+      float N_Right = -Weapon->Figure.Vertices[Index].Normal[1] * Mirror;
       float N_Up    =  Weapon->Figure.Vertices[Index].Normal[2];
-      N_Right *= Mirror;
       Normal_X = N_Fwd;
       Normal_Y = N_Up;
       Normal_Z = N_Right;
