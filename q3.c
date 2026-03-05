@@ -482,6 +482,56 @@ typedef struct {
   float Pad[2];
 } GPU_Projectile_Pool;
 
+// ── Ragdoll system ── XPBD (Macklin 2016) with small-step substepping (Macklin 2019) ─────────────
+// HL2-style skeleton topology (~15-20 bones), PhysX-informed stabilization (split impulse, bias).
+// rayQueryEXT collision against TLAS. All solver logic lives in the physics GLSL compute shader.
+#define RAGDOLL_MAX_BODIES  24  // Max point masses per ragdoll (one per bone)
+#define RAGDOLL_MAX_JOINTS  32  // Max constraints (distance + angular)
+#define RAGDOLL_MAX_ACTIVE   8  // Max simultaneously active ragdolls
+#define RAGDOLL_SUBSTEPS     8  // Substeps per frame (1 XPBD iteration each, per Macklin 2019)
+
+// Constraint types (PhysX-informed: ball-and-socket as distance, hinge via angular limits)
+#define JOINT_DISTANCE   0  // Maintains bone-to-bone distance (ball-and-socket)
+#define JOINT_ANGULAR    1  // Cone-twist angular limit between bones
+
+// GPU-side ragdoll body (point mass with Verlet state)
+typedef struct {
+  float Position  [3]; float Inv_Mass;   // xyz + inverse mass (0 = kinematic/fixed)
+  float Prev_Pos  [3]; float Radius;     // Previous position for Verlet + collision radius
+  float Velocity  [3]; float Damping;    // Explicit velocity for PhysX-style split impulse + per-body damping
+  int   Bone_Index;    int   Colliding;  // Maps back to skeleton bone, collision flag
+  float Pad_R     [2];
+} GPU_Ragdoll_Body;                       // 64 bytes
+
+// GPU-side ragdoll constraint
+typedef struct {
+  int   Body_A, Body_B;                  // Indices into the body array
+  int   Type;                            // JOINT_DISTANCE or JOINT_ANGULAR
+  float Rest_Length;                      // Rest distance (distance constraint) or rest angle (angular)
+  float Min_Angle, Max_Angle;            // Angular limits (cone half-angle, twist limit) — radians
+  float Compliance;                       // XPBD compliance (α = 1/stiffness, 0 = infinitely stiff)
+  float Lambda;                           // Accumulated Lagrange multiplier (warm-start, PhysX-style temporal coherence)
+} GPU_Ragdoll_Joint;                      // 32 bytes
+
+// Complete GPU ragdoll state
+typedef struct {
+  GPU_Ragdoll_Body  Bodies [RAGDOLL_MAX_BODIES];
+  GPU_Ragdoll_Joint Joints [RAGDOLL_MAX_JOINTS];
+  int   Body_Count, Joint_Count;
+  int   Active;                          // 0 = dormant, 1 = simulating
+  int   Substeps;                        // Substeps per frame (CVar-driven)
+  float Gravity;                         // Ragdoll gravity (may differ from player gravity)
+  float Global_Damping;                  // Velocity damping factor per substep
+  float Floor_Y;                         // Simple floor plane for fallback collision
+  float Pad_RG;
+} GPU_Ragdoll;
+
+typedef struct {
+  GPU_Ragdoll Ragdolls [RAGDOLL_MAX_ACTIVE];
+  int         Count;                     // Number of active ragdolls
+  int         Pad_RP [3];
+} GPU_Ragdoll_Pool;
+
 typedef struct {
   ALCdevice  *Device;
   ALCcontext *Context;
@@ -790,7 +840,8 @@ CVar *r_checkerboard, *r_postprocess, *r_parallax, *r_pbr, *r_validation, *r_ful
 CVar *r_exposure, *r_fov;
 // World CVars (w_ prefix)
 CVar *w_preset, *w_gravity, *w_max_speed, *w_jump_velocity, *w_friction, *w_accelerate, *w_air_accelerate;
-CVar *w_stop_speed, *w_step_size;
+CVar *w_stop_speed, *w_step_size, *w_overbounce, *w_view_height, *w_crouch_height;
+CVar *w_rocket_speed, *w_rocket_lifetime, *w_fire_cooldown, *w_splash_radius;
 // Audio CVars (a_ prefix)
 CVar *a_volume, *a_enabled;
 // Input CVars (in_ prefix)
@@ -930,6 +981,7 @@ VkDescriptorSet       Physics_Descriptor_Set;    // Descriptor set binding physi
 GPU_Buffer            Player_State_Buffer;       // SSBO holding the GPU_Player state (read-write each frame)
 GPU_Buffer            Hull_Storage_Buffer;       // SSBO holding GPU_Hull vertex + adjacency data
 GPU_Buffer            Projectile_Buffer;         // SSBO holding GPU_Projectile_Pool
+GPU_Buffer            Ragdoll_Buffer;            // SSBO holding GPU_Ragdoll_Pool (binding 6)
 
 // ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 //
@@ -2375,11 +2427,18 @@ typedef struct {
   float Spine;       float Pad_E [3];  // Capsule spine half-length (hh - radius), 0 for non-capsules
 } GPU_Player;
 
-// Per-frame input delivered to the physics compute shader via push constants (48 bytes)
+// Per-frame input delivered to the physics compute shader via push constants (128 bytes max)
+// Carries both input state and CVar-driven physics constants — no hardcoded values in the shader.
 typedef struct {
-  int   Forward, Back, Left, Right;
-  int   Jump, Fire, Crouch, Movement_Style; // 0=Q3, 1=Source
-  float Delta_X, Delta_Y, Dt, Pad2;
+  int   Forward, Back, Left, Right;                                           // 16 bytes
+  int   Jump, Fire, Crouch, Pad_I;                                            // 16 bytes
+  float Delta_X, Delta_Y, Dt;                                                 // 12 bytes
+  float Gravity;                                                               //  4 bytes
+  float Friction, Stop_Speed, Ground_Accel, Air_Accel;                         // 16 bytes
+  float Max_Speed, Jump_Vel, Overbounce, Step_Size;                            // 16 bytes
+  float Mouse_Sensitivity, View_Height, Crouch_Height, Spine;                  // 16 bytes
+  float Rocket_Speed, Rocket_Lifetime, Fire_Cooldown_Val, Splash_Radius;       // 16 bytes
+  // 112 bytes total — under the 128-byte Vulkan minimum guarantee
 } GPU_Input;
 
 // Packing routine - fp16 RLE packing for push constants
@@ -2411,7 +2470,12 @@ typedef struct {
   uint32_t Inv_Proj_Diag;   // Bits [15:0] = half(InvProj[0][0]), [31:16] = half(InvProj[1][1])
   uint32_t Sun_Screen_Pos;  // Bits [15:0] = half(Sun_Screen_U), [31:16] = half(Sun_Screen_V) - for god rays
   uint32_t Sun_Params;      // Bits [15:0] = half(God_Ray_Intensity), [31:16] = half(Sun_On_Screen) (0 or 1)
-} GPU_Postprocess_Push;
+  // Post-process tuning knobs (half2x16 packed from CVars)
+  uint32_t PP_Firefly;      // half(Headroom), half(Bias)
+  uint32_t PP_CAS;          // half(Amount),   half(Mix)
+  uint32_t PP_TAA_A;        // half(Static_Floor), half(Sigma)
+  uint32_t PP_TAA_B;        // half(Move_Lo),  half(Move_Hi)
+} GPU_Postprocess_Push;     // 56 + 16 = 72 bytes
 
 // CPU-side convex hull produced by the Quickhull algorithm. Stores vertex positions and per-vertex adjacency for hill-climbing
 // support queries.
@@ -3055,13 +3119,15 @@ int main (int Argc, char **Argv) {
   CVar_Set_Int   (r_parallax,       not No_Parallax);
   CVar_Set_Float (r_exposure,       Active_Exposure);
   CVar_Set_Int   (r_fullscreen,     Current_Window_Mode == FULLSCREEN_MODE);
-  // Sync world CVars from active world preset
+  // Sync world CVars — Source and Q3 carry different physics defaults
+  int Is_Source = (Active_Movement == WORLD_SOURCE);
   CVar_Set_Float (w_gravity,        Active_World.Gravity);
   CVar_Set_Float (w_max_speed,      Active_World.Max_Speed);
-  CVar_Set_Float (w_jump_velocity,  JUMP_VELOCITY);
-  CVar_Set_Float (w_friction,       GROUND_FRICTION);
-  CVar_Set_Float (w_accelerate,     GROUND_ACCELERATE);
-  CVar_Set_Float (w_air_accelerate, AIR_ACCELERATE);
+  CVar_Set_Float (w_jump_velocity,  Is_Source ? 301.993377f : JUMP_VELOCITY);
+  CVar_Set_Float (w_friction,       Is_Source ? 4.f : GROUND_FRICTION);
+  CVar_Set_Float (w_accelerate,     Is_Source ? 5.5f : GROUND_ACCELERATE);
+  CVar_Set_Float (w_air_accelerate, Is_Source ? 10.f : AIR_ACCELERATE);
+  CVar_Set_Float (w_overbounce,     Is_Source ? 1.f : OVERBOUNCE);
   printf ("[quality] preset: %s (%dx%d @ %.0f%% scale, %d SPP)\n",
           Preset->Name, Width, Height, Active_Render_Scale * 100.f, Override_SPP ? Override_SPP : Preset->SPP);
   printf ("[world] %s (height %.0f, eye %.0f, fov %.0f, speed %.0f)\n",
@@ -3297,7 +3363,7 @@ int main (int Argc, char **Argv) {
   }
 
   // Allocate the camera uniform buffer
-  Camera_Uniform_Buffer = Buffer_Allocate (/*Size         =>*/ 256,
+  Camera_Uniform_Buffer = Buffer_Allocate (/*Size         =>*/ 512,
                                            /*Usage        =>*/ VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
                                            /*Memory_Flags =>*/ VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT
                                                              | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
@@ -3545,7 +3611,11 @@ int main (int Argc, char **Argv) {
           .Bloom_Vignette = Pack_Half2x16 (STYLE.Bloom_Strength, STYLE.Vignette),
           .Inv_Proj_Diag  = Pack_Half2x16 (Bench_Inv_Proj.E[0], Bench_Inv_Proj.E[5]),
           .Sun_Screen_Pos = Pack_Half2x16 (0.5f, 0.5f),
-          .Sun_Params     = Pack_Half2x16 (0.f, 0.f)};
+          .Sun_Params     = Pack_Half2x16 (0.f, 0.f),
+          .PP_Firefly     = Pack_Half2x16 (CVar_Get_Float (rt_firefly_headroom), CVar_Get_Float (rt_firefly_bias)),
+          .PP_CAS         = Pack_Half2x16 (CVar_Get_Float (rt_cas_amount),       CVar_Get_Float (rt_cas_mix)),
+          .PP_TAA_A       = Pack_Half2x16 (CVar_Get_Float (rt_taa_static_floor), CVar_Get_Float (rt_taa_sigma)),
+          .PP_TAA_B       = Pack_Half2x16 (CVar_Get_Float (rt_taa_move_lo),      CVar_Get_Float (rt_taa_move_hi))};
         Pack_Mat4_Half (&Bench_Reproj, Warmup_Postprocess.Reproject);
         Raytracing_Frame (Warmup_Postprocess);
         VK_CHECK (vkWaitForFences (Device, 1, &Fence, VK_TRUE, UINT64_MAX));
@@ -3621,7 +3691,11 @@ int main (int Argc, char **Argv) {
         .Bloom_Vignette = Pack_Half2x16 (STYLE.Bloom_Strength, STYLE.Vignette),
         .Inv_Proj_Diag  = Pack_Half2x16 (Bench_Inverse_Projection.E[0], Bench_Inverse_Projection.E[5]),
         .Sun_Screen_Pos = Pack_Half2x16 (0.5f, 0.5f),
-        .Sun_Params     = Pack_Half2x16 (0.15f, 0.f)};
+        .Sun_Params     = Pack_Half2x16 (0.15f, 0.f),
+        .PP_Firefly     = Pack_Half2x16 (CVar_Get_Float (rt_firefly_headroom), CVar_Get_Float (rt_firefly_bias)),
+        .PP_CAS         = Pack_Half2x16 (CVar_Get_Float (rt_cas_amount),       CVar_Get_Float (rt_cas_mix)),
+        .PP_TAA_A       = Pack_Half2x16 (CVar_Get_Float (rt_taa_static_floor), CVar_Get_Float (rt_taa_sigma)),
+        .PP_TAA_B       = Pack_Half2x16 (CVar_Get_Float (rt_taa_move_lo),      CVar_Get_Float (rt_taa_move_hi))};
       Pack_Mat4_Half (&Bench_Reproject, Postprocess.Reproject);
       Raytracing_Frame (Postprocess);
       Prev_View_Matrix = Bench_View;
@@ -4074,7 +4148,11 @@ int main (int Argc, char **Argv) {
       .Bloom_Vignette = Pack_Half2x16 (STYLE.Bloom_Strength, STYLE.Vignette),
       .Inv_Proj_Diag  = Pack_Half2x16 (Inv_Proj.E[0], Inv_Proj.E[5]),
       .Sun_Screen_Pos = Pack_Half2x16 (Sun_U, Sun_V),
-      .Sun_Params     = Pack_Half2x16 (0.15f, Sun_Visible)};  // God ray intensity
+      .Sun_Params     = Pack_Half2x16 (0.15f, Sun_Visible),   // God ray intensity
+      .PP_Firefly     = Pack_Half2x16 (CVar_Get_Float (rt_firefly_headroom), CVar_Get_Float (rt_firefly_bias)),
+      .PP_CAS         = Pack_Half2x16 (CVar_Get_Float (rt_cas_amount),       CVar_Get_Float (rt_cas_mix)),
+      .PP_TAA_A       = Pack_Half2x16 (CVar_Get_Float (rt_taa_static_floor), CVar_Get_Float (rt_taa_sigma)),
+      .PP_TAA_B       = Pack_Half2x16 (CVar_Get_Float (rt_taa_move_lo),      CVar_Get_Float (rt_taa_move_hi))};
     Pack_Mat4_Half (&Reproject, Postprocess.Reproject);
     Raytracing_Frame (Postprocess);
     Prev_View_Matrix = Cur_View;
@@ -4183,6 +4261,7 @@ int main (int Argc, char **Argv) {
   Buffer_Destroy (&Player_State_Buffer);
   Buffer_Destroy (&Hull_Storage_Buffer);
   Buffer_Destroy (&Projectile_Buffer);
+  Buffer_Destroy (&Ragdoll_Buffer);
 
   // Textures
   for (uint I = 0; I < Texture_Count; I++) {
@@ -4940,6 +5019,13 @@ void CVar_Register_All (void) {
   w_air_accelerate = CVar_Register_Float ("w_air_accelerate", "Air acceleration rate",                 CVAR_NONE, AIR_ACCELERATE, 0, 100);
   w_stop_speed     = CVar_Register_Float ("w_stop_speed",     "Speed below which friction uses stop",  CVAR_NONE, STOP_SPEED, 0, 1000);
   w_step_size      = CVar_Register_Float ("w_step_size",      "Max stair step height",                 CVAR_NONE, STEP_SIZE, 0, 100);
+  w_overbounce     = CVar_Register_Float ("w_overbounce",     "Surface clip overshoot factor",         CVAR_NONE, OVERBOUNCE, 1.0f, 2.0f);
+  w_view_height    = CVar_Register_Float ("w_view_height",    "Standing eye height offset",            CVAR_NONE, DEFAULT_VIEW_HEIGHT, 0, 100);
+  w_crouch_height  = CVar_Register_Float ("w_crouch_height",  "Crouching eye height offset",           CVAR_NONE, CROUCH_VIEW_HEIGHT, 0, 100);
+  w_rocket_speed   = CVar_Register_Float ("w_rocket_speed",   "Rocket projectile speed",               CVAR_NONE, ROCKET_SPEED, 0, 10000);
+  w_rocket_lifetime= CVar_Register_Float ("w_rocket_lifetime","Projectile lifetime (seconds)",         CVAR_NONE, ROCKET_LIFETIME, 0, 60);
+  w_fire_cooldown  = CVar_Register_Float ("w_fire_cooldown",  "Min seconds between shots",             CVAR_NONE, FIRE_COOLDOWN, 0, 10);
+  w_splash_radius  = CVar_Register_Float ("w_splash_radius",  "Explosion splash damage radius",        CVAR_NONE, 120.0f, 0, 1000);
 
   // ── Audio CVars ────────────────────────────────────────────────────────────────────────
   a_volume         = CVar_Register_Float ("a_volume",         "Master volume (0.0 - 1.0)",           CVAR_ARCHIVE, 1.0f, 0.0f, 1.0f);
@@ -4950,32 +5036,32 @@ void CVar_Register_All (void) {
   in_invert_y      = CVar_Register_Int   ("in_invert_y",      "Invert mouse Y axis",                 CVAR_ARCHIVE, 0, 0, 1);
 
   // ── Shader Tuning CVars (rt_ prefix) ── ARCHIVE | LATCH: shader recompile needed ──────
-  rt_vndf_alpha_floor  = CVar_Register_Float ("rt_vndf_alpha_floor",  "Min roughness² for VNDF reflection",     CVAR_ARCHIVE | CVAR_LATCH, VNDF_ALPHA_FLOOR,  0, 1);
-  rt_specular_d_bias   = CVar_Register_Float ("rt_specular_d_bias",   "Min roughness² for GGX D term",          CVAR_ARCHIVE | CVAR_LATCH, SPECULAR_D_BIAS,   0, 1);
-  rt_refl_clamp_lo     = CVar_Register_Float ("rt_refl_clamp_lo",     "Reflection luminance clamp (budget=0)",  CVAR_ARCHIVE | CVAR_LATCH, REFL_CLAMP_LO,     0, 100);
-  rt_refl_clamp_hi     = CVar_Register_Float ("rt_refl_clamp_hi",     "Reflection luminance clamp (budget=1)",  CVAR_ARCHIVE | CVAR_LATCH, REFL_CLAMP_HI,     0, 100);
-  rt_refl_gate_lo      = CVar_Register_Float ("rt_refl_gate_lo",      "Max roughness for reflection (b=0)",     CVAR_ARCHIVE | CVAR_LATCH, REFL_GATE_LO,      0, 1);
-  rt_refl_gate_hi      = CVar_Register_Float ("rt_refl_gate_hi",      "Max roughness for reflection (b=1)",     CVAR_ARCHIVE | CVAR_LATCH, REFL_GATE_HI,      0, 1);
-  rt_refl_thresh_lo    = CVar_Register_Float ("rt_refl_thresh_lo",    "Fresnel skip threshold (budget=0)",      CVAR_ARCHIVE | CVAR_LATCH, REFL_THRESH_LO,    0, 1);
-  rt_refl_thresh_hi    = CVar_Register_Float ("rt_refl_thresh_hi",    "Fresnel skip threshold (budget=1)",      CVAR_ARCHIVE | CVAR_LATCH, REFL_THRESH_HI,    0, 1);
-  rt_refl_damping      = CVar_Register_Float ("rt_refl_damping",      "Budget-proportional reflection damping", CVAR_ARCHIVE | CVAR_LATCH, REFL_DAMPING,      0, 10);
-  rt_refl_soft_edge    = CVar_Register_Float ("rt_refl_soft_edge",    "Threshold transition sharpness",         CVAR_ARCHIVE | CVAR_LATCH, REFL_SOFT_EDGE,    0, 100);
-  rt_refl_trace_lo     = CVar_Register_Float ("rt_refl_trace_lo",     "Reflection trace max dist (budget=0)",   CVAR_ARCHIVE | CVAR_LATCH, REFL_TRACE_LO,     0, 100000);
-  rt_refl_trace_hi     = CVar_Register_Float ("rt_refl_trace_hi",     "Reflection trace max dist (budget=1)",   CVAR_ARCHIVE | CVAR_LATCH, REFL_TRACE_HI,     0, 100000);
-  rt_shadow_dist_lo    = CVar_Register_Float ("rt_shadow_dist_lo",    "Shadow ray max dist (budget=0)",         CVAR_ARCHIVE | CVAR_LATCH, SHADOW_DIST_LO,    0, 100000);
-  rt_shadow_dist_hi    = CVar_Register_Float ("rt_shadow_dist_hi",    "Shadow ray max dist (budget=1)",         CVAR_ARCHIVE | CVAR_LATCH, SHADOW_DIST_HI,    0, 100000);
-  rt_denoise_depth_lo  = CVar_Register_Float ("rt_denoise_depth_lo",  "Denoiser depth sensitivity (still)",     CVAR_ARCHIVE | CVAR_LATCH, DENOISE_DEPTH_LO,  0, 10000);
-  rt_denoise_depth_hi  = CVar_Register_Float ("rt_denoise_depth_hi",  "Denoiser depth sensitivity (motion)",    CVAR_ARCHIVE | CVAR_LATCH, DENOISE_DEPTH_HI,  0, 10000);
-  rt_denoise_lum_lo    = CVar_Register_Float ("rt_denoise_lum_lo",    "Denoiser lum sensitivity (still)",       CVAR_ARCHIVE | CVAR_LATCH, DENOISE_LUM_LO,    0, 10000);
-  rt_denoise_lum_hi    = CVar_Register_Float ("rt_denoise_lum_hi",    "Denoiser lum sensitivity (motion)",      CVAR_ARCHIVE | CVAR_LATCH, DENOISE_LUM_HI,    0, 10000);
-  rt_firefly_headroom  = CVar_Register_Float ("rt_firefly_headroom",  "Firefly clamp headroom multiplier",      CVAR_ARCHIVE | CVAR_LATCH, FIREFLY_HEADROOM,  1, 10);
-  rt_firefly_bias      = CVar_Register_Float ("rt_firefly_bias",      "Firefly clamp additive floor",           CVAR_ARCHIVE | CVAR_LATCH, FIREFLY_BIAS,      0, 1);
-  rt_cas_amount        = CVar_Register_Float ("rt_cas_amount",        "CAS sharpening strength",                CVAR_ARCHIVE | CVAR_LATCH, CAS_AMOUNT,        0, 2);
-  rt_cas_mix           = CVar_Register_Float ("rt_cas_mix",           "CAS edge enhancement multiplier",        CVAR_ARCHIVE | CVAR_LATCH, CAS_MIX,           0, 10);
-  rt_taa_static_floor  = CVar_Register_Float ("rt_taa_static_floor",  "TAA min blend when still",               CVAR_ARCHIVE | CVAR_LATCH, TAA_STATIC_FLOOR,  0, 1);
-  rt_taa_sigma         = CVar_Register_Float ("rt_taa_sigma",         "TAA variance clamp sigma",               CVAR_ARCHIVE | CVAR_LATCH, TAA_SIGMA,         0, 1);
-  rt_taa_move_lo       = CVar_Register_Float ("rt_taa_move_lo",       "TAA blend at low motion",                CVAR_ARCHIVE | CVAR_LATCH, TAA_MOVE_LO,       0, 1);
-  rt_taa_move_hi       = CVar_Register_Float ("rt_taa_move_hi",       "TAA blend at high motion",               CVAR_ARCHIVE | CVAR_LATCH, TAA_MOVE_HI,       0, 1);
+  rt_vndf_alpha_floor  = CVar_Register_Float ("rt_vndf_alpha_floor",  "Min roughness² for VNDF reflection",     CVAR_ARCHIVE, VNDF_ALPHA_FLOOR,  0, 1);
+  rt_specular_d_bias   = CVar_Register_Float ("rt_specular_d_bias",   "Min roughness² for GGX D term",          CVAR_ARCHIVE, SPECULAR_D_BIAS,   0, 1);
+  rt_refl_clamp_lo     = CVar_Register_Float ("rt_refl_clamp_lo",     "Reflection luminance clamp (budget=0)",  CVAR_ARCHIVE, REFL_CLAMP_LO,     0, 100);
+  rt_refl_clamp_hi     = CVar_Register_Float ("rt_refl_clamp_hi",     "Reflection luminance clamp (budget=1)",  CVAR_ARCHIVE, REFL_CLAMP_HI,     0, 100);
+  rt_refl_gate_lo      = CVar_Register_Float ("rt_refl_gate_lo",      "Max roughness for reflection (b=0)",     CVAR_ARCHIVE, REFL_GATE_LO,      0, 1);
+  rt_refl_gate_hi      = CVar_Register_Float ("rt_refl_gate_hi",      "Max roughness for reflection (b=1)",     CVAR_ARCHIVE, REFL_GATE_HI,      0, 1);
+  rt_refl_thresh_lo    = CVar_Register_Float ("rt_refl_thresh_lo",    "Fresnel skip threshold (budget=0)",      CVAR_ARCHIVE, REFL_THRESH_LO,    0, 1);
+  rt_refl_thresh_hi    = CVar_Register_Float ("rt_refl_thresh_hi",    "Fresnel skip threshold (budget=1)",      CVAR_ARCHIVE, REFL_THRESH_HI,    0, 1);
+  rt_refl_damping      = CVar_Register_Float ("rt_refl_damping",      "Budget-proportional reflection damping", CVAR_ARCHIVE, REFL_DAMPING,      0, 10);
+  rt_refl_soft_edge    = CVar_Register_Float ("rt_refl_soft_edge",    "Threshold transition sharpness",         CVAR_ARCHIVE, REFL_SOFT_EDGE,    0, 100);
+  rt_refl_trace_lo     = CVar_Register_Float ("rt_refl_trace_lo",     "Reflection trace max dist (budget=0)",   CVAR_ARCHIVE, REFL_TRACE_LO,     0, 100000);
+  rt_refl_trace_hi     = CVar_Register_Float ("rt_refl_trace_hi",     "Reflection trace max dist (budget=1)",   CVAR_ARCHIVE, REFL_TRACE_HI,     0, 100000);
+  rt_shadow_dist_lo    = CVar_Register_Float ("rt_shadow_dist_lo",    "Shadow ray max dist (budget=0)",         CVAR_ARCHIVE, SHADOW_DIST_LO,    0, 100000);
+  rt_shadow_dist_hi    = CVar_Register_Float ("rt_shadow_dist_hi",    "Shadow ray max dist (budget=1)",         CVAR_ARCHIVE, SHADOW_DIST_HI,    0, 100000);
+  rt_denoise_depth_lo  = CVar_Register_Float ("rt_denoise_depth_lo",  "Denoiser depth sensitivity (still)",     CVAR_ARCHIVE, DENOISE_DEPTH_LO,  0, 10000);
+  rt_denoise_depth_hi  = CVar_Register_Float ("rt_denoise_depth_hi",  "Denoiser depth sensitivity (motion)",    CVAR_ARCHIVE, DENOISE_DEPTH_HI,  0, 10000);
+  rt_denoise_lum_lo    = CVar_Register_Float ("rt_denoise_lum_lo",    "Denoiser lum sensitivity (still)",       CVAR_ARCHIVE, DENOISE_LUM_LO,    0, 10000);
+  rt_denoise_lum_hi    = CVar_Register_Float ("rt_denoise_lum_hi",    "Denoiser lum sensitivity (motion)",      CVAR_ARCHIVE, DENOISE_LUM_HI,    0, 10000);
+  rt_firefly_headroom  = CVar_Register_Float ("rt_firefly_headroom",  "Firefly clamp headroom multiplier",      CVAR_ARCHIVE, FIREFLY_HEADROOM,  1, 10);
+  rt_firefly_bias      = CVar_Register_Float ("rt_firefly_bias",      "Firefly clamp additive floor",           CVAR_ARCHIVE, FIREFLY_BIAS,      0, 1);
+  rt_cas_amount        = CVar_Register_Float ("rt_cas_amount",        "CAS sharpening strength",                CVAR_ARCHIVE, CAS_AMOUNT,        0, 2);
+  rt_cas_mix           = CVar_Register_Float ("rt_cas_mix",           "CAS edge enhancement multiplier",        CVAR_ARCHIVE, CAS_MIX,           0, 10);
+  rt_taa_static_floor  = CVar_Register_Float ("rt_taa_static_floor",  "TAA min blend when still",               CVAR_ARCHIVE, TAA_STATIC_FLOOR,  0, 1);
+  rt_taa_sigma         = CVar_Register_Float ("rt_taa_sigma",         "TAA variance clamp sigma",               CVAR_ARCHIVE, TAA_SIGMA,         0, 1);
+  rt_taa_move_lo       = CVar_Register_Float ("rt_taa_move_lo",       "TAA blend at low motion",                CVAR_ARCHIVE, TAA_MOVE_LO,       0, 1);
+  rt_taa_move_hi       = CVar_Register_Float ("rt_taa_move_hi",       "TAA blend at high motion",               CVAR_ARCHIVE, TAA_MOVE_HI,       0, 1);
 
   printf ("[cvar] registered %d cvars\n", CVar_Count);
 }
@@ -10499,7 +10585,7 @@ void Denoise_Pipeline_Create () {
                                          /*pSetLayout  =>*/ &Denoise_Descriptor_Layout));
 
   // Create the pipeline layout with push constants for step size and budget
-  VkPushConstantRange Push_Range = {VK_SHADER_STAGE_COMPUTE_BIT, 0, 2 * sizeof (int)};
+  VkPushConstantRange Push_Range = {VK_SHADER_STAGE_COMPUTE_BIT, 0, 16}; // Step + Budget + DN_Depth + DN_Lum
   VK_CHECK (vkCreatePipelineLayout (/*device          =>*/ Device,
                                     /*pCreateInfo     =>*/ &(VkPipelineLayoutCreateInfo){
                                       .sType                  = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
@@ -10856,6 +10942,9 @@ void Camera_Upload (Camera *State, float Field_Of_View, uint Weapon_Texture_Base
     float Ambient_Up   [4]; // xyz = Ambient up,    w = Sun_Disc_Intensity
     float Ambient_Down [4]; // xyz = Ambient down,  w = Fog_Density
     float Fog_Color    [4]; // xyz = Fog color,     w = Lightmap_Mult
+
+    // RT tuning knobs — packed half2x16 from CVars (no shader recompile needed)
+    uint32_t RT_Tune   [8]; // 7 pairs of half-float RT constants + 1 spare
   } Uniform;
 
   // Compute the inverse matrices for reconstructing world-space rays from screen coordinates
@@ -10885,6 +10974,16 @@ void Camera_Upload (Camera *State, float Field_Of_View, uint Weapon_Texture_Base
   Uniform.Ambient_Down [2] = E->Ambient_Down.z; Uniform.Ambient_Down [3] = E->Fog_Density;
   Uniform.Fog_Color    [0] = E->Fog_Color.x;    Uniform.Fog_Color    [1] = E->Fog_Color.y;
   Uniform.Fog_Color    [2] = E->Fog_Color.z;    Uniform.Fog_Color    [3] = E->Lightmap_Mult;
+
+  // Pack RT tuning CVars as half2x16 — runtime-adjustable without shader recompile
+  Uniform.RT_Tune[0] = Pack_Half2x16 (CVar_Get_Float (rt_vndf_alpha_floor), CVar_Get_Float (rt_specular_d_bias));
+  Uniform.RT_Tune[1] = Pack_Half2x16 (CVar_Get_Float (rt_refl_clamp_lo),    CVar_Get_Float (rt_refl_clamp_hi));
+  Uniform.RT_Tune[2] = Pack_Half2x16 (CVar_Get_Float (rt_refl_gate_lo),     CVar_Get_Float (rt_refl_gate_hi));
+  Uniform.RT_Tune[3] = Pack_Half2x16 (CVar_Get_Float (rt_refl_thresh_lo),   CVar_Get_Float (rt_refl_thresh_hi));
+  Uniform.RT_Tune[4] = Pack_Half2x16 (CVar_Get_Float (rt_refl_damping),     CVar_Get_Float (rt_refl_soft_edge));
+  Uniform.RT_Tune[5] = Pack_Half2x16 (CVar_Get_Float (rt_refl_trace_lo),    CVar_Get_Float (rt_refl_trace_hi));
+  Uniform.RT_Tune[6] = Pack_Half2x16 (CVar_Get_Float (rt_shadow_dist_lo),   CVar_Get_Float (rt_shadow_dist_hi));
+  Uniform.RT_Tune[7] = 0; // Spare
 
   // Upload the uniform data to the camera buffer
   Buffer_Upload (Camera_Uniform_Buffer, &Uniform, sizeof (Uniform));
@@ -11107,13 +11206,16 @@ void Raytracing_Frame (GPU_Postprocess_Push Postprocess) {
                                  /*pDescriptorSets     =>*/ &Denoise_Descriptor_Sets[I % 2],
                                  /*dynamicOffsetCount  =>*/ 0,
                                  /*pDynamicOffsets     =>*/ NULL);
-        int Push[2] = {Steps[I], Current_Budget_Byte};
+        struct { int Step, Budget; uint32_t Depth, Lum; } Push = {
+          Steps[I], Current_Budget_Byte,
+          Pack_Half2x16 (CVar_Get_Float (rt_denoise_depth_lo), CVar_Get_Float (rt_denoise_depth_hi)),
+          Pack_Half2x16 (CVar_Get_Float (rt_denoise_lum_lo),   CVar_Get_Float (rt_denoise_lum_hi))};
         vkCmdPushConstants (/*commandBuffer =>*/ Command_Buffer,
                             /*layout        =>*/ Denoise_Pipeline_Layout,
                             /*stageFlags    =>*/ VK_SHADER_STAGE_COMPUTE_BIT,
                             /*offset        =>*/ 0,
                             /*size          =>*/ sizeof (Push),
-                            /*pValues       =>*/ Push);
+                            /*pValues       =>*/ &Push);
         vkCmdDispatch (Command_Buffer, (Render_Width + 7) / 8, (Render_Height + 7) / 8, 1);
 
         // Barrier between iterations
@@ -11567,13 +11669,14 @@ void Physics_Pipeline_Create () {
     {3, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,             1, VK_SHADER_STAGE_COMPUTE_BIT, NULL}, // Player state
     {4, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,             1, VK_SHADER_STAGE_COMPUTE_BIT, NULL}, // Hull data
     {5, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,             1, VK_SHADER_STAGE_COMPUTE_BIT, NULL}, // Projectiles
+    {6, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,             1, VK_SHADER_STAGE_COMPUTE_BIT, NULL}, // Ragdolls
   };
 
-  // Create the descriptor set layout with all 6 physics bindings
+  // Create the descriptor set layout with all 7 physics bindings
   VK_CHECK (vkCreateDescriptorSetLayout (/*device      =>*/ Device,
                                          /*pCreateInfo =>*/ &(VkDescriptorSetLayoutCreateInfo){
                                            .sType        = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
-                                           .bindingCount = 6,
+                                           .bindingCount = 7,
                                            .pBindings    = Bindings},
                                          /*pAllocator  =>*/ NULL,
                                          /*pSetLayout  =>*/ &Physics_Descriptor_Layout));
@@ -11650,9 +11753,18 @@ void Physics_Resources_Create (const Player *Initial_State) {
   GPU_Projectile_Pool Empty_Pool = {0};
   Buffer_Upload (Projectile_Buffer, &Empty_Pool, sizeof Empty_Pool);
 
+  // Allocate the ragdoll pool buffer (binding 6)
+  Ragdoll_Buffer = Buffer_Allocate (/*Size         =>*/ sizeof (GPU_Ragdoll_Pool),
+                                     /*Usage        =>*/ VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
+                                                       | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
+                                     /*Memory_Flags =>*/ VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT
+                                                       | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+  GPU_Ragdoll_Pool Empty_Ragdolls = {0};
+  Buffer_Upload (Ragdoll_Buffer, &Empty_Ragdolls, sizeof Empty_Ragdolls);
+
   // Allocate the physics descriptor pool and set
   VkDescriptorPoolSize Pool_Sizes[] = {{VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, 1},
-                                       {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,             5}};
+                                       {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,             6}};
   VK_CHECK (vkCreateDescriptorPool (/*device          =>*/ Device,
                                     /*pCreateInfo     =>*/ &(VkDescriptorPoolCreateInfo){
                                       .sType         = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
@@ -11680,17 +11792,19 @@ void Physics_Resources_Create (const Player *Initial_State) {
   VkDescriptorBufferInfo Player_Info  = {Player_State_Buffer.Buffer, 0, Player_State_Buffer.Size};
   VkDescriptorBufferInfo Hull_Info    = {Hull_Storage_Buffer.Buffer, 0, Hull_Storage_Buffer.Size};
   VkDescriptorBufferInfo Proj_Info    = {Projectile_Buffer.Buffer,   0, Projectile_Buffer.Size};
+  VkDescriptorBufferInfo Ragdoll_Info = {Ragdoll_Buffer.Buffer,     0, Ragdoll_Buffer.Size};
 
-  // Write all 6 physics descriptor bindings
+  // Write all 7 physics descriptor bindings
   VkWriteDescriptorSet Writes[] = {
-    {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, &Acceleration_Write, Physics_Descriptor_Set, 0, 0, 1, VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, NULL, NULL,         NULL},
-    {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL,                Physics_Descriptor_Set, 1, 0, 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,             NULL, &Vertex_Info, NULL},
-    {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL,                Physics_Descriptor_Set, 2, 0, 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,             NULL, &Index_Info,  NULL},
-    {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL,                Physics_Descriptor_Set, 3, 0, 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,             NULL, &Player_Info, NULL},
-    {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL,                Physics_Descriptor_Set, 4, 0, 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,             NULL, &Hull_Info,   NULL},
-    {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL,                Physics_Descriptor_Set, 5, 0, 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,             NULL, &Proj_Info,   NULL},
+    {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, &Acceleration_Write, Physics_Descriptor_Set, 0, 0, 1, VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, NULL, NULL,          NULL},
+    {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL,                Physics_Descriptor_Set, 1, 0, 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,             NULL, &Vertex_Info,  NULL},
+    {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL,                Physics_Descriptor_Set, 2, 0, 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,             NULL, &Index_Info,   NULL},
+    {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL,                Physics_Descriptor_Set, 3, 0, 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,             NULL, &Player_Info,  NULL},
+    {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL,                Physics_Descriptor_Set, 4, 0, 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,             NULL, &Hull_Info,    NULL},
+    {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL,                Physics_Descriptor_Set, 5, 0, 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,             NULL, &Proj_Info,    NULL},
+    {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL,                Physics_Descriptor_Set, 6, 0, 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,             NULL, &Ragdoll_Info, NULL},
   };
-  vkUpdateDescriptorSets (Device, 6, Writes, 0, NULL);
+  vkUpdateDescriptorSets (Device, 7, Writes, 0, NULL);
 
 } // Physics_Resources_Create
 
@@ -11700,11 +11814,20 @@ void Physics_Resources_Create (const Player *Initial_State) {
 
 Player Physics_Dispatch (Input In, float Dt) {
 
-  // Pack the CPU input into the GPU push constant structure
+  // Pack the CPU input into the GPU push constant structure — every physics knob from CVars
   GPU_Input GPU_Input = {
     In.Forward, In.Back, In.Left, In.Right,
-    In.Jump, In.Fire, In.Crouch, Active_Movement,
-    In.Delta_X, In.Delta_Y, Dt, 0};
+    In.Jump, In.Fire, In.Crouch, 0,
+    In.Delta_X, In.Delta_Y, Dt,
+    CVar_Get_Float (w_gravity),
+    CVar_Get_Float (w_friction),       CVar_Get_Float (w_stop_speed),
+    CVar_Get_Float (w_accelerate),     CVar_Get_Float (w_air_accelerate),
+    CVar_Get_Float (w_max_speed),      CVar_Get_Float (w_jump_velocity),
+    CVar_Get_Float (w_overbounce),     CVar_Get_Float (w_step_size),
+    CVar_Get_Float (in_sensitivity),   CVar_Get_Float (w_view_height),
+    CVar_Get_Float (w_crouch_height),  0.f, /* Spine — reserved for capsule tuning */
+    CVar_Get_Float (w_rocket_speed),   CVar_Get_Float (w_rocket_lifetime),
+    CVar_Get_Float (w_fire_cooldown),  CVar_Get_Float (w_splash_radius)};
 
   // Record a one-shot command buffer for the physics compute dispatch
   VK_CHECK (vkResetCommandBuffer (Command_Buffer, 0));
@@ -11784,8 +11907,8 @@ void Projectile_Spawn (vec3 Origin, vec3 Direction) {
   vec3 Normalized = Normalize (Direction);
   Projectile *P   = &Projectiles.Slots[Projectiles.Count++];
   P->Position     = Add (Origin, Scale (Normalized, 20.f)); // Spawn 20 units ahead
-  P->Velocity     = Scale (Normalized, ROCKET_SPEED);
-  P->Lifetime     = ROCKET_LIFETIME;
+  P->Velocity     = Scale (Normalized, CVar_Get_Float (w_rocket_speed));
+  P->Lifetime     = CVar_Get_Float (w_rocket_lifetime);
   P->Active       = 1;
   P->Radius       = 3.f;
   P->Damage       = ROCKET_DAMAGE;
@@ -11795,7 +11918,7 @@ void Projectile_Spawn (vec3 Origin, vec3 Direction) {
   P->Instance_Hit = -1;
 
   // Start fire cooldown and play sound
-  Projectiles.Fire_Cooldown = FIRE_COOLDOWN;
+  Projectiles.Fire_Cooldown = CVar_Get_Float (w_fire_cooldown);
   Audio_Play (Audio.Sound_Shoot, 0.8f);
 }
 
@@ -12342,6 +12465,7 @@ glsl rgen Ray_Generation {
     vec4  Env_Ambient_Up;   // xyz = Ambient up,    w = Sun_Disc_Intensity
     vec4  Env_Ambient_Down; // xyz = Ambient down,  w = Fog_Density
     vec4  Env_Fog_Color;    // xyz = Fog color,     w = Lightmap_Mult
+    uint  RT_Tune[8];       // half2x16 packed RT tuning knobs from CVars
   };
   layout(binding = 11, r32f) uniform image2D             Depth_Output;
   
@@ -12423,8 +12547,41 @@ glsl rchit Closest_Hit {
     vec4  Env_Ambient_Up;   // xyz = Ambient up,    w = Sun_Disc_Intensity
     vec4  Env_Ambient_Down; // xyz = Ambient down,  w = Fog_Density
     vec4  Env_Fog_Color;    // xyz = Fog color,     w = Lightmap_Mult
+    uint  RT_Tune[8];       // half2x16 packed RT tuning knobs from CVars
   };
-  
+
+  // Unpack RT tuning knobs — CVar-driven, no shader recompile needed
+  // #undef build-system compile-time defaults; runtime values from Camera_Uniform take precedence
+  #define RT2(i) unpackHalf2x16(RT_Tune[(i)])
+  #undef  VNDF_ALPHA_FLOOR
+  #undef  SPECULAR_D_BIAS
+  #undef  REFL_CLAMP_LO
+  #undef  REFL_CLAMP_HI
+  #undef  REFL_GATE_LO
+  #undef  REFL_GATE_HI
+  #undef  REFL_THRESH_LO
+  #undef  REFL_THRESH_HI
+  #undef  REFL_DAMPING
+  #undef  REFL_SOFT_EDGE
+  #undef  REFL_TRACE_LO
+  #undef  REFL_TRACE_HI
+  #undef  SHADOW_DIST_LO
+  #undef  SHADOW_DIST_HI
+  #define VNDF_ALPHA_FLOOR RT2(0).x
+  #define SPECULAR_D_BIAS  RT2(0).y
+  #define REFL_CLAMP_LO    RT2(1).x
+  #define REFL_CLAMP_HI    RT2(1).y
+  #define REFL_GATE_LO     RT2(2).x
+  #define REFL_GATE_HI     RT2(2).y
+  #define REFL_THRESH_LO   RT2(3).x
+  #define REFL_THRESH_HI   RT2(3).y
+  #define REFL_DAMPING     RT2(4).x
+  #define REFL_SOFT_EDGE   RT2(4).y
+  #define REFL_TRACE_LO    RT2(5).x
+  #define REFL_TRACE_HI    RT2(5).y
+  #define SHADOW_DIST_LO   RT2(6).x
+  #define SHADOW_DIST_HI   RT2(6).y
+
   // Scene geometry
   layout(binding = 3, std430) readonly buffer Vertex_Data   {vec4 Data[];} Vertices;
   layout(binding = 4, std430) readonly buffer Index_Data    {uint Data[];} Indices;
@@ -12860,8 +13017,9 @@ glsl rmiss Ray_Miss {
     vec4  Env_Ambient_Up;   // xyz = ambient up, w = sun_disc_intensity
     vec4  Env_Ambient_Down; // xyz = ambient down, w = fog_density
     vec4  Env_Fog_Color;    // xyz = fog color, w = lightmap_mult
+    uint  RT_Tune[8];       // half2x16 packed RT tuning knobs (unused in miss shader)
   };
-  
+
   // Ray_Miss shader main
   void main () {
 
@@ -12973,44 +13131,36 @@ glsl comp Physics {
     float Fire_Cooldown; float Proj_Pad[2];
   };
   
+  // Push constants — mirrors GPU_Input on the CPU side. Every physics knob is CVar-driven.
   layout(push_constant) uniform Push {
-    int   Forward, Back, Left, Right;
-    int   Jump, Fire, Crouch, Movement_Style;
-    float Delta_X, Delta_Y, Dt, Pad2;
-  } Input;
+    int   Forward, Back, Left, Right;                                           // 16 B
+    int   Jump, Fire, Crouch, Pad_I;                                            // 16 B
+    float Delta_X, Delta_Y, Dt;                                                 // 12 B
+    float Gravity;                                                               //  4 B
+    float Friction, Stop_Speed, Ground_Accel, Air_Accel;                         // 16 B
+    float Max_Speed, Jump_Vel, Overbounce, Step_Size;                            // 16 B
+    float Mouse_Sensitivity, View_Height, Crouch_Height, Spine;                  // 16 B
+    float Rocket_Speed, Rocket_Lifetime, Fire_Cooldown_Val, Splash_Radius;       // 16 B
+  } Input;                                                                       // 112 B total
 
   layout(local_size_x = 1) in;
 
-  // Physics constants - Id's Quake Engine
-  const float Q3_GRAVITY         = 800.0;
-  const float Q3_GROUND_FRICTION = 6.0;
-  const float Q3_STOP_SPEED      = 100.0;
-  const float Q3_GROUND_ACCEL    = 10.0;
-  const float Q3_AIR_ACCEL       = 1.0;
-  const float Q3_MAX_SPEED       = 320.0;
-  const float Q3_JUMP_VEL        = 270.0;
-  const float Q3_OVERBOUNCE      = 1.001;
+  // Aliases — short names for push-constant-driven physics knobs (no hardcoded tables)
+  #define GRAVITY             Input.Gravity
+  #define GROUND_FRICTION     Input.Friction
+  #define STOP_SPEED          Input.Stop_Speed
+  #define GROUND_ACCELERATE   Input.Ground_Accel
+  #define AIR_ACCELERATE      Input.Air_Accel
+  #define MAXIMUM_SPEED       Input.Max_Speed
+  #define JUMP_VELOCITY       Input.Jump_Vel
+  #define OVERBOUNCE          Input.Overbounce
+  #define STEP_SIZE           Input.Step_Size
+  #define MOUSE_SENSITIVITY   Input.Mouse_Sensitivity
+  #define DEFAULT_VIEW_HEIGHT Input.View_Height
+  #define CROUCH_VIEW_HEIGHT  Input.Crouch_Height
 
-  // Physics constants - Valve's Source Engine
-  const float SRC_GRAVITY         = 800.0;
-  const float SRC_GROUND_FRICTION = 4.0;
-  const float SRC_STOP_SPEED      = 100.0;
-  const float SRC_GROUND_ACCEL    = 5.5;
-  const float SRC_AIR_ACCEL       = 10.0;  
-  const float SRC_MAX_SPEED       = 250.0;     
-  const float SRC_JUMP_VEL        = 301.993377; 
-  const float SRC_OVERBOUNCE      = 1.0; 
-
-  // Runtime-selected constants (branched once per frame - no divergence cost on single-invocation dispatch)
-  float GRAVITY, GROUND_FRICTION, STOP_SPEED, GROUND_ACCELERATE, AIR_ACCELERATE;
-  float MAXIMUM_SPEED, JUMP_VELOCITY, OVERBOUNCE;
-
-  const float STEP_SIZE           = 18.0;
   const float MINIMUM_WALK_NORMAL = 0.7;
   const int   MAXIMUM_CLIP_PLANES = 5;
-  const float DEFAULT_VIEW_HEIGHT = 22.0;
-  const float CROUCH_VIEW_HEIGHT  = 8.0;
-  const float MOUSE_SENSITIVITY   = 0.003;
   
   // Collider shape constants
   const int SHAPE_SPHERE    = 0;
@@ -13342,20 +13492,166 @@ glsl comp Physics {
     }
   }
   
+  // ════════════════════════════════════════════════════════════════════════════════════════════════
+  //   Ragdoll XPBD — Macklin 2016 compliance + Macklin 2019 small-step substepping.
+  //   PhysX-informed: warm-started λ, split impulse, exponential damping.
+  //   rayQueryEXT for bone-vs-world collision (same TLAS as player movement).
+  //   HL2-style skeleton topology: ball-and-socket (distance) + cone-twist (angular) constraints.
+  // ════════════════════════════════════════════════════════════════════════════════════════════════
+
+  struct Ragdoll_Body {
+    vec3  Position;  float Inv_Mass;
+    vec3  Prev_Pos;  float Radius;
+    vec3  Velocity;  float Damping;
+    int   Bone_Index; int  Colliding;  float Pad_R[2];
+  };
+
+  struct Ragdoll_Joint {
+    int Body_A, Body_B, Type;  float Rest_Length;
+    float Min_Angle, Max_Angle, Compliance, Lambda;
+  };
+
+  struct Ragdoll {
+    Ragdoll_Body  Bodies [24];
+    Ragdoll_Joint Joints [32];
+    int   Body_Count, Joint_Count, Active, Substeps;
+    float Rag_Gravity, Global_Damping, Floor_Y, Pad_RG;
+  };
+
+  layout(binding = 6, std430) buffer Ragdoll_Pool_Buffer {
+    Ragdoll Ragdolls [8];
+    int     Ragdoll_Count;
+    int     Ragdoll_Pad [3];
+  };
+
+  // ── XPBD distance constraint (ball-and-socket) ───────────────────────────────
+  void xpbd_distance (inout Ragdoll_Body a, inout Ragdoll_Body b,
+                       float rest, float compliance, float h, inout float lambda) {
+    vec3  d    = b.Position - a.Position;
+    float dist = length (d);
+    if (dist < 1e-6) return;
+    float C     = dist - rest;
+    float w     = a.Inv_Mass + b.Inv_Mass;
+    if (w < 1e-12) return;
+    float alpha = compliance / (h * h);                     // XPBD: α̃ = α/h²
+    float dl    = (-C - alpha * lambda) / (w + alpha);      // Lagrange multiplier delta
+    lambda     += dl;                                        // Warm-start accumulation (PhysX temporal coherence)
+    vec3  n     = d / dist;
+    a.Position -= n * (dl * a.Inv_Mass);
+    b.Position += n * (dl * b.Inv_Mass);
+  }
+
+  // ── XPBD angular constraint (cone-twist limit) ───────────────────────────────
+  void xpbd_angular (inout Ragdoll_Body a, inout Ragdoll_Body b, inout Ragdoll_Body pivot,
+                      float lo, float hi, float compliance, float h, inout float lambda) {
+    vec3  d1  = normalize (a.Position - pivot.Position);
+    vec3  d2  = normalize (b.Position - pivot.Position);
+    float ang = acos (clamp (dot (d1, d2), -1.0, 1.0));
+    float C   = (ang < lo) ? ang - lo : (ang > hi) ? ang - hi : 0.0;
+    if (abs (C) < 1e-6) return;
+    float w     = a.Inv_Mass + b.Inv_Mass;
+    if (w < 1e-12) return;
+    float alpha = compliance / (h * h);
+    float dl    = (-C - alpha * lambda) / (w + alpha);
+    lambda     += dl;
+    vec3  ax    = cross (d1, d2);
+    float al    = length (ax);
+    if (al < 1e-6) return;
+    ax /= al;
+    float corr = dl * 0.5;
+    vec3 ra = a.Position - pivot.Position, rb = b.Position - pivot.Position;
+    float la = length (ra), lb = length (rb);
+    if (la > 0.01) a.Position = pivot.Position + la * normalize (ra + ax * cross (ax, ra) * corr * a.Inv_Mass);
+    if (lb > 0.01) b.Position = pivot.Position + lb * normalize (rb - ax * cross (ax, rb) * corr * b.Inv_Mass);
+  }
+
+  // ── Ragdoll bone collision via rayQueryEXT ────────────────────────────────────
+  void ragdoll_collide (inout Ragdoll_Body body) {
+    body.Colliding = 0;
+    float r = body.Radius;
+    vec3 dirs[6] = vec3[6](vec3(1,0,0), vec3(-1,0,0), vec3(0,1,0), vec3(0,-1,0), vec3(0,0,1), vec3(0,0,-1));
+    for (int i = 0; i < 6; i++) {
+      rayQueryEXT rq;
+      rayQueryInitializeEXT (rq, Top_Level, gl_RayFlagsOpaqueEXT, 0xFF, body.Position, 0.0, dirs[i], r * 2.0);
+      while (rayQueryProceedEXT (rq)) {}
+      if (rayQueryGetIntersectionTypeEXT (rq, true) == gl_RayQueryCommittedIntersectionTriangleEXT) {
+        float t = rayQueryGetIntersectionTEXT (rq, true);
+        if (t < r) {
+          body.Position -= dirs[i] * (r - t + 0.125);       // PhysX bias epsilon
+          body.Colliding = 1;
+          float vn = dot (body.Velocity, dirs[i]);
+          if (vn > 0.0) body.Velocity -= dirs[i] * vn * 1.2; // Split impulse + 0.2 restitution
+        }
+      }
+    }
+  }
+
+  // ── Ragdoll simulation: XPBD substep loop (called from main) ─────────────────
+  void ragdoll_simulate (float dt) {
+    for (int r = 0; r < Ragdoll_Count; r++) {
+      if (Ragdolls[r].Active == 0) continue;
+      int   nb   = Ragdolls[r].Body_Count;
+      int   nj   = Ragdolls[r].Joint_Count;
+      int   ns   = max (Ragdolls[r].Substeps, 1);
+      float h    = dt / float (ns);
+      float grav = Ragdolls[r].Rag_Gravity;
+      float damp = Ragdolls[r].Global_Damping;
+
+      for (int s = 0; s < ns; s++) {
+        // Predict: Verlet + explicit velocity (Macklin 2019 small-step)
+        for (int i = 0; i < nb; i++) {
+          if (Ragdolls[r].Bodies[i].Inv_Mass < 1e-12) continue;
+          Ragdolls[r].Bodies[i].Velocity *= max (1.0 - damp * h, 0.0);  // PhysX exponential damping
+          Ragdolls[r].Bodies[i].Velocity.y -= grav * h;
+          Ragdolls[r].Bodies[i].Prev_Pos  = Ragdolls[r].Bodies[i].Position;
+          Ragdolls[r].Bodies[i].Position += Ragdolls[r].Bodies[i].Velocity * h;
+        }
+
+        // Solve: 1 XPBD iteration per substep (Macklin 2019 convergence insight)
+        for (int j = 0; j < nj; j++) {
+          int ba = Ragdolls[r].Joints[j].Body_A, bb = Ragdolls[r].Joints[j].Body_B;
+          float co = Ragdolls[r].Joints[j].Compliance;
+          if (Ragdolls[r].Joints[j].Type == 0)
+            xpbd_distance (Ragdolls[r].Bodies[ba], Ragdolls[r].Bodies[bb],
+                           Ragdolls[r].Joints[j].Rest_Length, co, h, Ragdolls[r].Joints[j].Lambda);
+          else if (Ragdolls[r].Joints[j].Type == 1 and nb > 2)
+            xpbd_angular (Ragdolls[r].Bodies[ba], Ragdolls[r].Bodies[bb],
+                          Ragdolls[r].Bodies[max (ba - 1, 0)],
+                          Ragdolls[r].Joints[j].Min_Angle, Ragdolls[r].Joints[j].Max_Angle,
+                          co, h, Ragdolls[r].Joints[j].Lambda);
+        }
+
+        // Collide: bone vs. TLAS + floor plane fallback
+        for (int i = 0; i < nb; i++) {
+          if (Ragdolls[r].Bodies[i].Inv_Mass < 1e-12) continue;
+          ragdoll_collide (Ragdolls[r].Bodies[i]);
+          float fl = Ragdolls[r].Floor_Y + Ragdolls[r].Bodies[i].Radius;
+          if (Ragdolls[r].Bodies[i].Position.y < fl) {
+            Ragdolls[r].Bodies[i].Position.y = fl;
+            if (Ragdolls[r].Bodies[i].Velocity.y < 0.0)
+              Ragdolls[r].Bodies[i].Velocity.y *= -0.3;
+            Ragdolls[r].Bodies[i].Colliding = 1;
+          }
+        }
+
+        // Update: velocity from position delta (Verlet extraction)
+        for (int i = 0; i < nb; i++) {
+          if (Ragdolls[r].Bodies[i].Inv_Mass < 1e-12) continue;
+          Ragdolls[r].Bodies[i].Velocity = (Ragdolls[r].Bodies[i].Position - Ragdolls[r].Bodies[i].Prev_Pos) / h;
+        }
+      }
+
+      // Sleep: gradual damping when near-stationary (PhysX linear sleep threshold ≈ 1.0 u/s)
+      float mv = 0.0;
+      for (int i = 0; i < nb; i++) mv = max (mv, length (Ragdolls[r].Bodies[i].Velocity));
+      if (mv < 1.0) for (int i = 0; i < nb; i++) Ragdolls[r].Bodies[i].Velocity *= 0.9;
+    }
+  }
+
   // Physics shader main
   void main () {
 
-    // Select physics constants based on movement style
-    if (Input.Movement_Style == 1) {
-      GRAVITY=SRC_GRAVITY; GROUND_FRICTION=SRC_GROUND_FRICTION; STOP_SPEED=SRC_STOP_SPEED;
-      GROUND_ACCELERATE=SRC_GROUND_ACCEL; AIR_ACCELERATE=SRC_AIR_ACCEL;
-      MAXIMUM_SPEED=SRC_MAX_SPEED; JUMP_VELOCITY=SRC_JUMP_VEL; OVERBOUNCE=SRC_OVERBOUNCE;
-    } else {
-      GRAVITY=Q3_GRAVITY; GROUND_FRICTION=Q3_GROUND_FRICTION; STOP_SPEED=Q3_STOP_SPEED;
-      GROUND_ACCELERATE=Q3_GROUND_ACCEL; AIR_ACCELERATE=Q3_AIR_ACCEL;
-      MAXIMUM_SPEED=Q3_MAX_SPEED; JUMP_VELOCITY=Q3_JUMP_VEL; OVERBOUNCE=Q3_OVERBOUNCE;
-    }
-
+    // All physics constants arrive via push constants — no branching, no hardcoded tables.
     // Mouse look
     Player.Yaw   -= Input.Delta_X * MOUSE_SENSITIVITY;
     Player.Pitch -= Input.Delta_Y * MOUSE_SENSITIVITY;
@@ -13463,8 +13759,8 @@ glsl comp Physics {
       // Initialize the new projectile
       int idx = Projectile_Count;
       Projectiles[idx].Position     = eye + cam_forward * 20.0;
-      Projectiles[idx].Velocity     = cam_forward * 900.0;
-      Projectiles[idx].Lifetime     = 10.0;
+      Projectiles[idx].Velocity     = cam_forward * Input.Rocket_Speed;
+      Projectiles[idx].Lifetime     = Input.Rocket_Lifetime;
       Projectiles[idx].Active       = 1;
       Projectiles[idx].Material_Hit = 0;
       Projectiles[idx].Radius       = 3.0;
@@ -13475,7 +13771,7 @@ glsl comp Physics {
 
       // Other book-keeping
       Projectile_Count = idx + 1;
-      Fire_Cooldown = 0.8;
+      Fire_Cooldown = Input.Fire_Cooldown_Val;
     }
   
     // Advance each active projectile: move, trace against TLAS, kill on impact or timeout
@@ -13532,6 +13828,8 @@ glsl comp Physics {
         Projectiles[i].Position += dir * dist;
       }
     }
+  // Ragdoll XPBD — step all active ragdolls
+  ragdoll_simulate (Input.Dt);
   }
 } // Physics
 
@@ -13547,9 +13845,21 @@ glsl comp Denoise {
   layout(binding = 2, r32f)  uniform image2D Depth_Image;    // Read: hit distance for edge stopping
   
   layout(push_constant) uniform Denoise_Push {
-    int Step_Size;  // A-trous step size: 1, 2, 4 for iterations
-    int Budget_256; // Budget  by  256 (0 = full quality, 256 = cheap path)
+    int  Step_Size;   // A-trous step size: 1, 2, 4 for iterations
+    int  Budget_256;  // Budget * 256 (0 = full quality, 256 = cheap path)
+    uint DN_Depth;    // packHalf2x16(Depth_Lo, Depth_Hi)
+    uint DN_Lum;      // packHalf2x16(Lum_Lo, Lum_Hi)
   };
+
+  // Unpack denoiser tuning knobs — CVar-driven
+  #undef  DENOISE_DEPTH_LO
+  #undef  DENOISE_DEPTH_HI
+  #undef  DENOISE_LUM_LO
+  #undef  DENOISE_LUM_HI
+  #define DENOISE_DEPTH_LO unpackHalf2x16(DN_Depth).x
+  #define DENOISE_DEPTH_HI unpackHalf2x16(DN_Depth).y
+  #define DENOISE_LUM_LO   unpackHalf2x16(DN_Lum).x
+  #define DENOISE_LUM_HI   unpackHalf2x16(DN_Lum).y
   
   layout(local_size_x = 8, local_size_y = 8) in;
   
@@ -13664,7 +13974,29 @@ glsl comp Post_Process {
     uint  Inv_Proj_Diag;  // Range [15:0] = half(InvProj[0][0]), [31:16] = half(InvProj[1][1])
     uint  Sun_Screen_Pos; // packHalf2x16(Sun_Screen_U, Sun_Screen_V)
     uint  Sun_Params;     // packHalf2x16(God_Ray_Intensity, Sun_On_Screen)
+    uint  PP_Firefly;     // packHalf2x16(Headroom, Bias)
+    uint  PP_CAS;         // packHalf2x16(Amount, Mix)
+    uint  PP_TAA_A;       // packHalf2x16(Static_Floor, Sigma)
+    uint  PP_TAA_B;       // packHalf2x16(Move_Lo, Move_Hi)
   } Params;
+
+  // Unpack postprocess tuning knobs — CVar-driven, no shader recompile
+  #undef  FIREFLY_HEADROOM
+  #undef  FIREFLY_BIAS
+  #undef  CAS_AMOUNT
+  #undef  CAS_MIX
+  #undef  TAA_STATIC_FLOOR
+  #undef  TAA_SIGMA
+  #undef  TAA_MOVE_LO
+  #undef  TAA_MOVE_HI
+  #define FIREFLY_HEADROOM unpackHalf2x16(Params.PP_Firefly).x
+  #define FIREFLY_BIAS     unpackHalf2x16(Params.PP_Firefly).y
+  #define CAS_AMOUNT       unpackHalf2x16(Params.PP_CAS).x
+  #define CAS_MIX          unpackHalf2x16(Params.PP_CAS).y
+  #define TAA_STATIC_FLOOR unpackHalf2x16(Params.PP_TAA_A).x
+  #define TAA_SIGMA        unpackHalf2x16(Params.PP_TAA_A).y
+  #define TAA_MOVE_LO      unpackHalf2x16(Params.PP_TAA_B).x
+  #define TAA_MOVE_HI      unpackHalf2x16(Params.PP_TAA_B).y
   
   layout(local_size_x = 8, local_size_y = 8) in;
   
@@ -14816,7 +15148,15 @@ Input Poll_Input () {
           Toggle_Fullscreen ();
         if (Event.key.keysym.sym == SDLK_F5) {
           Active_Movement = (Active_Movement + 1) % WORLD_COUNT;
-          printf("[movement] switched to %s\n", Active_Movement ? "Source" : "Quake 3");
+          int Src = (Active_Movement == WORLD_SOURCE);
+          CVar_Set_Float (w_gravity,        Src ? 800.f : GRAVITY);
+          CVar_Set_Float (w_max_speed,      Src ? 250.f : MAXIMUM_SPEED);
+          CVar_Set_Float (w_jump_velocity,  Src ? 301.993377f : JUMP_VELOCITY);
+          CVar_Set_Float (w_friction,       Src ? 4.f : GROUND_FRICTION);
+          CVar_Set_Float (w_accelerate,     Src ? 5.5f : GROUND_ACCELERATE);
+          CVar_Set_Float (w_air_accelerate, Src ? 10.f : AIR_ACCELERATE);
+          CVar_Set_Float (w_overbounce,     Src ? 1.f : OVERBOUNCE);
+          printf("[movement] switched to %s\n", Src ? "Source" : "Quake 3");
         }
         if (Event.key.keysym.sym == SDLK_F6) {
           Active_World = WORLD_PRESETS[(Active_World.Type + 1) % WORLD_COUNT];
