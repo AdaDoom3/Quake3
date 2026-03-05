@@ -192,10 +192,10 @@ const World_Settings WORLD_PRESETS[WORLD_COUNT] = {
 
 // Source engine viewmodel settings (per CalcViewModelView in Source SDK)
 #define SOURCE_VIEWMODEL_FOV     54.f   // Source viewmodel_fov default (ConVar: 54°)
-#define SOURCE_VIEWMODEL_SCALE   1.20f  // World-space scale factor (tuned for RT visibility without depth hack)
-#define SOURCE_VIEWMODEL_FWD     8.f    // Forward offset from eye (push barrel into view)
-#define SOURCE_VIEWMODEL_RIGHT   4.f    // Right offset from eye
-#define SOURCE_VIEWMODEL_UP     -3.f    // Up offset from eye (drop hands down)
+#define SOURCE_VIEWMODEL_SCALE   1.0f   // 1:1 — Source viewmodel vertices are already eye-relative
+#define SOURCE_VIEWMODEL_FWD     0.f    // No offset — model is authored at eye origin
+#define SOURCE_VIEWMODEL_RIGHT   0.f    // No offset
+#define SOURCE_VIEWMODEL_UP      0.f    // No offset
 #define SOURCE_VIEWMODEL_FOV_RATIO (SOURCE_VIEWMODEL_FOV / 90.f) // Viewmodel-to-world FOV correction
 
 // HL2-style viewmodel CVars — individually tunable per ConVar, with presets as commands
@@ -11415,12 +11415,17 @@ void Weapon_Update (Figure_Instance *Weapon, const Camera *Camera_Data, float De
   // HL2-style viewmodel scale: read from CVar (individually settable, overrides mode default)
   float Model_Scale = CVar_Get_Float (vm_scale);
 
-  // HL2-style viewmodel FOV correction: vm_fov / world_fov ratio compresses the viewmodel
-  // depth to make it appear rendered at a narrower FOV (Source Engine depth hack equivalent)
+  // Source Engine viewmodel FOV: the viewmodel is rendered with a separate, narrower projection
+  // (default 54°) while the world uses the player's FOV (typically 90°).  Since a ray tracer
+  // has no second projection pass, we fake it by compressing the forward (depth) component:
+  //   depth_scale = tan(vmFOV/2) / tan(worldFOV/2)
+  // This makes the weapon appear as if projected at the narrower FOV.
+  // Source SDK reference: FormatViewModelAttachment in c_baseviewmodel.cpp.
   float World_FOV = CVar_Get_Float (r_fov);
   if (World_FOV <= 0.f) World_FOV = 90.f;
-  float VM_Fov = CVar_Get_Float (vm_fov);
-  float VM_Fov_Scale = VM_Fov / World_FOV;
+  float VM_Fov        = CVar_Get_Float (vm_fov);
+  float VM_Fov_Scale  = tanf (VM_Fov * 0.5f * (float)M_PI / 180.f)
+                       / tanf (World_FOV * 0.5f * (float)M_PI / 180.f);
 
   // HL2 cl_righthand: for left-hand mode, mirror the model across the right axis
   // (Source Engine: ApplyBoneMatrixTransform negates the view-space X axis)
@@ -11434,15 +11439,15 @@ void Weapon_Update (Figure_Instance *Weapon, const Camera *Camera_Data, float De
     float Source_X, Source_Y, Source_Z;
     float Normal_X, Normal_Y, Normal_Z;
     if (Weapon->Figure.Is_Source) {
-      // Source viewmodel in Source-native coords: X=forward, Y=left, Z=up.
-      // After idle-pose skinning, bounds: X[0,22] Y[-4,9] Z[-9,-1].
-      // Barrel extends in +X (forward), hands spread in Y, arms hang in -Z.
-      // Map: Source +X → camera Forward, Source -Y → camera Right, Source +Z → camera Up.
-      float Src_Fwd   =  Weapon->Figure.Vertices[Index].Position[0] * Model_Scale;
-      float Src_Right = -Weapon->Figure.Vertices[Index].Position[1] * Model_Scale;
+      // Source viewmodel: vertices are in eye-relative Source coords (X=fwd, Y=left, Z=up).
+      // The model is authored to sit at the player's eye origin — no manual offsets needed.
+      // We compress the forward axis by the FOV ratio to fake Source's separate VM projection.
+      // Source SDK: CalcViewModelView places the entity at eyePosition with eyeAngles.
+      //             DrawViewModels renders with fovViewmodel=54, zNear=1, DepthRange(0,0.1).
+      //             FormatViewModelAttachment uses tan(worldFOV/2)/tan(vmFOV/2) for scaling.
+      float Src_Fwd   =  Weapon->Figure.Vertices[Index].Position[0] * Model_Scale * VM_Fov_Scale;
+      float Src_Right = -Weapon->Figure.Vertices[Index].Position[1] * Model_Scale * Mirror;
       float Src_Up    =  Weapon->Figure.Vertices[Index].Position[2] * Model_Scale;
-
-      Src_Right *= Mirror;
 
       // Camera basis columns: col0=Forward, col1=Up, col2=Right
       Source_X = Src_Fwd;
