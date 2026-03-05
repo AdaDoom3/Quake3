@@ -688,7 +688,7 @@ static void platform_compile(Nob_Cmd *cmd, Platform plat, bool production) {
             src_file,
             "-I/usr/x86_64-w64-mingw32/include/SDL2",
             "-lmingw32", "-lSDL2main", "-lSDL2",
-            "-lvulkan-1", "-lm", "-lOpenAL32",
+            "-lvulkan-1", "-lm", "-lz", "-lOpenAL32",
             "-mwindows");
         break;
 
@@ -704,7 +704,7 @@ static void platform_compile(Nob_Cmd *cmd, Platform plat, bool production) {
             "-I/opt/homebrew/include/SDL2", "-I/opt/homebrew/include",
             "-D_REENTRANT",
             "-L/opt/homebrew/lib",
-            "-lSDL2", "-lvulkan", "-lm",
+            "-lSDL2", "-lvulkan", "-lm", "-lz",
             "-framework", "OpenAL");
         break;
 
@@ -718,7 +718,7 @@ static void platform_compile(Nob_Cmd *cmd, Platform plat, bool production) {
             "-o", production ? BUILD "release/q3_debian" : BUILD "q3",
             src_file,
             "-I/usr/include/SDL2", "-D_REENTRANT",
-            "-lSDL2", "-lvulkan", "-lm",
+            "-lSDL2", "-lvulkan", "-lm", "-lz",
             "-lopenal");
         break;
 
@@ -732,7 +732,7 @@ static void platform_compile(Nob_Cmd *cmd, Platform plat, bool production) {
             "-o", production ? BUILD "release/q3_arch" : BUILD "q3",
             src_file,
             "-I/usr/include/SDL2", "-D_REENTRANT",
-            "-lSDL2", "-lvulkan", "-lm",
+            "-lSDL2", "-lvulkan", "-lm", "-lz",
             "-lopenal");
         break;
 
@@ -748,7 +748,7 @@ static void platform_compile(Nob_Cmd *cmd, Platform plat, bool production) {
             "-o", production ? BUILD "release/q3" : BUILD "q3",
             src_file,
             "-I/usr/include/SDL2", "-D_REENTRANT",
-            "-lSDL2", "-lvulkan", "-lm",
+            "-lSDL2", "-lvulkan", "-lm", "-lz",
             "-lopenal");
         break;
     }
