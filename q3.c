@@ -2616,11 +2616,20 @@ void Figure_BLAS_Initialize (Figure_Instance *F);
 // Rebuild a figure's BLAS after vertex data has changed (re-upload vertices, refit BLAS in-place)
 void Figure_BLAS_Rebuild (Figure_Instance *F);
 
+// Record a figure's BLAS rebuild into an existing command buffer (no submit — caller batches)
+void Figure_BLAS_Record (Figure_Instance *F, VkCommandBuffer Cmd);
+
 // Pre-allocate the top-level acceleration structure (TLAS) for up to Maximum_Instances instance entries
 void Top_Level_Initialize (uint Maximum_Instances);
 
 // Rebuild the TLAS each frame from the world BLAS plus all active figures in the pool
 void Top_Level_Rebuild (Acceleration_Structure *World, Figure_Pool *Pool);
+
+// Record a TLAS rebuild into an existing command buffer (no submit — caller batches)
+void Top_Level_Record (Acceleration_Structure *World, Figure_Pool *Pool, VkCommandBuffer Cmd);
+
+// Batch all BLAS rebuilds + TLAS rebuild into a single command buffer submission (eliminates per-figure vkQueueWaitIdle)
+void Acceleration_Rebuild_All (Acceleration_Structure *World, Figure_Pool *Pool);
 
 // ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 //
@@ -3915,8 +3924,7 @@ int main (int Argc, char **Argv) {
     {
       VK_CHECK (vkWaitForFences (Device, 1, &Fence, VK_TRUE, UINT64_MAX));
       Weapon_Update (Weapon, &Bench_Cam, Fixed_Dt, 0);
-      Figure_BLAS_Rebuild (Weapon);
-      Top_Level_Rebuild (&World_Bottom_Level, &Figures);
+      Acceleration_Rebuild_All (&World_Bottom_Level, &Figures);
       mat4 Bench_View = View (Bench_Cam.Position, Bench_Cam.Yaw, Bench_Cam.Pitch);
       mat4 Bench_Proj = Perspective (Vertical_FOV, (float)Width / Height, 0.1f, 10000.f);
       mat4 Bench_Inv_Proj = Inverse_Projection (Bench_Proj);
@@ -3983,13 +3991,11 @@ int main (int Argc, char **Argv) {
       // Update scene state for this frame
       Bench_Cam.Frame = (uint)F;
       Weapon_Update (Weapon, &Bench_Cam, Fixed_Dt, 0);
-      Figure_BLAS_Rebuild (Weapon);
       Enemy->Animation_Time += Fixed_Dt;
       if (Enemy->Figure.Animations[0].Frame_Count > 0 and Enemy->Figure.Frame_Vertices) {
         Enemy->Current_Vertices = Enemy->Figure.Frame_Vertices[(int)(Enemy->Animation_Time * Enemy->Figure.Animations[0].FPS) % Enemy->Figure.Animations[0].Frame_Count];
       }
-      Figure_BLAS_Rebuild (Enemy);
-      Top_Level_Rebuild (&World_Bottom_Level, &Figures);
+      Acceleration_Rebuild_All (&World_Bottom_Level, &Figures);
       Camera_Upload (&Bench_Cam, Vertical_FOV, Weapon->Texture_Base_Index, PBR_Stride, Active_SPP);
 
       // Build view and projection matrices
@@ -4452,19 +4458,15 @@ int main (int Argc, char **Argv) {
         printf ("\r[vm A/B] >>> %s <<<                    \n", VM_AB_Names[VM_AB_Test_Index]);
     }
 
-    // Animate and rebuild the weapon viewmodel
+    // Animate the weapon viewmodel and advance enemy idle animation
     Weapon_Update (Weapon, &Cam, Delta_Time, In.Fire);
-    Figure_BLAS_Rebuild (Weapon);
-
-    // Advance enemy idle animation and rebuild BLAS
     Enemy->Animation_Time += Delta_Time;
     if (Enemy->Figure.Animations[0].Frame_Count > 0 and Enemy->Figure.Frame_Vertices) {
       int Frame_Index = (int)(Enemy->Animation_Time * Enemy->Figure.Animations[0].FPS) % Enemy->Figure.Animations[0].Frame_Count;
       Enemy->Current_Vertices = Enemy->Figure.Frame_Vertices[Frame_Index];
     }
-    Figure_BLAS_Rebuild (Enemy);
 
-    // Compute player body TLAS transform and write it to the player body pool slot
+    // Compute player body TLAS transform
     vec3  Entity_Origin = Enemy->GL_Origin;
     float Body_Yaw      = -Physics.Yaw;
     float D_Yaw         = Body_Yaw - Enemy->GL_Yaw;
@@ -4476,10 +4478,10 @@ int main (int Argc, char **Argv) {
                            {0.f,         1.f, 0.f,         Translation_Y},
                            {-Sine_Yaw,   0.f, Cosine_Yaw,  Translation_Z}};
     memcpy (Player_Body->TLAS_Transform, Body_T, sizeof Body_T);
-    Player_Body->Bottom_Level = Enemy->Bottom_Level;  // Share rebuilt BLAS
+    Player_Body->Bottom_Level = Enemy->Bottom_Level;
 
-    // Rebuild the top-level acceleration structure
-    Top_Level_Rebuild (&World_Bottom_Level, &Figures);
+    // Batch all BLAS + TLAS rebuilds into a single command buffer submission
+    Acceleration_Rebuild_All (&World_Bottom_Level, &Figures);
 
     // Adaptive quality budget — frame-time targets per quality tier (seconds)
     float Target_Frame_Time;
@@ -11650,6 +11652,128 @@ void Top_Level_Rebuild (Acceleration_Structure *World, Figure_Pool *Pool) {
   VK_CHECK (vkQueueWaitIdle (Queue));
 
 } // Top_Level_Rebuild
+
+// ═══════════════════════════════
+//   Figure_BLAS_Record
+// ═══════════════════════════════
+//
+// Record a figure's BLAS rebuild into an existing command buffer. Caller is responsible for
+// begin/end/submit. This enables batching multiple BLAS + TLAS builds into one submission.
+
+void Figure_BLAS_Record (Figure_Instance *Fig, VkCommandBuffer Cmd) {
+  if (not Fig->Figure.Vertex_Count or not Fig->Bottom_Level.Handle) return;
+  const void *Vertex_Source = Fig->Transformed_Vertices ? (const void *)Fig->Transformed_Vertices
+                                                           : (const void *)Fig->Current_Vertices;
+  if (Vertex_Source) Buffer_Upload (Fig->Vertex_Buffer, Vertex_Source, sizeof (Vertex) * Fig->Figure.Vertex_Count);
+
+  VkAccelerationStructureGeometryKHR Geometry = {
+    .sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR, .geometryType = VK_GEOMETRY_TYPE_TRIANGLES_KHR,
+    .flags = VK_GEOMETRY_OPAQUE_BIT_KHR,
+    .geometry.triangles = {.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_TRIANGLES_DATA_KHR,
+      .vertexFormat = VK_FORMAT_R32G32B32_SFLOAT, .vertexData.deviceAddress = Fig->Vertex_Buffer.Address,
+      .vertexStride = sizeof (Vertex), .maxVertex = Fig->Figure.Vertex_Count - 1,
+      .indexType = VK_INDEX_TYPE_UINT32, .indexData.deviceAddress = Fig->Index_Buffer.Address}};
+
+  VkAccelerationStructureBuildGeometryInfoKHR Build_Info = {
+    .sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR,
+    .type = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR,
+    .flags = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_BUILD_BIT_KHR | VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_UPDATE_BIT_KHR,
+    .mode = VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR,
+    .dstAccelerationStructure = Fig->Bottom_Level.Handle,
+    .scratchData.deviceAddress = Fig->Bottom_Level_Scratch.Address,
+    .geometryCount = 1, .pGeometries = &Geometry};
+
+  VkAccelerationStructureBuildRangeInfoKHR Range = {.primitiveCount = Fig->Figure.Triangle_Count};
+  const VkAccelerationStructureBuildRangeInfoKHR *Range_Pointer = &Range;
+  vkCmdBuildAccelerationStructures (Cmd, 1, &Build_Info, &Range_Pointer);
+}
+
+// ═══════════════════════════════
+//   Top_Level_Record
+// ═══════════════════════════════
+//
+// Record a TLAS rebuild into an existing command buffer. Does NOT submit or wait.
+
+void Top_Level_Record (Acceleration_Structure *World, Figure_Pool *Pool, VkCommandBuffer Cmd) {
+  VkAccelerationStructureInstanceKHR Instances[1 + FIGURE_POOL_MAX];
+  memset (&Instances[0], 0, sizeof Instances[0]);
+  Instances[0].transform.matrix[0][0] = 1.f; Instances[0].transform.matrix[1][1] = 1.f; Instances[0].transform.matrix[2][2] = 1.f;
+  Instances[0].mask = 0xFF; Instances[0].instanceCustomIndex = 0;
+  Instances[0].flags = VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR;
+  Instances[0].accelerationStructureReference = World->Address;
+  uint N = 1;
+  for (uint I = 0; I < FIGURE_POOL_MAX and N < 1 + FIGURE_POOL_MAX; I++) {
+    if (not Pool->Active[I]) continue;
+    Figure_Instance *F = &Pool->Slots[I];
+    if (not F->Bottom_Level.Handle) continue;
+    uint Is_Weapon_Bit = (F->Ray_Mask == 0x01) ? 0x100u : 0u;
+    uint Custom_Index = (I + 1) | Is_Weapon_Bit | (F->Texture_Base_Index << 9);
+    memset (&Instances[N], 0, sizeof Instances[N]);
+    memcpy (&Instances[N].transform, F->TLAS_Transform, sizeof (float) * 12);
+    Instances[N].mask = F->Ray_Mask; Instances[N].instanceCustomIndex = Custom_Index;
+    Instances[N].flags = VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR;
+    Instances[N].accelerationStructureReference = F->Bottom_Level.Address;
+    N++;
+  }
+  Buffer_Upload (Top_Level_Instance_Buffer, Instances, sizeof (VkAccelerationStructureInstanceKHR) * N);
+
+  VkAccelerationStructureGeometryKHR Geometry = {
+    .sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR, .geometryType = VK_GEOMETRY_TYPE_INSTANCES_KHR,
+    .flags = VK_GEOMETRY_OPAQUE_BIT_KHR,
+    .geometry.instances = {.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_INSTANCES_DATA_KHR,
+      .arrayOfPointers = VK_FALSE, .data.deviceAddress = Top_Level_Instance_Buffer.Address}};
+
+  static int Prev_N = 0;
+  int Need_Full = (Prev_N != (int)N); Prev_N = (int)N;
+  VkAccelerationStructureBuildGeometryInfoKHR Build_Info = {
+    .sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR,
+    .type = VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR,
+    .flags = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_BUILD_BIT_KHR | VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_UPDATE_BIT_KHR,
+    .mode = Need_Full ? VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR : VK_BUILD_ACCELERATION_STRUCTURE_MODE_UPDATE_KHR,
+    .srcAccelerationStructure = Need_Full ? VK_NULL_HANDLE : Top_Level.Handle,
+    .dstAccelerationStructure = Top_Level.Handle,
+    .scratchData.deviceAddress = Top_Level_Scratch_Buffer.Address,
+    .geometryCount = 1, .pGeometries = &Geometry};
+
+  VkAccelerationStructureBuildRangeInfoKHR Range = {.primitiveCount = N};
+  const VkAccelerationStructureBuildRangeInfoKHR *Range_Pointer = &Range;
+  vkCmdBuildAccelerationStructures (Cmd, 1, &Build_Info, &Range_Pointer);
+}
+
+// ═══════════════════════════════════
+//   Acceleration_Rebuild_All
+// ═══════════════════════════════════
+//
+// Batch all per-frame BLAS rebuilds + TLAS rebuild into a single command buffer submission.
+// Eliminates 2-3 vkQueueWaitIdle round-trips per frame (massive win on software Vulkan).
+
+void Acceleration_Rebuild_All (Acceleration_Structure *World, Figure_Pool *Pool) {
+  VK_CHECK (vkResetCommandBuffer (Command_Buffer, 0));
+  VK_CHECK (vkBeginCommandBuffer (Command_Buffer, &(VkCommandBufferBeginInfo){
+    .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO, .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT}));
+
+  // Record all active figure BLAS rebuilds
+  for (uint I = 0; I < FIGURE_POOL_MAX; I++)
+    if (Pool->Active[I] and Pool->Slots[I].Bottom_Level.Handle)
+      Figure_BLAS_Record (&Pool->Slots[I], Command_Buffer);
+
+  // Memory barrier: BLAS builds must complete before TLAS reads their device addresses
+  VkMemoryBarrier AS_Barrier = {VK_STRUCTURE_TYPE_MEMORY_BARRIER, NULL,
+    VK_ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR, VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR};
+  vkCmdPipelineBarrier (Command_Buffer,
+    VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
+    VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
+    0, 1, &AS_Barrier, 0, NULL, 0, NULL);
+
+  // Record TLAS rebuild
+  Top_Level_Record (World, Pool, Command_Buffer);
+
+  VK_CHECK (vkEndCommandBuffer (Command_Buffer));
+  VK_CHECK (vkQueueSubmit (Queue, 1, &(VkSubmitInfo){
+    .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO, .commandBufferCount = 1, .pCommandBuffers = &Command_Buffer},
+    VK_NULL_HANDLE));
+  VK_CHECK (vkQueueWaitIdle (Queue));
+}
 
 // ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 //
