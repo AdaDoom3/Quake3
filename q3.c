@@ -892,8 +892,119 @@ struct {
   uint                                 Max_Ray_Recursion; // maxRayRecursionDepth from RT properties
 } Device_Limits;
 
+// ── VK_EXT_debug_utils ─────────────────────────────────────────────────────────
+//
+// Vulkan's debug utilities extension provides three orthogonal debugging aids:
+//
+//   1. Debug Messenger    — Structured callback that receives validation errors,
+//                           performance warnings, and driver info messages with
+//                           severity/type classification.  Replaces the deprecated
+//                           VK_EXT_debug_report.  We install this at instance
+//                           creation when --validation is active.
+//
+//   2. Object Names       — Associates a human-readable UTF-8 string with any
+//                           Vulkan handle via vkSetDebugUtilsObjectNameEXT.
+//                           These names appear in validation messages, RenderDoc
+//                           captures, and GPU crash dumps (AMD GPUOpen, NVIDIA
+//                           Aftermath).  We tag every VkImage, VkBuffer, VkPipeline,
+//                           VkCommandBuffer, VkQueue, VkDescriptorSet, and
+//                           VkSwapchainKHR at creation time.
+//
+//   3. Command Labels     — Hierarchical markers inserted into command buffers via
+//                           vkCmdBeginDebugUtilsLabelEXT / vkCmdEndDebugUtilsLabelEXT.
+//                           These create named regions in GPU profilers (RenderDoc,
+//                           NVIDIA Nsight, AMD RGP) and appear in GPU hang logs.
+//                           We bracket every major rendering pass: ray tracing,
+//                           denoising, post-processing, presentation.
+//
+// Function pointers are loaded from the instance (not the device) because the
+// debug messenger is an instance-level object.  Object naming and command labels
+// are device-level but still loaded via vkGetInstanceProcAddr per the spec.
+//
+// All three are no-ops when validation is disabled: function pointers stay NULL
+// and the VK_NAME / VK_CMD_BEGIN / VK_CMD_END macros short-circuit.
+
+VkDebugUtilsMessengerEXT Debug_Messenger = VK_NULL_HANDLE;
+
+// Instance-level function pointers for VK_EXT_debug_utils
+PFN_vkSetDebugUtilsObjectNameEXT    pfn_vkSetDebugUtilsObjectNameEXT    = NULL;
+PFN_vkCmdBeginDebugUtilsLabelEXT    pfn_vkCmdBeginDebugUtilsLabelEXT    = NULL;
+PFN_vkCmdEndDebugUtilsLabelEXT      pfn_vkCmdEndDebugUtilsLabelEXT      = NULL;
+PFN_vkCmdInsertDebugUtilsLabelEXT   pfn_vkCmdInsertDebugUtilsLabelEXT   = NULL;
+PFN_vkCreateDebugUtilsMessengerEXT  pfn_vkCreateDebugUtilsMessengerEXT  = NULL;
+PFN_vkDestroyDebugUtilsMessengerEXT pfn_vkDestroyDebugUtilsMessengerEXT = NULL;
+
+// ── VK_NAME: Tag a Vulkan object with a human-readable debug name ────────────
+//
+// Usage:  VK_NAME (VK_OBJECT_TYPE_IMAGE, my_image, "Aztec diffuse #%u", slot);
+//
+// This name will appear in:
+//   - Validation layer messages referencing this object
+//   - RenderDoc resource browser and pipeline state viewer
+//   - NVIDIA Nsight Graphics object inspector
+//   - AMD GPU crash dump analysis (Radeon GPU Profiler)
+//   - VK_ERROR_DEVICE_LOST extended diagnostics (VK_EXT_device_fault)
+//
+// Cost: one vkSetDebugUtilsObjectNameEXT call (~50 ns on NVIDIA, zero on lavapipe).
+// Compiles to nothing when validation is off (pfn == NULL guard).
+#define VK_NAME(Object_Type, Handle, Fmt, ...) do { \
+  if (pfn_vkSetDebugUtilsObjectNameEXT) { \
+    char _Dbg_Name[256]; snprintf (_Dbg_Name, sizeof _Dbg_Name, Fmt, ##__VA_ARGS__); \
+    pfn_vkSetDebugUtilsObjectNameEXT (Device, &(VkDebugUtilsObjectNameInfoEXT){ \
+      .sType        = VK_STRUCTURE_TYPE_DEBUG_UTILS_OBJECT_NAME_INFO_EXT, \
+      .objectType   = (Object_Type), \
+      .objectHandle = (uint64_t)(Handle), \
+      .pObjectName  = _Dbg_Name}); \
+  } \
+} while (0)
+
+// ── VK_CMD_BEGIN / VK_CMD_END: Bracket a GPU pass with a named debug label ───
+//
+// These create hierarchical regions in GPU profilers:
+//
+//   VK_CMD_BEGIN (Cmd, 0.2f, 0.8f, 0.2f, "Ray Tracing — %ux%u @ %u spp", W, H, SPP);
+//     vkCmdTraceRays (...);
+//   VK_CMD_END (Cmd);
+//
+// The color (R, G, B) is arbitrary but conventionally:
+//   Green  = ray tracing / compute    (0.2, 0.8, 0.2)
+//   Blue   = transfer / upload        (0.2, 0.2, 0.8)
+//   Yellow = post-processing          (0.8, 0.8, 0.2)
+//   Red    = synchronisation / fence   (0.8, 0.2, 0.2)
+//   Cyan   = denoising                (0.2, 0.8, 0.8)
+//
+// Nesting is allowed and encouraged: outer labels group phases, inner labels
+// distinguish sub-passes within each phase.
+#define VK_CMD_BEGIN(Cmd, R, G, B, Fmt, ...) do { \
+  if (pfn_vkCmdBeginDebugUtilsLabelEXT) { \
+    char _Lbl[256]; snprintf (_Lbl, sizeof _Lbl, Fmt, ##__VA_ARGS__); \
+    pfn_vkCmdBeginDebugUtilsLabelEXT (Cmd, &(VkDebugUtilsLabelEXT){ \
+      .sType      = VK_STRUCTURE_TYPE_DEBUG_UTILS_LABEL_EXT, \
+      .pLabelName = _Lbl, \
+      .color      = {R, G, B, 1.f}}); \
+  } \
+} while (0)
+
+#define VK_CMD_END(Cmd) do { \
+  if (pfn_vkCmdEndDebugUtilsLabelEXT) pfn_vkCmdEndDebugUtilsLabelEXT (Cmd); \
+} while (0)
+
+// ── VK_CMD_INSERT: One-shot marker (no matching End) ─────────────────────────
+//
+// Useful for marking individual dispatch calls, barrier points, or pipeline
+// transitions.  Shows as a single-point event in RenderDoc's event browser.
+#define VK_CMD_INSERT(Cmd, R, G, B, Fmt, ...) do { \
+  if (pfn_vkCmdInsertDebugUtilsLabelEXT) { \
+    char _Lbl[256]; snprintf (_Lbl, sizeof _Lbl, Fmt, ##__VA_ARGS__); \
+    pfn_vkCmdInsertDebugUtilsLabelEXT (Cmd, &(VkDebugUtilsLabelEXT){ \
+      .sType      = VK_STRUCTURE_TYPE_DEBUG_UTILS_LABEL_EXT, \
+      .pLabelName = _Lbl, \
+      .color      = {R, G, B, 1.f}}); \
+  } \
+} while (0)
+
 // BLAS for world geometry and TLAS combining all instances
-Acceleration_Structure Bottom_Level, Top_Level; 
+Acceleration_Structure Bottom_Level, Top_Level;
 
 // GPU storage images and scene data buffers
 GPU_Buffer Vertex_Buffer, Index_Buffer, Material_Buffer; // Scene geometry and material data on GPU
@@ -1909,6 +2020,76 @@ _Static_assert (sizeof (VBSP_Tex_Data)   == 32,  "VBSP_Tex_Data must be 32 bytes
 _Static_assert (sizeof (VBSP_Disp_Info)  == 176, "VBSP_Disp_Info must be 176 bytes");
 _Static_assert (sizeof (VBSP_Disp_Vert)  == 20,  "VBSP_Disp_Vert must be 20 bytes");
 
+// ── Vulkan resource type size assertions ─────────────────────────────────────
+//
+// These verify that Vulkan handles and key driver types match expected pointer
+// sizes.  The Vulkan spec defines handles as either pointers (dispatchable) or
+// uint64_t (non-dispatchable).  Getting this wrong corrupts the SBT, descriptor
+// writes, and the TLSF heap's reinterpret casts.
+//
+// Dispatchable handles (VkInstance, VkPhysicalDevice, VkDevice, VkCommandBuffer,
+// VkQueue) are pointers on the host architecture.  Non-dispatchable handles
+// (VkImage, VkBuffer, VkDeviceMemory, VkPipeline, etc.) are always uint64_t
+// regardless of host pointer size (Vulkan spec §3.3).
+_Static_assert (sizeof (VkImage)        == sizeof (uint64_t), "VkImage must be uint64_t (non-dispatchable handle)");
+_Static_assert (sizeof (VkBuffer)       == sizeof (uint64_t), "VkBuffer must be uint64_t (non-dispatchable handle)");
+_Static_assert (sizeof (VkDeviceMemory) == sizeof (uint64_t), "VkDeviceMemory must be uint64_t (non-dispatchable handle)");
+_Static_assert (sizeof (VkImageView)    == sizeof (uint64_t), "VkImageView must be uint64_t (non-dispatchable handle)");
+_Static_assert (sizeof (VkPipeline)     == sizeof (uint64_t), "VkPipeline must be uint64_t (non-dispatchable handle)");
+
+// ── GPU Heap structural invariants ───────────────────────────────────────────
+//
+// The TLSF allocator's correctness depends on block indices fitting in int16_t
+// (the free-list and physical-neighbor links are int16_t), and on the second-level
+// subdivision count matching the bitmap width.  These are compile-time invariants
+// that prevent silent corruption if someone tweaks the constants.
+_Static_assert (GPU_HEAP_MAX_BLOCKS    <= 32767,   "GPU_HEAP_MAX_BLOCKS must fit in int16_t for free-list links");
+_Static_assert (GPU_HEAP_SL_COUNT      == 16,      "GPU_HEAP_SL_COUNT must be 16 (2^SL_BITS) for bitmap scanning");
+_Static_assert (GPU_HEAP_FL_BITS       <= 32,      "GPU_HEAP_FL_BITS must fit in a uint32_t FL_Bitmap");
+_Static_assert (GPU_HEAP_MIN_SIZE      >= 64,      "GPU_HEAP_MIN_SIZE must be >= 64 to accommodate alignment padding splits");
+_Static_assert (GPU_HEAP_DEFAULT_SIZE  >= (1u<<20), "GPU_HEAP_DEFAULT_SIZE must be >= 1 MB for meaningful sub-allocation");
+_Static_assert (sizeof (GPU_Heap_Block) == 32,     "GPU_Heap_Block must be 32 bytes (2 uint64_t + 5 int16_t + 2 uint8_t, padded to 8-byte alignment)");
+
+// ── Engine data structure invariants ─────────────────────────────────────────
+//
+// These verify that the interleaved vertex layout matches the GPU shader input
+// exactly.  The ray-tracing closest-hit shader indexes into the vertex buffer
+// using sizeof(Vertex) as the stride.  If the struct packs differently, every
+// UV lookup, normal fetch, and position read will be garbage.
+_Static_assert (sizeof (Vertex)           == 48,    "Vertex must be 48 bytes (3×vec4 with padding for GPU alignment)");
+_Static_assert (sizeof (vec3)             == 12,    "vec3 must be 12 bytes (3 floats, no padding)");
+_Static_assert (sizeof (vec4)             == 16,    "vec4 must be 16 bytes (4 floats)");
+_Static_assert (sizeof (mat4)             == 64,    "mat4 must be 64 bytes (16 floats)");
+
+// ── Array size cross-checks ──────────────────────────────────────────────────
+//
+// Prevent silent index-out-of-range bugs where one constant is changed but its
+// dependent constant is not.  These are the "you changed X but forgot Y" guards.
+_Static_assert (FIGURE_MAX_BONES         <= 256,    "FIGURE_MAX_BONES must fit in uint8_t bone indices (VVD_Vertex.Bone_Ids)");
+_Static_assert (FIGURE_MAX_PARTS         <= 16,     "FIGURE_MAX_PARTS must fit in a 4-bit field for packing");
+_Static_assert (FIGURE_MAX_TAGS          <= 32,     "FIGURE_MAX_TAGS must be small enough for linear scan lookup");
+_Static_assert (ANIM_MAX_LAYERS          == 4,      "ANIM_MAX_LAYERS must be 4 (base, overlay, additive, death)");
+_Static_assert (IK_MAX_CHAINS            <= 16,     "IK_MAX_CHAINS must be <= 16 for bitmask operations");
+_Static_assert (WEAPON_MAX_TEXTURES      <= 64,     "WEAPON_MAX_TEXTURES must fit in 6-bit texture index field");
+// Note: FIGURE_POOL_MAX is defined in §2 Types — its static assert is placed after its definition
+_Static_assert (SWAPCHAIN_MAX_IMAGES     <= 16,     "SWAPCHAIN_MAX_IMAGES must be reasonable (typical: 2-4)");
+_Static_assert (DESCRIPTOR_TEXTURE_SLOTS >= 512,    "DESCRIPTOR_TEXTURE_SLOTS must accommodate BSP + weapon + PBR textures");
+_Static_assert (MAX_PROJECTILES          <= 256,    "MAX_PROJECTILES must fit in uint8_t pool index");
+_Static_assert (MAX_AUDIO_BUFFERS        <= 64,     "MAX_AUDIO_BUFFERS must be reasonable for OpenAL");
+_Static_assert (MAX_AUDIO_SOURCES        <= 32,     "MAX_AUDIO_SOURCES must be <= hardware AL source limit");
+
+// ── Rendering parameter sanity ───────────────────────────────────────────────
+//
+// These prevent nonsensical rendering configurations that would produce
+// undefined behaviour in the shaders or projection math.
+_Static_assert (NEAR_CLIP > 0.0f,                   "NEAR_CLIP must be strictly positive (zero causes divide-by-zero in projection)");
+_Static_assert (FAR_CLIP  > NEAR_CLIP,              "FAR_CLIP must be greater than NEAR_CLIP");
+_Static_assert (MINIMUM_WINDOW_SIZE >= 64,          "MINIMUM_WINDOW_SIZE must be >= 64 for readable UI");
+
+// ── Animation system consistency ─────────────────────────────────────────────
+_Static_assert (sizeof (Animation_Layer)  == 32,    "Animation_Layer must be 32 bytes for cache-line-friendly arrays");
+_Static_assert (sizeof (IK_Chain)         == 40,    "IK_Chain must be 40 bytes (4 ints + 3 floats + 2 floats + 1 int, padded)");
+
 // Per-frame camera state uploaded to the GPU as a uniform buffer
 typedef struct {
   vec3  Position, Velocity;               // World-space eye position and movement velocity
@@ -2434,6 +2615,7 @@ typedef struct {
 // Rust arenas, Bungie Destiny engine, etc.)
 
 #define FIGURE_POOL_MAX 64  // Maximum concurrent figures (world entities + weapon + props)
+_Static_assert (FIGURE_POOL_MAX <= 128, "FIGURE_POOL_MAX must fit in the TLAS instance array (1 + FIGURE_POOL_MAX)");
 
 // Opaque handle to a figure slot — encodes index + generation for safe ABA-free lookup
 typedef struct {
@@ -4861,10 +5043,21 @@ mat4 View (vec3 Position, float Yaw, float Pitch) {
 // ═════════════════
 
 void Buffer_Upload (GPU_Buffer Destination, const void *Data, uint64_t Size) {
+  // Preconditions: Data pointer must be valid, Size must be > 0 and not exceed the buffer's
+  // allocated capacity, and the buffer must have been successfully allocated (non-null handle).
+  assert (Data                          and "Buffer_Upload: source data pointer is NULL");
+  assert (Size > 0                      and "Buffer_Upload: upload size must be > 0");
+  assert (Size <= Destination.Size      and "Buffer_Upload: upload size exceeds buffer capacity");
+  assert (Destination.Buffer            and "Buffer_Upload: buffer handle is VK_NULL_HANDLE (allocation failed?)");
+  assert (Destination.Memory            and "Buffer_Upload: memory handle is VK_NULL_HANDLE (binding failed?)");
+
   if (Destination.Heap_Block >= 0) {
+    // Invariant: sub-allocated blocks must reference a valid slab within bounds
+    assert (Heap.Blocks[Destination.Heap_Block].Slab < (int16_t)Heap.Slab_Count
+            and "Buffer_Upload: heap block references out-of-range slab index");
     // Sub-allocated from TLSF heap — use the slab's persistent mapping + offset
     GPU_Heap_Slab *S = &Heap.Slabs[Heap.Blocks[Destination.Heap_Block].Slab];
-    assert (S->Mapped and "Buffer_Upload on non-host-visible sub-allocation");
+    assert (S->Mapped and "Buffer_Upload on non-host-visible sub-allocation — slab memory was not mapped");
     memcpy (S->Mapped + Destination.Offset, Data, Size);
   } else {
     // Standalone allocation — map/unmap the entire VkDeviceMemory
@@ -4880,11 +5073,25 @@ void Buffer_Upload (GPU_Buffer Destination, const void *Data, uint64_t Size) {
 // ════════════════════
 
 uint Find_Memory_Type (uint Type_Bits, VkMemoryPropertyFlags Desired_Properties) {
+  // Precondition: Type_Bits must have at least one bit set (vkGetBufferMemoryRequirements/
+  // vkGetImageMemoryRequirements always set at least one bit — if zero, the caller is
+  // passing an uninitialised VkMemoryRequirements struct).
+  assert (Type_Bits != 0 and "Find_Memory_Type: Type_Bits is zero — uninitialised VkMemoryRequirements?");
   for (uint Index = 0; Index < Device_Limits.Memory.memoryTypeCount; Index++)
     if ((Type_Bits >> Index & 1) and (Device_Limits.Memory.memoryTypes[Index].propertyFlags & Desired_Properties) == Desired_Properties)
       return Index;
 
-  assert (0 and "no matching memory type");
+  // Postcondition failure: no memory type satisfies both the type mask and the property flags.
+  // This typically means the device doesn't have HOST_VISIBLE + HOST_COHERENT memory (unlikely
+  // but possible on exotic hardware), or DEVICE_LOCAL is unavailable.
+  fprintf (stderr, "[memory] FATAL: no memory type matches Type_Bits=0x%x, Properties=0x%x\n"
+                   "         Available types: %u\n", Type_Bits, Desired_Properties,
+           Device_Limits.Memory.memoryTypeCount);
+  for (uint I = 0; I < Device_Limits.Memory.memoryTypeCount; I++)
+    fprintf (stderr, "         type %u: flags=0x%x (heap %u)\n", I,
+             Device_Limits.Memory.memoryTypes[I].propertyFlags,
+             Device_Limits.Memory.memoryTypes[I].heapIndex);
+  assert (0 and "Find_Memory_Type: no matching memory type — see diagnostics above");
   return 0;
 }
 
@@ -4893,6 +5100,12 @@ uint Find_Memory_Type (uint Type_Bits, VkMemoryPropertyFlags Desired_Properties)
 // ═══════════════════
 
 GPU_Buffer Buffer_Allocate (uint64_t Size, VkBufferUsageFlags Usage, VkMemoryPropertyFlags Memory_Flags) {
+  // Preconditions: Size must be non-zero (Vulkan spec §12.1: "size must be greater than 0"),
+  // Device must be a valid logical device handle, and Usage must have at least one bit set.
+  assert (Size > 0          and "Buffer_Allocate: size must be > 0 (Vulkan spec §12.1)");
+  assert (Device             and "Buffer_Allocate: Device must be initialised before allocating buffers");
+  assert (Usage             and "Buffer_Allocate: Usage must have at least one usage bit set");
+
   GPU_Buffer Result = {.Size = Size, .Heap_Block = -1};
 
   // Create the Vulkan buffer object
@@ -5015,7 +5228,10 @@ GPU_Buffer Buffer_Stage_Upload (VkCommandBuffer    Command_Buffer,
 // ════════════════
 
 Arena Arena_Create (uint64_t Capacity) {
-  return (Arena){.Base = (uint8_t *)malloc (Capacity), .Used = 0, .Capacity = Capacity};
+  assert (Capacity > 0 and "Arena_Create: capacity must be > 0");
+  Arena A = {.Base = (uint8_t *)malloc (Capacity), .Used = 0, .Capacity = Capacity};
+  assert (A.Base and "Arena_Create: malloc failed — out of host memory");
+  return A;
 }
 
 // ══════════════
@@ -5023,6 +5239,11 @@ Arena Arena_Create (uint64_t Capacity) {
 // ══════════════
 
 void *Arena_Alloc (Arena *A, uint64_t Size, uint64_t Align) {
+  // Preconditions: arena must be valid, alignment must be a power of two
+  assert (A       and "Arena_Alloc: arena pointer is NULL");
+  assert (A->Base and "Arena_Alloc: arena backing memory is NULL — was Arena_Create called?");
+  assert (Align > 0 and (Align & (Align - 1)) == 0
+          and "Arena_Alloc: alignment must be a non-zero power of two");
   uint64_t Mask   = Align - 1;
   uint64_t Cursor = (A->Used + Mask) & ~Mask;
   if (Cursor + Size > A->Capacity) return NULL;
@@ -5817,6 +6038,16 @@ int GPU_Heap_Alloc (GPU_Heap *H, uint64_t Size, uint64_t Alignment, int Is_Image
                     VkMemoryPropertyFlags Mem_Flags, uint Type_Bits,
                     VkDeviceMemory *Out_Memory, uint64_t *Out_Offset, uint8_t **Out_Mapped) {
 
+  // Preconditions: heap must be initialised, output pointers must be valid,
+  // alignment must be a power of two (Vulkan spec §12.7: "alignment must be a
+  // power of two"), and Type_Bits must have at least one memory type set.
+  assert (H                                      and "GPU_Heap_Alloc: heap pointer is NULL");
+  assert (Out_Memory                             and "GPU_Heap_Alloc: Out_Memory pointer is NULL");
+  assert (Out_Offset                             and "GPU_Heap_Alloc: Out_Offset pointer is NULL");
+  assert (Alignment > 0 and (Alignment & (Alignment - 1)) == 0
+          and "GPU_Heap_Alloc: alignment must be a non-zero power of two (Vulkan spec §12.7)");
+  assert (Type_Bits != 0                         and "GPU_Heap_Alloc: Type_Bits must have at least one bit set");
+
   if (Size < GPU_HEAP_MIN_SIZE) Size = GPU_HEAP_MIN_SIZE;
 
   // Vulkan spec §12.7.1: when buffer and image resources share a memory page,
@@ -6263,12 +6494,22 @@ void Figure_Pool_Init (Figure_Pool *Pool) {
 // ════════════════════════
 
 Figure_Handle Figure_Pool_Alloc (Figure_Pool *Pool, Figure_Instance **Out) {
+  // Preconditions
+  assert (Pool and "Figure_Pool_Alloc: pool pointer is NULL");
+  assert (Out  and "Figure_Pool_Alloc: output pointer is NULL");
   if (Pool->Free_Count == 0) {printf ("[pool] FULL — %u slots exhausted\n", FIGURE_POOL_MAX); *Out = NULL; return FIGURE_HANDLE_NULL;}
+  // Invariant: free count must never exceed max
+  assert (Pool->Free_Count <= FIGURE_POOL_MAX and "Figure_Pool_Alloc: Free_Count exceeds FIGURE_POOL_MAX — corruption");
   uint Index = Pool->Free_Stack[--Pool->Free_Count];
+  // Postcondition of pop: index must be within bounds
+  assert (Index < FIGURE_POOL_MAX and "Figure_Pool_Alloc: popped index out of range — free stack corrupted");
+  assert (not Pool->Active[Index] and "Figure_Pool_Alloc: slot already active — double allocation");
   memset (&Pool->Slots[Index], 0, sizeof (Figure_Instance));
   Pool->Active[Index] = 1;
   Pool->Active_Count++;
   *Out = &Pool->Slots[Index];
+  // Postcondition: active count must not exceed total pool size
+  assert (Pool->Active_Count <= FIGURE_POOL_MAX and "Figure_Pool_Alloc: Active_Count exceeds pool capacity");
   return (Figure_Handle){.Index = Index, .Generation = Pool->Generations[Index]};
 }
 
@@ -6435,14 +6676,69 @@ GPU_Image Image_Storage_Create (uint Width, uint Height) {
 
 } // Image_Storage_Create
 
-// ══════════════════════════════
-//   Texture_Upload_With_Format
-// ══════════════════════════════
+// ══════════════════════════════════════════════════════════════════════════════════════
+//   Texture Upload — Batched Transfer Pipeline
+// ══════════════════════════════════════════════════════════════════════════════════════
+//
+// Texture uploads are the dominant bottleneck during scene initialisation.  The naive
+// approach — one vkQueueSubmit + vkQueueWaitIdle per texture — serialises every GPU
+// transfer behind a full pipeline drain.  On lavapipe (software Vulkan) each sync costs
+// milliseconds; with 300+ PBR texture slots the load time balloons to minutes.
+//
+// The batched pipeline records all layout transitions and buffer→image copies into a
+// single command buffer.  Staging buffers are retained in a deferred-free list until
+// the batch is flushed.  One submit, one wait, one cleanup — O(1) syncs regardless
+// of texture count.
+//
+//   Texture_Upload_Begin  — reset the command buffer and begin recording
+//   Texture_Upload_Record — create image, allocate, stage, record copy + barriers
+//   Texture_Upload_Flush  — submit once, wait once, free all staging buffers
+//
+// The legacy Texture_Upload_With_Format wrapper calls all three for callers that upload
+// a single texture outside the batch window (weapon textures, fallbacks, etc.).
 
-void Texture_Upload_With_Format (VkCommandBuffer Command_Buffer, VkQueue Queue,
-                                 const uint8_t *Pixels, uint Width, uint Height, VkFormat Format,
-                                 VkImage *Out_Image, VkDeviceMemory *Out_Memory, VkImageView *Out_View,
-                                 int *Out_Heap_Block) {
+#define TEXTURE_BATCH_MAX 512
+static GPU_Buffer Texture_Batch_Staging [TEXTURE_BATCH_MAX];
+static int        Texture_Batch_Count = 0;
+static int        Texture_Batch_Active = 0;
+static int        Texture_Upload_Total = 0; // Monotonic count of all texture uploads (debugging)
+
+void Texture_Upload_Begin (VkCommandBuffer Command_Buffer) {
+  Texture_Batch_Count  = 0;
+  Texture_Batch_Active = 1;
+  VK_CHECK (vkResetCommandBuffer (Command_Buffer, 0));
+  VK_CHECK (vkBeginCommandBuffer (/*commandBuffer =>*/ Command_Buffer,
+                                  /*pBeginInfo    =>*/ &(VkCommandBufferBeginInfo){
+                                    .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+                                    .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT}));
+}
+
+void Texture_Upload_Record (VkCommandBuffer Command_Buffer,
+                            const uint8_t *Pixels, uint Width, uint Height, VkFormat Format,
+                            VkImage *Out_Image, VkDeviceMemory *Out_Memory, VkImageView *Out_View,
+                            int *Out_Heap_Block) {
+
+  // Preconditions: all inputs and output pointers must be valid.
+  // Width and Height must be non-zero and within device maxImageDimension2D.
+  // The batch must be active (caller either opened one or the wrapper does).
+  assert (Pixels                                 and "Texture_Upload_Record: pixel data pointer is NULL");
+  assert (Width > 0 and Height > 0               and "Texture_Upload_Record: dimensions must be > 0");
+  assert (Width <= 16384 and Height <= 16384      and "Texture_Upload_Record: dimensions exceed 16384 (unreasonable)");
+  assert (Out_Image                              and "Texture_Upload_Record: Out_Image pointer is NULL");
+  assert (Out_Memory                             and "Texture_Upload_Record: Out_Memory pointer is NULL");
+  assert (Out_View                               and "Texture_Upload_Record: Out_View pointer is NULL");
+  assert (Texture_Batch_Active                   and "Texture_Upload_Record: batch not active — call Texture_Upload_Begin first");
+  assert (Command_Buffer                         and "Texture_Upload_Record: Command_Buffer is VK_NULL_HANDLE");
+
+  int Upload_Id = ++Texture_Upload_Total;
+  printf ("[upload #%d] %ux%u fmt=%d, heap: %u/%u blocks, %u/%u slabs\n",
+          Upload_Id, Width, Height, Format, Heap.Block_Count, GPU_HEAP_MAX_BLOCKS,
+          Heap.Slab_Count, GPU_HEAP_MAX_SLABS);
+  fflush (stdout);
+
+  // Step-by-step diagnostic to isolate crash point (remove when bug is fixed)
+  #define UPLOAD_STEP(Step) do { printf ("  [step %d] %s\n", Step, #Step); fflush (stdout); } while (0)
+  UPLOAD_STEP(1); // before vkCreateImage
 
   // Create the texture image with sampled and transfer-destination usage
   VkImage Image;
@@ -6461,34 +6757,61 @@ void Texture_Upload_With_Format (VkCommandBuffer Command_Buffer, VkQueue Queue,
                              .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED},
                            /*pAllocator  =>*/ NULL,
                            /*pImage      =>*/ &Image));
+  UPLOAD_STEP(2); // after vkCreateImage
 
-  // Sub-allocate device-local memory from the TLSF heap
+  // Sub-allocate device-local memory from the TLSF heap.
+  // Postcondition: Img_Block >= 0 guarantees Memory and Img_Offset are valid.
+  // If the heap is exhausted (block limit or slab limit), we crash clearly rather
+  // than proceeding with uninitialised handles — the alternative is a silent SEGFAULT
+  // deep inside vkBindImageMemory on a garbage VkDeviceMemory handle.
   VkMemoryRequirements Req;
   vkGetImageMemoryRequirements (Device, Image, &Req);
-  VkDeviceMemory Memory;
-  uint64_t       Img_Offset = 0;
-  uint8_t       *Mapped     = NULL;
-  int            Img_Block  = GPU_Heap_Alloc (&Heap, Req.size, Req.alignment, /*Is_Image=*/1,
-                                               VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, Req.memoryTypeBits,
-                                               &Memory, &Img_Offset, &Mapped);
+  VkDeviceMemory Memory      = VK_NULL_HANDLE;
+  uint64_t       Img_Offset  = 0;
+  uint8_t       *Mapped      = NULL;
+  int            Img_Block   = GPU_Heap_Alloc (/*Heap      =>*/ &Heap,
+                                                /*Size      =>*/ Req.size,
+                                                /*Alignment =>*/ Req.alignment,
+                                                /*Is_Image  =>*/ 1,
+                                                /*Mem_Flags =>*/ VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+                                                /*Type_Bits =>*/ Req.memoryTypeBits,
+                                                /*Out_Memory =>*/ &Memory,
+                                                /*Out_Offset =>*/ &Img_Offset,
+                                                /*Out_Mapped =>*/ &Mapped);
+  if (Img_Block < 0) {
+    fprintf (stderr, "[texture] FATAL: GPU_Heap_Alloc failed for texture image (%llu bytes, align %llu)\n"
+                     "          TLSF heap exhausted — %u/%u blocks, %u/%u slabs in use.\n"
+                     "          This typically means too many VkImage objects are live simultaneously.\n"
+                     "          Consider: (1) increasing GPU_HEAP_MAX_BLOCKS, (2) reducing texture count,\n"
+                     "          (3) freeing unused textures before loading new ones.\n",
+             (unsigned long long)Req.size, (unsigned long long)Req.alignment,
+             Heap.Block_Count, GPU_HEAP_MAX_BLOCKS, Heap.Slab_Count, GPU_HEAP_MAX_SLABS);
+    vkDestroyImage (Device, Image, NULL);
+    // Write sentinel values so the caller knows this slot is invalid
+    *Out_Image      = VK_NULL_HANDLE;
+    *Out_Memory     = VK_NULL_HANDLE;
+    *Out_View       = VK_NULL_HANDLE;
+    if (Out_Heap_Block) *Out_Heap_Block = -1;
+    return;
+  }
+  assert (Memory != VK_NULL_HANDLE and "GPU_Heap_Alloc returned success but Memory is VK_NULL_HANDLE");
+  UPLOAD_STEP(3); // after GPU_Heap_Alloc
   VK_CHECK (vkBindImageMemory (Device, Image, Memory, Img_Offset));
+  UPLOAD_STEP(4); // after vkBindImageMemory
 
-  // Stage the pixel data through a host-visible buffer
+  // Stage the pixel data through a host-visible buffer (retained until flush)
   uint64_t Byte_Size = (uint64_t)Width * Height * 4;
   GPU_Buffer Staging = Buffer_Allocate (/*Size         =>*/ Byte_Size,
                                         /*Usage        =>*/ VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
                                         /*Memory_Flags =>*/ VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT
                                                           | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+  UPLOAD_STEP(5); // after Buffer_Allocate
   Buffer_Upload (Staging, Pixels, Byte_Size);
+  UPLOAD_STEP(6); // after Buffer_Upload
+  if (Texture_Batch_Count < TEXTURE_BATCH_MAX)
+    Texture_Batch_Staging[Texture_Batch_Count++] = Staging;
 
-  // Record a command buffer that transitions the image and copies the staging data into it
-  VK_CHECK (vkResetCommandBuffer (Command_Buffer, 0));
-  VK_CHECK (vkBeginCommandBuffer (/*commandBuffer =>*/ Command_Buffer,
-                                  /*pBeginInfo    =>*/ &(VkCommandBufferBeginInfo){
-                                    .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
-                                    .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT}));
-
-  // Transition from undefined to transfer-destination for the copy
+  // Record layout transition: UNDEFINED → TRANSFER_DST
   Image_Layout_Barrier (/*Command_Buffer     =>*/ Command_Buffer,
                         /*Image              =>*/ Image,
                         /*Old_Layout         =>*/ VK_IMAGE_LAYOUT_UNDEFINED,
@@ -6498,7 +6821,8 @@ void Texture_Upload_With_Format (VkCommandBuffer Command_Buffer, VkQueue Queue,
                         /*Source_Stage       =>*/ VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
                         /*Destination_Stage  =>*/ VK_PIPELINE_STAGE_TRANSFER_BIT);
 
-  // Copy the staging buffer contents into the image
+  UPLOAD_STEP(7); // after first barrier
+  // Record the buffer → image copy
   vkCmdCopyBufferToImage (/*commandBuffer  =>*/ Command_Buffer,
                           /*srcBuffer      =>*/ Staging.Buffer,
                           /*dstImage       =>*/ Image,
@@ -6508,7 +6832,8 @@ void Texture_Upload_With_Format (VkCommandBuffer Command_Buffer, VkQueue Queue,
                             .imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
                             .imageExtent      = {Width, Height, 1}});
 
-  // Transition from transfer-destination to shader-read-only for sampling in ray tracing shaders
+  UPLOAD_STEP(8); // after copy
+  // Record layout transition: TRANSFER_DST → SHADER_READ_ONLY
   Image_Layout_Barrier (/*Command_Buffer     =>*/ Command_Buffer,
                         /*Image              =>*/ Image,
                         /*Old_Layout         =>*/ VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
@@ -6518,21 +6843,8 @@ void Texture_Upload_With_Format (VkCommandBuffer Command_Buffer, VkQueue Queue,
                         /*Source_Stage       =>*/ VK_PIPELINE_STAGE_TRANSFER_BIT,
                         /*Destination_Stage  =>*/ VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR);
 
-  // Submit the command buffer and wait for the transfer to complete
-  VK_CHECK (vkEndCommandBuffer (Command_Buffer));
-  VK_CHECK (vkQueueSubmit (/*queue       =>*/ Queue,
-                           /*submitCount =>*/ 1,
-                           /*pSubmits    =>*/ &(VkSubmitInfo){
-                             .sType              = VK_STRUCTURE_TYPE_SUBMIT_INFO,
-                             .commandBufferCount = 1,
-                             .pCommandBuffers    = &Command_Buffer},
-                           /*fence       =>*/ VK_NULL_HANDLE));
-  VK_CHECK (vkQueueWaitIdle (Queue));
-
-  // Release the staging buffer
-  Buffer_Destroy (&Staging);
-
-  // Create an image view for shader access
+  UPLOAD_STEP(9); // after second barrier
+  // Create the image view immediately (no GPU work — pure API object)
   VkImageView Image_View;
   VK_CHECK (vkCreateImageView (/*device      =>*/ Device,
                                /*pCreateInfo =>*/ &(VkImageViewCreateInfo){
@@ -6544,12 +6856,64 @@ void Texture_Upload_With_Format (VkCommandBuffer Command_Buffer, VkQueue Queue,
                                /*pAllocator  =>*/ NULL,
                                /*pView       =>*/ &Image_View));
 
-  // Set result output
   *Out_Image      = Image;
   *Out_Memory     = Memory;
   *Out_View       = Image_View;
   if (Out_Heap_Block) *Out_Heap_Block = Img_Block;
 
+  // Tag the image and view for GPU debuggers (RenderDoc, Nsight, RGP).
+  // The batch count serves as a monotonic texture index within the current session.
+  VK_NAME (VK_OBJECT_TYPE_IMAGE,      Image,      "Texture %ux%u (batch #%d)", Width, Height, Texture_Batch_Count - 1);
+  VK_NAME (VK_OBJECT_TYPE_IMAGE_VIEW, Image_View, "Texture View %ux%u (batch #%d)", Width, Height, Texture_Batch_Count - 1);
+}
+
+// Flush the current batch — submit, wait, free staging buffers
+void Texture_Upload_Flush (VkCommandBuffer Command_Buffer, VkQueue Queue) {
+  if (not Texture_Batch_Active) return;
+  if (Texture_Batch_Count == 0) { Texture_Batch_Active = 0; return; }
+  printf ("  [flush] ending cmd buffer...\n"); fflush(stdout);
+  VK_CHECK (vkEndCommandBuffer (Command_Buffer));
+  printf ("  [flush] submitting...\n"); fflush(stdout);
+  VK_CHECK (vkQueueSubmit (/*queue       =>*/ Queue,
+                           /*submitCount =>*/ 1,
+                           /*pSubmits    =>*/ &(VkSubmitInfo){
+                             .sType              = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+                             .commandBufferCount = 1,
+                             .pCommandBuffers    = &Command_Buffer},
+                           /*fence       =>*/ VK_NULL_HANDLE));
+  printf ("  [flush] waiting idle...\n"); fflush(stdout);
+  VK_CHECK (vkQueueWaitIdle (Queue));
+  printf ("  [flush] destroying %d staging buffers...\n", Texture_Batch_Count); fflush(stdout);
+  for (int I = 0; I < Texture_Batch_Count; I++)
+    Buffer_Destroy (&Texture_Batch_Staging[I]);
+  printf ("[textures] batch flush: %d staging buffers released\n", Texture_Batch_Count);
+  Texture_Batch_Count  = 0;
+  Texture_Batch_Active = 0;
+}
+
+// Flush if the batch exceeds a staging memory budget, then re-open the command buffer.
+// This prevents OOM when uploading hundreds of high-resolution textures.
+#define TEXTURE_BATCH_FLUSH_THRESHOLD 32
+void Texture_Upload_Flush_If_Full (VkCommandBuffer Command_Buffer, VkQueue Queue) {
+  if (Texture_Batch_Count >= TEXTURE_BATCH_FLUSH_THRESHOLD) {
+    Texture_Upload_Flush (Command_Buffer, Queue);
+    Texture_Upload_Begin (Command_Buffer);
+  }
+}
+
+// Legacy single-shot wrapper — begins, records, and flushes one texture upload.
+// Used by callers outside the batched window (weapon textures, runtime fallbacks).
+// When called inside a batch window, records and periodically flushes to bound staging memory.
+void Texture_Upload_With_Format (VkCommandBuffer Command_Buffer, VkQueue Queue,
+                                 const uint8_t *Pixels, uint Width, uint Height, VkFormat Format,
+                                 VkImage *Out_Image, VkDeviceMemory *Out_Memory, VkImageView *Out_View,
+                                 int *Out_Heap_Block) {
+  int Was_Batching = Texture_Batch_Active;
+  if (not Was_Batching) Texture_Upload_Begin (Command_Buffer);
+  Texture_Upload_Record (Command_Buffer, Pixels, Width, Height, Format,
+                         Out_Image, Out_Memory, Out_View, Out_Heap_Block);
+  if (Was_Batching) Texture_Upload_Flush_If_Full (Command_Buffer, Queue);
+  else              Texture_Upload_Flush (Command_Buffer, Queue);
 } // Texture_Upload_With_Format
 
 // ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
@@ -10519,6 +10883,17 @@ void Scene_Load_Textures (const Scene *Scene_Data) {
 
 void Weapon_Load_Textures (Figure_Instance *Weapon) {
 
+  // Preconditions: Weapon must be a valid figure instance with its model already loaded.
+  // Texture_Count must be set from BSP loading.  The global texture arrays must be allocated.
+  assert (Weapon                   and "Weapon_Load_Textures: Weapon pointer is NULL");
+  assert (Texture_Images           and "Weapon_Load_Textures: Texture_Images not allocated — BSP must load first");
+  assert (Texture_Views            and "Weapon_Load_Textures: Texture_Views not allocated");
+  assert (Texture_Memories         and "Weapon_Load_Textures: Texture_Memories not allocated");
+  assert (Texture_Heap_Blocks      and "Weapon_Load_Textures: Texture_Heap_Blocks not allocated");
+  assert (Texture_Count > 0        and "Weapon_Load_Textures: Texture_Count is 0 — no BSP textures loaded?");
+  assert (Texture_Count < DESCRIPTOR_TEXTURE_SLOTS
+          and "Weapon_Load_Textures: Texture_Count already at descriptor limit before weapon textures");
+
   // Record the starting index in the global texture array for this weapon's textures
   Weapon->Texture_Base_Index = Texture_Count;
 
@@ -10539,11 +10914,21 @@ void Weapon_Load_Textures (Figure_Instance *Weapon) {
   // Grow the global texture arrays to hold weapon PBR slots
   uint Weapon_PBR_Maps = Weapon_Tex_Count * 6;
   uint New_Total = Texture_Count + Weapon_PBR_Maps;
+  // Guard: the total must not exceed the bindless descriptor array limit.
+  // If it does, the descriptor write at binding 12 will overrun the allocated pool.
+  assert (New_Total <= DESCRIPTOR_TEXTURE_SLOTS
+          and "Weapon_Load_Textures: total texture count would exceed DESCRIPTOR_TEXTURE_SLOTS — "
+              "increase DESCRIPTOR_TEXTURE_SLOTS or reduce PBR map count");
   Texture_Images      = realloc (Texture_Images,      sizeof (VkImage)        * New_Total);
   Texture_Memories    = realloc (Texture_Memories,    sizeof (VkDeviceMemory) * New_Total);
   Texture_Heap_Blocks = realloc (Texture_Heap_Blocks, sizeof (int)            * New_Total);
   for (uint I = Texture_Count; I < New_Total; I++) Texture_Heap_Blocks[I] = -1;
   Texture_Views       = realloc (Texture_Views,       sizeof (VkImageView)    * New_Total);
+  // Postcondition: all realloc'd arrays must be non-NULL (host OOM is fatal)
+  assert (Texture_Images      and "Weapon_Load_Textures: realloc Texture_Images failed — OOM");
+  assert (Texture_Memories    and "Weapon_Load_Textures: realloc Texture_Memories failed — OOM");
+  assert (Texture_Heap_Blocks and "Weapon_Load_Textures: realloc Texture_Heap_Blocks failed — OOM");
+  assert (Texture_Views       and "Weapon_Load_Textures: realloc Texture_Views failed — OOM");
 
   // Load weapon textures: 6 PBR map types  by  Weapon_Tex_Count textures
   uint Weapon_PBR_Loaded = 0;
@@ -11596,13 +11981,28 @@ void Descriptor_Set_Create (Figure_Pool *Pool) {
     }
   }
 
-  // Texture array
+  // Texture array — guard against VK_NULL_HANDLE views from failed GPU_Heap_Alloc.
+  // Vulkan spec §14.2.1: imageView must be a valid VkImageView handle when the descriptor
+  // is consumed.  If a texture upload failed (heap exhaustion), the slot will hold
+  // VK_NULL_HANDLE.  We substitute the first valid view as a harmless stand-in to avoid
+  // a validation error or driver crash.  The shader won't sample it at a visible UV anyway.
   VkDescriptorImageInfo *Texture_Infos = calloc (Texture_Count, sizeof (VkDescriptorImageInfo));
+  assert (Texture_Infos and "calloc failed for texture descriptor infos");
+  VkImageView Fallback_View = VK_NULL_HANDLE;
+  for (uint I = 0; I < Texture_Count; I++)
+    if (Texture_Views[I] != VK_NULL_HANDLE) { Fallback_View = Texture_Views[I]; break; }
+  assert (Fallback_View != VK_NULL_HANDLE and "no valid texture views — at least one texture must load successfully");
+  uint Null_View_Count = 0;
   for (uint I = 0; I < Texture_Count; I++) {
+    VkImageView View = Texture_Views[I];
+    if (View == VK_NULL_HANDLE) { View = Fallback_View; Null_View_Count++; }
     Texture_Infos[I] = (VkDescriptorImageInfo){.sampler     = Texture_Sampler,
-                                               .imageView   = Texture_Views[I],
+                                               .imageView   = View,
                                                .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
   }
+  if (Null_View_Count)
+    printf ("[descriptor] WARNING: %u/%u texture slots had VK_NULL_HANDLE views (heap exhaustion) — substituted fallback\n",
+            Null_View_Count, Texture_Count);
 
   // Write all 13 bindings (0-12). Bindings 8-10 are written as contiguous SSBO arrays spanning [0..Fig_Count).
   uint Fig_N = Fig_Count ? Fig_Count : 1;  // Vulkan requires descriptorCount >= 1 for array writes
@@ -11941,6 +12341,7 @@ void Raytracing_Frame (GPU_Postprocess_Push Postprocess) {
   // Checkerboard - Dispatch at half width, each thread remaps to a checkerboard pixel. Untouched pixels keep their previous value; the
   // postprocess reconstructs them from traced neighbors before TAA.
   int RT_Dispatch_W = Active_Checkerboard ? (Render_Width + 1) / 2 : Render_Width;
+  VK_CMD_BEGIN (Command_Buffer, 0.2f, 0.8f, 0.2f, "Ray Tracing — %dx%d @ frame %d", RT_Dispatch_W, Render_Height, Frame_Count);
   vkCmdTraceRays (/*commandBuffer                  =>*/ Command_Buffer,
                   /*pRaygenShaderBindingTable      =>*/ &Shader_Binding_Ray_Generation,
                   /*pMissShaderBindingTable        =>*/ &Shader_Binding_Miss,
@@ -11949,6 +12350,8 @@ void Raytracing_Frame (GPU_Postprocess_Push Postprocess) {
                   /*width                          =>*/ RT_Dispatch_W,
                   /*height                         =>*/ Render_Height,
                   /*depth                          =>*/ 1);
+
+  VK_CMD_END (Command_Buffer); // end Ray Tracing
 
   // Dispatch postprocess compute shader (unless bypassed for raw PBR output)
   if (not Skip_Postprocess) {
@@ -11980,6 +12383,7 @@ void Raytracing_Frame (GPU_Postprocess_Push Postprocess) {
     int Steps[] = {1, 3, 8, 16}; // Progressive A-trous: 3x3, 7x7, 17x17, 33x33
     int Denoise_Passes = Active_Denoise_Passes;
     if (Denoise_Passes > 0) {
+      VK_CMD_BEGIN (Command_Buffer, 0.2f, 0.8f, 0.8f, "Denoise — %d passes, budget %d", Denoise_Passes, Current_Budget_Byte);
       vkCmdBindPipeline (Command_Buffer, VK_PIPELINE_BIND_POINT_COMPUTE, Denoise_Pipeline);
       for (int I = 0; I < Denoise_Passes; I++) {
         vkCmdBindDescriptorSets (/*commandBuffer      =>*/ Command_Buffer,
@@ -12016,11 +12420,13 @@ void Raytracing_Frame (GPU_Postprocess_Push Postprocess) {
                               /*imageMemoryBarrierCount  =>*/ 0,
                               /*pImageMemoryBarriers     =>*/ NULL);
       }
+      VK_CMD_END (Command_Buffer); // end Denoise
     }
 
     // Result is now back in Storage_Image.
 
     // Postprocess: TAA + bloom + tonemapping
+    VK_CMD_BEGIN (Command_Buffer, 0.8f, 0.8f, 0.2f, "Post-Process — TAA + tonemap");
     vkCmdBindPipeline       (Command_Buffer, VK_PIPELINE_BIND_POINT_COMPUTE, Postprocess_Pipeline);
     vkCmdBindDescriptorSets (/*commandBuffer      =>*/ Command_Buffer,
                              /*pipelineBindPoint   =>*/ VK_PIPELINE_BIND_POINT_COMPUTE,
@@ -12037,6 +12443,7 @@ void Raytracing_Frame (GPU_Postprocess_Push Postprocess) {
                              /*size          =>*/ sizeof Postprocess,
                              /*pValues       =>*/ &Postprocess);
     vkCmdDispatch (Command_Buffer, (Render_Width + 7) / 8, (Render_Height + 7) / 8, 1);
+    VK_CMD_END (Command_Buffer); // end Post-Process
   }
 
   // Select blit source: postprocess writes to Display_Image, raw RT to Storage_Image
@@ -12080,6 +12487,8 @@ void Raytracing_Frame (GPU_Postprocess_Push Postprocess) {
                         /*Destination_Stage  =>*/ VK_PIPELINE_STAGE_TRANSFER_BIT);
 
   // Blit result to swapchain (bilinear upscale from internal to window resolution)
+  VK_CMD_BEGIN (Command_Buffer, 0.2f, 0.2f, 0.8f, "Blit — %dx%d → %ux%u",
+                Render_Width, Render_Height, Swapchain_Extent.width, Swapchain_Extent.height);
   vkCmdBlitImage (/*commandBuffer  =>*/ Command_Buffer,
                   /*srcImage       =>*/ Blit_Source,
                   /*srcImageLayout =>*/ VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
@@ -12113,6 +12522,7 @@ void Raytracing_Frame (GPU_Postprocess_Push Postprocess) {
                         /*Destination_Access =>*/ 0,
                         /*Source_Stage       =>*/ VK_PIPELINE_STAGE_TRANSFER_BIT,
                         /*Destination_Stage  =>*/ VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
+  VK_CMD_END (Command_Buffer); // end Blit
 
   // Finalize the command buffer recording
   VK_CHECK (vkEndCommandBuffer (Command_Buffer));
@@ -16550,6 +16960,55 @@ Input Poll_Input () {
 
 } // Poll_Input
 
+// ═════════════════════════════════
+//   Debug_Messenger_Callback
+// ═════════════════════════════════
+//
+// VK_EXT_debug_utils callback — receives structured validation, performance,
+// and general diagnostic messages from the Khronos validation layers and the
+// Vulkan loader.  This is the single funnel through which every validation
+// error, performance warning, and driver info message flows.
+//
+// The callback signature matches PFN_vkDebugUtilsMessengerCallbackEXT
+// (Vulkan spec §50.2).  Parameters:
+//
+//   Message_Severity — Bitmask indicating urgency:
+//     VERBOSE (0x0001)  Detailed diagnostic trace (suppressed here — too noisy)
+//     INFO    (0x0010)  Informational lifecycle event (layer loaded, extension negotiated)
+//     WARNING (0x0100)  Probable bug: missing barrier, wrong image layout, etc.
+//     ERROR   (0x1000)  Definite spec violation — undefined behaviour on some/all drivers
+//
+//   Message_Type — Category of the diagnostic:
+//     GENERAL     (0x01)  Loader/layer lifecycle, not related to spec compliance
+//     VALIDATION  (0x02)  Specification conformance violation detected
+//     PERFORMANCE (0x04)  Valid but sub-optimal Vulkan usage pattern
+//
+//   Callback_Data->pMessage — The human-readable diagnostic string including
+//     VUID references (e.g. "VUID-vkCmdDraw-None-02690") that can be looked up
+//     in the Vulkan specification for the exact violated rule.
+//
+// Returns VK_FALSE per spec: VK_TRUE would abort the Vulkan call that triggered
+// the message, which is only useful for breakpoint-on-error debugging.
+
+static VKAPI_ATTR VkBool32 VKAPI_CALL
+Debug_Messenger_Callback (VkDebugUtilsMessageSeverityFlagBitsEXT      Message_Severity,
+                          VkDebugUtilsMessageTypeFlagsEXT             Message_Type,
+                          const VkDebugUtilsMessengerCallbackDataEXT *Callback_Data,
+                          void                                       *User_Data) {
+  (void)User_Data;
+  const char *Severity = (Message_Severity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT)   ? "ERROR"
+                       : (Message_Severity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT) ? "WARNING"
+                       : (Message_Severity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_INFO_BIT_EXT)    ? "INFO"
+                       :                                                                        "VERBOSE";
+  const char *Type     = (Message_Type & VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT)  ? "VALIDATION"
+                       : (Message_Type & VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT) ? "PERFORMANCE"
+                       :                                                                    "GENERAL";
+  fprintf (stderr, "[vk_%s/%s] %s\n", Severity, Type, Callback_Data->pMessage);
+  // On ERROR severity, flush immediately so the message appears before any subsequent crash
+  if (Message_Severity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT) fflush (stderr);
+  return VK_FALSE;
+}
+
 // ══════════════════════════
 //   Vulkan_Create_Instance
 // ══════════════════════════
@@ -16602,6 +17061,58 @@ void Vulkan_Create_Instance () {
 
   // Release the temporary extensions array now that the instance owns the data
   free (Extensions);
+
+  // ── Install Debug Messenger ────────────────────────────────────────────────
+  //
+  // VK_EXT_debug_utils debug messenger intercepts all validation-layer messages
+  // and routes them through our callback.  The callback classifies messages by
+  // severity (verbose/info/warning/error) and type (general/validation/performance)
+  // then prints them with colour-coded prefixes for terminal readability.
+  //
+  // Severity mapping (Vulkan spec §50.2):
+  //   VERBOSE  — Diagnostic detail (loader chatter, object lifecycle tracing)
+  //   INFO     — Informational (extension negotiation, memory type selection)
+  //   WARNING  — Possible bug or sub-optimal usage (layout mismatch, barrier miss)
+  //   ERROR    — Definite spec violation (will crash or produce UB on some drivers)
+  //
+  // Type mapping:
+  //   GENERAL      — Non-validation (loader, layer lifecycle)
+  //   VALIDATION   — Specification violation detected by the validation layer
+  //   PERFORMANCE  — Sub-optimal Vulkan usage that may cause measurable slowdown
+  //
+  // We filter VERBOSE messages by default (too noisy) and print everything else.
+  // Errors trigger an immediate stderr flush so they appear before a crash.
+  if (Have_Validation) {
+    pfn_vkCreateDebugUtilsMessengerEXT  = (PFN_vkCreateDebugUtilsMessengerEXT)
+      vkGetInstanceProcAddr (Instance, "vkCreateDebugUtilsMessengerEXT");
+    pfn_vkDestroyDebugUtilsMessengerEXT = (PFN_vkDestroyDebugUtilsMessengerEXT)
+      vkGetInstanceProcAddr (Instance, "vkDestroyDebugUtilsMessengerEXT");
+    pfn_vkSetDebugUtilsObjectNameEXT    = (PFN_vkSetDebugUtilsObjectNameEXT)
+      vkGetInstanceProcAddr (Instance, "vkSetDebugUtilsObjectNameEXT");
+    pfn_vkCmdBeginDebugUtilsLabelEXT    = (PFN_vkCmdBeginDebugUtilsLabelEXT)
+      vkGetInstanceProcAddr (Instance, "vkCmdBeginDebugUtilsLabelEXT");
+    pfn_vkCmdEndDebugUtilsLabelEXT      = (PFN_vkCmdEndDebugUtilsLabelEXT)
+      vkGetInstanceProcAddr (Instance, "vkCmdEndDebugUtilsLabelEXT");
+    pfn_vkCmdInsertDebugUtilsLabelEXT   = (PFN_vkCmdInsertDebugUtilsLabelEXT)
+      vkGetInstanceProcAddr (Instance, "vkCmdInsertDebugUtilsLabelEXT");
+
+    if (pfn_vkCreateDebugUtilsMessengerEXT) {
+      VK_CHECK (pfn_vkCreateDebugUtilsMessengerEXT (
+        /*instance    =>*/ Instance,
+        /*pCreateInfo =>*/ &(VkDebugUtilsMessengerCreateInfoEXT){
+          .sType           = VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT,
+          .messageSeverity = VK_DEBUG_UTILS_MESSAGE_SEVERITY_INFO_BIT_EXT
+                           | VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT
+                           | VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT,
+          .messageType     = VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT
+                           | VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT
+                           | VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT,
+          .pfnUserCallback = Debug_Messenger_Callback},
+        /*pAllocator  =>*/ NULL,
+        /*pMessenger  =>*/ &Debug_Messenger));
+      printf ("[vulkan] debug messenger installed\n");
+    }
+  }
 
   // Create the platform window surface via SDL's Vulkan integration
   SDL_Vulkan_CreateSurface (Window, Instance, &Surface);
@@ -16770,6 +17281,8 @@ void Vulkan_Create_Logical_Device () {
 
   // Retrieve the queue handle from the newly created device
   vkGetDeviceQueue (Device, Queue_Family_Index, 0, &Queue);
+  VK_NAME (VK_OBJECT_TYPE_QUEUE, Queue, "Universal Queue (family %u)", Queue_Family_Index);
+  VK_NAME (VK_OBJECT_TYPE_DEVICE, Device, "Primary Logical Device");
 
   // Query the physical device's ray tracing pipeline properties for SBT layout
   Raytracing_Properties.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_PIPELINE_PROPERTIES_KHR;
@@ -16881,7 +17394,13 @@ void Vulkan_Create_Swapchain () {
 
   // Retrieve the swapchain image handles
   vkGetSwapchainImagesKHR (Device, Swapchain, &Swapchain_Image_Count, NULL);
+  assert (Swapchain_Image_Count <= SWAPCHAIN_MAX_IMAGES
+          and "Swapchain returned more images than SWAPCHAIN_MAX_IMAGES — increase the array size");
   vkGetSwapchainImagesKHR (Device, Swapchain, &Swapchain_Image_Count, Swapchain_Images);
+  VK_NAME (VK_OBJECT_TYPE_SWAPCHAIN_KHR, Swapchain, "Presentation Swapchain %ux%u",
+           Swapchain_Extent.width, Swapchain_Extent.height);
+  for (uint I = 0; I < Swapchain_Image_Count; I++)
+    VK_NAME (VK_OBJECT_TYPE_IMAGE, Swapchain_Images[I], "Swapchain Image [%u/%u]", I, Swapchain_Image_Count);
 
 } // Vulkan_Create_Swapchain
 
@@ -16967,6 +17486,9 @@ void Vulkan_Create_Synchronization () {
                                         .commandBufferCount = 1},
                                       /*pCommandBuffers =>*/ &Command_Buffer));
 
+  VK_NAME (VK_OBJECT_TYPE_COMMAND_POOL, Command_Pool, "Primary Command Pool (family %u)", Queue_Family_Index);
+  VK_NAME (VK_OBJECT_TYPE_COMMAND_BUFFER, Command_Buffer, "Primary Command Buffer");
+
   // Create a fence (pre-signaled so the first frame doesn't deadlock on vkWaitForFences)
   VK_CHECK (vkCreateFence (/*device      =>*/ Device,
                            /*pCreateInfo =>*/ &(VkFenceCreateInfo){
@@ -16974,11 +17496,14 @@ void Vulkan_Create_Synchronization () {
                              .flags = VK_FENCE_CREATE_SIGNALED_BIT},
                            /*pAllocator  =>*/ NULL,
                            /*pFence      =>*/ &Fence));
+  VK_NAME (VK_OBJECT_TYPE_FENCE, Fence, "Frame Fence (pre-signaled)");
 
   // Create semaphores for swapchain image acquisition and render completion signaling
   VkSemaphoreCreateInfo Semaphore_Info = {.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO };
   VK_CHECK (vkCreateSemaphore (Device, &Semaphore_Info, NULL, &Semaphore_Image_Available));
   VK_CHECK (vkCreateSemaphore (Device, &Semaphore_Info, NULL, &Semaphore_Render_Finished));
+  VK_NAME (VK_OBJECT_TYPE_SEMAPHORE, Semaphore_Image_Available, "Semaphore: Image Available");
+  VK_NAME (VK_OBJECT_TYPE_SEMAPHORE, Semaphore_Render_Finished, "Semaphore: Render Finished");
 
 } // Vulkan_Create_Synchronization
 
