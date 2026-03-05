@@ -4,3 +4,6 @@ nob.old
 sdk
 sdk.old
 reference/SDL2/
+*.tga
+*.png
+screenshot*
