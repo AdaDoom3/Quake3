@@ -873,6 +873,11 @@ CVar *rt_taa_static_floor, *rt_taa_sigma, *rt_taa_move_lo, *rt_taa_move_hi;
 CVar *vm_fov, *vm_offset_x, *vm_offset_y, *vm_offset_z, *vm_scale, *vm_bob, *vm_lag;
 CVar *cl_righthand;
 
+// Viewmodel A/B test state: cycles through 4 presets every 3 seconds when active
+static int   VM_AB_Test_Active = 0;
+static int   VM_AB_Test_Index  = 0;
+static float VM_AB_Test_Timer  = 0.f;
+
 // Projectile pool (CPU-side)
 Projectile_Pool Projectiles;
 
@@ -3357,38 +3362,24 @@ int main (int Argc, char **Argv) {
         CVar_Set_Float (vm_bob, 0.f); CVar_Set_Float (vm_lag, 0.f);
         CVar_Set_Int (cl_righthand, 1);
         printf ("[vm] preset: screenshot (fov=54 scale=0.65 close+left, right-hand)\n");
-      // ── A/B Test Presets: aztec-a through aztec-d ──────────────────────────────
-      // Run with --vm-preset aztec-a (or b/c/d) to compare viewmodel placements.
-      // After choosing, the winning preset becomes "aztec" below.
-      } else if (strcmp (P, "aztec-a") == 0 or strcmp (P, "aztec") == 0) {
-        // A: CS:S Classic — faithful Source viewmodel_fov 54, hands fill lower-right
+      } else if (strcmp (P, "aztec") == 0) {
+        // CS:S Classic in Aztec: faithful Counter-Strike Source viewmodel position
         CVar_Set_Float (vm_fov, 54.f); CVar_Set_Float (vm_scale, 1.0f);
         CVar_Set_Float (vm_offset_x, 10.f); CVar_Set_Float (vm_offset_y, 5.f); CVar_Set_Float (vm_offset_z, -4.f);
         CVar_Set_Float (vm_bob, 0.3f); CVar_Set_Float (vm_lag, 0.f);
         CVar_Set_Int (cl_righthand, 1);
-        printf ("[vm] preset: aztec-a (CS:S Classic — fov=54 scale=1.00 fwd=10 right=5 up=-4)\n");
-      } else if (strcmp (P, "aztec-b") == 0) {
-        // B: Tighter / Closer — pulled toward camera, imposing CS 1.6 feel
-        CVar_Set_Float (vm_fov, 54.f); CVar_Set_Float (vm_scale, 1.1f);
-        CVar_Set_Float (vm_offset_x, 14.f); CVar_Set_Float (vm_offset_y, 4.f); CVar_Set_Float (vm_offset_z, -3.f);
-        CVar_Set_Float (vm_bob, 0.3f); CVar_Set_Float (vm_lag, 0.f);
+        printf ("[vm] preset: aztec (CS:S Classic — fov=54 scale=1.00 fwd=10 right=5 up=-4)\n");
+      } else if (strcmp (P, "aztec-ab") == 0) {
+        // A/B test mode: auto-cycles through 4 viewmodel presets every 3 seconds at runtime.
+        // Watch the console output for which preset is active, pick your favourite.
+        VM_AB_Test_Active = 1; VM_AB_Test_Index = 0; VM_AB_Test_Timer = 0.f;
         CVar_Set_Int (cl_righthand, 1);
-        printf ("[vm] preset: aztec-b (Tighter — fov=54 scale=1.10 fwd=14 right=4 up=-3)\n");
-      } else if (strcmp (P, "aztec-c") == 0) {
-        // C: Lower / Compact — pushed down and right, competitive feel, more screen vis
-        CVar_Set_Float (vm_fov, 60.f); CVar_Set_Float (vm_scale, 0.9f);
-        CVar_Set_Float (vm_offset_x, 8.f); CVar_Set_Float (vm_offset_y, 6.f); CVar_Set_Float (vm_offset_z, -6.f);
-        CVar_Set_Float (vm_bob, 0.2f); CVar_Set_Float (vm_lag, 0.f);
-        CVar_Set_Int (cl_righthand, 1);
-        printf ("[vm] preset: aztec-c (Lower/Compact — fov=60 scale=0.90 fwd=8 right=6 up=-6)\n");
-      } else if (strcmp (P, "aztec-d") == 0) {
-        // D: Centered / HL2 Style — barrel lines up closer to crosshair, subtle lag
-        CVar_Set_Float (vm_fov, 54.f); CVar_Set_Float (vm_scale, 1.0f);
-        CVar_Set_Float (vm_offset_x, 12.f); CVar_Set_Float (vm_offset_y, 2.f); CVar_Set_Float (vm_offset_z, -3.f);
-        CVar_Set_Float (vm_bob, 0.4f); CVar_Set_Float (vm_lag, 0.1f);
-        CVar_Set_Int (cl_righthand, 1);
-        printf ("[vm] preset: aztec-d (HL2 Centered — fov=54 scale=1.00 fwd=12 right=2 up=-3)\n");
-      } else printf ("[vm] unknown preset '%s' (source/q3/closeup/cinematic/screenshot/aztec/aztec-a/b/c/d)\n", P);
+        printf ("[vm] A/B TEST MODE — cycling 4 presets every 3s. Watch and pick!\n");
+        printf ("[vm]   A: CS:S Classic  (fov=54 scale=1.00 fwd=10 right=5 up=-4)\n");
+        printf ("[vm]   B: Tighter       (fov=54 scale=1.10 fwd=14 right=4 up=-3)\n");
+        printf ("[vm]   C: Lower/Compact (fov=60 scale=0.90 fwd=8  right=6 up=-6)\n");
+        printf ("[vm]   D: HL2 Centered  (fov=54 scale=1.00 fwd=12 right=2 up=-3)\n");
+      } else printf ("[vm] unknown preset '%s' (source/q3/closeup/cinematic/screenshot/aztec/aztec-ab)\n", P);
     }
     else if (strcmp (Argv[I], "--vm-fov")    == 0 and I + 1 < Argc) CVar_Set_Float (vm_fov,      (float)atof (Argv[++I]));
     else if (strcmp (Argv[I], "--vm-scale")  == 0 and I + 1 < Argc) CVar_Set_Float (vm_scale,    (float)atof (Argv[++I]));
@@ -4427,6 +4418,30 @@ int main (int Argc, char **Argv) {
     Cam.Yaw         = Physics.Yaw;
     Cam.Pitch       = Physics.Pitch;
     Cam.Frame       = Frame;
+
+    // ── Viewmodel A/B test: auto-cycle 4 presets every 3 seconds ───────────────
+    if (VM_AB_Test_Active) {
+      VM_AB_Test_Timer += Delta_Time;
+      if (VM_AB_Test_Timer >= 3.f) {
+        VM_AB_Test_Timer = 0.f;
+        VM_AB_Test_Index = (VM_AB_Test_Index + 1) % 4;
+      }
+      static const char *VM_AB_Names[] = {"A: CS:S Classic", "B: Tighter", "C: Lower/Compact", "D: HL2 Centered"};
+      static const float VM_AB_Presets[][6] = {
+        // { fov, scale, offset_x, offset_y, offset_z, bob }
+        { 54.f, 1.0f, 10.f,  5.f, -4.f, 0.3f },   // A: CS:S Classic
+        { 54.f, 1.1f, 14.f,  4.f, -3.f, 0.3f },   // B: Tighter / Closer
+        { 60.f, 0.9f,  8.f,  6.f, -6.f, 0.2f },   // C: Lower / Compact
+        { 54.f, 1.0f, 12.f,  2.f, -3.f, 0.4f },   // D: HL2 Centered
+      };
+      const float *P = VM_AB_Presets[VM_AB_Test_Index];
+      CVar_Set_Float (vm_fov, P[0]); CVar_Set_Float (vm_scale, P[1]);
+      CVar_Set_Float (vm_offset_x, P[2]); CVar_Set_Float (vm_offset_y, P[3]); CVar_Set_Float (vm_offset_z, P[4]);
+      CVar_Set_Float (vm_bob, P[5]); CVar_Set_Float (vm_lag, 0.f);
+      // Print on transition (first frame of each preset)
+      if (VM_AB_Test_Timer < Delta_Time + 0.001f)
+        printf ("\r[vm A/B] >>> %s <<<                    \n", VM_AB_Names[VM_AB_Test_Index]);
+    }
 
     // Animate and rebuild the weapon viewmodel
     Weapon_Update (Weapon, &Cam, Delta_Time, In.Fire);
