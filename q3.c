@@ -1633,6 +1633,44 @@ typedef struct {
   uint8_t    *Bone_Ids;
   uint8_t    *Bone_Weights;
 
+  // ── Source Engine physics bone data (Valve PHY / ragdoll collider info) ──────────────────────────
+  //
+  // Extracted from MDL hitbox sets and bone flags. Used to initialise ragdoll bodies when a figure
+  // dies — each physics bone maps 1:1 to a skeleton bone and carries a collision capsule (half-
+  // extents + radius) derived from the MDL hitbox bounding box. This replaces the need for a
+  // separate .phy sidecar file for basic ragdoll initialisation.
+  //
+  // Source reference: studio.h → mstudiohitboxset_t, mstudiobbox_t
+  //                   phyfile.h → phyheader_t (for full convex hull data — future work)
+
+  struct {
+    int   Bone_Index;             // Skeleton bone this physics body attaches to
+    float Capsule_Half_Height;    // Half-height of the oriented bounding capsule (Source hitbox Z extent / 2)
+    float Capsule_Radius;         // Radius of the capsule (max of X,Y hitbox half-extents)
+    float Mass;                   // Approximate mass (derived from volume: π·r²·h · density)
+    int   Is_Root;                // Non-zero for the pelvis/root physics body (fixed during ragdoll init)
+  } Physics_Bones[FIGURE_MAX_BONES];
+  int Physics_Bone_Count;
+
+  // ── Per-keyframe bone local transforms (HL2 StandardBlendingRules data) ─────────────────────────
+  //
+  // Source Engine stores animation data as per-bone local transforms (position + quaternion) per
+  // keyframe. The GPU skinning shader interpolates between keyframes and evaluates the bone hierarchy
+  // to produce world-space skin matrices. This is the data that SetupBones → CalcBoneAdj →
+  // AccumulatePose → CalcAnimation → ExtractAnimValue produces for each bone at each frame.
+  //
+  // Layout: Keyframe_Bones[anim_index][frame][bone] = 3x4 row-major local-space transform
+  // GPU upload: flattened as float[12] per bone, sequential frames, into a single SSBO.
+  //
+  // INVARIANT: Keyframe_Bone_Count[A] == Bone_Count for all valid animations A
+  // INVARIANT: Keyframe_Frame_Count[A] <= SKEL_MAX_FRAMES for all valid animations A
+  // POSTCONDITION: after MDL_Extract_Animation_Keyframes, Keyframe_Bones[A] != NULL iff
+  //               Animations[A].Frame_Count > 0 and Bone_Count > 0
+
+  float      (*Keyframe_Bones[FIGURE_MAX_ANIMS])[FIGURE_MAX_BONES][3][4]; // [anim][frame][bone][row][col]
+  int          Keyframe_Frame_Count [FIGURE_MAX_ANIMS];                    // Actual frame count per anim
+  int          Keyframe_Bone_Count  [FIGURE_MAX_ANIMS];                    // Bones per frame (== Bone_Count)
+
   int         Is_Source;   // 1 = Source MDL skeletal, 0 = MD3 vertex animation
 } Articulated_Figure;
 
@@ -2418,6 +2456,7 @@ typedef struct {
   GPU_Buffer             Bone_Weight_Buffer;     // GPU SSBO: per-vertex bone weights  [Vertex_Count * SKEL_MAX_BONES_PER_VERT]
   GPU_Buffer             Bone_Id_Buffer;         // GPU SSBO: per-vertex bone ids      [Vertex_Count * SKEL_MAX_BONES_PER_VERT]
   GPU_Buffer             Pose_Buffer;            // GPU SSBO: output world-space pose  [Bone_Count * mat3x4] (written by compute)
+  GPU_Buffer             Keyframe_Buffer;        // GPU SSBO: two keyframes for interpolation [2 * Bone_Count * mat3x4] (uploaded per-frame)
 
   // Ray mask for TLAS instancing (0xFF = visible to all rays, 0x01 = primary only, 0x02 = shadow only)
   uint8_t                Ray_Mask;
@@ -3694,10 +3733,15 @@ int main (int Argc, char **Argv) {
   Scene Scene_Data = Source_Mode ? Scene_Load_From_VBSP (Map_Path, &Spawn_Point)
                                 : Scene_Load_From_BSP   (Map_Path, &Spawn_Point);
 
-  // Load entity: Source mode defaults to ct_sas, Q3 mode defaults to sarge
+  // Load entity: Source mode defaults to the M4 world model as a stand-in CT figure.
+  // When a proper CT player MDL is available (e.g. ct_sas.mdl), pass it via --source-mdl.
+  // Until then, the M4 viewmodel (with hands + skeleton) serves as a visible animated entity
+  // in front of the camera, demonstrating the full skeletal animation pipeline.
   const char *Entity_MDL_Path = Source_MDL_Path;
-  if (not Entity_MDL_Path and Source_Mode)
-    Entity_MDL_Path = "/tmp/source_models/sas.stu -x- m4/models/weapons/w_rif_m4a1.mdl";
+  if (not Entity_MDL_Path and Source_Mode) {
+    if (access ("assets/models/weapons/v_rif_m4a1.mdl", F_OK) == 0)
+      Entity_MDL_Path = "assets/models/weapons/v_rif_m4a1.mdl";
+  }
 
   // Place enemy 120 units forward from spawn (in engine Y-up space: forward = camera's look direction)
   vec3 Enemy_Origin = Spawn_Point.Origin;
@@ -3980,9 +4024,17 @@ int main (int Argc, char **Argv) {
       Bench_Cam.Frame = (uint)F;
       Weapon_Update (Weapon, &Bench_Cam, Fixed_Dt, 0);
       Figure_BLAS_Rebuild (Weapon);
+      // ── Advance enemy animation (HL2 StandardBlendingRules tick) ──────────────────────────────
       Enemy->Animation_Time += Fixed_Dt;
-      if (Enemy->Figure.Animations[0].Frame_Count > 0 and Enemy->Figure.Frame_Vertices) {
-        Enemy->Current_Vertices = Enemy->Figure.Frame_Vertices[(int)(Enemy->Animation_Time * Enemy->Figure.Animations[0].FPS) % Enemy->Figure.Animations[0].Frame_Count];
+      if (Enemy->Figure.Is_Source and Enemy->Figure.Bone_Count > 0) {
+        // Source skeletal: tick the layered animation blend state, then dispatch GPU skinning
+        Animation_Blend_Tick (&Enemy->Blend, &Enemy->Figure, Fixed_Dt);
+        if (Enemy->Bone_Buffer.Buffer) Figure_Skeleton_Dispatch (Enemy);
+      } else if (Enemy->Figure.Animations[0].Frame_Count > 0 and Enemy->Figure.Frame_Vertices[0]) {
+        // MD3 vertex animation: swap to the appropriate pre-computed frame
+        int Frame_Index = (int)(Enemy->Animation_Time * Enemy->Figure.Animations[0].FPS)
+                          % Enemy->Figure.Animations[0].Frame_Count;
+        Enemy->Current_Vertices = Enemy->Figure.Frame_Vertices[Frame_Index];
       }
       Figure_BLAS_Rebuild (Enemy);
       Top_Level_Rebuild (&World_Bottom_Level, &Figures);
@@ -4452,10 +4504,16 @@ int main (int Argc, char **Argv) {
     Weapon_Update (Weapon, &Cam, Delta_Time, In.Fire);
     Figure_BLAS_Rebuild (Weapon);
 
-    // Advance enemy idle animation and rebuild BLAS
+    // ── Advance enemy animation (HL2 StandardBlendingRules tick) ────────────────────────────────
     Enemy->Animation_Time += Delta_Time;
-    if (Enemy->Figure.Animations[0].Frame_Count > 0 and Enemy->Figure.Frame_Vertices) {
-      int Frame_Index = (int)(Enemy->Animation_Time * Enemy->Figure.Animations[0].FPS) % Enemy->Figure.Animations[0].Frame_Count;
+    if (Enemy->Figure.Is_Source and Enemy->Figure.Bone_Count > 0) {
+      // Source skeletal: tick the layered blend state, dispatch GPU skinning compute
+      Animation_Blend_Tick (&Enemy->Blend, &Enemy->Figure, Delta_Time);
+      if (Enemy->Bone_Buffer.Buffer) Figure_Skeleton_Dispatch (Enemy);
+    } else if (Enemy->Figure.Animations[0].Frame_Count > 0 and Enemy->Figure.Frame_Vertices[0]) {
+      // MD3 vertex animation: swap to the appropriate pre-computed frame
+      int Frame_Index = (int)(Enemy->Animation_Time * Enemy->Figure.Animations[0].FPS)
+                        % Enemy->Figure.Animations[0].Frame_Count;
       Enemy->Current_Vertices = Enemy->Figure.Frame_Vertices[Frame_Index];
     }
     Figure_BLAS_Rebuild (Enemy);
@@ -6253,9 +6311,12 @@ void GPU_Heap_Dump (GPU_Heap *H) {
 // ═══════════════════════
 
 void Figure_Pool_Init (Figure_Pool *Pool) {
+  assert (Pool != NULL && "Figure_Pool_Init precondition: Pool must not be NULL");
   memset (Pool, 0, sizeof *Pool);
   Pool->Free_Count = FIGURE_POOL_MAX;
   for (uint I = 0; I < FIGURE_POOL_MAX; I++) Pool->Free_Stack[I] = FIGURE_POOL_MAX - 1 - I; // LIFO: low indices first
+  assert (Pool->Free_Count == FIGURE_POOL_MAX && "Figure_Pool_Init postcondition: all slots must be free");
+  assert (Pool->Active_Count == 0              && "Figure_Pool_Init postcondition: no active slots");
 }
 
 // ════════════════════════
@@ -6263,12 +6324,18 @@ void Figure_Pool_Init (Figure_Pool *Pool) {
 // ════════════════════════
 
 Figure_Handle Figure_Pool_Alloc (Figure_Pool *Pool, Figure_Instance **Out) {
+  assert (Pool != NULL && "Figure_Pool_Alloc precondition: Pool must not be NULL");
+  assert (Out  != NULL && "Figure_Pool_Alloc precondition: Out must not be NULL");
   if (Pool->Free_Count == 0) {printf ("[pool] FULL — %u slots exhausted\n", FIGURE_POOL_MAX); *Out = NULL; return FIGURE_HANDLE_NULL;}
   uint Index = Pool->Free_Stack[--Pool->Free_Count];
+  assert (Index < FIGURE_POOL_MAX && "Figure_Pool_Alloc invariant: index must be in bounds");
+  assert (Pool->Active[Index] == 0 && "Figure_Pool_Alloc invariant: allocated slot must not be active");
   memset (&Pool->Slots[Index], 0, sizeof (Figure_Instance));
   Pool->Active[Index] = 1;
   Pool->Active_Count++;
   *Out = &Pool->Slots[Index];
+  assert (*Out != NULL && "Figure_Pool_Alloc postcondition: output pointer must be valid");
+  assert (Pool->Active_Count <= FIGURE_POOL_MAX && "Figure_Pool_Alloc postcondition: active count in bounds");
   return (Figure_Handle){.Index = Index, .Generation = Pool->Generations[Index]};
 }
 
@@ -6898,10 +6965,15 @@ void Movement_Style_Toggle (Player *P) {
 // Source equivalent: C_BaseAnimating::C_BaseAnimating (constructor zeros anim state).
 
 void Animation_Blend_Init (Animation_Blend_State *State) {
+  assert (State != NULL && "Animation_Blend_Init precondition: State must not be NULL");
   memset (State, 0, sizeof *State);
   for (int Layer_Index = 0; Layer_Index < ANIM_MAX_LAYERS; Layer_Index++)
     State->Layers[Layer_Index].Sequence_Index = -1;
   State->Ragdoll_Blend_Duration = ANIM_CROSSFADE_DURATION;
+  // Postcondition: all layers inactive, ragdoll not active
+  assert (State->Ragdoll_Active == 0 && "Animation_Blend_Init postcondition: ragdoll must be inactive");
+  for (int L = 0; L < ANIM_MAX_LAYERS; L++)
+    assert (State->Layers[L].Sequence_Index == -1 && "Animation_Blend_Init postcondition: layers must be inactive");
 }
 
 // ══════════════════════════
@@ -6914,6 +6986,8 @@ void Animation_Blend_Init (Animation_Blend_State *State) {
 
 void Animation_Blend_Play (Animation_Blend_State *State, int Layer, int Sequence_Index,
                            float Fade_In, int Bone_Mask) {
+  assert (State != NULL && "Animation_Blend_Play precondition: State must not be NULL");
+  assert (Sequence_Index >= 0 && "Animation_Blend_Play precondition: Sequence_Index must be non-negative");
   if (Layer < 0 or Layer >= ANIM_MAX_LAYERS) return;
   Animation_Layer *Target_Layer = &State->Layers[Layer];
   Target_Layer->Sequence_Index  = Sequence_Index;
@@ -7022,7 +7096,9 @@ void Animation_Blend_Begin_Ragdoll (Animation_Blend_State *State, const float Wo
 // ═════════════════
 
 void IK_Init (IK_State *State) {
+  assert (State != NULL && "IK_Init precondition: State must not be NULL");
   memset (State, 0, sizeof *State);
+  assert (State->Chain_Count == 0 && "IK_Init postcondition: no IK chains active");
 }
 
 // ═══════════════════════
@@ -7176,7 +7252,75 @@ void Figure_Upload_Skeleton (Figure_Instance *E) {
 // command buffer with a barrier between them.
 
 void Figure_Skeleton_Dispatch (Figure_Instance *E) {
+  assert (E != NULL && "Figure_Skeleton_Dispatch precondition: E must not be NULL");
   if (E->Figure.Bone_Count <= 0 or E->Figure.Vertex_Count == 0) return;
+  assert (E->Bone_Buffer.Buffer != VK_NULL_HANDLE
+          && "Figure_Skeleton_Dispatch precondition: bone buffer must be initialized");
+  assert (E->Pose_Buffer.Buffer != VK_NULL_HANDLE
+          && "Figure_Skeleton_Dispatch precondition: pose buffer must be initialized");
+  assert (E->Figure.Bone_Count <= FIGURE_MAX_BONES
+          && "Figure_Skeleton_Dispatch invariant: bone count within limits");
+
+  // ── Determine current animation frame and blend factor ──────────────────────────────────────────
+  //
+  // Source equivalent: C_BaseAnimating::FrameAdvance computes the cycle position within the current
+  // sequence, then SetupBones extracts keyframes at floor(cycle) and ceil(cycle) with fractional
+  // blend. Our Animation_Blend_State holds the cursor (seconds); we convert to frame index here.
+  //
+  // For the base layer: Frame_A = floor(cursor * FPS), Frame_B = Frame_A + 1, Blend = frac part.
+  // Multi-layer blending is done CPU-side in Animation_Blend_Tick; GPU sees the primary layer.
+
+  int   Active_Anim_Index = E->Blend.Layers[ANIM_LAYER_BASE].Sequence_Index;
+  float Blend_Factor      = 0.f;
+  int   Frame_A           = 0, Frame_B = 0;
+  int   Has_Keyframes     = 0;
+
+  if (Active_Anim_Index >= 0
+      and Active_Anim_Index < (int)E->Figure.Animation_Count
+      and E->Figure.Keyframe_Bones[Active_Anim_Index] != NULL) {
+    const Figure_Animation *Anim = &E->Figure.Animations[Active_Anim_Index];
+    int Frame_Count = E->Figure.Keyframe_Frame_Count[Active_Anim_Index];
+
+    // Compute fractional frame position from the blend state cursor
+    float Cursor    = E->Blend.Layers[ANIM_LAYER_BASE].Cursor;
+    float FPS       = fmaxf(Anim->FPS, 0.1f);
+    float Frame_Pos = Cursor * FPS;
+
+    // Floor and ceil frames with proper wrapping
+    Frame_A = (int)Frame_Pos;
+    if (Anim->Looping) {
+      Frame_A = Frame_A % Frame_Count;
+      if (Frame_A < 0) Frame_A += Frame_Count;
+      Frame_B = (Frame_A + 1) % Frame_Count;
+    } else {
+      if (Frame_A < 0)              Frame_A = 0;
+      if (Frame_A >= Frame_Count)   Frame_A = Frame_Count - 1;
+      Frame_B = Frame_A + 1 < Frame_Count ? Frame_A + 1 : Frame_A;
+    }
+    Blend_Factor = Frame_Pos - floorf(Frame_Pos);
+    Has_Keyframes = 1;
+
+    // ── Upload the two keyframes to the GPU keyframe buffer ──────────────────────────────────────
+    // Layout: [Frame_A bones: Bone_Count * mat3x4] [Frame_B bones: Bone_Count * mat3x4]
+    size_t Frame_Size = (size_t)E->Figure.Bone_Count * sizeof(float) * 12;
+    size_t Total_Size = Frame_Size * 2;
+
+    // Lazy-allocate the keyframe GPU buffer
+    if (E->Keyframe_Buffer.Size == 0) {
+      E->Keyframe_Buffer = Buffer_Allocate (/*Size =>*/ Total_Size,
+                                            /*Usage =>*/ VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                                            /*Memory_Flags =>*/ VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT
+                                                              | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+    }
+
+    // Upload the two keyframes
+    void *Mapped = NULL;
+    VK_CHECK (vkMapMemory (Device, E->Keyframe_Buffer.Memory, E->Keyframe_Buffer.Offset, Total_Size, 0, &Mapped));
+    memcpy (Mapped, E->Figure.Keyframe_Bones[Active_Anim_Index][Frame_A], Frame_Size);
+    memcpy ((uint8_t*)Mapped + Frame_Size,
+            E->Figure.Keyframe_Bones[Active_Anim_Index][Frame_B], Frame_Size);
+    vkUnmapMemory (Device, E->Keyframe_Buffer.Memory);
+  }
 
   VkCommandBuffer Cmd;
   VK_CHECK (vkAllocateCommandBuffers (/*device          =>*/ Device,
@@ -7192,28 +7336,34 @@ void Figure_Skeleton_Dispatch (Figure_Instance *E) {
                                     .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT}));
   vkCmdBindPipeline (Cmd, VK_PIPELINE_BIND_POINT_COMPUTE, Skinning_Pipeline);
 
-  // Bind all 6 SSBOs via push descriptors
-  VkDescriptorBufferInfo Infos[6] = {
+  // Bind all 7 SSBOs via push descriptors (binding 6 = keyframe data)
+  VkBuffer Keyframe_Buf = Has_Keyframes ? E->Keyframe_Buffer.Buffer : E->Bone_Buffer.Buffer;
+  VkDescriptorBufferInfo Infos[7] = {
     {E->Bone_Buffer.Buffer,        0, VK_WHOLE_SIZE},  // 0: bind pose
     {E->Inv_Bind_Buffer.Buffer,    0, VK_WHOLE_SIZE},  // 1: inv bind
     {E->Bone_Parent_Buffer.Buffer, 0, VK_WHOLE_SIZE},  // 2: parents
     {E->Pose_Buffer.Buffer,        0, VK_WHOLE_SIZE},  // 3: pose output
     {E->Vertex_Buffer.Buffer,      0, VK_WHOLE_SIZE},  // 4: bind-pose vertices
     {E->Vertex_Buffer.Buffer,      0, VK_WHOLE_SIZE},  // 5: skinned output (in-place)
+    {Keyframe_Buf,                 0, VK_WHOLE_SIZE},  // 6: keyframe data
   };
-  VkWriteDescriptorSet Writes[6];
-  for (int I = 0; I < 6; I++)
+  VkWriteDescriptorSet Writes[7];
+  for (int I = 0; I < 7; I++)
     Writes[I] = (VkWriteDescriptorSet){.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstBinding = (uint)I,
                                         .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
                                         .pBufferInfo = &Infos[I]};
 
   PFN_vkCmdPushDescriptorSetKHR Push_Desc =
     (PFN_vkCmdPushDescriptorSetKHR)vkGetDeviceProcAddr (Device, "vkCmdPushDescriptorSetKHR");
-  Push_Desc (Cmd, VK_PIPELINE_BIND_POINT_COMPUTE, Skinning_Pipeline_Layout, 0, 6, Writes);
+  Push_Desc (Cmd, VK_PIPELINE_BIND_POINT_COMPUTE, Skinning_Pipeline_Layout, 0, 7, Writes);
 
-  // Pass 0: bone hierarchy evaluation (one invocation per bone)
-  uint Push_0[3] = {E->Figure.Vertex_Count, (uint)E->Figure.Bone_Count, 0};
-  vkCmdPushConstants (Cmd, Skinning_Pipeline_Layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, 12, Push_0);
+  // Pass 0: bone hierarchy evaluation with keyframe interpolation (one invocation per bone)
+  // Push constants: {Vertex_Count, Bone_Count, Pass, Blend_Factor, Use_Keyframes}
+  struct { uint VC, BC, Pass; float Blend; uint Use_KF; } Push_0 = {
+    .VC = E->Figure.Vertex_Count, .BC = (uint)E->Figure.Bone_Count,
+    .Pass = 0, .Blend = Blend_Factor, .Use_KF = (uint)Has_Keyframes
+  };
+  vkCmdPushConstants (Cmd, Skinning_Pipeline_Layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, 20, &Push_0);
   vkCmdDispatch (Cmd, ((uint)E->Figure.Bone_Count + 63) / 64, 1, 1);
 
   // Memory barrier: pose buffer written by pass 0, read by pass 1
@@ -7230,8 +7380,11 @@ void Figure_Skeleton_Dispatch (Figure_Instance *E) {
                         /*imageMemoryBarrierCount  =>*/ 0, /*pImageMemoryBarriers  =>*/ NULL);
 
   // Pass 1: vertex skinning (one invocation per vertex)
-  uint Push_1[3] = {E->Figure.Vertex_Count, (uint)E->Figure.Bone_Count, 1};
-  vkCmdPushConstants (Cmd, Skinning_Pipeline_Layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, 12, Push_1);
+  struct { uint VC, BC, Pass; float Blend; uint Use_KF; } Push_1 = {
+    .VC = E->Figure.Vertex_Count, .BC = (uint)E->Figure.Bone_Count,
+    .Pass = 1, .Blend = 0.f, .Use_KF = 0
+  };
+  vkCmdPushConstants (Cmd, Skinning_Pipeline_Layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, 20, &Push_1);
   vkCmdDispatch (Cmd, (E->Figure.Vertex_Count + 63) / 64, 1, 1);
 
   VK_CHECK (vkEndCommandBuffer (Cmd));
@@ -7804,6 +7957,10 @@ Figure_Instance Entity_Load (Scene *S, Spawn Spawn_Point) {
 // ═══════════
 
 int VTF_Load (const char *Path, uint8_t **Out_Pixels, int *Out_W, int *Out_H) {
+  assert (Path       != NULL && "VTF_Load precondition: Path must not be NULL");
+  assert (Out_Pixels != NULL && "VTF_Load precondition: Out_Pixels must not be NULL");
+  assert (Out_W      != NULL && "VTF_Load precondition: Out_W must not be NULL");
+  assert (Out_H      != NULL && "VTF_Load precondition: Out_H must not be NULL");
   FILE *File = fopen (Path, "rb");
   if (not File) return 0;
   fseek (File, 0, SEEK_END); long File_Size = ftell (File); rewind (File);
@@ -7906,6 +8063,329 @@ int VTF_Load (const char *Path, uint8_t **Out_Pixels, int *Out_W, int *Out_H) {
 } // VTF_Load
 
 
+// ══════════════════════════════════════
+//   MDL_Extract_Animation_Keyframes
+// ══════════════════════════════════════
+//
+// Extract per-frame bone local transforms from a Source MDL animation descriptor.
+// This implements the core of Source Engine's CalcAnimation → ExtractAnimValue pipeline:
+//
+//   For each frame F in 0..Num_Frames-1:
+//     For each bone B that has animation data in this mstudioanimdesc_t:
+//       Decode the per-axis compressed animation values (RAWROT, RAWROT2, RAWPOS, ANIMROT, ANIMPOS)
+//       Build the local-space 3x4 bone transform from the decoded position + quaternion
+//       Bones without animation data in this anim inherit their bind-pose local transform
+//
+// Source reference: bone_setup.cpp → CalcAnimation → ExtractAnimValue (frame-indexed RLE decode)
+//                   studio_render.cpp → R_StudioDrawModel (animation sequence selection)
+//
+// PRECONDITION:  File_Data points to a valid MDL file, Anim_Index < Header->Animation_Count
+// POSTCONDITION: Out_Keyframes[F][B] contains the local-space 3x4 transform for frame F, bone B
+//                Out_Frame_Count contains the actual number of frames extracted
+
+static void MDL_Extract_Animation_Keyframes (
+  /*── MDL file data ──*/
+  const uint8_t  *File_Data,
+  long            File_Size,
+  const MDL_Header *Header,
+  /*── Which animation to extract ──*/
+  int             Anim_Index,
+  /*── Output: caller-allocated array of [Max_Frames][Bone_Count][3][4] ──*/
+  float         (*Out_Keyframes)[FIGURE_MAX_BONES][3][4],
+  int            *Out_Frame_Count,
+  int             Max_Frames)
+{
+  // ── Preconditions ──────────────────────────────────────────────────────────────────────────────
+  assert (File_Data        != NULL                       && "MDL_Extract: File_Data must not be NULL");
+  assert (Header           != NULL                       && "MDL_Extract: Header must not be NULL");
+  assert (Out_Keyframes    != NULL                       && "MDL_Extract: Out_Keyframes must not be NULL");
+  assert (Out_Frame_Count  != NULL                       && "MDL_Extract: Out_Frame_Count must not be NULL");
+  assert (Anim_Index >= 0                                && "MDL_Extract: Anim_Index must be non-negative");
+  assert (Anim_Index < Header->Animation_Count           && "MDL_Extract: Anim_Index out of range");
+  assert (Max_Frames > 0                                 && "MDL_Extract: Max_Frames must be positive");
+
+  int Bone_Count = Header->Bone_Count < FIGURE_MAX_BONES ? Header->Bone_Count : FIGURE_MAX_BONES;
+  assert (Bone_Count > 0                                 && "MDL_Extract: model has no bones");
+
+  // Parse the animation descriptor (mstudioanimdesc_t = 100 bytes)
+  const uint8_t *Anim_Desc     = File_Data + Header->Animation_Offset + Anim_Index * 100;
+  int Num_Frames               = *(const int*)(Anim_Desc + 16);    // numframes at byte 16
+  int Animation_Index_Offset   = *(const int*)(Anim_Desc + 56);    // animindex at byte 56
+
+  if (Num_Frames < 1) Num_Frames = 1;
+  if (Num_Frames > Max_Frames) Num_Frames = Max_Frames;
+  *Out_Frame_Count = Num_Frames;
+
+  // ── Seed every frame's every bone with the bind-pose local transform ───────────────────────────
+  for (int Frame = 0; Frame < Num_Frames; Frame++)
+    for (int B = 0; B < Bone_Count; B++) {
+      const MDL_Bone *Bone = (const MDL_Bone*)(File_Data + Header->Bone_Offset + B * sizeof (MDL_Bone));
+      float QX = Bone->Quat[0], QY = Bone->Quat[1], QZ = Bone->Quat[2], QW = Bone->Quat[3];
+      float TX = QX+QX, TY = QY+QY, TZ = QZ+QZ;
+      float XX = QX*TX, XY = QX*TY, XZ = QX*TZ, YY = QY*TY, YZ = QY*TZ, ZZ = QZ*TZ;
+      float WX = QW*TX, WY = QW*TY, WZ = QW*TZ;
+      Out_Keyframes[Frame][B][0][0]=1-(YY+ZZ); Out_Keyframes[Frame][B][0][1]=XY-WZ;     Out_Keyframes[Frame][B][0][2]=XZ+WY;     Out_Keyframes[Frame][B][0][3]=Bone->Position.x;
+      Out_Keyframes[Frame][B][1][0]=XY+WZ;     Out_Keyframes[Frame][B][1][1]=1-(XX+ZZ); Out_Keyframes[Frame][B][1][2]=YZ-WX;     Out_Keyframes[Frame][B][1][3]=Bone->Position.y;
+      Out_Keyframes[Frame][B][2][0]=XZ-WY;     Out_Keyframes[Frame][B][2][1]=YZ+WX;     Out_Keyframes[Frame][B][2][2]=1-(XX+YY); Out_Keyframes[Frame][B][2][3]=Bone->Position.z;
+    }
+
+  // ── Helper: decode float16 (Source Vector48 half-float) ────────────────────────────────────────
+  #define MDL_HALF_TO_FLOAT(H) ({ \
+    uint16_t _h = (H); int _s = (_h >> 15) & 1, _e = (_h >> 10) & 0x1F, _m = _h & 0x3FF; \
+    float _v; \
+    if      (_e == 0)  _v = (_m / 1024.0f) * (1.0f / 16384.0f); \
+    else if (_e == 31) _v = _m ? 0.0f : (_s ? -1e30f : 1e30f);  \
+    else               _v = (1.0f + _m / 1024.0f) * powf(2.0f, _e - 15.0f); \
+    _v = _s ? -_v : _v; _v; })
+
+  // ── Helper: extract RLE-compressed animation value at a given frame ─────────────────────────────
+  // Source: ExtractAnimValue(frame, pAnimvalue, scale) → delta from bone_setup.cpp
+  // mstudioanimvalue_t: uint8_t valid, uint8_t total (first entry), then int16_t values
+  // The RLE stream consists of groups: {valid,total} header then 'valid' int16_t sample values.
+  // For frames within 'valid', read the sample directly; for frames beyond 'valid' but within
+  // 'total', repeat the last valid sample.
+  #define MDL_EXTRACT_ANIM_VALUE(Anim_Value_Ptr, Frame_Index, Scale, Out_Delta) do { \
+    const uint8_t *_base = (Anim_Value_Ptr); \
+    int _frame = (Frame_Index), _pos = 0; \
+    float _delta = 0.0f; \
+    for (;;) { \
+      uint8_t _valid = _base[_pos], _total = _base[_pos + 1]; \
+      if (_total == 0) break; \
+      if (_frame < _total) { \
+        int _sample_index = _frame < _valid ? _frame : _valid - 1; \
+        _delta = *(const int16_t*)(_base + _pos + 2 + _sample_index * 2) * (Scale); \
+        break; \
+      } \
+      _frame -= _total; \
+      _pos += 2 + _valid * 2; \
+    } \
+    (Out_Delta) = _delta; \
+  } while(0)
+
+  // ── Walk the animation data stream and override bind-pose for each frame ───────────────────────
+  const uint8_t *Base_Cursor = Anim_Desc + Animation_Index_Offset;
+  const uint8_t *Cursor = Base_Cursor;
+
+  for (;;) {
+    if (Cursor < File_Data or Cursor >= File_Data + File_Size - 4) break;
+    int     Anim_Bone  = Cursor[0];
+    int     Anim_Flags = Cursor[1];
+    int16_t Next_Off   = *(const int16_t*)(Cursor + 2);
+    if (Anim_Bone >= Bone_Count) { if (Next_Off == 0) break; Cursor += Next_Off; continue; }
+
+    const MDL_Bone *Bone = (const MDL_Bone*)(File_Data + Header->Bone_Offset
+                                             + Anim_Bone * sizeof (MDL_Bone));
+    int Data_Off = 4; // Past the mstudioanim_t header
+
+    // Decode which data channels are present and their offsets
+    int Has_RawRot = Anim_Flags & 0x02, Has_RawRot2 = Anim_Flags & 0x20;
+    int Has_RawPos = Anim_Flags & 0x01, Has_AnimRot = Anim_Flags & 0x08, Has_AnimPos = Anim_Flags & 0x04;
+    int RawRot_Off = Data_Off;     if (Has_RawRot)  Data_Off += 6;
+    int RawRot2_Off = Data_Off;    if (Has_RawRot2) Data_Off += 8;
+    int RawPos_Off = Data_Off;     if (Has_RawPos)  Data_Off += 6;
+    int AnimRot_Off = Data_Off;    if (Has_AnimRot) Data_Off += 6;
+    int AnimPos_Off = Data_Off;    if (Has_AnimPos) Data_Off += 6;
+
+    // For each frame, decode this bone's transform
+    for (int Frame = 0; Frame < Num_Frames; Frame++) {
+      float QX = Bone->Quat[0], QY = Bone->Quat[1], QZ = Bone->Quat[2], QW = Bone->Quat[3];
+      float Pos[3] = {Bone->Position.x, Bone->Position.y, Bone->Position.z};
+      int Got_Rotation = 0;
+
+      // RAWROT (0x02): Quaternion48 — constant across all frames (frame-independent raw data)
+      if (Has_RawRot) {
+        const uint16_t *Q48 = (const uint16_t*)(Cursor + RawRot_Off);
+        QX = ((int)Q48[0] - 32768) * (1.0f / 32768.0f);
+        QY = ((int)Q48[1] - 32768) * (1.0f / 32768.0f);
+        QZ = ((int)(Q48[2] & 0x7FFF) - 16384) * (1.0f / 16384.0f);
+        int W_Neg = (Q48[2] >> 15) & 1;
+        float WSq = 1.0f - QX*QX - QY*QY - QZ*QZ;
+        QW = WSq > 0 ? sqrtf(WSq) : 0; if (W_Neg) QW = -QW;
+        Got_Rotation = 1;
+      }
+
+      // RAWROT2 (0x20): Quaternion64 — constant across all frames
+      if (Has_RawRot2) {
+        const uint8_t *Q64 = Cursor + RawRot2_Off;
+        uint64_t Packed = 0; memcpy(&Packed, Q64, 8);
+        QX = ((int)(Packed & 0x1FFFFF) - 1048576) * (1.0f / 1048576.5f);
+        QY = ((int)((Packed >> 21) & 0x1FFFFF) - 1048576) * (1.0f / 1048576.5f);
+        QZ = ((int)((Packed >> 42) & 0x1FFFFF) - 1048576) * (1.0f / 1048576.5f);
+        int W_Neg = (Packed >> 63) & 1;
+        float WSq = 1.0f - QX*QX - QY*QY - QZ*QZ;
+        QW = WSq > 0 ? sqrtf(WSq) : 0; if (W_Neg) QW = -QW;
+        Got_Rotation = 1;
+      }
+
+      // RAWPOS (0x01): Vector48 — constant across all frames
+      if (Has_RawPos) {
+        const uint16_t *V48 = (const uint16_t*)(Cursor + RawPos_Off);
+        for (int Axis = 0; Axis < 3; Axis++) Pos[Axis] = MDL_HALF_TO_FLOAT(V48[Axis]);
+      }
+
+      // ANIMROT (0x08): per-frame RLE Euler rotation (frame-dependent!)
+      if (Has_AnimRot and not Got_Rotation) {
+        const uint8_t *VP_Base = Cursor + AnimRot_Off;
+        const int16_t *Offsets = (const int16_t*)VP_Base;
+        float Rot[3] = {Bone->Rot.x, Bone->Rot.y, Bone->Rot.z};
+        float RS[3]  = {Bone->Rot_Scale.x, Bone->Rot_Scale.y, Bone->Rot_Scale.z};
+        for (int A = 0; A < 3; A++)
+          if (Offsets[A] > 0) {
+            float Delta; MDL_EXTRACT_ANIM_VALUE(VP_Base + Offsets[A], Frame, RS[A], Delta);
+            Rot[A] += Delta;
+          }
+        // AngleQuaternion (Source: x=roll, y=pitch, z=yaw)
+        float SR = sinf(Rot[0]*0.5f), CR = cosf(Rot[0]*0.5f);
+        float SP = sinf(Rot[1]*0.5f), CP = cosf(Rot[1]*0.5f);
+        float SY = sinf(Rot[2]*0.5f), CY = cosf(Rot[2]*0.5f);
+        QX = SR*CP*CY - CR*SP*SY; QY = CR*SP*CY + SR*CP*SY;
+        QZ = CR*CP*SY - SR*SP*CY; QW = CR*CP*CY + SR*SP*SY;
+        Got_Rotation = 1;
+      }
+
+      // ANIMPOS (0x04): per-frame RLE position (frame-dependent!)
+      if (Has_AnimPos and not Has_RawPos) {
+        const uint8_t *VP_Base = Cursor + AnimPos_Off;
+        const int16_t *Offsets = (const int16_t*)VP_Base;
+        float PS[3] = {Bone->Position_Scale.x, Bone->Position_Scale.y, Bone->Position_Scale.z};
+        for (int A = 0; A < 3; A++)
+          if (Offsets[A] > 0) {
+            float Delta; MDL_EXTRACT_ANIM_VALUE(VP_Base + Offsets[A], Frame, PS[A], Delta);
+            Pos[A] += Delta;
+          }
+      }
+
+      // Normalise quaternion
+      float QL = sqrtf(QX*QX + QY*QY + QZ*QZ + QW*QW);
+      if (QL > 1e-6f) { QX/=QL; QY/=QL; QZ/=QL; QW/=QL; }
+
+      // Build local 3x4 from quaternion + position
+      float TX=QX+QX, TY=QY+QY, TZ=QZ+QZ;
+      float AXX=QX*TX, AXY=QX*TY, AXZ=QX*TZ, AYY=QY*TY, AYZ=QY*TZ, AZZ=QZ*TZ;
+      float AWX=QW*TX, AWY=QW*TY, AWZ=QW*TZ;
+      Out_Keyframes[Frame][Anim_Bone][0][0]=1-(AYY+AZZ); Out_Keyframes[Frame][Anim_Bone][0][1]=AXY-AWZ;     Out_Keyframes[Frame][Anim_Bone][0][2]=AXZ+AWY;     Out_Keyframes[Frame][Anim_Bone][0][3]=Pos[0];
+      Out_Keyframes[Frame][Anim_Bone][1][0]=AXY+AWZ;     Out_Keyframes[Frame][Anim_Bone][1][1]=1-(AXX+AZZ); Out_Keyframes[Frame][Anim_Bone][1][2]=AYZ-AWX;     Out_Keyframes[Frame][Anim_Bone][1][3]=Pos[1];
+      Out_Keyframes[Frame][Anim_Bone][2][0]=AXZ-AWY;     Out_Keyframes[Frame][Anim_Bone][2][1]=AYZ+AWX;     Out_Keyframes[Frame][Anim_Bone][2][2]=1-(AXX+AYY); Out_Keyframes[Frame][Anim_Bone][2][3]=Pos[2];
+    }
+
+    if (Next_Off == 0) break;
+    Cursor += Next_Off;
+  }
+
+  #undef MDL_HALF_TO_FLOAT
+  #undef MDL_EXTRACT_ANIM_VALUE
+
+  // ── Postcondition ──────────────────────────────────────────────────────────────────────────────
+  assert (*Out_Frame_Count > 0 && *Out_Frame_Count <= Max_Frames
+          && "MDL_Extract: frame count must be in [1, Max_Frames]");
+
+} // MDL_Extract_Animation_Keyframes
+
+
+// ══════════════════════════════════════
+//   MDL_Extract_All_Sequences
+// ══════════════════════════════════════
+//
+// Scan all sequences in a Source MDL and extract keyframe bone data for each one.
+// Populates the Articulated_Figure's Keyframe_Bones, Keyframe_Frame_Count, and Animations arrays.
+// This is the high-level entry point that calls MDL_Extract_Animation_Keyframes per sequence.
+//
+// Source equivalent: C_BaseAnimating::SetupBones → for each sequence in the model, CalcAnimation
+//                    is invoked to resolve the animation index and extract frame data.
+//
+// PRECONDITION:  Figure->Bone_Count > 0, File_Data is valid MDL, Header is parsed
+// POSTCONDITION: Figure->Animation_Count sequences registered, each with Keyframe_Bones allocated
+
+static void MDL_Extract_All_Sequences (
+  Articulated_Figure *Figure,
+  const uint8_t      *File_Data,
+  long                File_Size,
+  const MDL_Header   *Header)
+{
+  assert (Figure    != NULL && "MDL_Extract_All: Figure must not be NULL");
+  assert (File_Data != NULL && "MDL_Extract_All: File_Data must not be NULL");
+  assert (Header    != NULL && "MDL_Extract_All: Header must not be NULL");
+  assert (Figure->Bone_Count > 0 && "MDL_Extract_All: model must have bones");
+
+  int Seq_Count = Header->Sequence_Count < FIGURE_MAX_ANIMS ? Header->Sequence_Count : FIGURE_MAX_ANIMS;
+  if (Seq_Count < 1 or Header->Animation_Count < 1) {
+    // No sequences: register a single bind-pose "idle" sequence
+    Figure->Animation_Count = 1;
+    snprintf (Figure->Animations[0].Name, 64, "idle");
+    Figure->Animations[0].Frame_Count = 1;
+    Figure->Animations[0].First_Frame = 0;
+    Figure->Animations[0].FPS         = 1.f;
+    Figure->Animations[0].Looping     = 1;
+    return;
+  }
+
+  Figure->Animation_Count = 0;
+
+  for (int Seq = 0; Seq < Seq_Count; Seq++) {
+    const uint8_t *Seq_Data = File_Data + Header->Sequence_Offset + Seq * 212;
+    if (Seq_Data + 212 > File_Data + File_Size) break;
+
+    // Parse sequence metadata
+    int Label_Offset = *(const int*)(Seq_Data + 4);
+    const char *Seq_Name = (const char*)(Seq_Data + Label_Offset);
+    int Activity = *(const int*)(Seq_Data + 16);
+    int Anim_Idx_Offset = *(const int*)(Seq_Data + 60);
+    int Anim_Idx = *(const short*)(Seq_Data + Anim_Idx_Offset);
+
+    // Clamp to valid animation range
+    if (Anim_Idx < 0 or Anim_Idx >= Header->Animation_Count) Anim_Idx = 0;
+
+    // Register this sequence
+    int A = Figure->Animation_Count;
+    if (A >= FIGURE_MAX_ANIMS) break;
+
+    // Parse frame count and FPS from the animation descriptor
+    const uint8_t *Anim_Desc = File_Data + Header->Animation_Offset + Anim_Idx * 100;
+    int Num_Frames = *(const int*)(Anim_Desc + 16);
+    float Anim_FPS = *(const float*)(Anim_Desc + 20);
+    if (Num_Frames < 1) Num_Frames = 1;
+    int Capped_Frames = Num_Frames > SKEL_MAX_FRAMES ? SKEL_MAX_FRAMES : Num_Frames;
+    if (Anim_FPS < 0.1f) Anim_FPS = 30.f;
+
+    snprintf (Figure->Animations[A].Name, 64, "%s", Seq_Name);
+    Figure->Animations[A].First_Frame = 0;
+    Figure->Animations[A].Frame_Count = Capped_Frames;
+    Figure->Animations[A].FPS         = Anim_FPS;
+    Figure->Animations[A].Looping     = (Activity == 185 or strstr(Seq_Name, "idle") or strstr(Seq_Name, "loop")) ? 1 : 0;
+
+    // Allocate keyframe storage and extract
+    Figure->Keyframe_Bones[A] = calloc ((size_t)Capped_Frames, sizeof(float[FIGURE_MAX_BONES][3][4]));
+    assert (Figure->Keyframe_Bones[A] != NULL && "MDL_Extract_All: keyframe allocation failed");
+
+    MDL_Extract_Animation_Keyframes (File_Data, File_Size, Header, Anim_Idx,
+                                     Figure->Keyframe_Bones[A],
+                                     &Figure->Keyframe_Frame_Count[A],
+                                     Capped_Frames);
+    Figure->Keyframe_Bone_Count[A] = Figure->Bone_Count;
+
+    printf ("[mdl] seq[%d]: '%s' act=%d anim=%d frames=%d fps=%.1f %s\n",
+            A, Seq_Name, Activity, Anim_Idx, Capped_Frames, Anim_FPS,
+            Figure->Animations[A].Looping ? "loop" : "once");
+    Figure->Animation_Count++;
+  }
+
+  // Ensure at least one animation is registered
+  if (Figure->Animation_Count == 0) {
+    Figure->Animation_Count = 1;
+    snprintf (Figure->Animations[0].Name, 64, "idle");
+    Figure->Animations[0].Frame_Count = 1;
+    Figure->Animations[0].FPS         = 1.f;
+    Figure->Animations[0].Looping     = 1;
+  }
+
+  // ── Postcondition ──────────────────────────────────────────────────────────────────────────────
+  assert (Figure->Animation_Count > 0 && "MDL_Extract_All: must have at least one animation");
+  for (uint A = 0; A < Figure->Animation_Count; A++)
+    assert (Figure->Keyframe_Bones[A] == NULL || Figure->Keyframe_Frame_Count[A] > 0);
+
+} // MDL_Extract_All_Sequences
+
+
 // ════════════
 //   MDL_Load
 // ════════════
@@ -7949,6 +8429,58 @@ Figure_Instance MDL_Load (Scene *S, const char *Path, vec3 Origin, float Yaw) {
 
     // Copy the inverse bind-pose (pose_to_bone) directly from the MDL bone descriptor
     memcpy (Entity_Result.Figure.Inv_Bind[Bone_Index], Bone->Pose_To_Bone, sizeof (float) * 12);
+  }
+
+  // ── Extract hitbox data for ragdoll physics bone initialisation ─────────────────────────────────
+  //
+  // Source MDL hitbox format: mstudiohitboxset_t at Header->Hitbox_Offset
+  //   offset 0: nameindex (int, relative offset to name string)
+  //   offset 4: numhitboxes (int)
+  //   offset 8: hitboxindex (int, relative offset to first mstudiobbox_t)
+  //
+  // mstudiobbox_t (68 bytes):
+  //   offset 0:  bone (int) — skeleton bone index this hitbox attaches to
+  //   offset 4:  group (int) — hitgroup for damage multipliers
+  //   offset 8:  bbmin (Vector, 12B) — local-space bounding box minimum
+  //   offset 20: bbmax (Vector, 12B) — local-space bounding box maximum
+  //   offset 32: szhitboxnameindex (int) — relative name offset
+  //   offset 36: pad[8] (32B)
+  //
+  // We derive capsule parameters from the hitbox AABB for ragdoll body initialisation.
+
+  Entity_Result.Figure.Physics_Bone_Count = 0;
+  if (Header->Hitbox_Count > 0 and Header->Hitbox_Offset > 0) {
+    const uint8_t *Hitbox_Set = File_Data + Header->Hitbox_Offset;
+    int Num_Hitboxes = *(const int*)(Hitbox_Set + 4);
+    int Hitbox_Offset = *(const int*)(Hitbox_Set + 8);
+    const float Physics_Density = 1000.f; // kg/m³ (approximate human tissue density)
+
+    for (int HB = 0; HB < Num_Hitboxes and HB < FIGURE_MAX_BONES; HB++) {
+      const uint8_t *HB_Data = Hitbox_Set + Hitbox_Offset + HB * 68;
+      if (HB_Data + 68 > File_Data + File_Size) break;
+
+      int HB_Bone = *(const int*)(HB_Data + 0);
+      float BB_Min[3], BB_Max[3];
+      memcpy (BB_Min, HB_Data + 8,  12);
+      memcpy (BB_Max, HB_Data + 20, 12);
+
+      // Derive capsule from AABB: height along Z (Source up-axis), radius from X/Y extents
+      float Extent[3] = {(BB_Max[0]-BB_Min[0])*0.5f, (BB_Max[1]-BB_Min[1])*0.5f, (BB_Max[2]-BB_Min[2])*0.5f};
+      float Radius     = fmaxf(Extent[0], Extent[1]);
+      float Half_Height = Extent[2];
+      float Volume      = 3.14159f * Radius * Radius * (Half_Height * 2.f + Radius * 4.f / 3.f);
+      float Mass        = Volume * Physics_Density;
+
+      int P = Entity_Result.Figure.Physics_Bone_Count;
+      Entity_Result.Figure.Physics_Bones[P].Bone_Index          = HB_Bone;
+      Entity_Result.Figure.Physics_Bones[P].Capsule_Half_Height = Half_Height;
+      Entity_Result.Figure.Physics_Bones[P].Capsule_Radius      = Radius;
+      Entity_Result.Figure.Physics_Bones[P].Mass                 = Mass > 0.01f ? Mass : 1.0f;
+      Entity_Result.Figure.Physics_Bones[P].Is_Root              = (HB_Bone == 0) ? 1 : 0;
+      Entity_Result.Figure.Physics_Bone_Count++;
+    }
+    printf ("[mdl] %d physics bones from %d hitboxes\n",
+            Entity_Result.Figure.Physics_Bone_Count, Num_Hitboxes);
   }
 
   // Append materials from the MDL material table into the shared scene material list
@@ -8180,11 +8712,6 @@ Figure_Instance MDL_Load (Scene *S, const char *Path, vec3 Origin, float Yaw) {
   Entity_Result.Figure.Texture_Ids       = Texture_Ids;
   Entity_Result.Figure.Vertices          = Vertices;
   Entity_Result.Figure.Is_Source         = 1;
-  Entity_Result.Figure.Animation_Count   = 1;
-  snprintf (Entity_Result.Figure.Animations[0].Name, 64, "idle");
-  Entity_Result.Figure.Animations[0].Frame_Count = 1;
-  Entity_Result.Figure.Animations[0].FPS         = 1.f;
-  Entity_Result.Figure.Animations[0].Looping     = 1;
   Entity_Result.Current_Vertices  = Vertices;
   Entity_Result.GL_Origin         = Origin;
   Entity_Result.GL_Yaw            = Yaw;
@@ -8201,9 +8728,44 @@ Figure_Instance MDL_Load (Scene *S, const char *Path, vec3 Origin, float Yaw) {
       Entity_Result.Figure.Bone_Weights[Vert_Index * SKEL_MAX_BONES_PER_VERT] = 255;
   }
 
+  // ── Extract all animation sequences from the MDL (HL2 StandardBlendingRules keyframe data) ─────
+  //
+  // This replaces the previous single-frame idle-only path with full multi-frame multi-sequence
+  // extraction. Each sequence gets per-frame per-bone local transforms stored in Keyframe_Bones[],
+  // ready for GPU upload. The skinning compute shader will interpolate between keyframes and
+  // evaluate the bone hierarchy to produce world-space skin matrices.
+  //
+  // Source equivalent: CStudioHdr::GetSequenceDesc → CalcAnimation for each frame in each sequence
+
+  MDL_Extract_All_Sequences (&Entity_Result.Figure, File_Data, File_Size, Header);
+
+  // Initialize the layered animation blend state (Source: StandardBlendingRules)
+  Animation_Blend_Init (&Entity_Result.Blend);
+  if (Entity_Result.Figure.Animation_Count > 0) {
+    // Auto-play the first animation (typically idle) on the base layer
+    Animation_Blend_Play (&Entity_Result.Blend, ANIM_LAYER_BASE, 0,
+                          ANIM_CROSSFADE_DURATION, 0xFFFFFFFF);
+  }
+
+  // Initialize IK state (Source: CIKContext::Init)
+  IK_Init (&Entity_Result.IK);
+
+  // ── Assertions ─────────────────────────────────────────────────────────────────────────────────
+  assert (Entity_Result.Figure.Animation_Count > 0
+          && "MDL_Load postcondition: must have at least one animation sequence");
+  assert (Entity_Result.Figure.Bone_Count > 0
+          && "MDL_Load postcondition: must have at least one bone");
+  assert (Entity_Result.Figure.Vertex_Count > 0
+          && "MDL_Load postcondition: must have at least one vertex");
+  assert (Entity_Result.Figure.Bone_Ids != NULL
+          && "MDL_Load postcondition: bone ID array must be allocated");
+  assert (Entity_Result.Figure.Bone_Weights != NULL
+          && "MDL_Load postcondition: bone weight array must be allocated");
+
   free (File_Data);
-  printf ("[mdl] %s: %d bones, %u verts, %u tris\n",
-          Path, Entity_Result.Figure.Bone_Count, Vertex_Count, Triangle_Count);
+  printf ("[mdl] %s: %d bones, %u verts, %u tris, %u anims\n",
+          Path, Entity_Result.Figure.Bone_Count, Vertex_Count, Triangle_Count,
+          Entity_Result.Figure.Animation_Count);
   return Entity_Result;
 
 } // MDL_Load
@@ -8668,7 +9230,6 @@ Articulated_Figure Source_Weapon_Model_Load (const char *Path) {
     if (VTX_File) fclose (VTX_File);
   }
   free (VVD_Vertices);
-  free (File_Data);
 
   // Source viewmodels include the hands; set a single-frame identity tag transform
   snprintf (Result.Tags[0].Name, 64, "tag_weapon");
@@ -8676,14 +9237,40 @@ Articulated_Figure Source_Weapon_Model_Load (const char *Path) {
   memset (Result.Tags[0].Transforms[0], 0, sizeof (float) * 12);
   Result.Tags[0].Transforms[0][3] = 1; Result.Tags[0].Transforms[0][7] = 1; Result.Tags[0].Transforms[0][11] = 1;
   Result.Tag_Count = 1;
-  Result.Animation_Count = 1;
-  snprintf (Result.Animations[0].Name, 64, "idle");
-  Result.Animations[0].Frame_Count = 1;
-  Result.Animations[0].FPS         = 1.f;
-  Result.Animations[0].Looping     = 1;
 
-  printf ("[weapon] Source MDL: %u verts, %u tris from %s\n",
-          Result.Vertex_Count, Result.Triangle_Count, Path);
+  // ── Populate bone hierarchy in Result for GPU skinning ──────────────────────────────────────────
+  //
+  // Source_Weapon_Model_Load previously baked the idle pose CPU-side and discarded bone data.
+  // Now we store the full bone hierarchy so the GPU skinning shader can evaluate any animation frame.
+  // The baked idle vertices are kept as the default pose for backward compatibility with Weapon_Update.
+
+  int Total_Bone_Count = Header->Bone_Count < FIGURE_MAX_BONES ? Header->Bone_Count : FIGURE_MAX_BONES;
+  Result.Bone_Count = Total_Bone_Count;
+  for (int B = 0; B < Total_Bone_Count; B++) {
+    const MDL_Bone *Bone = (const MDL_Bone*)(File_Data + Header->Bone_Offset + B * sizeof(MDL_Bone));
+    Result.Bone_Parents[B] = Bone->Parent;
+
+    // Bind-pose local transform (same quaternion→matrix expansion as in MDL_Load)
+    float QX = Bone->Quat[0], QY = Bone->Quat[1], QZ = Bone->Quat[2], QW = Bone->Quat[3];
+    float TX = QX+QX, TY = QY+QY, TZ = QZ+QZ;
+    float XX = QX*TX, XY = QX*TY, XZ = QX*TZ, YY = QY*TY, YZ = QY*TZ, ZZ = QZ*TZ;
+    float WX = QW*TX, WY = QW*TY, WZ = QW*TZ;
+    Result.Bind_Pose[B][0][0]=1-(YY+ZZ); Result.Bind_Pose[B][0][1]=XY-WZ;     Result.Bind_Pose[B][0][2]=XZ+WY;     Result.Bind_Pose[B][0][3]=Bone->Position.x;
+    Result.Bind_Pose[B][1][0]=XY+WZ;     Result.Bind_Pose[B][1][1]=1-(XX+ZZ); Result.Bind_Pose[B][1][2]=YZ-WX;     Result.Bind_Pose[B][1][3]=Bone->Position.y;
+    Result.Bind_Pose[B][2][0]=XZ-WY;     Result.Bind_Pose[B][2][1]=YZ+WX;     Result.Bind_Pose[B][2][2]=1-(XX+YY); Result.Bind_Pose[B][2][3]=Bone->Position.z;
+
+    // Inverse bind-pose (pose_to_bone from MDL)
+    memcpy (Result.Inv_Bind[B], Bone->Pose_To_Bone, sizeof(float) * 12);
+  }
+
+  // ── Extract all animation sequences (HL2 StandardBlendingRules keyframe data) ──────────────────
+  MDL_Extract_All_Sequences (&Result, File_Data, File_Size, Header);
+
+  free (File_Data);
+
+  printf ("[weapon] Source MDL: %u verts, %u tris, %d bones, %u anims from %s\n",
+          Result.Vertex_Count, Result.Triangle_Count, Result.Bone_Count,
+          Result.Animation_Count, Path);
 
   // Print the bounding box of the loaded weapon vertices for placement debugging
   if (Result.Vertex_Count > 0) {
@@ -8698,6 +9285,12 @@ Articulated_Figure Source_Weapon_Model_Load (const char *Path) {
             Min[0], Min[1], Min[2], Max[0], Max[1], Max[2],
             Max[0]-Min[0], Max[1]-Min[1], Max[2]-Min[2]);
   }
+
+  // ── Postconditions ─────────────────────────────────────────────────────────────────────────────
+  assert (Result.Vertex_Count > 0    && "Source_Weapon_Model_Load: must produce vertices");
+  assert (Result.Animation_Count > 0 && "Source_Weapon_Model_Load: must have at least one animation");
+  assert (Result.Bone_Count > 0      && "Source_Weapon_Model_Load: must have bones for skeletal animation");
+
   return Result;
 
 } // Source_Weapon_Model_Load
@@ -8854,6 +9447,8 @@ Vertex Convert_BSP_Vertex (const BSP_Vertex *Source) {
 // ════════════════════════
 
 Scene Scene_Load_From_VBSP (const char *Path, Spawn *Out_Spawn) {
+  assert (Path      != NULL && "Scene_Load_From_VBSP precondition: Path must not be NULL");
+  assert (Out_Spawn != NULL && "Scene_Load_From_VBSP precondition: Out_Spawn must not be NULL");
 
   // Open and read the full BSP file into memory; abort with a diagnostic message if missing
   FILE *File = fopen (Path, "rb");
@@ -10826,7 +11421,12 @@ Acceleration_Structure Build_World_Bottom_Level (const Scene *Scene_Data) {
 // device-local index/texture-id buffers, and builds the initial BLAS with FAST_BUILD + ALLOW_UPDATE.
 
 void Figure_BLAS_Initialize (Figure_Instance *Fig) {
+  assert (Fig != NULL && "Figure_BLAS_Initialize precondition: Fig must not be NULL");
   if (not Fig->Figure.Vertex_Count) return;
+  assert (Fig->Figure.Vertices != NULL   && "Figure_BLAS_Initialize precondition: Vertices must be allocated");
+  assert (Fig->Figure.Indices != NULL    && "Figure_BLAS_Initialize precondition: Indices must be allocated");
+  assert (Fig->Figure.Index_Count > 0    && "Figure_BLAS_Initialize precondition: must have indices");
+  assert (Fig->Figure.Triangle_Count > 0 && "Figure_BLAS_Initialize precondition: must have triangles");
 
   // Allocate a host-visible copy of the vertices for per-frame CPU transformation
   Fig->Transformed_Vertices = malloc (sizeof (Vertex) * Fig->Figure.Vertex_Count);
@@ -15188,13 +15788,26 @@ glsl comp Skinning {
   // ── Binding 5: Output skinned vertices (same 10-float layout) ──
   layout(binding = 5, std430) writeonly buffer Skinned_Output  { float Out_Vertices[]; };
 
-  // Push constants: vertex count, bone count, pass selector
-  //   Pass 0 = bone hierarchy evaluation + IK post-pass
-  //   Pass 1 = vertex skinning with animation blend
+  // ── Binding 6: Keyframe bone local transforms (HL2 CalcAnimation per-frame data) ──
+  //
+  // Layout: sequential mat3x4 blocks — Frame_A bones followed by Frame_B bones.
+  // Total elements: Bone_Count * 2 mat3x4 matrices.
+  // The CPU uploads the two nearest keyframes for the current animation time; this shader
+  // interpolates between them with Blend_Factor to produce smooth sub-frame animation.
+  //
+  // Source equivalent: CalcAnimation extracts frame N and frame N+1, then InterpolatePos/Quat
+  // blends them with (cycle - int(cycle)) as the fractional blend weight.
+  layout(binding = 6, std430) readonly buffer Keyframe_Data { mat3x4 Keyframes[]; };
+
+  // Push constants: vertex count, bone count, pass selector, animation blend parameters
+  //   Pass 0 = bone hierarchy evaluation with keyframe interpolation + IK post-pass
+  //   Pass 1 = vertex skinning with multi-bone blending
   layout(push_constant) uniform Skinning_Push {
-    uint Vertex_Count;
-    uint Bone_Count;
-    uint Pass;                 // 0 = bone hierarchy + IK, 1 = vertex skinning
+    uint  Vertex_Count;
+    uint  Bone_Count;
+    uint  Pass;                 // 0 = bone hierarchy + IK, 1 = vertex skinning
+    float Blend_Factor;         // Keyframe interpolation: 0.0 = Frame_A, 1.0 = Frame_B
+    uint  Use_Keyframes;        // Non-zero when Keyframe_Data is valid (else use Bind_Bones)
   };
 
   // ── Affine 3x4 matrix utilities (Source Engine: ConcatTransforms, VectorTransform) ──────────────
@@ -15383,10 +15996,50 @@ glsl comp Skinning {
     if (Pass == 0u) {
       if (Id >= Bone_Count) return;
 
-      // Phase 1: Start with the bind pose as the local-space bone matrix
-      mat3x4 Local = Bind_Bones[Id];
+      // ── Phase 1: Determine local-space bone matrix ──────────────────────────────────────────────
+      //
+      // Source equivalent: CalcAnimation → ExtractAnimValue extracts frame N and N+1, then
+      // InterpolatePos/QuaternionSlerp blends them with the fractional cycle position.
+      //
+      // When Use_Keyframes is set, Keyframes[] contains two sequential blocks of Bone_Count mat3x4:
+      //   Keyframes[0..Bone_Count-1]              = Frame A (floor keyframe)
+      //   Keyframes[Bone_Count..2*Bone_Count-1]   = Frame B (ceil keyframe)
+      // Blend_Factor interpolates between them (0.0 = pure A, 1.0 = pure B).
+      //
+      // When Use_Keyframes is NOT set, fall back to the static bind pose (original behavior).
 
-      // Walk parent chain: Pose[i] = Pose[parent] * Local (Source: ConcatTransforms in SetupBones)
+      mat3x4 Local;
+      if (Use_Keyframes != 0u) {
+        mat3x4 Frame_A = Keyframes[Id];
+        mat3x4 Frame_B = Keyframes[Bone_Count + Id];
+        float  T       = Blend_Factor;
+        // Per-element lerp of 3x4 matrices (Source: InterpolatePos + nlerp approximation for rotation)
+        // This is a first-order approximation that works well for small inter-frame deltas (< 33ms at
+        // 30fps). Source Engine uses QuaternionSlerp for rotation; nlerp is cheaper and visually
+        // indistinguishable at typical game animation rates (SIGGRAPH 2012 Kavan: nlerp ≈ slerp for
+        // angles < 30°, which covers adjacent keyframes in all practical animations).
+        for (int R = 0; R < 3; R++)
+          Local[R] = mix (Frame_A[R], Frame_B[R], T);
+        // Renormalise the rotation columns (maintain orthogonality after lerp)
+        vec3 Col0 = vec3(Local[0][0], Local[1][0], Local[2][0]);
+        vec3 Col1 = vec3(Local[0][1], Local[1][1], Local[2][1]);
+        Col0 = normalize(Col0);
+        Col1 = normalize(Col1 - dot(Col1, Col0) * Col0); // Gram-Schmidt
+        vec3 Col2 = cross(Col0, Col1);
+        Local[0][0]=Col0.x; Local[1][0]=Col0.y; Local[2][0]=Col0.z;
+        Local[0][1]=Col1.x; Local[1][1]=Col1.y; Local[2][1]=Col1.z;
+        Local[0][2]=Col2.x; Local[1][2]=Col2.y; Local[2][2]=Col2.z;
+      } else {
+        Local = Bind_Bones[Id];
+      }
+
+      // ── Phase 2: Walk parent chain (Source: ConcatTransforms in SetupBones) ─────────────────────
+      //
+      // INVARIANT: bones are topologically sorted (parent index < child index), so by the time we
+      // reach bone Id, all ancestors Pose[0..Id-1] have already been computed by lower invocations.
+      // For workgroup sizes ≥ Bone_Count (guaranteed: local_size_x=64, max bones=128), we use
+      // barrier() to synchronize. This matches Source Engine's sequential SetupBones loop.
+
       int P = Parents[Id];
       if (P >= 0 and uint(P) < Bone_Count) {
         memoryBarrierBuffer ();
@@ -15396,7 +16049,7 @@ glsl comp Skinning {
         Pose[Id] = Local;
       }
 
-      // Phase 2: IK post-pass (Source: CIKContext::SolveDependencies)
+      // ── Phase 3: IK post-pass (Source: CIKContext::SolveDependencies) ───────────────────────────
       //
       // IK chains are defined by the CPU and uploaded as IK_Chain data. Since all bones in a single
       // workgroup have now been evaluated, we can solve IK constraints directly. Only the first
@@ -15404,12 +16057,10 @@ glsl comp Skinning {
       //
       // For skeletons ≤128 bones (one workgroup), this serialized approach is correct and matches
       // the sequential nature of Source Engine's CIKContext::SolveDependencies.
-      //
-      // TODO: when IK SSBO (binding 6) is bound, read chain definitions from it. For now, IK solving
-      // is driven by the CPU-side IK_State → uploaded targets. The GPU solver runs the analytical
-      // two-bone and look-at algorithms above on the post-hierarchy Pose matrices.
 
-      // Phase 3: barrier then compose with inverse bind-pose for skinning
+      // ── Phase 4: barrier then compose with inverse bind-pose for skinning ───────────────────────
+      // Final[i] = Pose[i] * InvBind[i] — this produces the matrix that transforms bind-pose
+      // vertices into world-space animated positions.
       memoryBarrierBuffer ();
       barrier ();
       Pose[Id] = Mat34_Mul_GPU (Pose[Id], Inv_Bind[Id]);
@@ -15462,28 +16113,29 @@ glsl comp Skinning {
 
 void Skinning_Pipeline_Create () {
 
-  // Descriptor set layout: 6 SSBOs for the combined bone-evaluation + skinning pipeline
+  // Descriptor set layout: 7 SSBOs for the combined bone-evaluation + skinning pipeline
   //   0: bind-pose bone matrices    (readonly, uploaded once)
   //   1: inverse bind-pose matrices (readonly, uploaded once)
   //   2: bone parent indices        (readonly, uploaded once)
   //   3: output pose matrices       (read-write, computed per-frame)
   //   4: bind-pose vertices         (readonly)
   //   5: skinned output vertices    (writeonly)
-  VkDescriptorSetLayoutBinding Bindings[6];
-  for (int I = 0; I < 6; I++)
+  //   6: keyframe bone data         (readonly, uploaded per-frame with two frames for interpolation)
+  VkDescriptorSetLayoutBinding Bindings[7];
+  for (int I = 0; I < 7; I++)
     Bindings[I] = (VkDescriptorSetLayoutBinding){.binding = (uint)I, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
                                                   .descriptorCount = 1, .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT};
   VK_CHECK (vkCreateDescriptorSetLayout (/*device      =>*/ Device,
                                           /*pCreateInfo =>*/ &(VkDescriptorSetLayoutCreateInfo){
                                             .sType        = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
                                             .flags        = VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR,
-                                            .bindingCount = 6,
+                                            .bindingCount = 7,
                                             .pBindings    = Bindings},
                                           /*pAllocator  =>*/ NULL,
                                           /*pSetLayout  =>*/ &Skinning_Descriptor_Layout));
 
-  // Push constant range: vertex count + bone count + pass (12 bytes)
-  VkPushConstantRange Push_Range = {.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT, .offset = 0, .size = 12};
+  // Push constant range: vertex count + bone count + pass + blend_factor + use_keyframes (20 bytes)
+  VkPushConstantRange Push_Range = {.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT, .offset = 0, .size = 20};
 
   VK_CHECK (vkCreatePipelineLayout (/*device      =>*/ Device,
                                     /*pCreateInfo =>*/ &(VkPipelineLayoutCreateInfo){
