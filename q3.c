@@ -2741,6 +2741,11 @@ void Acceleration_Rebuild_All (Acceleration_Structure *World, Figure_Pool *Pool)
 #define HULL_MAX_FACES    512 // Quickhull internal face cap during construction
 #define HULL_MAX_ENTITIES 32  // Maximum simultaneous hull collider instances
 
+// Per-frame hull recomputation: when enabled, the convex hull is rebuilt on the GPU every frame
+// after the skinning pass completes. This keeps the collision hull accurate for animated/deformable
+// meshes at the cost of one extra compute dispatch per skinned entity per frame.
+#define HULL_RECOMPUTE_PER_FRAME 0
+
 // Collider Shape Enumeration
 //
 // Six collider shapes, each defining a support function s(d̂) : S² > ℝ³ from unit directions to surface offsets. The GPU physics compute
@@ -2851,8 +2856,11 @@ Convex_Hull Hull_From_Vertices (const Vertex *Vertices, uint Count);
 // Pack a CPU-side Convex_Hull into GPU_Hull format and upload to the hull storage buffer (binding 4)
 void Hull_Upload (const Convex_Hull *Hull);
 
-// Build a convex hull directly from scene vertex buffer data already on GPU (no CPU roundtrip)
+// Build a convex hull from the global scene vertex buffer data already on GPU (no CPU roundtrip)
 void Hull_From_Vertex_Buffer (uint Vertex_Offset, uint Vertex_Count);
+
+// Build a convex hull from an arbitrary GPU vertex buffer (e.g. per-entity skinned vertices)
+void Hull_From_GPU_Buffer (GPU_Buffer Source, uint Vertex_Count);
 
 // Create the GPU physics compute pipeline with 5 descriptor bindings:
 //
@@ -2903,9 +2911,9 @@ void Skinning_Pipeline_Create ();
 // Create the GPU Quickhull compute pipeline (builds convex hulls on GPU without CPU roundtrip)
 void Quickhull_Pipeline_Create ();
 
-// Build a convex hull entirely on GPU: reads positions from an SSBO, writes GPU_Hull to Hull_Storage_Buffer.
-// Vertex_Offset is the starting vec4 index in the scene vertex buffer, Vertex_Stride is vec4s per vertex (3 for Vertex).
-void GPU_Quickhull (uint Vertex_Offset, uint Vertex_Count, uint Vertex_Stride);
+// Build a convex hull entirely on GPU: reads positions from Source_Buffer, writes GPU_Hull to Hull_Storage_Buffer.
+// Vertex_Offset is the starting vec4 index, Vertex_Stride is vec4s per vertex (3 for the engine's Vertex layout).
+void GPU_Quickhull (GPU_Buffer Source_Buffer, uint Vertex_Offset, uint Vertex_Count, uint Vertex_Stride);
 
 // Create the GPU Bezier tessellation compute pipeline
 void Tessellation_Pipeline_Create ();
@@ -7325,6 +7333,13 @@ void Figure_Skeleton_Dispatch (Figure_Instance *E) {
                                                       .commandBufferCount = 1, .pCommandBuffers = &Cmd}, VK_NULL_HANDLE));
   vkQueueWaitIdle (Queue);
   vkFreeCommandBuffers (Device, Command_Pool, 1, &Cmd);
+
+  // Per-frame hull recomputation: rebuild the convex hull from the freshly skinned vertices.
+  // The skinned vertex buffer is already on the GPU, so this is a single compute dispatch with
+  // no CPU→GPU data transfer. Keeps the collision hull accurate for animated meshes.
+  #if HULL_RECOMPUTE_PER_FRAME
+  Hull_From_GPU_Buffer (E->Vertex_Buffer, E->Figure.Vertex_Count);
+  #endif
 }
 
 // ═════════════════════
@@ -13057,7 +13072,18 @@ Convex_Hull Hull_From_Vertices (const Vertex *Vertices, uint Count) {
 // result to Hull_Storage_Buffer.
 
 void Hull_From_Vertex_Buffer (uint Vertex_Offset, uint Vertex_Count) {
-  GPU_Quickhull (Vertex_Offset * 3, Vertex_Count, 3);
+  GPU_Quickhull (Vertex_Buffer, Vertex_Offset * 3, Vertex_Count, 3);
+}
+
+// ══════════════════════════════════════
+//   Hull_From_GPU_Buffer  (GPU path)
+// ══════════════════════════════════════
+//
+// Build a convex hull from an arbitrary GPU buffer (e.g. per-entity skinned vertex buffer).
+// Assumes the buffer uses the engine's interleaved Vertex layout (3 vec4s per vertex, position in [0].xyz).
+
+void Hull_From_GPU_Buffer (GPU_Buffer Source, uint Vertex_Count) {
+  GPU_Quickhull (Source, 0, Vertex_Count, 3);
 }
 
 // ═══════════════
@@ -16717,11 +16743,11 @@ void Quickhull_Pipeline_Create () {
 //   GPU_Quickhull
 // ══════════════════
 //
-// Build a convex hull entirely on the GPU. Reads vertex positions from the scene vertex buffer
+// Build a convex hull entirely on the GPU. Reads vertex positions from Source_Buffer
 // (at Vertex_Offset with Vertex_Stride vec4s per vertex), dispatches the Quickhull_GPU compute
 // shader, and writes the result directly to Hull_Storage_Buffer. No CPU roundtrip.
 
-void GPU_Quickhull (uint Vertex_Offset, uint Vertex_Count, uint Vertex_Stride) {
+void GPU_Quickhull (GPU_Buffer Source_Buffer, uint Vertex_Offset, uint Vertex_Count, uint Vertex_Stride) {
 
   if (Vertex_Count < 4) return;
 
@@ -16755,8 +16781,8 @@ void GPU_Quickhull (uint Vertex_Offset, uint Vertex_Count, uint Vertex_Stride) {
 
   vkCmdBindPipeline (Cmd, VK_PIPELINE_BIND_POINT_COMPUTE, Quickhull_Pipeline);
 
-  // Push descriptors: scene vertex buffer, hull output, scratch
-  VkDescriptorBufferInfo Vertex_Info  = {Vertex_Buffer.Buffer, 0, Vertex_Buffer.Size};
+  // Push descriptors: source vertex buffer, hull output, scratch
+  VkDescriptorBufferInfo Vertex_Info  = {Source_Buffer.Buffer, 0, Source_Buffer.Size};
   VkDescriptorBufferInfo Hull_Info    = {Hull_Storage_Buffer.Buffer, 0, Hull_Storage_Buffer.Size};
   VkDescriptorBufferInfo Scratch_Info = {Quickhull_Scratch_Buffer.Buffer, 0, Quickhull_Scratch_Buffer.Size};
 
