@@ -2971,6 +2971,118 @@ typedef struct {
   uint32_t Pad[2];
 } GPU_Console_Line;
 
+// ── GUI Element System (Doom 3 windowDef–inspired, flexbox layout) ──────────────────────────────
+//
+// Each GUI_Element maps to one "windowDef" in the Doom 3 GUI language:
+//   windowDef Name { rect x,y,w,h; forecolor r,g,b,a; backcolor r,g,b,a; text "..."; ... }
+//
+// The system supports nested elements (parent-child), text selection, cursor/focus tracking,
+// and flexbox-style auto-layout within containers.
+
+#define GUI_MAX_ELEMENTS 128   // Max elements in the GUI tree
+#define GUI_MAX_TEXT     256   // Max text length per element
+#define GUI_MAX_CHILDREN 16   // Max direct children per element
+
+typedef enum {
+  GUI_WINDOW,       // Standard rectangular window (Doom3: windowDef)
+  GUI_EDIT,         // Text input field (Doom3: editDef)
+  GUI_LIST,         // Scrollable list (Doom3: listDef)
+  GUI_CHOICE,       // Toggle/dropdown (Doom3: choiceDef)
+  GUI_SLIDER,       // Slider bar (Doom3: sliderDef)
+  GUI_RENDER,       // 3D model viewport (Doom3: renderDef)
+  GUI_LABEL         // Static text label (no interaction)
+} GUI_Element_Kind;
+
+typedef enum {
+  GUI_ALIGN_LEFT   = 0,
+  GUI_ALIGN_CENTER = 1,
+  GUI_ALIGN_RIGHT  = 2
+} GUI_Text_Align;
+
+typedef enum {
+  GUI_FLEX_NONE    = 0,  // Manual positioning (rect)
+  GUI_FLEX_ROW     = 1,  // Children laid out left-to-right
+  GUI_FLEX_COLUMN  = 2   // Children laid out top-to-bottom
+} GUI_Flex_Direction;
+
+typedef struct {
+  GUI_Element_Kind  Kind;
+  int               Parent;           // Index into GUI_State.Elements (-1 = root)
+  int               Children[GUI_MAX_CHILDREN];
+  int               Child_Count;
+
+  // Layout (Doom3: rect x,y,w,h — relative to parent)
+  float             Rect[4];          // x, y, width, height (in virtual 640x480 coords)
+  GUI_Flex_Direction Flex;             // Flexbox layout mode for children
+  float             Gap;              // Spacing between flex children
+  float             Padding[4];       // top, right, bottom, left (CSS order)
+
+  // Visual
+  float             Forecolor[4];     // Text RGBA (Doom3: forecolor)
+  float             Backcolor[4];     // Background RGBA (Doom3: backcolor)
+  float             Hovercolor[4];    // Text color on hover (Doom3: hovercolor)
+  float             Bordercolor[4];   // Border RGBA (Doom3: bordercolor)
+  float             Bordersize;       // Border thickness in pixels
+  float             Textscale;        // Font scale (Doom3: textscale)
+  GUI_Text_Align    Textalign;        // Text alignment
+
+  // Content
+  char              Text[GUI_MAX_TEXT]; // Display text (Doom3: text)
+  int               Text_Length;
+  char              Name[64];          // Element name for scripting (Doom3: windowDef Name)
+
+  // State
+  int               Visible;          // 1=shown, 0=hidden (Doom3: visible)
+  int               No_Events;        // 1=ignore mouse (Doom3: noevents)
+  int               Focused;          // 1=has keyboard focus
+  int               Hovered;          // 1=mouse is over this element
+  int               Pressed;          // 1=mouse button held
+
+  // Text selection (for editDef and selectable text)
+  int               Sel_Start;        // Selection start character index (-1 = no selection)
+  int               Sel_End;          // Selection end character index
+  int               Cursor;           // Text cursor position (caret)
+
+  // CVar binding (Doom3: cvar)
+  int               CVar_Index;       // Bound CVar index (-1 = none)
+} GUI_Element;
+
+typedef struct {
+  GUI_Element Elements[GUI_MAX_ELEMENTS];
+  int         Element_Count;
+
+  // Cursor state (virtual 640x480 coordinates)
+  float       Cursor_X, Cursor_Y;
+  int         Focus_Element;        // Index of element with keyboard focus (-1 = none)
+  int         Hot_Element;          // Index of element under cursor (-1 = none)
+  int         Active_Element;       // Index of element being pressed (-1 = none)
+
+  // Text selection drag state
+  int         Selecting;            // 1 = mouse drag selecting text
+  int         Sel_Element;          // Which element has active text selection
+  int         Sel_Anchor;           // Character index where selection started
+
+  // Transition animation targets (Doom3: transition)
+  float       Transition_T;         // Current transition time
+} GUI_State;
+
+// Global GUI state
+GUI_State GUI;
+
+// GUI API
+void GUI_Init          (void);
+int  GUI_Add_Window    (int Parent, const char *Name, float X, float Y, float W, float H);
+int  GUI_Add_Label     (int Parent, const char *Name, const char *Text, float X, float Y);
+int  GUI_Add_Edit      (int Parent, const char *Name, float X, float Y, float W, float H);
+void GUI_Set_Text      (int Index, const char *Text);
+void GUI_Set_Backcolor (int Index, float R, float G, float B, float A);
+void GUI_Set_Forecolor (int Index, float R, float G, float B, float A);
+void GUI_Set_Flex      (int Index, GUI_Flex_Direction Dir, float Gap);
+void GUI_Layout        (void);  // Recalculate flexbox positions
+int  GUI_Hit_Test      (float X, float Y); // Returns element index under cursor
+void GUI_Handle_Mouse  (float X, float Y, int Button_Down); // Process mouse input
+void GUI_Handle_Key    (int Key, int Char); // Process keyboard input for focused element
+
 // GPU-packed hull data — the physics compute shader's storage buffer layout. The shader uses this for
 // SHAPE_HULL support queries via hill-climbing with adjacency. Built entirely on GPU by Quickhull_GPU.
 typedef struct {
@@ -6085,6 +6197,241 @@ void Command_Register_All (void) {
   COMMANDS (CMD_REGISTER)
   #undef CMD_REGISTER
   printf ("[cmd] registered %d commands\n", Command_Count);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════
+//   GUI System — Doom 3 windowDef–inspired, flexbox layout, MSDF text
+// ═══════════════════════════════════════════════════════════════════════════════════════════
+//
+// Modelled after the id Software Doom 3 GUI system (https://iddevnet.dhewm3.org/doom3/guis.html)
+// with modern flexbox auto-layout. Elements form a tree (parent → children). Each element has
+// a rect, colors, text, and interactive state (hover, focus, selection). The compute shader
+// renders all elements in the tree order using the shared MSDF font atlas.
+//
+// Ada equivalent: Neo.Engine.System.Menu (the full retained-mode GUI built on Neo.Data.Console)
+
+void GUI_Init (void) {
+  memset (&GUI, 0, sizeof GUI);
+  GUI.Focus_Element  = -1;
+  GUI.Hot_Element    = -1;
+  GUI.Active_Element = -1;
+  GUI.Sel_Element    = -1;
+  for (int I = 0; I < GUI_MAX_ELEMENTS; I++) {
+    GUI.Elements[I].Parent     = -1;
+    GUI.Elements[I].Visible    = 1;
+    GUI.Elements[I].Sel_Start  = -1;
+    GUI.Elements[I].Sel_End    = -1;
+    GUI.Elements[I].CVar_Index = -1;
+    GUI.Elements[I].Textscale  = 1.f;
+    GUI.Elements[I].Forecolor[0] = GUI.Elements[I].Forecolor[1] = GUI.Elements[I].Forecolor[2] = 0.9f;
+    GUI.Elements[I].Forecolor[3] = 1.f;
+  }
+}
+
+static int GUI_Alloc (void) {
+  if (GUI.Element_Count >= GUI_MAX_ELEMENTS) return -1;
+  int Idx = GUI.Element_Count++;
+  return Idx;
+}
+
+int GUI_Add_Window (int Parent, const char *Name, float X, float Y, float W, float H) {
+  int I = GUI_Alloc ();
+  if (I < 0) return -1;
+  GUI_Element *E = &GUI.Elements[I];
+  E->Kind = GUI_WINDOW;
+  E->Parent = Parent;
+  E->Rect[0] = X; E->Rect[1] = Y; E->Rect[2] = W; E->Rect[3] = H;
+  if (Name) snprintf (E->Name, sizeof E->Name, "%s", Name);
+  // Register as child of parent
+  if (Parent >= 0 and Parent < GUI_MAX_ELEMENTS and GUI.Elements[Parent].Child_Count < GUI_MAX_CHILDREN)
+    GUI.Elements[Parent].Children[GUI.Elements[Parent].Child_Count++] = I;
+  return I;
+}
+
+int GUI_Add_Label (int Parent, const char *Name, const char *Text, float X, float Y) {
+  int I = GUI_Alloc ();
+  if (I < 0) return -1;
+  GUI_Element *E = &GUI.Elements[I];
+  E->Kind = GUI_LABEL;
+  E->Parent = Parent;
+  E->Rect[0] = X; E->Rect[1] = Y;
+  E->No_Events = 1;
+  if (Name) snprintf (E->Name, sizeof E->Name, "%s", Name);
+  if (Text) { int L = (int)strlen (Text); if (L > GUI_MAX_TEXT - 1) L = GUI_MAX_TEXT - 1;
+    memcpy (E->Text, Text, (size_t)L); E->Text_Length = L; }
+  if (Parent >= 0 and Parent < GUI_MAX_ELEMENTS and GUI.Elements[Parent].Child_Count < GUI_MAX_CHILDREN)
+    GUI.Elements[Parent].Children[GUI.Elements[Parent].Child_Count++] = I;
+  return I;
+}
+
+int GUI_Add_Edit (int Parent, const char *Name, float X, float Y, float W, float H) {
+  int I = GUI_Alloc ();
+  if (I < 0) return -1;
+  GUI_Element *E = &GUI.Elements[I];
+  E->Kind = GUI_EDIT;
+  E->Parent = Parent;
+  E->Rect[0] = X; E->Rect[1] = Y; E->Rect[2] = W; E->Rect[3] = H;
+  E->Backcolor[0] = 0.08f; E->Backcolor[1] = 0.08f; E->Backcolor[2] = 0.12f; E->Backcolor[3] = 0.9f;
+  E->Bordercolor[0] = 0.3f; E->Bordercolor[1] = 0.3f; E->Bordercolor[2] = 0.5f; E->Bordercolor[3] = 1.f;
+  E->Bordersize = 1.f;
+  if (Name) snprintf (E->Name, sizeof E->Name, "%s", Name);
+  if (Parent >= 0 and Parent < GUI_MAX_ELEMENTS and GUI.Elements[Parent].Child_Count < GUI_MAX_CHILDREN)
+    GUI.Elements[Parent].Children[GUI.Elements[Parent].Child_Count++] = I;
+  return I;
+}
+
+void GUI_Set_Text (int Index, const char *Text) {
+  if (Index < 0 or Index >= GUI.Element_Count) return;
+  GUI_Element *E = &GUI.Elements[Index];
+  int L = (int)strlen (Text);
+  if (L > GUI_MAX_TEXT - 1) L = GUI_MAX_TEXT - 1;
+  memcpy (E->Text, Text, (size_t)L);
+  E->Text[L] = '\0';
+  E->Text_Length = L;
+}
+
+void GUI_Set_Backcolor (int Index, float R, float G, float B, float A) {
+  if (Index < 0 or Index >= GUI.Element_Count) return;
+  GUI_Element *E = &GUI.Elements[Index];
+  E->Backcolor[0] = R; E->Backcolor[1] = G; E->Backcolor[2] = B; E->Backcolor[3] = A;
+}
+
+void GUI_Set_Forecolor (int Index, float R, float G, float B, float A) {
+  if (Index < 0 or Index >= GUI.Element_Count) return;
+  GUI_Element *E = &GUI.Elements[Index];
+  E->Forecolor[0] = R; E->Forecolor[1] = G; E->Forecolor[2] = B; E->Forecolor[3] = A;
+}
+
+void GUI_Set_Flex (int Index, GUI_Flex_Direction Dir, float Gap) {
+  if (Index < 0 or Index >= GUI.Element_Count) return;
+  GUI.Elements[Index].Flex = Dir;
+  GUI.Elements[Index].Gap  = Gap;
+}
+
+// ── Flexbox layout solver: compute absolute rects for all elements ──
+void GUI_Layout (void) {
+  // Process elements in tree order (parent before children)
+  for (int I = 0; I < GUI.Element_Count; I++) {
+    GUI_Element *E = &GUI.Elements[I];
+    if (not E->Visible) continue;
+    if (E->Flex == GUI_FLEX_NONE or E->Child_Count == 0) continue;
+
+    float Pad_T = E->Padding[0], Pad_R = E->Padding[1];
+    float Pad_B = E->Padding[2], Pad_L = E->Padding[3];
+    float Inner_W = E->Rect[2] - Pad_L - Pad_R;
+    float Inner_H = E->Rect[3] - Pad_T - Pad_B;
+
+    float Cursor_X = Pad_L, Cursor_Y = Pad_T;
+
+    for (int C = 0; C < E->Child_Count; C++) {
+      int Child_Idx = E->Children[C];
+      if (Child_Idx < 0 or Child_Idx >= GUI.Element_Count) continue;
+      GUI_Element *Child = &GUI.Elements[Child_Idx];
+      if (not Child->Visible) continue;
+
+      Child->Rect[0] = Cursor_X;
+      Child->Rect[1] = Cursor_Y;
+
+      if (E->Flex == GUI_FLEX_ROW) {
+        // Row: expand children to fill height, advance X
+        if (Child->Rect[3] <= 0.f) Child->Rect[3] = Inner_H;
+        Cursor_X += Child->Rect[2] + E->Gap;
+      } else {
+        // Column: expand children to fill width, advance Y
+        if (Child->Rect[2] <= 0.f) Child->Rect[2] = Inner_W;
+        Cursor_Y += Child->Rect[3] + E->Gap;
+      }
+    }
+  }
+}
+
+// ── Hit test: find the deepest visible element containing the point ──
+static void GUI_Hit_Test_Recursive (int Index, float Abs_X, float Abs_Y,
+                                     float Px, float Py, int *Result) {
+  GUI_Element *E = &GUI.Elements[Index];
+  if (not E->Visible or E->No_Events) return;
+
+  float Ex = Abs_X + E->Rect[0], Ey = Abs_Y + E->Rect[1];
+  float Ew = E->Rect[2],         Eh = E->Rect[3];
+
+  if (Px >= Ex and Px < Ex + Ew and Py >= Ey and Py < Ey + Eh) {
+    *Result = Index;
+    // Recurse into children (last child = highest z-order wins)
+    for (int C = 0; C < E->Child_Count; C++)
+      GUI_Hit_Test_Recursive (E->Children[C], Ex, Ey, Px, Py, Result);
+  }
+}
+
+int GUI_Hit_Test (float X, float Y) {
+  int Result = -1;
+  for (int I = 0; I < GUI.Element_Count; I++) {
+    if (GUI.Elements[I].Parent == -1)
+      GUI_Hit_Test_Recursive (I, 0.f, 0.f, X, Y, &Result);
+  }
+  return Result;
+}
+
+// ── Mouse input handler ──
+void GUI_Handle_Mouse (float X, float Y, int Button_Down) {
+  GUI.Cursor_X = X;
+  GUI.Cursor_Y = Y;
+
+  int Hit = GUI_Hit_Test (X, Y);
+
+  // Update hover state
+  if (GUI.Hot_Element >= 0 and GUI.Hot_Element != Hit)
+    GUI.Elements[GUI.Hot_Element].Hovered = 0;
+  GUI.Hot_Element = Hit;
+  if (Hit >= 0) GUI.Elements[Hit].Hovered = 1;
+
+  // Handle mouse press/release
+  if (Button_Down and GUI.Active_Element < 0) {
+    GUI.Active_Element = Hit;
+    if (Hit >= 0) {
+      GUI.Elements[Hit].Pressed = 1;
+      // Set focus to this element (for text editing)
+      if (GUI.Focus_Element >= 0) GUI.Elements[GUI.Focus_Element].Focused = 0;
+      GUI.Focus_Element = Hit;
+      GUI.Elements[Hit].Focused = 1;
+
+      // Begin text selection for edit elements
+      if (GUI.Elements[Hit].Kind == GUI_EDIT) {
+        GUI.Selecting   = 1;
+        GUI.Sel_Element = Hit;
+        // TODO: compute character index from X coordinate
+        GUI.Elements[Hit].Sel_Start = 0;
+        GUI.Elements[Hit].Sel_End   = 0;
+        GUI.Elements[Hit].Cursor    = 0;
+      }
+    }
+  }
+  if (not Button_Down and GUI.Active_Element >= 0) {
+    GUI.Elements[GUI.Active_Element].Pressed = 0;
+    GUI.Active_Element = -1;
+    GUI.Selecting = 0;
+  }
+}
+
+// ── Keyboard input handler for focused element ──
+void GUI_Handle_Key (int Key, int Char) {
+  if (GUI.Focus_Element < 0) return;
+  GUI_Element *E = &GUI.Elements[GUI.Focus_Element];
+  if (E->Kind != GUI_EDIT) return;
+
+  if (Char > 0 and E->Text_Length < GUI_MAX_TEXT - 1) {
+    // Insert character at cursor
+    E->Text[E->Text_Length++] = (char)Char;
+    E->Text[E->Text_Length]   = '\0';
+    E->Cursor = E->Text_Length;
+    E->Sel_Start = E->Sel_End = -1;
+  }
+  // Backspace
+  if (Key == 8 and E->Text_Length > 0) {
+    E->Text[--E->Text_Length] = '\0';
+    E->Cursor = E->Text_Length;
+    E->Sel_Start = E->Sel_End = -1;
+  }
+  // Select all (Ctrl+A) — handled at a higher level
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════
