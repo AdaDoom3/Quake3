@@ -117,7 +117,7 @@ const Device_Tier_Preset DEVICE_TIERS[] = {
 
 // World settings
 //
-// Each asset group has a dominant coordinate convention, player scale, and camera model. The active world determines physics extents, 
+// Each asset group has a dominant coordinate convention, player scale, and camera model. The active world determines physics extents,
 // eye height, FOV, and the swizzle applied during asset load. Assets from a non-dominant world get rescaled on load.
 //
 // Coordinate system conventions:
@@ -133,66 +133,94 @@ typedef struct {
   World_Type  Type;
   const char *Name;
   float       Unit_Scale;        // World units per real-world inch
+  // Player bounding volume
   float       Player_Height;     // Standing bounding box height
   float       Player_Width;      // Bounding box half-width
+  float       Half_Extents[3];   // Standing AABB half-extents (x, y, z)
+  float       Capsule_Spine;     // Half-length of capsule cylindrical midsection
+  // Camera
   float       Eye_Height;        // Camera height above feet
   float       Crouch_Eye_Height; // Camera height crouched
   float       Crouch_Height;     // Crouched bounding box height
-  float       Step_Size;         // Max stair step height
   float       FOV;               // Horizontal field of view
+  // Movement physics (Quake/Source/Unreal each have distinct values)
   float       Max_Speed;         // Maximum wish speed
   float       Gravity;           // Downward acceleration
+  float       Jump_Velocity;     // Instantaneous upward velocity on jump
+  float       Friction;          // Ground friction coefficient
+  float       Stop_Speed;        // Speed below which friction uses this as control speed
+  float       Ground_Accel;      // Acceleration while grounded
+  float       Air_Accel;         // Acceleration while airborne (strafe-jumping)
+  float       Step_Size;         // Max stair step height
+  float       Overbounce;        // Surface clip overshoot factor
+  float       Walk_Normal;       // Min surface normal Y for walkable floor
+  // Assets
   int         Up_Axis;           // Native up axis before swizzle
   const char *Default_Pack;      // Default asset archive (e.g. "assets/pak0.pk3")
   const char *Default_Map;       // Default map name (e.g. "oa_dm1.bsp")
 } World_Settings;
 
-const float PLAYER_HALF_EXTENTS[3] = {15.f, 28.f, 15.f}; // Standing bbox
-
-// World presets: physics, camera, and asset defaults for each supported game family
+// World presets: physics, camera, and asset defaults for each supported game family.
+// Each column is one game engine's complete physics profile — no external #defines needed.
 //
-//   Quake 3:   Z-up, 56-unit player, 90° FOV, 320 u/s run, 800 gravity, pak0.pk3
-//   Source:    Z-up, 72-unit player, 90° FOV, 250 u/s run, 800 gravity, VPK archives
-//   Unreal:    Z-up, 78-unit player, 90° FOV, 400 u/s run, 950 gravity, .u/.utx packages
-//
+//                                        Quake 3             Source              Unreal Tournament
+//                                        ───────             ──────              ─────────────────
 const World_Settings WORLD_PRESETS[WORLD_COUNT] = {
-  [WORLD_QUAKE3] = {WORLD_QUAKE3, "Quake 3",            1.f,  56.f, 15.f, 50.f, 36.f, 32.f, 18.f, 90.f, 320.f, 800.f, 2,
-                    "assets/pak0.pk3",   "oa_dm1.bsp"},
-  [WORLD_SOURCE] = {WORLD_SOURCE, "Source Engine",       1.f,  72.f, 16.f, 64.f, 46.f, 36.f, 18.f, 90.f, 250.f, 800.f, 2,
-                    NULL,                "de_dust2.bsp"},
-  [WORLD_UNREAL] = {WORLD_UNREAL, "Unreal Tournament",  1.f,  78.f, 17.f, 68.f, 48.f, 39.f, 16.f, 90.f, 400.f, 950.f, 2,
-                    NULL,                "DM-Morpheus.unr"}};
+  [WORLD_QUAKE3] = {
+    .Type            = WORLD_QUAKE3,    //                    WORLD_SOURCE,       WORLD_UNREAL,
+    .Name            = "Quake 3",       //                    "Source Engine",     "Unreal Tournament",
+    .Unit_Scale      = 1.f,             //                    1.f,                1.f,
+    // ── Player bounding volume ──
+    .Player_Height   = 56.f,            //                    72.f,               78.f,
+    .Player_Width    = 15.f,            //                    16.f,               17.f,
+    .Half_Extents    = {15, 28, 15},    //                    {16, 36, 16},       {17, 39, 17},
+    .Capsule_Spine   = 13.f,            //                    18.f,               19.f,
+    // ── Camera ──
+    .Eye_Height      = 50.f,            //                    64.f,               68.f,
+    .Crouch_Eye_Height = 36.f,          //                    46.f,               48.f,
+    .Crouch_Height   = 32.f,            //                    36.f,               39.f,
+    .FOV             = 90.f,            //                    90.f,               90.f,
+    // ── Movement physics ──
+    .Max_Speed       = 320.f,           //                    250.f,              400.f,
+    .Gravity         = 800.f,           //                    800.f,              950.f,
+    .Jump_Velocity   = 270.f,           //                    301.993377f,        340.f,
+    .Friction        = 6.f,             //                    4.f,                8.f,
+    .Stop_Speed      = 100.f,           //                    100.f,              150.f,
+    .Ground_Accel    = 10.f,            //                    5.5f,               10.f,
+    .Air_Accel       = 1.f,             //                    10.f,               2.f,
+    .Step_Size       = 18.f,            //                    18.f,               16.f,
+    .Overbounce      = 1.001f,          //                    1.0f,               1.0f,
+    .Walk_Normal     = 0.7f,            //                    0.7f,               0.7f,
+    // ── Assets ──
+    .Up_Axis         = 2,               //                    2,                  2,
+    .Default_Pack    = "assets/pak0.pk3", //                  NULL,               NULL,
+    .Default_Map     = "oa_dm1.bsp",    //                    "de_dust2.bsp",     "DM-Morpheus.unr",
+  },
+  [WORLD_SOURCE] = {
+    .Type = WORLD_SOURCE, .Name = "Source Engine", .Unit_Scale = 1.f,
+    .Player_Height = 72.f, .Player_Width = 16.f, .Half_Extents = {16, 36, 16}, .Capsule_Spine = 18.f,
+    .Eye_Height = 64.f, .Crouch_Eye_Height = 46.f, .Crouch_Height = 36.f, .FOV = 90.f,
+    .Max_Speed = 250.f, .Gravity = 800.f, .Jump_Velocity = 301.993377f, .Friction = 4.f,
+    .Stop_Speed = 100.f, .Ground_Accel = 5.5f, .Air_Accel = 10.f, .Step_Size = 18.f,
+    .Overbounce = 1.0f, .Walk_Normal = 0.7f,
+    .Up_Axis = 2, .Default_Pack = NULL, .Default_Map = "de_dust2.bsp",
+  },
+  [WORLD_UNREAL] = {
+    .Type = WORLD_UNREAL, .Name = "Unreal Tournament", .Unit_Scale = 1.f,
+    .Player_Height = 78.f, .Player_Width = 17.f, .Half_Extents = {17, 39, 17}, .Capsule_Spine = 19.f,
+    .Eye_Height = 68.f, .Crouch_Eye_Height = 48.f, .Crouch_Height = 39.f, .FOV = 90.f,
+    .Max_Speed = 400.f, .Gravity = 950.f, .Jump_Velocity = 340.f, .Friction = 8.f,
+    .Stop_Speed = 150.f, .Ground_Accel = 10.f, .Air_Accel = 2.f, .Step_Size = 16.f,
+    .Overbounce = 1.0f, .Walk_Normal = 0.7f,
+    .Up_Axis = 2, .Default_Pack = NULL, .Default_Map = "DM-Morpheus.unr",
+  },
+};
 
-// Id Software player settings
-#define FIELD_OF_VIEW       90.f   // Windowing and horizontal viewport settings
-#define GRAVITY             800.f  // Downward acceleration in units per second squared
-#define GROUND_FRICTION     6.f    // Friction coefficient applied while on walkable ground
-#define STOP_SPEED          100.f  // Speed below which friction uses this as the control speed
-#define GROUND_ACCELERATE   10.f   // Acceleration rate while grounded (units/s per frame)
-#define AIR_ACCELERATE      1.f    // Acceleration rate while airborne (enables strafe-jumping)
-#define MAXIMUM_SPEED       320.f  // Maximum wish speed from input (units/s)
-#define JUMP_VELOCITY       270.f  // Instantaneous upward velocity applied on jump
-#define STEP_SIZE           18.f   // Maximum stair step height the player can walk up
-#define MINIMUM_WALK_NORMAL 0.7f   // Minimum Y-component of a surface normal to count as walkable floor
-#define OVERBOUNCE          1.001f // Slight overshoot factor when clipping velocity off surfaces
+// Constants that are truly engine-wide (not per-world)
 #define MAXIMUM_CLIP_PLANES 5      // Maximum simultaneous contact planes during slide-move resolution
-#define DEFAULT_VIEW_HEIGHT 22.f   // Camera height offset from capsule center 
-#define CROUCH_VIEW_HEIGHT   8.f   // Camera height offset when crouching 
-#define PLAYER_CAPSULE_SPINE 13.f  // Half-length of the capsule's cylindrical midsection (spine between the two hemispheres)
 
-// Valve Source player settings
-#define SRC_JUMP_VELOCITY       301.993377f 
-#define SRC_GRAVITY             800.f
-#define SRC_GROUND_FRICTION     4.f
-#define SRC_STOP_SPEED          100.f
-#define SRC_GROUND_ACCELERATE   5.5f
-#define SRC_AIR_ACCELERATE      10.f  // Source air-strafe acceleration 
-#define SRC_MAXIMUM_SPEED       250.f // Knife run speed
-#define SRC_OVERBOUNCE          1.0f  // Source clips exactly to plane (no overbounce)
-#define SRC_DUCK_SPEED          0.34f // Duck transition time in seconds
-#define SRC_WALK_SPEED          130.f // Walk modifier speed
-#define SRC_STEP_SIZE           18.f
-#define SRC_MINIMUM_WALK_NORMAL 0.7f
+// Shorthand: AW = Active_World (used in CVARS table for world-dependent CVar defaults)
+#define AW Active_World
 
 // Weapon animation settings
 #define WEAPON_MODEL_SCALE  0.50f // Viewmodel scale factor (world-space shrink, no depth hack)
@@ -213,16 +241,7 @@ const World_Settings WORLD_PRESETS[WORLD_COUNT] = {
 #define SOURCE_VIEWMODEL_UP      0.f    // CalcViewModelView: vmorigin = eyePosition, then only bob/lag/shake
 #define SOURCE_VIEWMODEL_FOV_RATIO (SOURCE_VIEWMODEL_FOV / 90.f) // Viewmodel-to-world FOV correction
 
-// HL2-style viewmodel CVars — individually tunable per ConVar, with presets as commands
-// (Derived from Source Engine CViewRender::DrawViewModels, CalcViewModelView, cl_righthand)
-#define CVAR_DEFAULT_VM_FOV       74.f    // viewmodel_fov: CS:S default 74, HL2 default 54
-#define CVAR_DEFAULT_VM_OFFSET_X  0.f     // viewmodel_offset_x: forward/back offset from eye
-#define CVAR_DEFAULT_VM_OFFSET_Y  0.f     // viewmodel_offset_y: right/left offset from eye
-#define CVAR_DEFAULT_VM_OFFSET_Z  0.f     // viewmodel_offset_z: up/down offset from eye
-#define CVAR_DEFAULT_VM_SCALE     0.70f   // viewmodel_scale: world-space scale factor (larger for RT — no depth hack)
-#define CVAR_DEFAULT_VM_BOB       1.f     // viewmodel_bob: bob amplitude multiplier (0=disabled)
-#define CVAR_DEFAULT_VM_LAG       0.f     // viewmodel_lag: camera-trailing lag factor (0=no lag, Source ~0.2)
-#define CVAR_DEFAULT_CL_RIGHTHAND 1       // cl_righthand: 1=right-hand, 0=left-hand (mirror viewmodel)
+// HL2-style viewmodel CVars — defaults are inline in the CVARS table below
 
 // Projectile limits
 #define MAX_PROJECTILES 64    // Maximum simultaneous projectiles in flight
@@ -430,18 +449,8 @@ typedef struct {
 
 // ── CVar Defaults ─────────────────────────────────────────────────────────────────────────
 //
-// Default values for engine console variables.  CVar_Register_All reads these at startup.
-// All CVar defaults that reference gameplay constants (GRAVITY, GROUND_FRICTION, etc.)
-// are resolved through the #defines above.
-
-// Video defaults
-#define CVAR_DEFAULT_WIDTH          1280
-#define CVAR_DEFAULT_HEIGHT          720
-#define CVAR_DEFAULT_RENDER_SCALE   0.75f
-#define CVAR_DEFAULT_SPP              0      // 0 = use quality preset
-#define CVAR_DEFAULT_DENOISE_PASSES   3
-#define CVAR_DEFAULT_FOV              0      // 0 = auto from world preset
-#define CVAR_DEFAULT_SENSITIVITY    1.0f
+// Default values for engine console variables (non-world-specific constants).
+// World-dependent defaults reference Active_World fields via the W shorthand.
 
 // ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 //
@@ -872,52 +881,52 @@ int Use_Validation;   // Non-zero to enable Vulkan validation layers
 
 #define CVARS(V) \
   /* ── Video (r_) ─────────────────────────────────────────────────────────────────────────────────── */ \
-  V (r_width,             "r_width",             "Window width",                    Int,   ARCHIVE, CVAR_DEFAULT_WIDTH,         320,    7680)   \
-  V (r_height,            "r_height",            "Window height",                   Int,   ARCHIVE, CVAR_DEFAULT_HEIGHT,        240,    4320)   \
-  V (r_quality,           "r_quality",           "Quality preset (0=ultra..4=potato)", Int, ARCHIVE, QUALITY_MEDIUM,            0,      QUALITY_COUNT - 1) \
-  V (r_render_scale,      "r_render_scale",      "Internal RT render scale",        Float, ARCHIVE, CVAR_DEFAULT_RENDER_SCALE,  0.25f,  2.0f)   \
-  V (r_spp,               "r_spp",               "Samples per pixel (0=preset)",    Int,   ARCHIVE, CVAR_DEFAULT_SPP,           0,      8)      \
-  V (r_denoise_passes,    "r_denoise_passes",    "A-trous denoise iterations",      Int,   ARCHIVE, CVAR_DEFAULT_DENOISE_PASSES, 0,     8)      \
-  V (r_checkerboard,      "r_checkerboard",      "Checkerboard ray dispatch",       Int,   ARCHIVE, 1,                          0,      1)      \
-  V (r_postprocess,       "r_postprocess",       "Post-processing pass",            Int,   ARCHIVE, 1,                          0,      1)      \
-  V (r_parallax,          "r_parallax",          "Parallax occlusion mapping",      Int,   ARCHIVE, 1,                          0,      1)      \
-  V (r_pbr,               "r_pbr",               "PBR material maps",               Int,   ARCHIVE, 1,                          0,      1)      \
-  V (r_validation,        "r_validation",        "Vulkan validation layers",        Int,   NONE,    0,                          0,      1)      \
-  V (r_fullscreen,        "r_fullscreen",        "Fullscreen mode",                 Int,   ARCHIVE, 0,                          0,      1)      \
-  V (r_exposure,          "r_exposure",          "Exposure multiplier",             Float, ARCHIVE, STYLE.Exposure,             0.1f,   10.0f)  \
-  V (r_fov,               "r_fov",               "Vertical FOV (0=auto)",           Float, ARCHIVE, CVAR_DEFAULT_FOV,           0,      170)    \
-  /* ── World (w_) ─────────────────────────────────────────────────────────────────────────────────── */ \
-  V (w_preset,            "w_preset",            "World preset (0=q3 1=src 2=ue)", Int,   ARCHIVE, WORLD_QUAKE3,               0,      WORLD_COUNT - 1) \
-  V (w_gravity,           "w_gravity",           "Gravity (units/s²)",             Float, NONE,    GRAVITY,                    0,      10000)  \
-  V (w_max_speed,         "w_max_speed",         "Max run speed (units/s)",        Float, NONE,    MAXIMUM_SPEED,              0,      5000)   \
-  V (w_jump_velocity,     "w_jump_velocity",     "Jump velocity (units/s)",        Float, NONE,    JUMP_VELOCITY,              0,      5000)   \
-  V (w_friction,          "w_friction",          "Ground friction",                Float, NONE,    GROUND_FRICTION,            0,      100)    \
-  V (w_accelerate,        "w_accelerate",        "Ground acceleration",            Float, NONE,    GROUND_ACCELERATE,          0,      100)    \
-  V (w_air_accelerate,    "w_air_accelerate",    "Air acceleration",               Float, NONE,    AIR_ACCELERATE,             0,      100)    \
-  V (w_stop_speed,        "w_stop_speed",        "Friction stop threshold",        Float, NONE,    STOP_SPEED,                 0,      1000)   \
-  V (w_step_size,         "w_step_size",         "Stair step height",              Float, NONE,    STEP_SIZE,                  0,      100)    \
-  V (w_overbounce,        "w_overbounce",        "Surface clip overshoot",         Float, NONE,    OVERBOUNCE,                 1.0f,   2.0f)   \
-  V (w_view_height,       "w_view_height",       "Standing eye height",            Float, NONE,    DEFAULT_VIEW_HEIGHT,        0,      100)    \
-  V (w_crouch_height,     "w_crouch_height",     "Crouching eye height",           Float, NONE,    CROUCH_VIEW_HEIGHT,         0,      100)    \
-  V (w_rocket_speed,      "w_rocket_speed",      "Rocket speed",                   Float, NONE,    ROCKET_SPEED,               0,      10000)  \
-  V (w_rocket_lifetime,   "w_rocket_lifetime",   "Projectile lifetime (s)",        Float, NONE,    ROCKET_LIFETIME,            0,      60)     \
-  V (w_fire_cooldown,     "w_fire_cooldown",     "Seconds between shots",          Float, NONE,    FIRE_COOLDOWN,              0,      10)     \
-  V (w_splash_radius,     "w_splash_radius",     "Splash damage radius",           Float, NONE,    120.0f,                     0,      1000)   \
+  V (r_width,             "r_width",             "Window width",                    Int,   ARCHIVE, 1280,              320,    7680)   \
+  V (r_height,            "r_height",            "Window height",                   Int,   ARCHIVE, 720,               240,    4320)   \
+  V (r_quality,           "r_quality",           "Quality preset (0=ultra..4=potato)", Int, ARCHIVE, QUALITY_MEDIUM,   0,      QUALITY_COUNT - 1) \
+  V (r_render_scale,      "r_render_scale",      "Internal RT render scale",        Float, ARCHIVE, 0.75f,             0.25f,  2.0f)   \
+  V (r_spp,               "r_spp",               "Samples per pixel (0=preset)",    Int,   ARCHIVE, 0,                 0,      8)      \
+  V (r_denoise_passes,    "r_denoise_passes",    "A-trous denoise iterations",      Int,   ARCHIVE, 3,                 0,      8)      \
+  V (r_checkerboard,      "r_checkerboard",      "Checkerboard ray dispatch",       Int,   ARCHIVE, 1,                 0,      1)      \
+  V (r_postprocess,       "r_postprocess",       "Post-processing pass",            Int,   ARCHIVE, 1,                 0,      1)      \
+  V (r_parallax,          "r_parallax",          "Parallax occlusion mapping",      Int,   ARCHIVE, 1,                 0,      1)      \
+  V (r_pbr,               "r_pbr",               "PBR material maps",               Int,   ARCHIVE, 1,                 0,      1)      \
+  V (r_validation,        "r_validation",        "Vulkan validation layers",        Int,   NONE,    0,                 0,      1)      \
+  V (r_fullscreen,        "r_fullscreen",        "Fullscreen mode",                 Int,   ARCHIVE, 0,                 0,      1)      \
+  V (r_exposure,          "r_exposure",          "Exposure multiplier",             Float, ARCHIVE, STYLE.Exposure,    0.1f,   10.0f)  \
+  V (r_fov,               "r_fov",               "Vertical FOV (0=auto)",           Float, ARCHIVE, 0,                 0,      170)    \
+  /* ── World (w_) ── defaults from Active_World (W shorthand) ─────────────────────────────────────── */ \
+  V (w_preset,            "w_preset",            "World preset (0=q3 1=src 2=ue)", Int,   ARCHIVE, WORLD_QUAKE3,      0,      WORLD_COUNT - 1) \
+  V (w_gravity,           "w_gravity",           "Gravity (units/s²)",             Float, NONE,    AW.Gravity,         0,      10000)  \
+  V (w_max_speed,         "w_max_speed",         "Max run speed (units/s)",        Float, NONE,    AW.Max_Speed,       0,      5000)   \
+  V (w_jump_velocity,     "w_jump_velocity",     "Jump velocity (units/s)",        Float, NONE,    AW.Jump_Velocity,   0,      5000)   \
+  V (w_friction,          "w_friction",          "Ground friction",                Float, NONE,    AW.Friction,        0,      100)    \
+  V (w_accelerate,        "w_accelerate",        "Ground acceleration",            Float, NONE,    AW.Ground_Accel,    0,      100)    \
+  V (w_air_accelerate,    "w_air_accelerate",    "Air acceleration",               Float, NONE,    AW.Air_Accel,       0,      100)    \
+  V (w_stop_speed,        "w_stop_speed",        "Friction stop threshold",        Float, NONE,    AW.Stop_Speed,      0,      1000)   \
+  V (w_step_size,         "w_step_size",         "Stair step height",              Float, NONE,    AW.Step_Size,       0,      100)    \
+  V (w_overbounce,        "w_overbounce",        "Surface clip overshoot",         Float, NONE,    AW.Overbounce,      0.0f,   2.0f)   \
+  V (w_view_height,       "w_view_height",       "Standing eye height",            Float, NONE,    AW.Eye_Height,      0,      100)    \
+  V (w_crouch_height,     "w_crouch_height",     "Crouching eye height",           Float, NONE,    AW.Crouch_Eye_Height, 0,    100)    \
+  V (w_rocket_speed,      "w_rocket_speed",      "Rocket speed",                   Float, NONE,    ROCKET_SPEED,      0,      10000)  \
+  V (w_rocket_lifetime,   "w_rocket_lifetime",   "Projectile lifetime (s)",        Float, NONE,    ROCKET_LIFETIME,   0,      60)     \
+  V (w_fire_cooldown,     "w_fire_cooldown",     "Seconds between shots",          Float, NONE,    FIRE_COOLDOWN,     0,      10)     \
+  V (w_splash_radius,     "w_splash_radius",     "Splash damage radius",           Float, NONE,    120.0f,            0,      1000)   \
   /* ── Audio (a_) ─────────────────────────────────────────────────────────────────────────────────── */ \
-  V (a_volume,            "a_volume",            "Master volume",                  Float, ARCHIVE, 1.0f,                       0.0f,   1.0f)   \
-  V (a_enabled,           "a_enabled",           "Audio enabled",                  Int,   ARCHIVE, 1,                          0,      1)      \
+  V (a_volume,            "a_volume",            "Master volume",                  Float, ARCHIVE, 1.0f,              0.0f,   1.0f)   \
+  V (a_enabled,           "a_enabled",           "Audio enabled",                  Int,   ARCHIVE, 1,                 0,      1)      \
   /* ── Input (in_) ────────────────────────────────────────────────────────────────────────────────── */ \
-  V (in_sensitivity,      "in_sensitivity",      "Mouse sensitivity",              Float, ARCHIVE, CVAR_DEFAULT_SENSITIVITY,   0.01f,  100.0f) \
-  V (in_invert_y,         "in_invert_y",         "Invert mouse Y",                Int,   ARCHIVE, 0,                          0,      1)      \
+  V (in_sensitivity,      "in_sensitivity",      "Mouse sensitivity",              Float, ARCHIVE, 1.0f,              0.01f,  100.0f) \
+  V (in_invert_y,         "in_invert_y",         "Invert mouse Y",                Int,   ARCHIVE, 0,                 0,      1)      \
   /* ── Viewmodel (vm_) ── HL2-style: viewmodel_fov, viewmodel_offset_x/y/z, cl_righthand ─────────── */ \
-  V (vm_fov,              "vm_fov",              "Viewmodel FOV",                  Float, ARCHIVE, CVAR_DEFAULT_VM_FOV,        10,     170)    \
-  V (vm_offset_x,         "vm_offset_x",         "Viewmodel fwd offset",           Float, ARCHIVE, CVAR_DEFAULT_VM_OFFSET_X,  -20,    20)     \
-  V (vm_offset_y,         "vm_offset_y",         "Viewmodel right offset",         Float, ARCHIVE, CVAR_DEFAULT_VM_OFFSET_Y,  -20,    20)     \
-  V (vm_offset_z,         "vm_offset_z",         "Viewmodel up offset",            Float, ARCHIVE, CVAR_DEFAULT_VM_OFFSET_Z,  -20,    20)     \
-  V (vm_scale,            "vm_scale",            "Viewmodel scale",                Float, ARCHIVE, CVAR_DEFAULT_VM_SCALE,      0.05f,  5.0f)   \
-  V (vm_bob,              "vm_bob",              "Viewmodel bob amplitude",        Float, ARCHIVE, CVAR_DEFAULT_VM_BOB,        0.0f,   5.0f)   \
-  V (vm_lag,              "vm_lag",              "Viewmodel trailing lag",         Float, ARCHIVE, CVAR_DEFAULT_VM_LAG,        0.0f,   1.0f)   \
-  V (cl_righthand,        "cl_righthand",        "Right-hand viewmodel",           Int,   ARCHIVE, CVAR_DEFAULT_CL_RIGHTHAND,  0,      1)      \
+  V (vm_fov,              "vm_fov",              "Viewmodel FOV",                  Float, ARCHIVE, 74.f,              10,     170)    \
+  V (vm_offset_x,         "vm_offset_x",         "Viewmodel fwd offset",           Float, ARCHIVE, 0.f,              -20,    20)     \
+  V (vm_offset_y,         "vm_offset_y",         "Viewmodel right offset",         Float, ARCHIVE, 0.f,              -20,    20)     \
+  V (vm_offset_z,         "vm_offset_z",         "Viewmodel up offset",            Float, ARCHIVE, 0.f,              -20,    20)     \
+  V (vm_scale,            "vm_scale",            "Viewmodel scale",                Float, ARCHIVE, 0.70f,             0.05f,  5.0f)   \
+  V (vm_bob,              "vm_bob",              "Viewmodel bob amplitude",        Float, ARCHIVE, 1.f,               0.0f,   5.0f)   \
+  V (vm_lag,              "vm_lag",              "Viewmodel trailing lag",         Float, ARCHIVE, 0.f,               0.0f,   1.0f)   \
+  V (cl_righthand,        "cl_righthand",        "Right-hand viewmodel",           Int,   ARCHIVE, 1,                 0,      1)      \
   /* ── RT Shader Tuning (rt_) ── ARCHIVE: runtime-adjustable, packed into Camera_Uniform ──────────── */ \
   V (rt_vndf_alpha_floor, "rt_vndf_alpha_floor", "VNDF min roughness²",           Float, ARCHIVE, VNDF_ALPHA_FLOOR,           0,      1)      \
   V (rt_specular_d_bias,  "rt_specular_d_bias",  "GGX D min roughness²",          Float, ARCHIVE, SPECULAR_D_BIAS,            0,      1)      \
@@ -3524,15 +3533,17 @@ int main (int Argc, char **Argv) {
   CVar_Set_Int   (r_parallax,       not No_Parallax);
   CVar_Set_Float (r_exposure,       Active_Exposure);
   CVar_Set_Int   (r_fullscreen,     Current_Window_Mode == FULLSCREEN_MODE);
-  // Sync world CVars — Source and Q3 carry different physics defaults
-  int Is_Source = (Active_Movement == WORLD_SOURCE);
+  // Sync world CVars from the active preset — all physics constants live in WORLD_PRESETS
   CVar_Set_Float (w_gravity,        Active_World.Gravity);
   CVar_Set_Float (w_max_speed,      Active_World.Max_Speed);
-  CVar_Set_Float (w_jump_velocity,  Is_Source ? 301.993377f : JUMP_VELOCITY);
-  CVar_Set_Float (w_friction,       Is_Source ? 4.f : GROUND_FRICTION);
-  CVar_Set_Float (w_accelerate,     Is_Source ? 5.5f : GROUND_ACCELERATE);
-  CVar_Set_Float (w_air_accelerate, Is_Source ? 10.f : AIR_ACCELERATE);
-  CVar_Set_Float (w_overbounce,     Is_Source ? 1.f : OVERBOUNCE);
+  CVar_Set_Float (w_jump_velocity,  Active_World.Jump_Velocity);
+  CVar_Set_Float (w_friction,       Active_World.Friction);
+  CVar_Set_Float (w_accelerate,     Active_World.Ground_Accel);
+  CVar_Set_Float (w_air_accelerate, Active_World.Air_Accel);
+  CVar_Set_Float (w_overbounce,     Active_World.Overbounce);
+  CVar_Set_Float (w_step_size,      Active_World.Step_Size);
+  CVar_Set_Float (w_view_height,    Active_World.Eye_Height);
+  CVar_Set_Float (w_crouch_height,  Active_World.Crouch_Eye_Height);
   printf ("[quality] preset: %s (%dx%d @ %.0f%% scale, %d SPP)\n",
           Preset->Name, Width, Height, Active_Render_Scale * 100.f, Override_SPP ? Override_SPP : Preset->SPP);
   printf ("[world] %s (height %.0f, eye %.0f, fov %.0f, speed %.0f)\n",
@@ -13114,10 +13125,10 @@ void Physics_Resources_Create (const Player *Initial_State) {
     .Position    = {Initial_State->Position.x, Initial_State->Position.y, Initial_State->Position.z},
     .Yaw         = Initial_State->Yaw,
     .Pitch       = Initial_State->Pitch,
-    .View_Height = DEFAULT_VIEW_HEIGHT,
+    .View_Height = Active_World.Eye_Height,
     .Shape       = SHAPE_CAPSULE,
-    .Extents     = {PLAYER_HALF_EXTENTS[0], PLAYER_HALF_EXTENTS[1], PLAYER_HALF_EXTENTS[2]},
-    .Spine       = PLAYER_CAPSULE_SPINE};
+    .Extents     = {Active_World.Half_Extents[0], Active_World.Half_Extents[1], Active_World.Half_Extents[2]},
+    .Spine       = Active_World.Capsule_Spine};
   Buffer_Upload (Player_State_Buffer, &Initial_GPU_State, sizeof Initial_GPU_State);
 
   // Initialize the hull storage buffer with a 1-vertex dummy (replaced when a real hull is loaded)
@@ -17080,15 +17091,15 @@ Input Poll_Input () {
           Toggle_Fullscreen ();
         if (Event.key.keysym.sym == SDLK_F5) {
           Active_Movement = (Active_Movement + 1) % WORLD_COUNT;
-          int Src = (Active_Movement == WORLD_SOURCE);
-          CVar_Set_Float (w_gravity,        Src ? 800.f : GRAVITY);
-          CVar_Set_Float (w_max_speed,      Src ? 250.f : MAXIMUM_SPEED);
-          CVar_Set_Float (w_jump_velocity,  Src ? 301.993377f : JUMP_VELOCITY);
-          CVar_Set_Float (w_friction,       Src ? 4.f : GROUND_FRICTION);
-          CVar_Set_Float (w_accelerate,     Src ? 5.5f : GROUND_ACCELERATE);
-          CVar_Set_Float (w_air_accelerate, Src ? 10.f : AIR_ACCELERATE);
-          CVar_Set_Float (w_overbounce,     Src ? 1.f : OVERBOUNCE);
-          printf("[movement] switched to %s\n", Src ? "Source" : "Quake 3");
+          World_Settings M = WORLD_PRESETS[Active_Movement];
+          CVar_Set_Float (w_gravity,        M.Gravity);
+          CVar_Set_Float (w_max_speed,      M.Max_Speed);
+          CVar_Set_Float (w_jump_velocity,  M.Jump_Velocity);
+          CVar_Set_Float (w_friction,       M.Friction);
+          CVar_Set_Float (w_accelerate,     M.Ground_Accel);
+          CVar_Set_Float (w_air_accelerate, M.Air_Accel);
+          CVar_Set_Float (w_overbounce,     M.Overbounce);
+          printf("[movement] switched to %s\n", M.Name);
         }
         if (Event.key.keysym.sym == SDLK_F6) {
           Active_World = WORLD_PRESETS[(Active_World.Type + 1) % WORLD_COUNT];
