@@ -4093,6 +4093,21 @@ int main (int Argc, char **Argv) {
   // Create the menu overlay pipeline (MSDF text rendering for console/HUD)
   Menu_Pipeline_Create ();
 
+  // Startup console messages so the overlay has visible text
+  Console_Section ("Engine Startup");
+  Console_Info    ("Vulkan device ready");
+  Console_Info    ("MSDF font atlas loaded (Oxygen 11pt)");
+  Console_Info    ("Menu overlay pipeline created");
+  {
+    char Buf[256];
+    snprintf (Buf, sizeof Buf, "Map: %s  |  Resolution: %dx%d", Map_Name, Render_Width, Render_Height);
+    Console_Line (Buf, STYLE_DEFAULT);
+    snprintf (Buf, sizeof Buf, "Quality: %s  |  SPP: %d", QUALITY_PRESETS[Active_Quality].Name,
+              Override_SPP ? Override_SPP : QUALITY_PRESETS[Active_Quality].SPP);
+    Console_Line (Buf, STYLE_DEFAULT);
+  }
+  Console_Line ("Type 'help' for available commands.", STYLE_INFO);
+
   // Create the GPU physics pipeline and resources (with hull binding)
   Physics_Pipeline_Create ();
 
