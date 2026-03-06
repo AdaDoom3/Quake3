@@ -863,33 +863,93 @@ float Delta_Time; // Time elapsed since the previous frame in seconds
 int Skip_Postprocess; // Non-zero to bypass the post-processing compute pass
 int Use_Validation;   // Non-zero to enable Vulkan validation layers
 
-// ── CVar Pointers ── Cached for hot-path per-frame reads (avoids CVar_Find every frame) ─────────
+// ── CVar Specification Table ── Ada pattern: package Name is new CVar (Name => ..., Default => ...) ──
 //
-// Video CVars (r_ prefix)
-CVar *r_width, *r_height, *r_quality, *r_render_scale, *r_spp, *r_denoise_passes;
-CVar *r_checkerboard, *r_postprocess, *r_parallax, *r_pbr, *r_validation, *r_fullscreen;
-CVar *r_exposure, *r_fov;
-// World CVars (w_ prefix)
-CVar *w_preset, *w_gravity, *w_max_speed, *w_jump_velocity, *w_friction, *w_accelerate, *w_air_accelerate;
-CVar *w_stop_speed, *w_step_size, *w_overbounce, *w_view_height, *w_crouch_height;
-CVar *w_rocket_speed, *w_rocket_lifetime, *w_fire_cooldown, *w_splash_radius;
-// Audio CVars (a_ prefix)
-CVar *a_volume, *a_enabled;
-// Input CVars (in_ prefix)
-CVar *in_sensitivity, *in_invert_y;
-// Shader tuning CVars (rt_ prefix) — LATCH: need shader recompile to take effect
-CVar *rt_vndf_alpha_floor, *rt_specular_d_bias;
-CVar *rt_refl_clamp_lo, *rt_refl_clamp_hi, *rt_refl_gate_lo, *rt_refl_gate_hi;
-CVar *rt_refl_thresh_lo, *rt_refl_thresh_hi, *rt_refl_damping, *rt_refl_soft_edge;
-CVar *rt_refl_trace_lo, *rt_refl_trace_hi;
-CVar *rt_shadow_dist_lo, *rt_shadow_dist_hi;
-CVar *rt_denoise_depth_lo, *rt_denoise_depth_hi, *rt_denoise_lum_lo, *rt_denoise_lum_hi;
-CVar *rt_firefly_headroom, *rt_firefly_bias;
-CVar *rt_cas_amount, *rt_cas_mix;
-CVar *rt_taa_static_floor, *rt_taa_sigma, *rt_taa_move_lo, *rt_taa_move_hi;
-// Viewmodel CVars (vm_ prefix) — HL2-style individually settable viewmodel parameters
-CVar *vm_fov, *vm_offset_x, *vm_offset_y, *vm_offset_z, *vm_scale, *vm_bob, *vm_lag;
-CVar *cl_righthand;
+// Single source of truth: this X-macro table generates both pointer declarations and CVar_Register_All.
+// Layout: V (Pointer, "console_name", "Description", Type, Flags, Default, Min, Max)
+//   Type  = Int | Float      (selects CVar_Register_Int or CVar_Register_Float)
+//   Flags = ARCHIVE | NONE   (token-pasted to CVAR_ARCHIVE or CVAR_NONE)
+
+#define CVARS(V) \
+  /* ── Video (r_) ─────────────────────────────────────────────────────────────────────────────────── */ \
+  V (r_width,             "r_width",             "Window width",                    Int,   ARCHIVE, CVAR_DEFAULT_WIDTH,         320,    7680)   \
+  V (r_height,            "r_height",            "Window height",                   Int,   ARCHIVE, CVAR_DEFAULT_HEIGHT,        240,    4320)   \
+  V (r_quality,           "r_quality",           "Quality preset (0=ultra..4=potato)", Int, ARCHIVE, QUALITY_MEDIUM,            0,      QUALITY_COUNT - 1) \
+  V (r_render_scale,      "r_render_scale",      "Internal RT render scale",        Float, ARCHIVE, CVAR_DEFAULT_RENDER_SCALE,  0.25f,  2.0f)   \
+  V (r_spp,               "r_spp",               "Samples per pixel (0=preset)",    Int,   ARCHIVE, CVAR_DEFAULT_SPP,           0,      8)      \
+  V (r_denoise_passes,    "r_denoise_passes",    "A-trous denoise iterations",      Int,   ARCHIVE, CVAR_DEFAULT_DENOISE_PASSES, 0,     8)      \
+  V (r_checkerboard,      "r_checkerboard",      "Checkerboard ray dispatch",       Int,   ARCHIVE, 1,                          0,      1)      \
+  V (r_postprocess,       "r_postprocess",       "Post-processing pass",            Int,   ARCHIVE, 1,                          0,      1)      \
+  V (r_parallax,          "r_parallax",          "Parallax occlusion mapping",      Int,   ARCHIVE, 1,                          0,      1)      \
+  V (r_pbr,               "r_pbr",               "PBR material maps",               Int,   ARCHIVE, 1,                          0,      1)      \
+  V (r_validation,        "r_validation",        "Vulkan validation layers",        Int,   NONE,    0,                          0,      1)      \
+  V (r_fullscreen,        "r_fullscreen",        "Fullscreen mode",                 Int,   ARCHIVE, 0,                          0,      1)      \
+  V (r_exposure,          "r_exposure",          "Exposure multiplier",             Float, ARCHIVE, STYLE.Exposure,             0.1f,   10.0f)  \
+  V (r_fov,               "r_fov",               "Vertical FOV (0=auto)",           Float, ARCHIVE, CVAR_DEFAULT_FOV,           0,      170)    \
+  /* ── World (w_) ─────────────────────────────────────────────────────────────────────────────────── */ \
+  V (w_preset,            "w_preset",            "World preset (0=q3 1=src 2=ue)", Int,   ARCHIVE, WORLD_QUAKE3,               0,      WORLD_COUNT - 1) \
+  V (w_gravity,           "w_gravity",           "Gravity (units/s²)",             Float, NONE,    GRAVITY,                    0,      10000)  \
+  V (w_max_speed,         "w_max_speed",         "Max run speed (units/s)",        Float, NONE,    MAXIMUM_SPEED,              0,      5000)   \
+  V (w_jump_velocity,     "w_jump_velocity",     "Jump velocity (units/s)",        Float, NONE,    JUMP_VELOCITY,              0,      5000)   \
+  V (w_friction,          "w_friction",          "Ground friction",                Float, NONE,    GROUND_FRICTION,            0,      100)    \
+  V (w_accelerate,        "w_accelerate",        "Ground acceleration",            Float, NONE,    GROUND_ACCELERATE,          0,      100)    \
+  V (w_air_accelerate,    "w_air_accelerate",    "Air acceleration",               Float, NONE,    AIR_ACCELERATE,             0,      100)    \
+  V (w_stop_speed,        "w_stop_speed",        "Friction stop threshold",        Float, NONE,    STOP_SPEED,                 0,      1000)   \
+  V (w_step_size,         "w_step_size",         "Stair step height",              Float, NONE,    STEP_SIZE,                  0,      100)    \
+  V (w_overbounce,        "w_overbounce",        "Surface clip overshoot",         Float, NONE,    OVERBOUNCE,                 1.0f,   2.0f)   \
+  V (w_view_height,       "w_view_height",       "Standing eye height",            Float, NONE,    DEFAULT_VIEW_HEIGHT,        0,      100)    \
+  V (w_crouch_height,     "w_crouch_height",     "Crouching eye height",           Float, NONE,    CROUCH_VIEW_HEIGHT,         0,      100)    \
+  V (w_rocket_speed,      "w_rocket_speed",      "Rocket speed",                   Float, NONE,    ROCKET_SPEED,               0,      10000)  \
+  V (w_rocket_lifetime,   "w_rocket_lifetime",   "Projectile lifetime (s)",        Float, NONE,    ROCKET_LIFETIME,            0,      60)     \
+  V (w_fire_cooldown,     "w_fire_cooldown",     "Seconds between shots",          Float, NONE,    FIRE_COOLDOWN,              0,      10)     \
+  V (w_splash_radius,     "w_splash_radius",     "Splash damage radius",           Float, NONE,    120.0f,                     0,      1000)   \
+  /* ── Audio (a_) ─────────────────────────────────────────────────────────────────────────────────── */ \
+  V (a_volume,            "a_volume",            "Master volume",                  Float, ARCHIVE, 1.0f,                       0.0f,   1.0f)   \
+  V (a_enabled,           "a_enabled",           "Audio enabled",                  Int,   ARCHIVE, 1,                          0,      1)      \
+  /* ── Input (in_) ────────────────────────────────────────────────────────────────────────────────── */ \
+  V (in_sensitivity,      "in_sensitivity",      "Mouse sensitivity",              Float, ARCHIVE, CVAR_DEFAULT_SENSITIVITY,   0.01f,  100.0f) \
+  V (in_invert_y,         "in_invert_y",         "Invert mouse Y",                Int,   ARCHIVE, 0,                          0,      1)      \
+  /* ── Viewmodel (vm_) ── HL2-style: viewmodel_fov, viewmodel_offset_x/y/z, cl_righthand ─────────── */ \
+  V (vm_fov,              "vm_fov",              "Viewmodel FOV",                  Float, ARCHIVE, CVAR_DEFAULT_VM_FOV,        10,     170)    \
+  V (vm_offset_x,         "vm_offset_x",         "Viewmodel fwd offset",           Float, ARCHIVE, CVAR_DEFAULT_VM_OFFSET_X,  -20,    20)     \
+  V (vm_offset_y,         "vm_offset_y",         "Viewmodel right offset",         Float, ARCHIVE, CVAR_DEFAULT_VM_OFFSET_Y,  -20,    20)     \
+  V (vm_offset_z,         "vm_offset_z",         "Viewmodel up offset",            Float, ARCHIVE, CVAR_DEFAULT_VM_OFFSET_Z,  -20,    20)     \
+  V (vm_scale,            "vm_scale",            "Viewmodel scale",                Float, ARCHIVE, CVAR_DEFAULT_VM_SCALE,      0.05f,  5.0f)   \
+  V (vm_bob,              "vm_bob",              "Viewmodel bob amplitude",        Float, ARCHIVE, CVAR_DEFAULT_VM_BOB,        0.0f,   5.0f)   \
+  V (vm_lag,              "vm_lag",              "Viewmodel trailing lag",         Float, ARCHIVE, CVAR_DEFAULT_VM_LAG,        0.0f,   1.0f)   \
+  V (cl_righthand,        "cl_righthand",        "Right-hand viewmodel",           Int,   ARCHIVE, CVAR_DEFAULT_CL_RIGHTHAND,  0,      1)      \
+  /* ── RT Shader Tuning (rt_) ── ARCHIVE: runtime-adjustable, packed into Camera_Uniform ──────────── */ \
+  V (rt_vndf_alpha_floor, "rt_vndf_alpha_floor", "VNDF min roughness²",           Float, ARCHIVE, VNDF_ALPHA_FLOOR,           0,      1)      \
+  V (rt_specular_d_bias,  "rt_specular_d_bias",  "GGX D min roughness²",          Float, ARCHIVE, SPECULAR_D_BIAS,            0,      1)      \
+  V (rt_refl_clamp_lo,    "rt_refl_clamp_lo",    "Refl lum clamp (b=0)",          Float, ARCHIVE, REFL_CLAMP_LO,              0,      100)    \
+  V (rt_refl_clamp_hi,    "rt_refl_clamp_hi",    "Refl lum clamp (b=1)",          Float, ARCHIVE, REFL_CLAMP_HI,              0,      100)    \
+  V (rt_refl_gate_lo,     "rt_refl_gate_lo",     "Refl max roughness (b=0)",      Float, ARCHIVE, REFL_GATE_LO,               0,      1)      \
+  V (rt_refl_gate_hi,     "rt_refl_gate_hi",     "Refl max roughness (b=1)",      Float, ARCHIVE, REFL_GATE_HI,               0,      1)      \
+  V (rt_refl_thresh_lo,   "rt_refl_thresh_lo",   "Refl Fresnel skip (b=0)",       Float, ARCHIVE, REFL_THRESH_LO,             0,      1)      \
+  V (rt_refl_thresh_hi,   "rt_refl_thresh_hi",   "Refl Fresnel skip (b=1)",       Float, ARCHIVE, REFL_THRESH_HI,             0,      1)      \
+  V (rt_refl_damping,     "rt_refl_damping",     "Budget refl damping",           Float, ARCHIVE, REFL_DAMPING,               0,      10)     \
+  V (rt_refl_soft_edge,   "rt_refl_soft_edge",   "Threshold transition",          Float, ARCHIVE, REFL_SOFT_EDGE,             0,      100)    \
+  V (rt_refl_trace_lo,    "rt_refl_trace_lo",    "Refl trace dist (b=0)",         Float, ARCHIVE, REFL_TRACE_LO,              0,      100000) \
+  V (rt_refl_trace_hi,    "rt_refl_trace_hi",    "Refl trace dist (b=1)",         Float, ARCHIVE, REFL_TRACE_HI,              0,      100000) \
+  V (rt_shadow_dist_lo,   "rt_shadow_dist_lo",   "Shadow dist (b=0)",             Float, ARCHIVE, SHADOW_DIST_LO,             0,      100000) \
+  V (rt_shadow_dist_hi,   "rt_shadow_dist_hi",   "Shadow dist (b=1)",             Float, ARCHIVE, SHADOW_DIST_HI,             0,      100000) \
+  V (rt_denoise_depth_lo, "rt_denoise_depth_lo", "Denoise depth sens (still)",    Float, ARCHIVE, DENOISE_DEPTH_LO,           0,      10000)  \
+  V (rt_denoise_depth_hi, "rt_denoise_depth_hi", "Denoise depth sens (motion)",   Float, ARCHIVE, DENOISE_DEPTH_HI,           0,      10000)  \
+  V (rt_denoise_lum_lo,   "rt_denoise_lum_lo",   "Denoise lum sens (still)",      Float, ARCHIVE, DENOISE_LUM_LO,             0,      10000)  \
+  V (rt_denoise_lum_hi,   "rt_denoise_lum_hi",   "Denoise lum sens (motion)",     Float, ARCHIVE, DENOISE_LUM_HI,             0,      10000)  \
+  V (rt_firefly_headroom, "rt_firefly_headroom", "Firefly clamp headroom",        Float, ARCHIVE, FIREFLY_HEADROOM,           1,      10)     \
+  V (rt_firefly_bias,     "rt_firefly_bias",     "Firefly clamp floor",           Float, ARCHIVE, FIREFLY_BIAS,               0,      1)      \
+  V (rt_cas_amount,       "rt_cas_amount",       "CAS sharpening strength",       Float, ARCHIVE, CAS_AMOUNT,                 0,      2)      \
+  V (rt_cas_mix,          "rt_cas_mix",          "CAS edge enhancement",          Float, ARCHIVE, CAS_MIX,                    0,      10)     \
+  V (rt_taa_static_floor, "rt_taa_static_floor", "TAA blend when still",          Float, ARCHIVE, TAA_STATIC_FLOOR,           0,      1)      \
+  V (rt_taa_sigma,        "rt_taa_sigma",        "TAA variance sigma",            Float, ARCHIVE, TAA_SIGMA,                  0,      1)      \
+  V (rt_taa_move_lo,      "rt_taa_move_lo",      "TAA blend at low motion",       Float, ARCHIVE, TAA_MOVE_LO,                0,      1)      \
+  V (rt_taa_move_hi,      "rt_taa_move_hi",      "TAA blend at high motion",      Float, ARCHIVE, TAA_MOVE_HI,                0,      1)      \
+
+// ── Generate CVar pointer declarations from the specification table ──
+#define CVAR_DECLARE(P, ...) CVar *P;
+CVARS (CVAR_DECLARE)
+#undef CVAR_DECLARE
 
 // Viewmodel A/B test state: cycles through 4 presets every 3 seconds when active
 static int   VM_AB_Test_Active = 0;
@@ -5436,88 +5496,12 @@ void Gamepad_Handle_Event (const SDL_Event *Event) {
 // from the config file, then command-line flags override individual CVars.
 
 void CVar_Register_All (void) {
-  // ── Video CVars (defaults from §1. Settings: CVAR_DEFAULT_*) ─────────────────────────
-  r_width          = CVar_Register_Int   ("r_width",          "Window width in pixels",              CVAR_ARCHIVE, CVAR_DEFAULT_WIDTH, 320, 7680);
-  r_height         = CVar_Register_Int   ("r_height",         "Window height in pixels",             CVAR_ARCHIVE, CVAR_DEFAULT_HEIGHT, 240, 4320);
-  r_quality        = CVar_Register_Int   ("r_quality",        "Quality preset (0=ultra..4=potato)",  CVAR_ARCHIVE, QUALITY_MEDIUM, 0, QUALITY_COUNT - 1);
-  r_render_scale   = CVar_Register_Float ("r_render_scale",   "Internal RT render scale",            CVAR_ARCHIVE, CVAR_DEFAULT_RENDER_SCALE, 0.25f, 2.0f);
-  r_spp            = CVar_Register_Int   ("r_spp",            "Samples per pixel (0=use preset)",    CVAR_ARCHIVE, CVAR_DEFAULT_SPP, 0, 8);
-  r_denoise_passes = CVar_Register_Int   ("r_denoise_passes", "A-trous wavelet denoise iterations",  CVAR_ARCHIVE, CVAR_DEFAULT_DENOISE_PASSES, 0, 8);
-  r_checkerboard   = CVar_Register_Int   ("r_checkerboard",   "Temporal checkerboard ray dispatch",  CVAR_ARCHIVE, 1, 0, 1);
-  r_postprocess    = CVar_Register_Int   ("r_postprocess",    "Enable post-processing pass",         CVAR_ARCHIVE, 1, 0, 1);
-  r_parallax       = CVar_Register_Int   ("r_parallax",       "Enable parallax occlusion mapping",   CVAR_ARCHIVE, 1, 0, 1);
-  r_pbr            = CVar_Register_Int   ("r_pbr",            "Enable PBR material maps",            CVAR_ARCHIVE, 1, 0, 1);
-  r_validation     = CVar_Register_Int   ("r_validation",     "Enable Vulkan validation layers",     CVAR_NONE,    0, 0, 1);
-  r_fullscreen     = CVar_Register_Int   ("r_fullscreen",     "Fullscreen mode (0=windowed 1=full)", CVAR_ARCHIVE, 0, 0, 1);
-  r_exposure       = CVar_Register_Float ("r_exposure",       "Tonemapping exposure multiplier",     CVAR_ARCHIVE, STYLE.Exposure, 0.1f, 10.0f);
-  r_fov            = CVar_Register_Float ("r_fov",            "Vertical FOV override (0=auto)",      CVAR_ARCHIVE, CVAR_DEFAULT_FOV, 0, 170);
-
-  // ── World CVars (defaults from §1. Settings: GRAVITY, GROUND_FRICTION, etc.) ────────
-  w_preset         = CVar_Register_Int   ("w_preset",         "World preset (0=q3 1=source 2=unreal)", CVAR_ARCHIVE, WORLD_QUAKE3, 0, WORLD_COUNT - 1);
-  w_gravity        = CVar_Register_Float ("w_gravity",        "Gravity (units/s²)",                    CVAR_NONE, GRAVITY, 0, 10000);
-  w_max_speed      = CVar_Register_Float ("w_max_speed",      "Max run speed (units/s)",               CVAR_NONE, MAXIMUM_SPEED, 0, 5000);
-  w_jump_velocity  = CVar_Register_Float ("w_jump_velocity",  "Jump impulse velocity (units/s)",       CVAR_NONE, JUMP_VELOCITY, 0, 5000);
-  w_friction       = CVar_Register_Float ("w_friction",       "Ground friction coefficient",           CVAR_NONE, GROUND_FRICTION, 0, 100);
-  w_accelerate     = CVar_Register_Float ("w_accelerate",     "Ground acceleration rate",              CVAR_NONE, GROUND_ACCELERATE, 0, 100);
-  w_air_accelerate = CVar_Register_Float ("w_air_accelerate", "Air acceleration rate",                 CVAR_NONE, AIR_ACCELERATE, 0, 100);
-  w_stop_speed     = CVar_Register_Float ("w_stop_speed",     "Speed below which friction uses stop",  CVAR_NONE, STOP_SPEED, 0, 1000);
-  w_step_size      = CVar_Register_Float ("w_step_size",      "Max stair step height",                 CVAR_NONE, STEP_SIZE, 0, 100);
-  w_overbounce     = CVar_Register_Float ("w_overbounce",     "Surface clip overshoot factor",         CVAR_NONE, OVERBOUNCE, 1.0f, 2.0f);
-  w_view_height    = CVar_Register_Float ("w_view_height",    "Standing eye height offset",            CVAR_NONE, DEFAULT_VIEW_HEIGHT, 0, 100);
-  w_crouch_height  = CVar_Register_Float ("w_crouch_height",  "Crouching eye height offset",           CVAR_NONE, CROUCH_VIEW_HEIGHT, 0, 100);
-  w_rocket_speed   = CVar_Register_Float ("w_rocket_speed",   "Rocket projectile speed",               CVAR_NONE, ROCKET_SPEED, 0, 10000);
-  w_rocket_lifetime= CVar_Register_Float ("w_rocket_lifetime","Projectile lifetime (seconds)",         CVAR_NONE, ROCKET_LIFETIME, 0, 60);
-  w_fire_cooldown  = CVar_Register_Float ("w_fire_cooldown",  "Min seconds between shots",             CVAR_NONE, FIRE_COOLDOWN, 0, 10);
-  w_splash_radius  = CVar_Register_Float ("w_splash_radius",  "Explosion splash damage radius",        CVAR_NONE, 120.0f, 0, 1000);
-
-  // ── Audio CVars ────────────────────────────────────────────────────────────────────────
-  a_volume         = CVar_Register_Float ("a_volume",         "Master volume (0.0 - 1.0)",           CVAR_ARCHIVE, 1.0f, 0.0f, 1.0f);
-  a_enabled        = CVar_Register_Int   ("a_enabled",        "Audio enabled",                       CVAR_ARCHIVE, 1, 0, 1);
-
-  // ── Input CVars ────────────────────────────────────────────────────────────────────────
-  in_sensitivity   = CVar_Register_Float ("in_sensitivity",   "Mouse sensitivity multiplier",        CVAR_ARCHIVE, CVAR_DEFAULT_SENSITIVITY, 0.01f, 100.0f);
-  in_invert_y      = CVar_Register_Int   ("in_invert_y",      "Invert mouse Y axis",                 CVAR_ARCHIVE, 0, 0, 1);
-
-  // ── Viewmodel CVars (vm_ prefix) — HL2-style per-setting viewmodel control ────────────
-  // Modelled after Source Engine: viewmodel_fov, viewmodel_offset_x/y/z, cl_righthand.
-  // Each setting is individually tunable; preset commands (vm_preset) set them in bulk.
-  vm_fov       = CVar_Register_Float ("vm_fov",       "Viewmodel FOV (Source default 54)",         CVAR_ARCHIVE, CVAR_DEFAULT_VM_FOV, 10, 170);
-  vm_offset_x  = CVar_Register_Float ("vm_offset_x",  "Viewmodel forward offset from eye",         CVAR_ARCHIVE, CVAR_DEFAULT_VM_OFFSET_X, -20, 20);
-  vm_offset_y  = CVar_Register_Float ("vm_offset_y",  "Viewmodel right offset from eye",           CVAR_ARCHIVE, CVAR_DEFAULT_VM_OFFSET_Y, -20, 20);
-  vm_offset_z  = CVar_Register_Float ("vm_offset_z",  "Viewmodel up offset from eye",              CVAR_ARCHIVE, CVAR_DEFAULT_VM_OFFSET_Z, -20, 20);
-  vm_scale     = CVar_Register_Float ("vm_scale",     "Viewmodel world-space scale factor",        CVAR_ARCHIVE, CVAR_DEFAULT_VM_SCALE, 0.05f, 5.0f);
-  vm_bob       = CVar_Register_Float ("vm_bob",       "Viewmodel bob amplitude multiplier",        CVAR_ARCHIVE, CVAR_DEFAULT_VM_BOB, 0.0f, 5.0f);
-  vm_lag       = CVar_Register_Float ("vm_lag",       "Viewmodel camera-trailing lag (0=none)",    CVAR_ARCHIVE, CVAR_DEFAULT_VM_LAG, 0.0f, 1.0f);
-  cl_righthand = CVar_Register_Int   ("cl_righthand", "Right-handed viewmodel (0=left, 1=right)",  CVAR_ARCHIVE, CVAR_DEFAULT_CL_RIGHTHAND, 0, 1);
-
-  // ── Shader Tuning CVars (rt_ prefix) ── ARCHIVE | LATCH: shader recompile needed ──────
-  rt_vndf_alpha_floor  = CVar_Register_Float ("rt_vndf_alpha_floor",  "Min roughness² for VNDF reflection",     CVAR_ARCHIVE, VNDF_ALPHA_FLOOR,  0, 1);
-  rt_specular_d_bias   = CVar_Register_Float ("rt_specular_d_bias",   "Min roughness² for GGX D term",          CVAR_ARCHIVE, SPECULAR_D_BIAS,   0, 1);
-  rt_refl_clamp_lo     = CVar_Register_Float ("rt_refl_clamp_lo",     "Reflection luminance clamp (budget=0)",  CVAR_ARCHIVE, REFL_CLAMP_LO,     0, 100);
-  rt_refl_clamp_hi     = CVar_Register_Float ("rt_refl_clamp_hi",     "Reflection luminance clamp (budget=1)",  CVAR_ARCHIVE, REFL_CLAMP_HI,     0, 100);
-  rt_refl_gate_lo      = CVar_Register_Float ("rt_refl_gate_lo",      "Max roughness for reflection (b=0)",     CVAR_ARCHIVE, REFL_GATE_LO,      0, 1);
-  rt_refl_gate_hi      = CVar_Register_Float ("rt_refl_gate_hi",      "Max roughness for reflection (b=1)",     CVAR_ARCHIVE, REFL_GATE_HI,      0, 1);
-  rt_refl_thresh_lo    = CVar_Register_Float ("rt_refl_thresh_lo",    "Fresnel skip threshold (budget=0)",      CVAR_ARCHIVE, REFL_THRESH_LO,    0, 1);
-  rt_refl_thresh_hi    = CVar_Register_Float ("rt_refl_thresh_hi",    "Fresnel skip threshold (budget=1)",      CVAR_ARCHIVE, REFL_THRESH_HI,    0, 1);
-  rt_refl_damping      = CVar_Register_Float ("rt_refl_damping",      "Budget-proportional reflection damping", CVAR_ARCHIVE, REFL_DAMPING,      0, 10);
-  rt_refl_soft_edge    = CVar_Register_Float ("rt_refl_soft_edge",    "Threshold transition sharpness",         CVAR_ARCHIVE, REFL_SOFT_EDGE,    0, 100);
-  rt_refl_trace_lo     = CVar_Register_Float ("rt_refl_trace_lo",     "Reflection trace max dist (budget=0)",   CVAR_ARCHIVE, REFL_TRACE_LO,     0, 100000);
-  rt_refl_trace_hi     = CVar_Register_Float ("rt_refl_trace_hi",     "Reflection trace max dist (budget=1)",   CVAR_ARCHIVE, REFL_TRACE_HI,     0, 100000);
-  rt_shadow_dist_lo    = CVar_Register_Float ("rt_shadow_dist_lo",    "Shadow ray max dist (budget=0)",         CVAR_ARCHIVE, SHADOW_DIST_LO,    0, 100000);
-  rt_shadow_dist_hi    = CVar_Register_Float ("rt_shadow_dist_hi",    "Shadow ray max dist (budget=1)",         CVAR_ARCHIVE, SHADOW_DIST_HI,    0, 100000);
-  rt_denoise_depth_lo  = CVar_Register_Float ("rt_denoise_depth_lo",  "Denoiser depth sensitivity (still)",     CVAR_ARCHIVE, DENOISE_DEPTH_LO,  0, 10000);
-  rt_denoise_depth_hi  = CVar_Register_Float ("rt_denoise_depth_hi",  "Denoiser depth sensitivity (motion)",    CVAR_ARCHIVE, DENOISE_DEPTH_HI,  0, 10000);
-  rt_denoise_lum_lo    = CVar_Register_Float ("rt_denoise_lum_lo",    "Denoiser lum sensitivity (still)",       CVAR_ARCHIVE, DENOISE_LUM_LO,    0, 10000);
-  rt_denoise_lum_hi    = CVar_Register_Float ("rt_denoise_lum_hi",    "Denoiser lum sensitivity (motion)",      CVAR_ARCHIVE, DENOISE_LUM_HI,    0, 10000);
-  rt_firefly_headroom  = CVar_Register_Float ("rt_firefly_headroom",  "Firefly clamp headroom multiplier",      CVAR_ARCHIVE, FIREFLY_HEADROOM,  1, 10);
-  rt_firefly_bias      = CVar_Register_Float ("rt_firefly_bias",      "Firefly clamp additive floor",           CVAR_ARCHIVE, FIREFLY_BIAS,      0, 1);
-  rt_cas_amount        = CVar_Register_Float ("rt_cas_amount",        "CAS sharpening strength",                CVAR_ARCHIVE, CAS_AMOUNT,        0, 2);
-  rt_cas_mix           = CVar_Register_Float ("rt_cas_mix",           "CAS edge enhancement multiplier",        CVAR_ARCHIVE, CAS_MIX,           0, 10);
-  rt_taa_static_floor  = CVar_Register_Float ("rt_taa_static_floor",  "TAA min blend when still",               CVAR_ARCHIVE, TAA_STATIC_FLOOR,  0, 1);
-  rt_taa_sigma         = CVar_Register_Float ("rt_taa_sigma",         "TAA variance clamp sigma",               CVAR_ARCHIVE, TAA_SIGMA,         0, 1);
-  rt_taa_move_lo       = CVar_Register_Float ("rt_taa_move_lo",       "TAA blend at low motion",                CVAR_ARCHIVE, TAA_MOVE_LO,       0, 1);
-  rt_taa_move_hi       = CVar_Register_Float ("rt_taa_move_hi",       "TAA blend at high motion",               CVAR_ARCHIVE, TAA_MOVE_HI,       0, 1);
-
+  // Generate all CVar registrations from the CVARS specification table (§3 Globals).
+  // X-macro dispatch: Type token (Int|Float) is pasted onto CVar_Register_ to select the typed call.
+  // Flags token (ARCHIVE|NONE) is pasted onto CVAR_ to select the flag constant.
+  #define CVAR_REGISTER(P, N, H, T, F, D, Lo, Hi) P = CVar_Register_##T (N, H, CVAR_##F, D, Lo, Hi);
+  CVARS (CVAR_REGISTER)
+  #undef CVAR_REGISTER
   printf ("[cvar] registered %d cvars\n", CVar_Count);
 }
 
