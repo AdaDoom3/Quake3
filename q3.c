@@ -995,6 +995,12 @@ VkPipeline            Skinning_Pipeline;
 VkPipelineLayout      Skinning_Pipeline_Layout;
 VkDescriptorSetLayout Skinning_Descriptor_Layout;
 
+// GPU Quickhull compute pipeline state (builds convex hulls entirely on GPU)
+VkPipeline            Quickhull_Pipeline;
+VkPipelineLayout      Quickhull_Pipeline_Layout;
+VkDescriptorSetLayout Quickhull_Descriptor_Layout;
+GPU_Buffer            Quickhull_Scratch_Buffer;        // Scratch SSBO for per-point assignments during hull construction
+
 // GPU Bezier tessellation pipeline state
 VkPipeline            Tessellation_Pipeline;
 VkPipelineLayout      Tessellation_Pipeline_Layout;
@@ -2845,6 +2851,9 @@ Convex_Hull Hull_From_Vertices (const Vertex *Vertices, uint Count);
 // Pack a CPU-side Convex_Hull into GPU_Hull format and upload to the hull storage buffer (binding 4)
 void Hull_Upload (const Convex_Hull *Hull);
 
+// Build a convex hull directly from scene vertex buffer data already on GPU (no CPU roundtrip)
+void Hull_From_Vertex_Buffer (uint Vertex_Offset, uint Vertex_Count);
+
 // Create the GPU physics compute pipeline with 5 descriptor bindings:
 //
 //   Binding 0: TLAS (acceleration structure)
@@ -2890,6 +2899,13 @@ void Postprocess_Pipeline_Create ();
 
 // Create the GPU skeletal skinning compute pipeline for Source MDL bone-driven animation
 void Skinning_Pipeline_Create ();
+
+// Create the GPU Quickhull compute pipeline (builds convex hulls on GPU without CPU roundtrip)
+void Quickhull_Pipeline_Create ();
+
+// Build a convex hull entirely on GPU: reads positions from an SSBO, writes GPU_Hull to Hull_Storage_Buffer.
+// Vertex_Offset is the starting vec4 index in the scene vertex buffer, Vertex_Stride is vec4s per vertex (3 for Vertex).
+void GPU_Quickhull (uint Vertex_Offset, uint Vertex_Count, uint Vertex_Stride);
 
 // Create the GPU Bezier tessellation compute pipeline
 void Tessellation_Pipeline_Create ();
@@ -3036,6 +3052,9 @@ glsl comp Skinning;
 
 // GPU Bezier tessellation: evaluates bi-quadratic Bezier patches in parallel on the GPU
 glsl comp Tessellation;
+
+// GPU Quickhull: builds convex hulls entirely on the GPU from vertex buffer data
+glsl comp Quickhull_GPU;
 
 // ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 //
@@ -3931,6 +3950,9 @@ int main (int Argc, char **Argv) {
   // Create the GPU Bezier tessellation pipeline (used by Q3 BSP curved surfaces)
   Tessellation_Pipeline_Create ();
 
+  // Create the GPU Quickhull pipeline (builds convex hulls on GPU without CPU roundtrip)
+  Quickhull_Pipeline_Create ();
+
   // Create the GPU physics pipeline and resources (with hull binding)
   Physics_Pipeline_Create ();
 
@@ -4713,6 +4735,10 @@ int main (int Argc, char **Argv) {
   vkDestroyPipeline            (Device, Tessellation_Pipeline, NULL);
   vkDestroyPipelineLayout      (Device, Tessellation_Pipeline_Layout, NULL);
   vkDestroyDescriptorSetLayout (Device, Tessellation_Descriptor_Layout, NULL);
+  vkDestroyPipeline            (Device, Quickhull_Pipeline, NULL);
+  vkDestroyPipelineLayout      (Device, Quickhull_Pipeline_Layout, NULL);
+  vkDestroyDescriptorSetLayout (Device, Quickhull_Descriptor_Layout, NULL);
+  Buffer_Destroy (&Quickhull_Scratch_Buffer);
   vkDestroyPipeline            (Device, Pipeline, NULL);
   vkDestroyPipelineLayout      (Device, Pipeline_Layout, NULL);
   vkDestroyDescriptorPool      (Device, Descriptor_Pool, NULL);
@@ -13012,13 +13038,26 @@ Convex_Hull Quickhull (const vec3 *Points, uint Count) {
 
 Convex_Hull Hull_From_Vertices (const Vertex *Vertices, uint Count) {
 
-  // Extract vec3 positions from the vertex array and delegate to Quickhull
+  // CPU fallback: extract vec3 positions from the vertex array and delegate to Quickhull
   vec3 *Positions = malloc (sizeof (vec3) * Count);
   for (uint Index = 0; Index < Count; Index++)
     Positions[Index] = Make (Vertices[Index].Position[0], Vertices[Index].Position[1], Vertices[Index].Position[2]);
   Convex_Hull Hull = Quickhull (Positions, Count);
   free (Positions);
   return Hull;
+}
+
+// ══════════════════════════════════════
+//   Hull_From_Vertex_Buffer  (GPU path)
+// ══════════════════════════════════════
+//
+// Build a convex hull from vertices already resident on the GPU in the scene vertex buffer.
+// Vertex_Offset is the index of the first vertex (not byte offset). This avoids all CPU→GPU
+// data transfer — the compute shader reads directly from the vertex SSBO and writes the
+// result to Hull_Storage_Buffer.
+
+void Hull_From_Vertex_Buffer (uint Vertex_Offset, uint Vertex_Count) {
+  GPU_Quickhull (Vertex_Offset * 3, Vertex_Count, 3);
 }
 
 // ═══════════════
@@ -16078,6 +16117,460 @@ glsl comp Skinning {
   }
 } // Skinning
 
+// ═══════════════════════════════════════════════════════════════════════════════════════════════════════
+//
+//   GPU Quickhull compute shader — builds convex hulls entirely on the GPU, eliminating the
+//   CPU→GPU upload roundtrip. Reads vertex positions from the scene vertex buffer and writes
+//   the final GPU_Hull (vertices + adjacency tables) directly to the hull storage buffer.
+//
+//   Parallelization strategy (single workgroup, 256 threads):
+//     • Extremal point search — parallel reduction over all input vertices
+//     • Farthest point per iteration — parallel reduction with stride loops
+//     • Face visibility testing — parallel per-face scan
+//     • Point reassignment — parallel per-point stride loop
+//     • Vertex extraction + adjacency — parallel over surviving faces
+//     • Centroid + bounding radius — parallel reduction
+//
+//   Serial phases (thread 0 only, barriers synchronize):
+//     • Seed tetrahedron construction
+//     • Horizon edge extraction
+//     • New face creation from horizon edges
+//
+// ═══════════════════════════════════════════════════════════════════════════════════════════════════════
+
+glsl comp Quickhull_GPU {
+  #version 460
+
+  layout(local_size_x = 256) in;
+
+  // ── Descriptor bindings ────────────────────────────────────────────────────────────────────────────
+
+  // Binding 0: Scene vertex buffer (same as physics binding 1). Each vertex = Stride vec4s, position in [0].xyz
+  layout(binding = 0, std430) readonly buffer Vertex_Data { vec4 Data[]; } Vertices;
+
+  // Binding 1: Output hull — matches GPU_Hull layout exactly (written by this shader)
+  layout(binding = 1, std430) buffer Output_Hull {
+    vec4  Out_Vertices  [256];
+    int   Out_Adjacency [256][16];
+    int   Out_Count;
+    float Out_Radius;
+    vec3  Out_Centroid; int Out_Pad;
+  };
+
+  // Binding 2: Scratch buffer for per-point assignments (int per input vertex, -1 = unassigned)
+  layout(binding = 2, std430) buffer Scratch_Buffer { int Assign[]; };
+
+  // Push constants: input geometry parameters
+  layout(push_constant) uniform Quickhull_Push {
+    uint Point_Count;       // Number of input vertices
+    uint Vertex_Offset;     // Starting vec4 index in the scene vertex buffer
+    uint Vertex_Stride;     // Vec4s per vertex (3 for the engine's interleaved Vertex layout)
+  };
+
+  // ── Shared memory ──────────────────────────────────────────────────────────────────────────────────
+
+  const int MAX_FACES = 512;
+
+  shared int   Face_A[MAX_FACES], Face_B[MAX_FACES], Face_C[MAX_FACES];
+  shared int   Face_Dead[MAX_FACES];
+  shared int   Num_Faces;
+
+  shared int   Seed[4];                     // Tetrahedron seed point indices
+
+  shared float Reduce_Val[256];             // Parallel reduction: values
+  shared int   Reduce_Idx[256];             // Parallel reduction: indices
+
+  shared int   Visible[MAX_FACES];          // Faces visible from the expansion point
+  shared int   Num_Visible;
+
+  shared int   Horizon_V0[768];             // Horizon edges (V0→V1), capped at MAX_FACES * 1.5
+  shared int   Horizon_V1[768];
+  shared int   Num_Horizon;
+
+  shared int   New_Face_Start;              // Where new faces begin in the face array
+  shared int   Result_Vertex_Count;         // Output vertex counter
+
+  // ── Helpers ────────────────────────────────────────────────────────────────────────────────────────
+
+  // Fetch the position of input vertex at index I
+  vec3 point (uint I) { return Vertices.Data[Vertex_Offset + I * Vertex_Stride].xyz; }
+
+  // Signed distance from point P to the plane of triangle (A, B, C). Positive = front side.
+  float plane_dist (vec3 P, vec3 A, vec3 B, vec3 C) {
+    vec3 N = cross (B - A, C - A);
+    float L = length (N);
+    return L > 1e-8 ? dot (P - A, N / L) : 0.0;
+  }
+
+  // Parallel maximum reduction across the workgroup. Returns the winning thread's value and index.
+  // After calling, Reduce_Val[0] holds the max value and Reduce_Idx[0] holds its index.
+  void parallel_max_reduce () {
+    for (uint S = 128u; S > 0u; S >>= 1u) {
+      barrier ();
+      if (gl_LocalInvocationID.x < S)
+        if (Reduce_Val[gl_LocalInvocationID.x + S] > Reduce_Val[gl_LocalInvocationID.x]) {
+          Reduce_Val[gl_LocalInvocationID.x] = Reduce_Val[gl_LocalInvocationID.x + S];
+          Reduce_Idx[gl_LocalInvocationID.x] = Reduce_Idx[gl_LocalInvocationID.x + S];
+        }
+    }
+    barrier ();
+  }
+
+  // ── Main ───────────────────────────────────────────────────────────────────────────────────────────
+
+  void main () {
+    uint Tid = gl_LocalInvocationID.x;
+    uint N   = Point_Count;
+
+    // ────────────────────────────────────────────────────────
+    // Phase 1: Find 6 extremal points (min/max per axis)
+    // ────────────────────────────────────────────────────────
+
+    // Initialize extremals to point 0
+    if (Tid < 6u) { Reduce_Idx[Tid] = 0; Reduce_Val[Tid] = 0.0; }
+    barrier ();
+
+    // Each thread scans a stride of the input, tracking local extremals
+    int Local_Ext[6];
+    float Local_Ext_Val[6];
+    for (int E = 0; E < 6; E++) { Local_Ext[E] = 0; Local_Ext_Val[E] = 0.0; }
+
+    vec3 P0 = point (0u);
+    Local_Ext_Val[0] = P0.x; Local_Ext_Val[1] = P0.x;
+    Local_Ext_Val[2] = P0.y; Local_Ext_Val[3] = P0.y;
+    Local_Ext_Val[4] = P0.z; Local_Ext_Val[5] = P0.z;
+
+    for (uint I = Tid; I < N; I += 256u) {
+      vec3 P = point (I);
+      if (P.x < Local_Ext_Val[0]) { Local_Ext_Val[0] = P.x; Local_Ext[0] = int(I); }
+      if (P.x > Local_Ext_Val[1]) { Local_Ext_Val[1] = P.x; Local_Ext[1] = int(I); }
+      if (P.y < Local_Ext_Val[2]) { Local_Ext_Val[2] = P.y; Local_Ext[2] = int(I); }
+      if (P.y > Local_Ext_Val[3]) { Local_Ext_Val[3] = P.y; Local_Ext[3] = int(I); }
+      if (P.z < Local_Ext_Val[4]) { Local_Ext_Val[4] = P.z; Local_Ext[4] = int(I); }
+      if (P.z > Local_Ext_Val[5]) { Local_Ext_Val[5] = P.z; Local_Ext[5] = int(I); }
+    }
+
+    // Reduce extremals across threads. Use 6 sequential reductions (cheap at 256 threads).
+    for (int Axis = 0; Axis < 6; Axis++) {
+      // For min axes (0, 2, 4): negate so max reduction finds the minimum
+      float Sign = (Axis % 2 == 0) ? -1.0 : 1.0;
+      Reduce_Val[Tid] = Sign * Local_Ext_Val[Axis];
+      Reduce_Idx[Tid] = Local_Ext[Axis];
+      parallel_max_reduce ();
+      if (Tid == 0u) Seed[0] = Reduce_Idx[0]; // Temporarily stash — we'll pick the best pair below
+      barrier ();
+      // Store extremal results in scratch buffer as temp storage
+      if (Tid == 0u) Assign[N + uint(Axis)] = Reduce_Idx[0];
+      barrier ();
+    }
+
+    // ────────────────────────────────────────────────────────
+    // Phase 2: Build seed tetrahedron (thread 0)
+    // ────────────────────────────────────────────────────────
+
+    if (Tid == 0u) {
+      // Recover the 6 extremal point indices
+      int Ext[6];
+      for (int E = 0; E < 6; E++) Ext[E] = Assign[N + uint(E)];
+
+      // Select the most distant extremal pair
+      Seed[0] = Ext[0]; Seed[1] = Ext[1];
+      float Best_Dist = 0.0;
+      for (int I = 0; I < 6; I++)
+        for (int J = I + 1; J < 6; J++) {
+          vec3 D = point (uint(Ext[I])) - point (uint(Ext[J]));
+          float Dist2 = dot (D, D);
+          if (Dist2 > Best_Dist) { Best_Dist = Dist2; Seed[0] = Ext[I]; Seed[1] = Ext[J]; }
+        }
+
+      // Third point: most distant from the edge
+      Seed[2] = (Seed[0] + 1) % int(N);
+      Seed[3] = (Seed[2] + 1) % int(N);
+    }
+    barrier ();
+
+    // Parallel: find the 3rd point (farthest from the seed edge)
+    vec3 Edge_A = point (uint(Seed[0]));
+    vec3 Edge_B = point (uint(Seed[1]));
+    vec3 Edge_Dir = Edge_B - Edge_A;
+    float Edge_Len2 = dot (Edge_Dir, Edge_Dir);
+
+    Reduce_Val[Tid] = 0.0;
+    Reduce_Idx[Tid] = (Seed[0] + 1) % int(N);
+
+    for (uint I = Tid; I < N; I += 256u) {
+      if (int(I) == Seed[0] || int(I) == Seed[1]) continue;
+      vec3 V = point (I) - Edge_A;
+      float T = dot (V, Edge_Dir) / max (Edge_Len2, 1e-10);
+      vec3 Proj = V - Edge_Dir * T;
+      float Dist2 = dot (Proj, Proj);
+      if (Dist2 > Reduce_Val[Tid]) { Reduce_Val[Tid] = Dist2; Reduce_Idx[Tid] = int(I); }
+    }
+    parallel_max_reduce ();
+    if (Tid == 0u && Reduce_Idx[0] >= 0) Seed[2] = Reduce_Idx[0];
+    barrier ();
+
+    // Parallel: find the 4th point (farthest from the seed triangle)
+    vec3 Tri_A = point (uint(Seed[0])), Tri_B = point (uint(Seed[1])), Tri_C = point (uint(Seed[2]));
+
+    Reduce_Val[Tid] = 0.0;
+    Reduce_Idx[Tid] = (Seed[2] + 1) % int(N);
+
+    for (uint I = Tid; I < N; I += 256u) {
+      if (int(I) == Seed[0] || int(I) == Seed[1] || int(I) == Seed[2]) continue;
+      float Dist = abs (plane_dist (point (I), Tri_A, Tri_B, Tri_C));
+      if (Dist > Reduce_Val[Tid]) { Reduce_Val[Tid] = Dist; Reduce_Idx[Tid] = int(I); }
+    }
+    parallel_max_reduce ();
+    if (Tid == 0u && Reduce_Idx[0] >= 0) Seed[3] = Reduce_Idx[0];
+    barrier ();
+
+    // Thread 0: orient tetrahedron and create the 4 seed faces
+    if (Tid == 0u) {
+      // Ensure consistent winding (4th point on the negative side of face 0)
+      if (plane_dist (point (uint(Seed[3])), point (uint(Seed[0])), point (uint(Seed[1])), point (uint(Seed[2]))) > 0.0) {
+        int Tmp = Seed[0]; Seed[0] = Seed[1]; Seed[1] = Tmp;
+      }
+      Face_A[0] = Seed[0]; Face_B[0] = Seed[1]; Face_C[0] = Seed[2]; Face_Dead[0] = 0;
+      Face_A[1] = Seed[0]; Face_B[1] = Seed[2]; Face_C[1] = Seed[3]; Face_Dead[1] = 0;
+      Face_A[2] = Seed[0]; Face_B[2] = Seed[3]; Face_C[2] = Seed[1]; Face_Dead[2] = 0;
+      Face_A[3] = Seed[1]; Face_B[3] = Seed[3]; Face_C[3] = Seed[2]; Face_Dead[3] = 0;
+      Num_Faces = 4;
+    }
+    barrier ();
+
+    // ────────────────────────────────────────────────────────
+    // Phase 3: Initial point-to-face assignment (parallel)
+    // ────────────────────────────────────────────────────────
+
+    for (uint I = Tid; I < N; I += 256u) {
+      Assign[I] = -1;
+      if (int(I) == Seed[0] || int(I) == Seed[1] || int(I) == Seed[2] || int(I) == Seed[3]) continue;
+      float Best = 0.0;
+      int Best_Face = -1;
+      for (int F = 0; F < 4; F++) {
+        float Dist = plane_dist (point (I), point (uint(Face_A[F])), point (uint(Face_B[F])), point (uint(Face_C[F])));
+        if (Dist > Best) { Best = Dist; Best_Face = F; }
+      }
+      Assign[I] = Best_Face;
+    }
+    barrier ();
+
+    // ────────────────────────────────────────────────────────
+    // Phase 4: Iterative expansion (parallel find + serial expand)
+    // ────────────────────────────────────────────────────────
+
+    for (int Iteration = 0; Iteration < int(N) && Num_Faces < MAX_FACES - 20; Iteration++) {
+
+      // Parallel: find the point with greatest distance above its assigned face
+      Reduce_Val[Tid] = 0.0;
+      Reduce_Idx[Tid] = -1;
+
+      for (uint I = Tid; I < N; I += 256u) {
+        int F = Assign[I];
+        if (F < 0 || Face_Dead[F] != 0) continue;
+        float Dist = plane_dist (point (I), point (uint(Face_A[F])), point (uint(Face_B[F])), point (uint(Face_C[F])));
+        if (Dist > Reduce_Val[Tid]) { Reduce_Val[Tid] = Dist; Reduce_Idx[Tid] = int(I); }
+      }
+      parallel_max_reduce ();
+      int Best_Pt = Reduce_Idx[0];
+      if (Best_Pt < 0) break;
+      barrier ();
+
+      // Parallel: find all faces visible from the selected point
+      if (Tid == 0u) Num_Visible = 0;
+      barrier ();
+
+      int Local_Face_Count = Num_Faces; // snapshot
+      for (int F = int(Tid); F < Local_Face_Count; F += 256) {
+        if (Face_Dead[F] != 0) continue;
+        float Dist = plane_dist (point (uint(Best_Pt)), point (uint(Face_A[F])), point (uint(Face_B[F])), point (uint(Face_C[F])));
+        if (Dist > 1e-6) {
+          int Slot = atomicAdd (Num_Visible, 1);
+          if (Slot < MAX_FACES) Visible[Slot] = F;
+        }
+      }
+      barrier ();
+
+      // Thread 0: extract horizon edges and create new faces
+      if (Tid == 0u) {
+        Num_Horizon = 0;
+        int VC = min (Num_Visible, MAX_FACES);
+
+        // Iterate visible faces, find unshared (horizon) edges
+        for (int Vi = 0; Vi < VC; Vi++) {
+          int FI = Visible[Vi];
+          int Tri[3][2];
+          Tri[0][0] = Face_A[FI]; Tri[0][1] = Face_B[FI];
+          Tri[1][0] = Face_B[FI]; Tri[1][1] = Face_C[FI];
+          Tri[2][0] = Face_C[FI]; Tri[2][1] = Face_A[FI];
+
+          for (int E = 0; E < 3; E++) {
+            bool Shared = false;
+            for (int Vj = 0; Vj < VC && !Shared; Vj++) {
+              if (Vj == Vi) continue;
+              int Other = Visible[Vj];
+              int FV[3]; FV[0] = Face_A[Other]; FV[1] = Face_B[Other]; FV[2] = Face_C[Other];
+              bool H0 = false, H1 = false;
+              for (int K = 0; K < 3; K++) { H0 = H0 || (FV[K] == Tri[E][0]); H1 = H1 || (FV[K] == Tri[E][1]); }
+              Shared = H0 && H1;
+            }
+            if (!Shared && Num_Horizon < 768) {
+              Horizon_V0[Num_Horizon] = Tri[E][0];
+              Horizon_V1[Num_Horizon] = Tri[E][1];
+              Num_Horizon++;
+            }
+          }
+        }
+
+        // Mark visible faces as dead
+        for (int Vi = 0; Vi < VC; Vi++) Face_Dead[Visible[Vi]] = 1;
+
+        // Create new faces connecting each horizon edge to the expansion point
+        New_Face_Start = Num_Faces;
+        for (int Hi = 0; Hi < Num_Horizon && Num_Faces < MAX_FACES; Hi++) {
+          int NF = Num_Faces++;
+          Face_A[NF] = Horizon_V1[Hi];
+          Face_B[NF] = Horizon_V0[Hi];
+          Face_C[NF] = Best_Pt;
+          Face_Dead[NF] = 0;
+        }
+      }
+      barrier ();
+
+      // Parallel: reassign orphaned points to the new faces
+      int NFS = New_Face_Start;
+      int NFC = Num_Faces;
+
+      for (uint I = Tid; I < N; I += 256u) {
+        if (int(I) == Best_Pt) { Assign[I] = -1; continue; }
+        int F = Assign[I];
+        if (F < 0) continue;
+        if (Face_Dead[F] == 0) continue;
+        Assign[I] = -1;
+        float Best = 0.0;
+        for (int FF = NFS; FF < NFC; FF++) {
+          float Dist = plane_dist (point (I), point (uint(Face_A[FF])), point (uint(Face_B[FF])), point (uint(Face_C[FF])));
+          if (Dist > Best) { Best = Dist; Assign[I] = FF; }
+        }
+      }
+      barrier ();
+    }
+
+    // ────────────────────────────────────────────────────────
+    // Phase 5: Extract unique vertices and build adjacency
+    // ────────────────────────────────────────────────────────
+
+    // Clear remap table in scratch (reuse Assign[N..N+N-1] as remap)
+    for (uint I = Tid; I < N; I += 256u) Assign[N + I] = -1;
+    if (Tid == 0u) Result_Vertex_Count = 0;
+    barrier ();
+
+    // Thread 0: extract unique vertices from surviving faces into output hull
+    // (Sequential because vertex dedup requires ordered insertion — hull has ≤256 verts so this is fast)
+    if (Tid == 0u) {
+      int FC = Num_Faces;
+      for (int F = 0; F < FC; F++) {
+        if (Face_Dead[F] != 0) continue;
+        int Tri[3]; Tri[0] = Face_A[F]; Tri[1] = Face_B[F]; Tri[2] = Face_C[F];
+        for (int K = 0; K < 3; K++) {
+          int Pt = Tri[K];
+          if (Pt < 0 || uint(Pt) >= N) continue;
+          if (Assign[N + uint(Pt)] < 0 && Result_Vertex_Count < 256) {
+            int Slot = Result_Vertex_Count++;
+            Assign[N + uint(Pt)] = Slot;
+            vec3 P = point (uint(Pt));
+            Out_Vertices[Slot] = vec4 (P, 0.0);
+          }
+        }
+      }
+      Out_Count = Result_Vertex_Count;
+    }
+    barrier ();
+
+    // Clear adjacency table (parallel)
+    for (uint I = Tid; I < 256u * 16u; I += 256u)
+      Out_Adjacency[I / 16u][I % 16u] = -1;
+    barrier ();
+
+    // Build per-vertex adjacency from surviving faces (thread 0 — face count is small)
+    if (Tid == 0u) {
+      int FC = Num_Faces;
+      for (int F = 0; F < FC; F++) {
+        if (Face_Dead[F] != 0) continue;
+        int RA = Assign[N + uint(Face_A[F])];
+        int RB = Assign[N + uint(Face_B[F])];
+        int RC = Assign[N + uint(Face_C[F])];
+        int Remapped[3]; Remapped[0] = RA; Remapped[1] = RB; Remapped[2] = RC;
+
+        for (int E = 0; E < 3; E++) {
+          int V0 = Remapped[E], V1 = Remapped[(E + 1) % 3];
+          if (V0 < 0 || V1 < 0) continue;
+          // Add V1 to V0's adjacency list (skip if duplicate)
+          for (int S = 0; S < 16; S++) {
+            if (Out_Adjacency[V0][S] == V1) break;
+            if (Out_Adjacency[V0][S] < 0) { Out_Adjacency[V0][S] = V1; break; }
+          }
+          // Add V0 to V1's adjacency list (skip if duplicate)
+          for (int S = 0; S < 16; S++) {
+            if (Out_Adjacency[V1][S] == V0) break;
+            if (Out_Adjacency[V1][S] < 0) { Out_Adjacency[V1][S] = V0; break; }
+          }
+        }
+      }
+    }
+    barrier ();
+
+    // ────────────────────────────────────────────────────────
+    // Phase 6: Compute centroid and bounding radius (parallel reduction)
+    // ────────────────────────────────────────────────────────
+
+    int VC = Result_Vertex_Count;
+
+    // Parallel centroid accumulation
+    vec3 Local_Sum = vec3 (0.0);
+    for (int I = int(Tid); I < VC; I += 256) Local_Sum += Out_Vertices[I].xyz;
+
+    // Store partial sums and reduce (use Reduce_Val for each component sequentially)
+    // X component
+    Reduce_Val[Tid] = Local_Sum.x;
+    for (uint S = 128u; S > 0u; S >>= 1u) { barrier (); if (Tid < S) Reduce_Val[Tid] += Reduce_Val[Tid + S]; }
+    barrier ();
+    float Cx = (VC > 0) ? Reduce_Val[0] / float(VC) : 0.0;
+
+    // Y component
+    Reduce_Val[Tid] = Local_Sum.y;
+    for (uint S = 128u; S > 0u; S >>= 1u) { barrier (); if (Tid < S) Reduce_Val[Tid] += Reduce_Val[Tid + S]; }
+    barrier ();
+    float Cy = (VC > 0) ? Reduce_Val[0] / float(VC) : 0.0;
+
+    // Z component
+    Reduce_Val[Tid] = Local_Sum.z;
+    for (uint S = 128u; S > 0u; S >>= 1u) { barrier (); if (Tid < S) Reduce_Val[Tid] += Reduce_Val[Tid + S]; }
+    barrier ();
+    float Cz = (VC > 0) ? Reduce_Val[0] / float(VC) : 0.0;
+
+    vec3 Centroid = vec3 (Cx, Cy, Cz);
+
+    // Parallel bounding radius: max distance from centroid
+    float Local_Max_R2 = 0.0;
+    for (int I = int(Tid); I < VC; I += 256) {
+      vec3 D = Out_Vertices[I].xyz - Centroid;
+      float R2 = dot (D, D);
+      Local_Max_R2 = max (Local_Max_R2, R2);
+    }
+    Reduce_Val[Tid] = Local_Max_R2;
+    Reduce_Idx[Tid] = 0;
+    parallel_max_reduce ();
+
+    // Thread 0: write centroid and radius to the output hull
+    if (Tid == 0u) {
+      Out_Centroid = Centroid;
+      Out_Radius   = sqrt (Reduce_Val[0]);
+    }
+  }
+} // Quickhull_GPU
+
 // ════════════════════════════
 //   Skinning_Pipeline_Create
 // ════════════════════════════
@@ -16176,6 +16669,124 @@ void Tessellation_Pipeline_Create () {
 
   vkDestroyShaderModule (Device, Tess_Module, NULL);
   printf ("[tessellation] GPU Bezier tessellation pipeline created\n");
+}
+
+// ═══════════════════════════════
+//   Quickhull_Pipeline_Create
+// ═══════════════════════════════
+
+void Quickhull_Pipeline_Create () {
+
+  // 3 SSBOs: input vertices (readonly), output hull (read-write), scratch assignments (read-write)
+  VkDescriptorSetLayoutBinding Bindings[3];
+  for (int I = 0; I < 3; I++)
+    Bindings[I] = (VkDescriptorSetLayoutBinding){.binding = (uint)I, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                                                  .descriptorCount = 1, .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT};
+  VK_CHECK (vkCreateDescriptorSetLayout (Device,
+    &(VkDescriptorSetLayoutCreateInfo){
+      .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+      .flags = VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR,
+      .bindingCount = 3, .pBindings = Bindings},
+    NULL, &Quickhull_Descriptor_Layout));
+
+  // Push constants: 3 uints = 12 bytes (point_count, vertex_offset, vertex_stride)
+  VkPushConstantRange Push_Range = {.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT, .offset = 0, .size = 12};
+
+  VK_CHECK (vkCreatePipelineLayout (Device,
+    &(VkPipelineLayoutCreateInfo){
+      .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+      .setLayoutCount = 1, .pSetLayouts = &Quickhull_Descriptor_Layout,
+      .pushConstantRangeCount = 1, .pPushConstantRanges = &Push_Range},
+    NULL, &Quickhull_Pipeline_Layout));
+
+  VkShaderModule Quickhull_Module = Shader_Module_Load (Shader_Path (Quickhull_GPU));
+
+  VK_CHECK (vkCreateComputePipelines (Device, Pipeline_Cache, 1,
+    &(VkComputePipelineCreateInfo){
+      .sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
+      .stage = {.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+                .stage = VK_SHADER_STAGE_COMPUTE_BIT, .module = Quickhull_Module, .pName = "main"},
+      .layout = Quickhull_Pipeline_Layout},
+    NULL, &Quickhull_Pipeline));
+
+  vkDestroyShaderModule (Device, Quickhull_Module, NULL);
+  printf ("[quickhull] GPU compute hull pipeline created\n");
+}
+
+// ══════════════════
+//   GPU_Quickhull
+// ══════════════════
+//
+// Build a convex hull entirely on the GPU. Reads vertex positions from the scene vertex buffer
+// (at Vertex_Offset with Vertex_Stride vec4s per vertex), dispatches the Quickhull_GPU compute
+// shader, and writes the result directly to Hull_Storage_Buffer. No CPU roundtrip.
+
+void GPU_Quickhull (uint Vertex_Offset, uint Vertex_Count, uint Vertex_Stride) {
+
+  if (Vertex_Count < 4) return;
+
+  // Ensure the hull storage buffer exists
+  if (not Hull_Storage_Buffer.Buffer)
+    Hull_Storage_Buffer = Buffer_Allocate (/*Size         =>*/ sizeof (GPU_Hull),
+                                           /*Usage        =>*/ VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
+                                                             | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
+                                           /*Memory_Flags =>*/ VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT
+                                                             | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+
+  // Allocate or grow the scratch buffer (2 × Vertex_Count ints: assignments + remap)
+  uint64_t Scratch_Size = (uint64_t)Vertex_Count * 2 * sizeof (int);
+  if (not Quickhull_Scratch_Buffer.Buffer or Quickhull_Scratch_Buffer.Size < Scratch_Size) {
+    if (Quickhull_Scratch_Buffer.Buffer) Buffer_Destroy (&Quickhull_Scratch_Buffer);
+    Quickhull_Scratch_Buffer = Buffer_Allocate (/*Size         =>*/ Scratch_Size,
+                                                 /*Usage        =>*/ VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                                                 /*Memory_Flags =>*/ VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT
+                                                                   | VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT
+                                                                   | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+  }
+
+  // Record and submit a one-shot compute command
+  VkCommandBuffer Cmd;
+  VK_CHECK (vkAllocateCommandBuffers (Device,
+    &(VkCommandBufferAllocateInfo){VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO, NULL,
+                                    Command_Pool, VK_COMMAND_BUFFER_LEVEL_PRIMARY, 1}, &Cmd));
+  VK_CHECK (vkBeginCommandBuffer (Cmd,
+    &(VkCommandBufferBeginInfo){VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO, NULL,
+                                 VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT, NULL}));
+
+  vkCmdBindPipeline (Cmd, VK_PIPELINE_BIND_POINT_COMPUTE, Quickhull_Pipeline);
+
+  // Push descriptors: scene vertex buffer, hull output, scratch
+  VkDescriptorBufferInfo Vertex_Info  = {Vertex_Buffer.Buffer, 0, Vertex_Buffer.Size};
+  VkDescriptorBufferInfo Hull_Info    = {Hull_Storage_Buffer.Buffer, 0, Hull_Storage_Buffer.Size};
+  VkDescriptorBufferInfo Scratch_Info = {Quickhull_Scratch_Buffer.Buffer, 0, Quickhull_Scratch_Buffer.Size};
+
+  VkWriteDescriptorSet Writes[3] = {
+    {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, 0, 0, 0, 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, NULL, &Vertex_Info,  NULL},
+    {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, 0, 1, 0, 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, NULL, &Hull_Info,    NULL},
+    {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, 0, 2, 0, 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, NULL, &Scratch_Info, NULL},
+  };
+  PFN_vkCmdPushDescriptorSetKHR Push_Desc =
+    (PFN_vkCmdPushDescriptorSetKHR)vkGetDeviceProcAddr (Device, "vkCmdPushDescriptorSetKHR");
+  Push_Desc (Cmd, VK_PIPELINE_BIND_POINT_COMPUTE, Quickhull_Pipeline_Layout, 0, 3, Writes);
+
+  // Push constants: point count, vertex offset, vertex stride
+  uint Push_Data[3] = {Vertex_Count, Vertex_Offset, Vertex_Stride};
+  vkCmdPushConstants (Cmd, Quickhull_Pipeline_Layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, 12, Push_Data);
+
+  // Dispatch exactly 1 workgroup (256 threads, algorithm uses shared memory across the group)
+  vkCmdDispatch (Cmd, 1, 1, 1);
+
+  VK_CHECK (vkEndCommandBuffer (Cmd));
+  VK_CHECK (vkQueueSubmit (Queue, 1,
+    &(VkSubmitInfo){VK_STRUCTURE_TYPE_SUBMIT_INFO, NULL, 0, NULL, NULL, 1, &Cmd, 0, NULL}, VK_NULL_HANDLE));
+  VK_CHECK (vkQueueWaitIdle (Queue));
+  vkFreeCommandBuffers (Device, Command_Pool, 1, &Cmd);
+
+  // Read back vertex count for diagnostics
+  GPU_Hull *Mapped = NULL;
+  vkMapMemory (Device, Hull_Storage_Buffer.Memory, 0, sizeof (GPU_Hull), 0, (void **)&Mapped);
+  printf ("[quickhull] GPU hull: %d vertices, radius %.1f\n", Mapped->Count, Mapped->Radius);
+  vkUnmapMemory (Device, Hull_Storage_Buffer.Memory);
 }
 
 // ═══════════════════════════
