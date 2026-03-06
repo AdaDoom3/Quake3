@@ -38,6 +38,8 @@
 #include <assert.h>
 #include <math.h>
 #include <stdatomic.h>
+#include <stdarg.h>
+#include <time.h>
 #include <unistd.h>
 
 // Media Layer
@@ -590,15 +592,24 @@ typedef struct {
 //
 // A CVar is a named, typed, atomic variable readable/writable from any thread without locks.
 // INT CVars use _Atomic int; FLOAT CVars pack into _Atomic uint32_t via memcpy (type-punning).
-// No string CVars — use a separate localization database for text.
+// STRING CVars use a mutex-protected char buffer for thread-safe read/write.
 //
 // This is the C equivalent of an Ada protected object with atomic Get/Set entries:
 //   protected CVar is
 //     function  Get return Value_Type;
 //     procedure Set (V : Value_Type);
 //   end CVar;
+//
+// Mirrors the Ada Neo Engine pattern:
+//   generic
+//     Name : Str;  Help : Str;  type Var_T is (<>);  Initial : Var_T;  Settable : Bool := True;
+//   package CVar is
+//     procedure Set (Val : Var_T);
+//     function  Get return Var_T;
+//     function  Last_Edit return Edit_State;
+//   end;
 
-typedef enum {CVAR_INT, CVAR_FLOAT} CVar_Type;
+typedef enum {CVAR_INT, CVAR_FLOAT, CVAR_STRING} CVar_Type;
 
 // Flags (bitfield)
 #define CVAR_NONE     0
@@ -607,17 +618,22 @@ typedef enum {CVAR_INT, CVAR_FLOAT} CVar_Type;
 #define CVAR_LATCH    4   // Change is deferred until next map load / restart
 #define CVAR_CHEAT    8   // Only active when cheats are enabled
 
+#define CVAR_STRING_MAX 256
+
 typedef struct {
   const char    *Name;       // "r_width", "w_gravity", "in_sensitivity", etc.
   const char    *Help;       // One-line description for console / config comments
-  CVar_Type      Type;       // INT or FLOAT
+  CVar_Type      Type;       // INT, FLOAT, or STRING
   int            Flags;      // Bitmask of CVAR_ARCHIVE | CVAR_READONLY | ...
   _Atomic int    Value_I;    // Current value (int CVar) — lock-free atomic
   _Atomic int    Value_F_Bits; // Current value (float CVar) — float bits stored as atomic int
+  char           Value_S[CVAR_STRING_MAX];   // Current value (string CVar) — mutex-protected
   int            Default_I;  // Default value for int CVars
   int            Default_F_Bits; // Default value bits for float CVars
+  char           Default_S[CVAR_STRING_MAX]; // Default value for string CVars
   float          Min, Max;   // Numeric clamp range
   _Atomic int    Modified;   // Dirty flag — set on write, cleared by consumer (atomic exchange)
+  SDL_mutex     *Lock;       // Mutex for string CVar access (NULL for int/float — they use atomics)
 } CVar;
 
 #define MAX_CVARS 256
@@ -627,19 +643,155 @@ static inline int   Float_To_Bits (float F)  { int   B; memcpy (&B, &F, 4); retu
 static inline float Bits_To_Float (int   B)  { float F; memcpy (&F, &B, 4); return F; }
 
 // CVar API — lock-free, thread-safe registration, lookup, and access
-CVar *CVar_Register_Int   (const char *Name, const char *Help, int Flags, int   Default, float Min, float Max);
-CVar *CVar_Register_Float (const char *Name, const char *Help, int Flags, float Default, float Min, float Max);
-CVar *CVar_Find           (const char *Name);
-int   CVar_Get_Int         (CVar *V);
-float CVar_Get_Float       (CVar *V);
-void  CVar_Set_Int         (CVar *V, int   Val);
-void  CVar_Set_Float       (CVar *V, float Val);
-int   CVar_Modified        (CVar *V);          // Returns and clears the Modified flag (atomic exchange)
-void  CVar_Reset           (CVar *V);          // Reset to default
-void  CVar_Save            (const char *Path); // Write all ARCHIVE CVars to config file
-void  CVar_Load            (const char *Path); // Read config file and apply values
-void  CVar_Init            (void);             // Initialize CVar registry
-void  CVar_Shutdown        (void);             // Cleanup
+CVar *CVar_Register_Int    (const char *Name, const char *Help, int Flags, int   Default, float Min, float Max);
+CVar *CVar_Register_Float  (const char *Name, const char *Help, int Flags, float Default, float Min, float Max);
+CVar *CVar_Register_String (const char *Name, const char *Help, int Flags, const char *Default);
+CVar *CVar_Find            (const char *Name);
+int   CVar_Get_Int          (CVar *V);
+float CVar_Get_Float        (CVar *V);
+void  CVar_Get_String       (CVar *V, char *Out, int Out_Size);
+void  CVar_Set_Int          (CVar *V, int   Val);
+void  CVar_Set_Float        (CVar *V, float Val);
+void  CVar_Set_String       (CVar *V, const char *Val);
+int   CVar_Modified         (CVar *V);          // Returns and clears the Modified flag (atomic exchange)
+void  CVar_Reset            (CVar *V);          // Reset to default
+void  CVar_Save             (const char *Path); // Write all ARCHIVE CVars to config file
+void  CVar_Load             (const char *Path); // Read config file and apply values
+void  CVar_Init             (void);             // Initialize CVar registry
+void  CVar_Shutdown         (void);             // Cleanup
+
+// ── Command System ── Named console commands with callbacks (Ada Command generic pattern) ────────
+//
+// A Command is a named action registered by the engine or game code.  When the user types a
+// command into the console (e.g. "bind left_mouse_button fire"), the console's Submit function
+// tokenizes the input, finds the matching Command by name, validates argument count, and
+// dispatches the callback with the argument array.
+//
+// This is the C equivalent of the Ada generic:
+//   generic
+//     Name    : Str;  Info : Str;  Usage : Str;
+//     Arg_Min : Natural := 0;  Arg_Max : Natural := Arg_Min;
+//     with procedure Callback (Args : Array_Str_Unbound);
+//     Save : access function return Str := null;
+//   package Command is end;
+
+#define COMMAND_MAX_ARGS 16
+
+typedef void (*Command_Callback) (int Argc, const char *Argv[]);
+typedef void (*Command_Save_Fn)  (FILE *F);
+
+typedef struct {
+  const char       *Name;             // "bind", "map", "kick", etc.
+  const char       *Info;             // Human-readable description
+  const char       *Usage;            // Usage string (e.g. "bind [key] [action]")
+  int               Arg_Min, Arg_Max; // Minimum and maximum argument count (excluding command name)
+  Command_Callback  Callback;         // Dispatch target
+  Command_Save_Fn   Save;             // Optional: writes persistent state to config file (NULL = none)
+} Command;
+
+#define MAX_COMMANDS 64
+
+// Command API
+Command *Command_Register (const char *Name, const char *Info, const char *Usage,
+                           int Arg_Min, int Arg_Max, Command_Callback Callback, Command_Save_Fn Save);
+Command *Command_Find     (const char *Name);
+void     Command_Init     (void);
+void     Command_Shutdown (void);
+
+// ── Console System ── Task-safe IO and command-line interface (Ada Neo.Data.Console pattern) ─────
+//
+// The console is the central user-facing interface for interacting with CVars and Commands.
+// It maintains a styled line buffer for output, an input line with cursor, command history,
+// and tab-completion from both the CVar and Command registries.
+//
+// Mirrors the Ada Console package:
+//   procedure Submit (Text : Str);          -- Parse and execute a command or CVar assignment
+//   procedure Line   (Item : Str);          -- Append a styled line to the console output
+//   function  Autocomplete return Vector;   -- Tab-complete the current input
+//   procedure Section (Item : Str);         -- Print a section header
+//   procedure Error   (Item : Str);         -- Print an error message
+//   procedure Warn    (Item : Str);         -- Print a warning message
+//   procedure Info    (Item : Str);         -- Print an info message
+
+// Console style for colored, formatted output (Ada Draw_State / Style_State)
+typedef struct {
+  uint8_t R, G, B;   // Text color
+  int     Bold;      // Bold flag
+  int     Italic;    // Italic flag
+} Console_Style;
+
+// Predefined styles (mirrors Ada ERROR_STYLE, WARNING_STYLE, SECTION_STYLE, INFO_STYLE, ENTRY_STYLE)
+#define CONSOLE_STYLE_DEFAULT  (Console_Style){200, 200, 200, 0, 0}
+#define CONSOLE_STYLE_ERROR    (Console_Style){220,  20,  60, 1, 0}
+#define CONSOLE_STYLE_WARNING  (Console_Style){255, 165,   0, 1, 0}
+#define CONSOLE_STYLE_SECTION  (Console_Style){100, 149, 237, 1, 0}
+#define CONSOLE_STYLE_INFO     (Console_Style){128, 128, 128, 0, 1}
+#define CONSOLE_STYLE_ENTRY    (Console_Style){255, 255,   0, 0, 0}
+#define CONSOLE_STYLE_CVAR     (Console_Style){144, 238, 144, 0, 0}
+
+// Console line (styled text segment)
+typedef struct {
+  char          Text[512];
+  Console_Style Style;
+} Console_Entry;
+
+#define CONSOLE_MAX_LINES   1024
+#define CONSOLE_MAX_HISTORY 64
+#define CONSOLE_INPUT_MAX   512
+
+// Console state (protected by mutex for thread safety — Ada protected type pattern)
+typedef struct {
+  // Output line buffer (circular)
+  Console_Entry  Lines[CONSOLE_MAX_LINES];
+  int           Line_Count;      // Total lines written (mod MAX for index)
+  int           Line_Head;       // Write cursor (next slot to write)
+
+  // Input line
+  char          Input[CONSOLE_INPUT_MAX];
+  int           Input_Cursor;    // Cursor position within input
+  int           Input_Length;    // Current length of input string
+
+  // Command history
+  char          History[CONSOLE_MAX_HISTORY][CONSOLE_INPUT_MAX];
+  int           History_Count;   // Total entries in history
+  int           History_Index;   // Current browse position (-1 = live input)
+
+  // Visibility
+  int           Open;            // 1 = console is visible and accepting input, 0 = hidden
+  int           Scroll_Offset;   // Lines scrolled up from bottom (0 = at bottom)
+
+  // Thread safety
+  SDL_mutex    *Lock;
+} Console_State;
+
+// Console API — all functions are thread-safe (acquire Lock internally)
+void Console_Init     (void);
+void Console_Shutdown (void);
+void Console_Put      (const char *Text, Console_Style Style);  // Append styled text
+void Console_Line      (const char *Text, Console_Style Style);  // Append styled line
+void Console_Section  (const char *Text);                       // Styled section header
+void Console_Error    (const char *Text);                       // Error message
+void Console_Warn     (const char *Text);                       // Warning message
+void Console_Info     (const char *Text);                       // Info message
+void Console_Printf   (Console_Style Style, const char *Fmt, ...);  // printf-style output
+void Console_Submit   (const char *Text);                       // Parse and execute command/CVar
+void Console_Toggle   (void);                                   // Toggle open/closed
+int  Console_Is_Open  (void);                                   // Query open state
+void Console_Input_Char     (char C);                           // Type a character into input
+void Console_Input_Backspace(void);                             // Delete character before cursor
+void Console_Input_Delete   (void);                             // Delete character at cursor
+void Console_Input_Left     (void);                             // Move cursor left
+void Console_Input_Right    (void);                             // Move cursor right
+void Console_Input_Home     (void);                             // Move cursor to start
+void Console_Input_End      (void);                             // Move cursor to end
+void Console_Input_Submit   (void);                             // Submit current input line
+void Console_History_Up     (void);                             // Browse history (older)
+void Console_History_Down   (void);                             // Browse history (newer)
+void Console_Autocomplete   (void);                             // Tab-complete current input
+void Console_Scroll_Up      (void);                             // Scroll output up
+void Console_Scroll_Down    (void);                             // Scroll output down
+int  Console_Get_Line_Count (void);                             // Total lines in buffer
+Console_Entry Console_Get_Line (int Index);                      // Get a specific line (0 = oldest visible)
 
 // ── Game Controller ── SDL_GameController wrapper for gamepads (Xbox, PS, etc.) ──────────────────
 
@@ -823,6 +975,13 @@ typedef struct {
 // Registration is single-threaded at startup; Get/Set are lock-free atomics from any thread.
 CVar      CVar_Registry[MAX_CVARS];
 int       CVar_Count;
+
+// Command registry — named console commands with callbacks
+Command   Command_Registry[MAX_COMMANDS];
+int       Command_Count;
+
+// Console state — thread-safe output buffer, input line, and history
+Console_State Console;
 
 // Impulse registry — named input actions with rebindable keys
 Impulse   Impulse_Registry[MAX_IMPULSES];
@@ -3351,10 +3510,11 @@ const Model_Damage_Entry DAMAGE_MAP_REGISTRY[DAMAGE_MODEL_COUNT] = {
 // Forward declarations for globals and functions defined after main()
 Input_Ring                Input_Ring_Buffer;
 Snapshot_Double_Buffer    Snapshot_Buffer;
-void CVar_Register_All   (void);
-void Input_Ring_Push      (Input_Ring *Ring, const Input *In);
-void Snapshot_Init        (Snapshot_Double_Buffer *SB);
-void Snapshot_Destroy     (Snapshot_Double_Buffer *SB);
+void CVar_Register_All    (void);
+void Command_Register_All (void);
+void Input_Ring_Push       (Input_Ring *Ring, const Input *In);
+void Snapshot_Init         (Snapshot_Double_Buffer *SB);
+void Snapshot_Destroy      (Snapshot_Double_Buffer *SB);
 
 int main (int Argc, char **Argv) {
 
@@ -3396,6 +3556,13 @@ int main (int Argc, char **Argv) {
   // Initialize CVar system — register all engine CVars with their defaults
   CVar_Init ();
   CVar_Register_All ();
+
+  // Initialize Command system — register all engine commands (Ada Command generic pattern)
+  Command_Init ();
+  Command_Register_All ();
+
+  // Initialize Console — thread-safe IO interface (Ada Neo.Data.Console pattern)
+  Console_Init ();
 
   // Load saved config (overrides defaults with user-persisted values)
   CVar_Load ("q3.cfg");
@@ -4501,6 +4668,29 @@ int main (int Argc, char **Argv) {
                 .Yaw = 1.5707963f - Spawn_Point.Angle * 3.14159f / 180.f};
   Prev_View_Matrix = View (Cam.Position, Cam.Yaw, Cam.Pitch);
 
+  // Dump startup info to console (mirrors Ada Main: Title/Line pattern)
+  Console_Section ("Info");
+  Console_Printf (CONSOLE_STYLE_DEFAULT, "Engine: %s %s", ENGINE_NAME, ENGINE_VERSION);
+  Console_Printf (CONSOLE_STYLE_DEFAULT, "World:  %s (%.0f gravity, %.0f max speed)", Active_World.Name, Active_World.Gravity, Active_World.Max_Speed);
+  Console_Printf (CONSOLE_STYLE_DEFAULT, "Video:  %dx%d (%s quality)", Width, Height, QUALITY_PRESETS[Active_Quality].Name);
+  Console_Section ("Configuration");
+  Console_Printf (CONSOLE_STYLE_DEFAULT, "CVars: %d registered, Commands: %d registered", CVar_Count, Command_Count);
+  Console_Section ("Threading");
+
+  // Spawn the game thread (60 Hz fixed timestep — Ada Tasks pattern)
+  // The game thread reads input from the ring buffer, runs physics, and publishes snapshots.
+  Game_Thread = SDL_CreateThread (Game_Thread_Entry, "GameThread", NULL);
+  if (Game_Thread) Console_Printf (CONSOLE_STYLE_DEFAULT, "Game thread: started (60 Hz fixed timestep)");
+  else Console_Error ("Game thread: failed to start");
+
+  // Spawn the render thread (GPU-paced — Ada Tasks pattern)
+  // The render thread reads snapshots and submits Vulkan commands.
+  Render_Thread = SDL_CreateThread (Render_Thread_Entry, "RenderThread", NULL);
+  if (Render_Thread) Console_Printf (CONSOLE_STYLE_DEFAULT, "Render thread: started (GPU-paced)");
+  else Console_Error ("Render thread: failed to start");
+
+  Console_Section ("Graphics");
+
   // Loop timing
   uint64_t Last       = SDL_GetPerformanceCounter ();
   uint64_t Freq       = SDL_GetPerformanceFrequency ();
@@ -4846,12 +5036,19 @@ int main (int Argc, char **Argv) {
   vkDestroyDevice       (Device, NULL);
   vkDestroyInstance     (Instance, NULL);
 
+  // Signal threads to stop and wait for them to finish (Ada Task.Finalize pattern)
+  atomic_store (&Quit_Requested, 1);
+  if (Game_Thread)   { SDL_WaitThread (Game_Thread,   NULL); Game_Thread = NULL; }
+  if (Render_Thread) { SDL_WaitThread (Render_Thread, NULL); Render_Thread = NULL; }
+
   // Shutdown gamepad and thread synchronization
   Gamepad_Shutdown ();
   Snapshot_Destroy (&Snapshot_Buffer);
 
-  // Save config and shutdown CVar system
+  // Save config and shutdown systems
   CVar_Save ("q3.cfg");
+  Console_Shutdown ();
+  Command_Shutdown ();
   CVar_Shutdown ();
 
   // Media layer
@@ -5211,6 +5408,9 @@ void CVar_Init (void) {
 // ════════════════
 
 void CVar_Shutdown (void) {
+  for (int I = 0; I < CVar_Count; I++) {
+    if (CVar_Registry[I].Lock) { SDL_DestroyMutex (CVar_Registry[I].Lock); CVar_Registry[I].Lock = NULL; }
+  }
   CVar_Count = 0;
 }
 
@@ -5235,6 +5435,7 @@ CVar *CVar_Register_Int (const char *Name, const char *Help, int Flags, int Defa
   atomic_store (&V->Value_I,      Default);
   atomic_store (&V->Value_F_Bits, 0);
   atomic_store (&V->Modified,     0);
+  V->Lock = NULL;
   return V;
 }
 
@@ -5258,6 +5459,29 @@ CVar *CVar_Register_Float (const char *Name, const char *Help, int Flags, float 
   atomic_store (&V->Value_I,      0);
   atomic_store (&V->Value_F_Bits, Float_To_Bits (Default));
   atomic_store (&V->Modified,     0);
+  V->Lock = NULL;
+  return V;
+}
+
+// ═════════════════════════
+//   CVar_Register_String
+// ═════════════════════════
+
+CVar *CVar_Register_String (const char *Name, const char *Help, int Flags, const char *Default) {
+  for (int I = 0; I < CVar_Count; I++)
+    if (strcmp (CVar_Registry[I].Name, Name) == 0) return &CVar_Registry[I];
+  if (CVar_Count >= MAX_CVARS) { printf ("[cvar] registry full, cannot register %s\n", Name); return NULL; }
+  CVar *V    = &CVar_Registry[CVar_Count++];
+  V->Name    = Name;
+  V->Help    = Help;
+  V->Type    = CVAR_STRING;
+  V->Flags   = Flags;
+  V->Min     = 0;
+  V->Max     = 0;
+  V->Lock    = SDL_CreateMutex ();
+  snprintf (V->Value_S,   CVAR_STRING_MAX, "%s", Default ? Default : "");
+  snprintf (V->Default_S, CVAR_STRING_MAX, "%s", Default ? Default : "");
+  atomic_store (&V->Modified, 0);
   return V;
 }
 
@@ -5271,12 +5495,18 @@ CVar *CVar_Find (const char *Name) {
   return NULL;
 }
 
-// ═══════════════════════════════════
-//   CVar_Get_Int / Float
-// ═══════════════════════════════════
+// ═══════════════════════════════════════
+//   CVar_Get_Int / Float / String
+// ═══════════════════════════════════════
 
 int   CVar_Get_Int   (CVar *V) { return atomic_load (&V->Value_I); }
 float CVar_Get_Float (CVar *V) { return Bits_To_Float (atomic_load (&V->Value_F_Bits)); }
+
+void CVar_Get_String (CVar *V, char *Out, int Out_Size) {
+  if (V->Lock) SDL_LockMutex (V->Lock);
+  snprintf (Out, Out_Size, "%s", V->Value_S);
+  if (V->Lock) SDL_UnlockMutex (V->Lock);
+}
 
 // ═══════════════════════════════════
 //   CVar_Set_Int / Float
@@ -5292,6 +5522,13 @@ void CVar_Set_Float (CVar *V, float Val) {
   if (V->Flags & CVAR_READONLY) return;
   if (V->Min < V->Max) Val = Val < V->Min ? V->Min : Val > V->Max ? V->Max : Val;
   atomic_store (&V->Value_F_Bits, Float_To_Bits (Val));
+  atomic_store (&V->Modified, 1);
+}
+void CVar_Set_String (CVar *V, const char *Val) {
+  if (V->Flags & CVAR_READONLY) return;
+  if (V->Lock) SDL_LockMutex (V->Lock);
+  snprintf (V->Value_S, CVAR_STRING_MAX, "%s", Val ? Val : "");
+  if (V->Lock) SDL_UnlockMutex (V->Lock);
   atomic_store (&V->Modified, 1);
 }
 
@@ -5310,8 +5547,9 @@ int CVar_Modified (CVar *V) {
 // ════════════════
 
 void CVar_Reset (CVar *V) {
-  if (V->Type == CVAR_INT)   atomic_store (&V->Value_I,      V->Default_I);
-  if (V->Type == CVAR_FLOAT) atomic_store (&V->Value_F_Bits, V->Default_F_Bits);
+  if (V->Type == CVAR_INT)    atomic_store (&V->Value_I,      V->Default_I);
+  if (V->Type == CVAR_FLOAT)  atomic_store (&V->Value_F_Bits, V->Default_F_Bits);
+  if (V->Type == CVAR_STRING) CVar_Set_String (V, V->Default_S);
   atomic_store (&V->Modified, 1);
 }
 
@@ -5330,8 +5568,10 @@ void CVar_Save (const char *Path) {
     CVar *V = &CVar_Registry[I];
     if (not (V->Flags & CVAR_ARCHIVE)) continue;
     switch (V->Type) {
-      case CVAR_INT:   fprintf (F, "%s %d\n",   V->Name, CVar_Get_Int (V));   break;
-      case CVAR_FLOAT: fprintf (F, "%s %.6f\n", V->Name, CVar_Get_Float (V)); break;
+      case CVAR_INT:    fprintf (F, "%s %d\n",   V->Name, CVar_Get_Int (V));   break;
+      case CVAR_FLOAT:  fprintf (F, "%s %.6f\n", V->Name, CVar_Get_Float (V)); break;
+      case CVAR_STRING: { char Buf[CVAR_STRING_MAX]; CVar_Get_String (V, Buf, sizeof Buf);
+                          fprintf (F, "%s \"%s\"\n", V->Name, Buf); break; }
     }
   }
   fclose (F);
@@ -5359,8 +5599,17 @@ void CVar_Load (const char *Path) {
     CVar *V = CVar_Find (Name);
     if (not V or (V->Flags & CVAR_READONLY)) continue;
     switch (V->Type) {
-      case CVAR_INT:   CVar_Set_Int   (V, atoi (Value_Str));         break;
-      case CVAR_FLOAT: CVar_Set_Float (V, (float)atof (Value_Str)); break;
+      case CVAR_INT:    CVar_Set_Int    (V, atoi (Value_Str));         break;
+      case CVAR_FLOAT:  CVar_Set_Float  (V, (float)atof (Value_Str)); break;
+      case CVAR_STRING: {
+        // Strip surrounding quotes if present
+        int Len = (int)strlen (Value_Str);
+        if (Len >= 2 and Value_Str[0] == '"' and Value_Str[Len - 1] == '"') {
+          Value_Str[Len - 1] = '\0';
+          CVar_Set_String (V, Value_Str + 1);
+        } else CVar_Set_String (V, Value_Str);
+        break;
+      }
     }
     Applied++;
   }
@@ -5548,6 +5797,707 @@ void CVar_Register_All (void) {
   CVARS (CVAR_REGISTER)
   #undef CVAR_REGISTER
   printf ("[cvar] registered %d cvars\n", CVar_Count);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════
+//   Command System — Named Console Commands (Ada Command Generic Pattern)
+// ═══════════════════════════════════════════════════════════════════════════════════════════
+//
+// Commands are registered at startup.  Console_Submit tokenizes input and dispatches to
+// the matching command's callback.  This mirrors the Ada pattern:
+//   package Bind is new Command (Name => "bind", Callback => Command_Bind, ...);
+
+// ════════════════════
+//   Command_Init
+// ════════════════════
+
+void Command_Init (void) {
+  Command_Count = 0;
+  memset (Command_Registry, 0, sizeof Command_Registry);
+}
+
+// ════════════════════════
+//   Command_Shutdown
+// ════════════════════════
+
+void Command_Shutdown (void) {
+  Command_Count = 0;
+}
+
+// ════════════════════════
+//   Command_Register
+// ════════════════════════
+
+Command *Command_Register (const char *Name, const char *Info, const char *Usage,
+                           int Arg_Min, int Arg_Max, Command_Callback Callback, Command_Save_Fn Save) {
+  for (int I = 0; I < Command_Count; I++)
+    if (strcmp (Command_Registry[I].Name, Name) == 0) return &Command_Registry[I];
+  if (Command_Count >= MAX_COMMANDS) { printf ("[cmd] registry full, cannot register %s\n", Name); return NULL; }
+  Command *C  = &Command_Registry[Command_Count++];
+  C->Name     = Name;
+  C->Info     = Info;
+  C->Usage    = Usage;
+  C->Arg_Min  = Arg_Min;
+  C->Arg_Max  = Arg_Max;
+  C->Callback = Callback;
+  C->Save     = Save;
+  return C;
+}
+
+// ════════════════════
+//   Command_Find
+// ════════════════════
+
+Command *Command_Find (const char *Name) {
+  for (int I = 0; I < Command_Count; I++)
+    if (strcmp (Command_Registry[I].Name, Name) == 0) return &Command_Registry[I];
+  return NULL;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════
+//   Console System — Thread-Safe IO and Command-Line Interface
+// ═══════════════════════════════════════════════════════════════════════════════════════════
+//
+// The console is the central user-facing interface for interacting with CVars and Commands.
+// All functions acquire Console.Lock for thread safety (Ada protected type pattern).
+//
+// Mirrors Ada Neo.Data.Console:
+//   procedure Submit (Text : Str);   -- Parse and execute
+//   procedure Line   (Item : Str);   -- Styled output
+//   function  Autocomplete return Vector_Str_Unbound.Unsafe.Vector;
+
+// ════════════════════
+//   Console_Init
+// ════════════════════
+
+void Console_Init (void) {
+  memset (&Console, 0, sizeof Console);
+  Console.Lock          = SDL_CreateMutex ();
+  Console.History_Index = -1;
+}
+
+// ════════════════════════
+//   Console_Shutdown
+// ════════════════════════
+
+void Console_Shutdown (void) {
+  if (Console.Lock) SDL_DestroyMutex (Console.Lock);
+  Console.Lock = NULL;
+}
+
+// ═══════════════════════════════════
+//   Console_Put — append styled text
+// ═══════════════════════════════════
+
+void Console_Put (const char *Text, Console_Style Style) {
+  SDL_LockMutex (Console.Lock);
+  Console_Entry *L = &Console.Lines[Console.Line_Head];
+  // Append to existing line if there's room and it matches style
+  int Existing = (int)strlen (L->Text);
+  int Adding   = (int)strlen (Text);
+  if (Existing + Adding < (int)sizeof L->Text - 1) {
+    strncat (L->Text, Text, sizeof L->Text - Existing - 1);
+    L->Style = Style;
+  } else {
+    // Overflow — advance to new line
+    Console.Line_Head  = (Console.Line_Head + 1) % CONSOLE_MAX_LINES;
+    Console.Line_Count = Console.Line_Count < CONSOLE_MAX_LINES ? Console.Line_Count + 1 : CONSOLE_MAX_LINES;
+    L = &Console.Lines[Console.Line_Head];
+    snprintf (L->Text, sizeof L->Text, "%s", Text);
+    L->Style = Style;
+  }
+  SDL_UnlockMutex (Console.Lock);
+}
+
+// ═══════════════════════════════════
+//   Console_Line — append styled line
+// ═══════════════════════════════════
+
+void Console_Line (const char *Text, Console_Style Style) {
+  SDL_LockMutex (Console.Lock);
+  Console.Line_Head  = (Console.Line_Head + 1) % CONSOLE_MAX_LINES;
+  Console.Line_Count = Console.Line_Count < CONSOLE_MAX_LINES ? Console.Line_Count + 1 : CONSOLE_MAX_LINES;
+  Console_Entry *L = &Console.Lines[Console.Line_Head];
+  snprintf (L->Text, sizeof L->Text, "%s", Text);
+  L->Style = Style;
+  SDL_UnlockMutex (Console.Lock);
+
+  // Also echo to stdout for debugging
+  printf ("%s\n", Text);
+}
+
+// ════════════════════════════════
+//   Console_Section / Error / Warn / Info
+// ════════════════════════════════
+
+void Console_Section (const char *Text) {
+  char Buf[520];
+  snprintf (Buf, sizeof Buf, "── %s ──", Text);
+  Console_Line (Buf, CONSOLE_STYLE_SECTION);
+}
+
+void Console_Error (const char *Text) {
+  char Buf[520];
+  snprintf (Buf, sizeof Buf, "[ERROR] %s", Text);
+  Console_Line (Buf, CONSOLE_STYLE_ERROR);
+}
+
+void Console_Warn (const char *Text) {
+  char Buf[520];
+  snprintf (Buf, sizeof Buf, "[WARN] %s", Text);
+  Console_Line (Buf, CONSOLE_STYLE_WARNING);
+}
+
+void Console_Info (const char *Text) {
+  Console_Line (Text, CONSOLE_STYLE_INFO);
+}
+
+// ════════════════════════════════
+//   Console_Printf — formatted styled output
+// ════════════════════════════════
+
+void Console_Printf (Console_Style Style, const char *Fmt, ...) {
+  char Buf[1024];
+  va_list Args;
+  va_start (Args, Fmt);
+  vsnprintf (Buf, sizeof Buf, Fmt, Args);
+  va_end (Args);
+  Console_Line (Buf, Style);
+}
+
+// ════════════════════════════════
+//   Console_Toggle / Is_Open
+// ════════════════════════════════
+
+void Console_Toggle (void) {
+  SDL_LockMutex (Console.Lock);
+  Console.Open = not Console.Open;
+  SDL_UnlockMutex (Console.Lock);
+}
+
+int Console_Is_Open (void) {
+  SDL_LockMutex (Console.Lock);
+  int Open = Console.Open;
+  SDL_UnlockMutex (Console.Lock);
+  return Open;
+}
+
+// ════════════════════════════════════════
+//   Console Input Editing
+// ════════════════════════════════════════
+
+void Console_Input_Char (char C) {
+  SDL_LockMutex (Console.Lock);
+  if (Console.Input_Length < CONSOLE_INPUT_MAX - 1) {
+    // Shift characters right to insert at cursor
+    for (int I = Console.Input_Length; I > Console.Input_Cursor; I--)
+      Console.Input[I] = Console.Input[I - 1];
+    Console.Input[Console.Input_Cursor++] = C;
+    Console.Input[++Console.Input_Length] = '\0';
+  }
+  SDL_UnlockMutex (Console.Lock);
+}
+
+void Console_Input_Backspace (void) {
+  SDL_LockMutex (Console.Lock);
+  if (Console.Input_Cursor > 0) {
+    for (int I = Console.Input_Cursor - 1; I < Console.Input_Length - 1; I++)
+      Console.Input[I] = Console.Input[I + 1];
+    Console.Input_Cursor--;
+    Console.Input[--Console.Input_Length] = '\0';
+  }
+  SDL_UnlockMutex (Console.Lock);
+}
+
+void Console_Input_Delete (void) {
+  SDL_LockMutex (Console.Lock);
+  if (Console.Input_Cursor < Console.Input_Length) {
+    for (int I = Console.Input_Cursor; I < Console.Input_Length - 1; I++)
+      Console.Input[I] = Console.Input[I + 1];
+    Console.Input[--Console.Input_Length] = '\0';
+  }
+  SDL_UnlockMutex (Console.Lock);
+}
+
+void Console_Input_Left  (void) { SDL_LockMutex (Console.Lock); if (Console.Input_Cursor > 0)                     Console.Input_Cursor--; SDL_UnlockMutex (Console.Lock); }
+void Console_Input_Right (void) { SDL_LockMutex (Console.Lock); if (Console.Input_Cursor < Console.Input_Length)   Console.Input_Cursor++; SDL_UnlockMutex (Console.Lock); }
+void Console_Input_Home  (void) { SDL_LockMutex (Console.Lock); Console.Input_Cursor = 0;                         SDL_UnlockMutex (Console.Lock); }
+void Console_Input_End   (void) { SDL_LockMutex (Console.Lock); Console.Input_Cursor = Console.Input_Length;       SDL_UnlockMutex (Console.Lock); }
+
+// ════════════════════════════════════════
+//   Console History
+// ════════════════════════════════════════
+
+void Console_History_Up (void) {
+  SDL_LockMutex (Console.Lock);
+  if (Console.History_Count > 0 and Console.History_Index < Console.History_Count - 1) {
+    Console.History_Index++;
+    int Idx = (Console.History_Count - 1 - Console.History_Index) % CONSOLE_MAX_HISTORY;
+    snprintf (Console.Input, CONSOLE_INPUT_MAX, "%s", Console.History[Idx]);
+    Console.Input_Length = (int)strlen (Console.Input);
+    Console.Input_Cursor = Console.Input_Length;
+  }
+  SDL_UnlockMutex (Console.Lock);
+}
+
+void Console_History_Down (void) {
+  SDL_LockMutex (Console.Lock);
+  if (Console.History_Index > 0) {
+    Console.History_Index--;
+    int Idx = (Console.History_Count - 1 - Console.History_Index) % CONSOLE_MAX_HISTORY;
+    snprintf (Console.Input, CONSOLE_INPUT_MAX, "%s", Console.History[Idx]);
+    Console.Input_Length = (int)strlen (Console.Input);
+    Console.Input_Cursor = Console.Input_Length;
+  } else if (Console.History_Index == 0) {
+    Console.History_Index = -1;
+    Console.Input[0] = '\0';
+    Console.Input_Length = 0;
+    Console.Input_Cursor = 0;
+  }
+  SDL_UnlockMutex (Console.Lock);
+}
+
+// ════════════════════════════════════════
+//   Console Scroll
+// ════════════════════════════════════════
+
+void Console_Scroll_Up   (void) { SDL_LockMutex (Console.Lock); if (Console.Scroll_Offset < Console.Line_Count - 1) Console.Scroll_Offset++; SDL_UnlockMutex (Console.Lock); }
+void Console_Scroll_Down (void) { SDL_LockMutex (Console.Lock); if (Console.Scroll_Offset > 0) Console.Scroll_Offset--;                       SDL_UnlockMutex (Console.Lock); }
+
+// ════════════════════════════════
+//   Console_Get_Line_Count / Console_Get_Line
+// ════════════════════════════════
+
+int Console_Get_Line_Count (void) {
+  SDL_LockMutex (Console.Lock);
+  int N = Console.Line_Count;
+  SDL_UnlockMutex (Console.Lock);
+  return N;
+}
+
+Console_Entry Console_Get_Line (int Index) {
+  Console_Entry Result = {0};
+  SDL_LockMutex (Console.Lock);
+  if (Index >= 0 and Index < Console.Line_Count) {
+    // Index 0 = oldest visible, Line_Count-1 = newest
+    int Oldest = (Console.Line_Head - Console.Line_Count + 1 + CONSOLE_MAX_LINES) % CONSOLE_MAX_LINES;
+    int Actual = (Oldest + Index) % CONSOLE_MAX_LINES;
+    Result = Console.Lines[Actual];
+  }
+  SDL_UnlockMutex (Console.Lock);
+  return Result;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════
+//   Console_Submit — Parse and Execute Command or CVar Assignment
+// ═══════════════════════════════════════════════════════════════════════════════════════════
+//
+// Tokenizes the input string and dispatches to:
+//   1. A registered Command (e.g. "bind", "map", "kick")
+//   2. A CVar set/get (e.g. "r_width 1920" sets the CVar, "r_width" alone prints current value)
+//
+// Mirrors Ada: procedure Submit (Text : Str);
+
+void Console_Submit (const char *Text) {
+  if (not Text or Text[0] == '\0') return;
+
+  // Echo the submitted command
+  Console_Printf (CONSOLE_STYLE_ENTRY, "] %s", Text);
+
+  // Tokenize into Argc/Argv (simple space-separated, supports quoted strings)
+  char Buf[CONSOLE_INPUT_MAX];
+  snprintf (Buf, sizeof Buf, "%s", Text);
+
+  const char *Argv[COMMAND_MAX_ARGS];
+  int Argc = 0;
+  char *P = Buf;
+  while (*P and Argc < COMMAND_MAX_ARGS) {
+    while (*P == ' ' or *P == '\t') P++;
+    if (*P == '\0') break;
+    if (*P == '"') {
+      P++;
+      Argv[Argc++] = P;
+      while (*P and *P != '"') P++;
+      if (*P == '"') *P++ = '\0';
+    } else {
+      Argv[Argc++] = P;
+      while (*P and *P != ' ' and *P != '\t') P++;
+      if (*P) *P++ = '\0';
+    }
+  }
+  if (Argc == 0) return;
+
+  // Built-in commands: "help", "cvarlist", "cmdlist", "reset", "quit"
+  if (strcmp (Argv[0], "help") == 0) {
+    Console_Section ("Available Commands");
+    for (int I = 0; I < Command_Count; I++)
+      Console_Printf (CONSOLE_STYLE_DEFAULT, "  %-20s %s", Command_Registry[I].Name, Command_Registry[I].Info);
+    Console_Section ("CVar Usage");
+    Console_Info ("  <cvar_name>            — print current value");
+    Console_Info ("  <cvar_name> <value>    — set new value");
+    Console_Info ("  cvarlist               — list all CVars");
+    Console_Info ("  cmdlist                — list all commands");
+    Console_Info ("  reset <cvar_name>      — reset CVar to default");
+    return;
+  }
+
+  if (strcmp (Argv[0], "cvarlist") == 0) {
+    Console_Section ("Registered CVars");
+    for (int I = 0; I < CVar_Count; I++) {
+      CVar *V = &CVar_Registry[I];
+      char Val_Buf[64];
+      switch (V->Type) {
+        case CVAR_INT:    snprintf (Val_Buf, sizeof Val_Buf, "%d",   CVar_Get_Int (V));   break;
+        case CVAR_FLOAT:  snprintf (Val_Buf, sizeof Val_Buf, "%.3f", CVar_Get_Float (V)); break;
+        case CVAR_STRING: CVar_Get_String (V, Val_Buf, sizeof Val_Buf); break;
+      }
+      Console_Printf (CONSOLE_STYLE_CVAR, "  %-24s = %-12s  %s%s",
+                       V->Name, Val_Buf, V->Help,
+                       (V->Flags & CVAR_ARCHIVE) ? " [ARCHIVE]" : "");
+    }
+    Console_Printf (CONSOLE_STYLE_INFO, "  %d cvars total", CVar_Count);
+    return;
+  }
+
+  if (strcmp (Argv[0], "cmdlist") == 0) {
+    Console_Section ("Registered Commands");
+    for (int I = 0; I < Command_Count; I++)
+      Console_Printf (CONSOLE_STYLE_DEFAULT, "  %-20s %s", Command_Registry[I].Name, Command_Registry[I].Info);
+    Console_Printf (CONSOLE_STYLE_INFO, "  %d commands total", Command_Count);
+    return;
+  }
+
+  if (strcmp (Argv[0], "quit") == 0 or strcmp (Argv[0], "exit") == 0) {
+    atomic_store (&Quit_Requested, 1);
+    return;
+  }
+
+  if (strcmp (Argv[0], "reset") == 0 and Argc >= 2) {
+    CVar *V = CVar_Find (Argv[1]);
+    if (V) { CVar_Reset (V); Console_Printf (CONSOLE_STYLE_DEFAULT, "  %s reset to default", V->Name); }
+    else Console_Printf (CONSOLE_STYLE_ERROR, "  unknown cvar: %s", Argv[1]);
+    return;
+  }
+
+  // Check if it's a registered command
+  Command *Cmd = Command_Find (Argv[0]);
+  if (Cmd) {
+    int Arg_Count = Argc - 1;
+    if (Arg_Count < Cmd->Arg_Min) {
+      Console_Printf (CONSOLE_STYLE_ERROR, "  %s: too few arguments (min %d)", Cmd->Name, Cmd->Arg_Min);
+      Console_Printf (CONSOLE_STYLE_INFO, "  usage: %s", Cmd->Usage);
+      return;
+    }
+    if (Cmd->Arg_Max > 0 and Arg_Count > Cmd->Arg_Max) {
+      Console_Printf (CONSOLE_STYLE_ERROR, "  %s: too many arguments (max %d)", Cmd->Name, Cmd->Arg_Max);
+      Console_Printf (CONSOLE_STYLE_INFO, "  usage: %s", Cmd->Usage);
+      return;
+    }
+    Cmd->Callback (Argc, Argv);
+    return;
+  }
+
+  // Check if it's a CVar get/set
+  CVar *V = CVar_Find (Argv[0]);
+  if (V) {
+    if (Argc == 1) {
+      // Print current value
+      char Val_Buf[CVAR_STRING_MAX];
+      switch (V->Type) {
+        case CVAR_INT:    snprintf (Val_Buf, sizeof Val_Buf, "%d",   CVar_Get_Int (V));   break;
+        case CVAR_FLOAT:  snprintf (Val_Buf, sizeof Val_Buf, "%.6f", CVar_Get_Float (V)); break;
+        case CVAR_STRING: CVar_Get_String (V, Val_Buf, sizeof Val_Buf); break;
+      }
+      Console_Printf (CONSOLE_STYLE_CVAR, "  %s = %s  (%s)", V->Name, Val_Buf, V->Help);
+    } else {
+      // Set value from console
+      if (V->Flags & CVAR_READONLY) {
+        Console_Printf (CONSOLE_STYLE_ERROR, "  %s is read-only", V->Name);
+        return;
+      }
+      switch (V->Type) {
+        case CVAR_INT:    CVar_Set_Int    (V, atoi (Argv[1]));         break;
+        case CVAR_FLOAT:  CVar_Set_Float  (V, (float)atof (Argv[1])); break;
+        case CVAR_STRING: CVar_Set_String (V, Argv[1]);                break;
+      }
+      char Val_Buf[CVAR_STRING_MAX];
+      switch (V->Type) {
+        case CVAR_INT:    snprintf (Val_Buf, sizeof Val_Buf, "%d",   CVar_Get_Int (V));   break;
+        case CVAR_FLOAT:  snprintf (Val_Buf, sizeof Val_Buf, "%.6f", CVar_Get_Float (V)); break;
+        case CVAR_STRING: CVar_Get_String (V, Val_Buf, sizeof Val_Buf); break;
+      }
+      Console_Printf (CONSOLE_STYLE_DEFAULT, "  %s -> %s", V->Name, Val_Buf);
+    }
+    return;
+  }
+
+  Console_Printf (CONSOLE_STYLE_ERROR, "  unknown command or cvar: %s", Argv[0]);
+}
+
+// ════════════════════════════════════════
+//   Console_Input_Submit — Submit current input and add to history
+// ════════════════════════════════════════
+
+void Console_Input_Submit (void) {
+  SDL_LockMutex (Console.Lock);
+  if (Console.Input_Length == 0) { SDL_UnlockMutex (Console.Lock); return; }
+
+  // Copy input for submission
+  char Text[CONSOLE_INPUT_MAX];
+  snprintf (Text, sizeof Text, "%s", Console.Input);
+
+  // Add to history (circular buffer)
+  int Idx = Console.History_Count % CONSOLE_MAX_HISTORY;
+  snprintf (Console.History[Idx], CONSOLE_INPUT_MAX, "%s", Text);
+  if (Console.History_Count < CONSOLE_MAX_HISTORY) Console.History_Count++;
+  Console.History_Index = -1;
+
+  // Clear input
+  Console.Input[0]     = '\0';
+  Console.Input_Length  = 0;
+  Console.Input_Cursor  = 0;
+  Console.Scroll_Offset = 0;
+
+  SDL_UnlockMutex (Console.Lock);
+
+  // Execute (outside lock — Submit may call Console_Line which also locks)
+  Console_Submit (Text);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════
+//   Console_Autocomplete — Tab completion from CVar and Command registries
+// ═══════════════════════════════════════════════════════════════════════════════════════════
+//
+// Mirrors Ada: function Autocomplete return Vector_Str_Unbound.Unsafe.Vector;
+//
+// If there's a single match, complete it.  If multiple matches, print them all and complete
+// up to the longest common prefix.
+
+void Console_Autocomplete (void) {
+  SDL_LockMutex (Console.Lock);
+  if (Console.Input_Length == 0) { SDL_UnlockMutex (Console.Lock); return; }
+
+  // Extract prefix (first word)
+  char Prefix[CONSOLE_INPUT_MAX];
+  snprintf (Prefix, sizeof Prefix, "%s", Console.Input);
+  int Prefix_Len = (int)strlen (Prefix);
+
+  // Collect matches from Commands and CVars
+  const char *Matches[MAX_COMMANDS + MAX_CVARS];
+  int Match_Count = 0;
+
+  for (int I = 0; I < Command_Count and Match_Count < MAX_COMMANDS + MAX_CVARS; I++)
+    if (strncmp (Command_Registry[I].Name, Prefix, Prefix_Len) == 0)
+      Matches[Match_Count++] = Command_Registry[I].Name;
+
+  for (int I = 0; I < CVar_Count and Match_Count < MAX_COMMANDS + MAX_CVARS; I++)
+    if (strncmp (CVar_Registry[I].Name, Prefix, Prefix_Len) == 0)
+      Matches[Match_Count++] = CVar_Registry[I].Name;
+
+  if (Match_Count == 0) {
+    SDL_UnlockMutex (Console.Lock);
+    return;
+  }
+
+  if (Match_Count == 1) {
+    // Single match — complete it with a trailing space
+    snprintf (Console.Input, CONSOLE_INPUT_MAX, "%s ", Matches[0]);
+    Console.Input_Length = (int)strlen (Console.Input);
+    Console.Input_Cursor = Console.Input_Length;
+    SDL_UnlockMutex (Console.Lock);
+    return;
+  }
+
+  // Multiple matches — find longest common prefix
+  int Common = (int)strlen (Matches[0]);
+  for (int I = 1; I < Match_Count; I++) {
+    int J = 0;
+    while (J < Common and Matches[0][J] == Matches[I][J]) J++;
+    Common = J;
+  }
+
+  // Complete to the common prefix
+  if (Common > Prefix_Len) {
+    snprintf (Console.Input, CONSOLE_INPUT_MAX, "%.*s", Common, Matches[0]);
+    Console.Input_Length = Common;
+    Console.Input_Cursor = Common;
+  }
+  SDL_UnlockMutex (Console.Lock);
+
+  // Print all matches
+  for (int I = 0; I < Match_Count; I++)
+    Console_Printf (CONSOLE_STYLE_INFO, "  %s", Matches[I]);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════
+//   Built-in Engine Commands — registered at startup
+// ═══════════════════════════════════════════════════════════════════════════════════════════
+//
+// These mirror the Ada command instances:
+//   package The_Time is new Command (Name => "thetime", ...);
+//   package Bind     is new Command (Name => "bind", ...);
+//   package Kick     is new Command (Name => "kick", ...);
+//   etc.
+
+// Forward declarations for built-in command callbacks
+void Cmd_The_Time     (int Argc, const char *Argv[]);
+void Cmd_Kick         (int Argc, const char *Argv[]);
+void Cmd_Ban          (int Argc, const char *Argv[]);
+void Cmd_Info         (int Argc, const char *Argv[]);
+void Cmd_Say          (int Argc, const char *Argv[]);
+void Cmd_Bind         (int Argc, const char *Argv[]);
+void Cmd_Unbind       (int Argc, const char *Argv[]);
+void Cmd_Restart      (int Argc, const char *Argv[]);
+void Cmd_Map          (int Argc, const char *Argv[]);
+void Cmd_Host         (int Argc, const char *Argv[]);
+void Cmd_Join         (int Argc, const char *Argv[]);
+void Cmd_Servers      (int Argc, const char *Argv[]);
+void Cmd_Recent       (int Argc, const char *Argv[]);
+void Cmd_Toggle_Mode  (int Argc, const char *Argv[]);
+void Cmd_Save_Config  (int Argc, const char *Argv[]);
+void Cmd_Load_Config  (int Argc, const char *Argv[]);
+
+// ── Command Implementations ──
+
+void Cmd_The_Time (int Argc, const char *Argv[]) {
+  (void)Argc; (void)Argv;
+  time_t Now = time (NULL);
+  struct tm *T = localtime (&Now);
+  char Buf[128];
+  strftime (Buf, sizeof Buf, "%Y-%m-%d %H:%M:%S", T);
+  Console_Printf (CONSOLE_STYLE_DEFAULT, "  %s", Buf);
+}
+
+void Cmd_Kick (int Argc, const char *Argv[]) {
+  (void)Argc; (void)Argv;
+  Console_Info ("  kick: not yet connected to server");
+}
+
+void Cmd_Ban (int Argc, const char *Argv[]) {
+  (void)Argc; (void)Argv;
+  Console_Info ("  ban: not yet connected to server");
+}
+
+void Cmd_Info (int Argc, const char *Argv[]) {
+  (void)Argc; (void)Argv;
+  Console_Section ("Engine Info");
+  Console_Printf (CONSOLE_STYLE_DEFAULT, "  Engine: %s %s", ENGINE_NAME, ENGINE_VERSION);
+  Console_Printf (CONSOLE_STYLE_DEFAULT, "  World:  %s", Active_World.Name);
+  Console_Printf (CONSOLE_STYLE_DEFAULT, "  CVars:  %d registered", CVar_Count);
+  Console_Printf (CONSOLE_STYLE_DEFAULT, "  Cmds:   %d registered", Command_Count);
+  Console_Printf (CONSOLE_STYLE_DEFAULT, "  Threads: Game=%s  Render=%s",
+                   Game_Thread ? "running" : "idle", Render_Thread ? "running" : "idle");
+}
+
+void Cmd_Say (int Argc, const char *Argv[]) {
+  if (Argc < 2) { Console_Error ("say: no message"); return; }
+  // Concatenate all args after "say"
+  char Msg[512] = "";
+  for (int I = 1; I < Argc; I++) {
+    if (I > 1) strncat (Msg, " ", sizeof Msg - strlen (Msg) - 1);
+    strncat (Msg, Argv[I], sizeof Msg - strlen (Msg) - 1);
+  }
+  Console_Printf (CONSOLE_STYLE_DEFAULT, "  [chat] %s", Msg);
+}
+
+void Cmd_Bind (int Argc, const char *Argv[]) {
+  if (Argc < 3) { Console_Error ("usage: bind <key> <action>"); return; }
+  Impulse *Imp = Impulse_Find (Argv[2]);
+  if (not Imp) { Console_Printf (CONSOLE_STYLE_ERROR, "  unknown impulse: %s", Argv[2]); return; }
+  // Try to find the SDL scancode from name
+  SDL_Scancode SC = SDL_GetScancodeFromName (Argv[1]);
+  if (SC != SDL_SCANCODE_UNKNOWN) {
+    Imp->Primary = SC;
+    Console_Printf (CONSOLE_STYLE_DEFAULT, "  bound %s to %s", Argv[1], Argv[2]);
+  } else {
+    Console_Printf (CONSOLE_STYLE_ERROR, "  unknown key: %s", Argv[1]);
+  }
+}
+
+void Cmd_Unbind (int Argc, const char *Argv[]) {
+  if (Argc < 2) { Console_Error ("usage: unbind <action>"); return; }
+  Impulse *Imp = Impulse_Find (Argv[1]);
+  if (not Imp) { Console_Printf (CONSOLE_STYLE_ERROR, "  unknown impulse: %s", Argv[1]); return; }
+  Imp->Primary   = 0;
+  Imp->Alternate = 0;
+  Console_Printf (CONSOLE_STYLE_DEFAULT, "  unbound %s", Argv[1]);
+}
+
+void Cmd_Restart (int Argc, const char *Argv[]) {
+  (void)Argc; (void)Argv;
+  Console_Info ("  restart: map restart not yet implemented");
+}
+
+void Cmd_Map (int Argc, const char *Argv[]) {
+  if (Argc < 2) { Console_Error ("usage: map <name.bsp>"); return; }
+  Console_Printf (CONSOLE_STYLE_DEFAULT, "  loading map: %s", Argv[1]);
+  // Map loading to be connected to asset pipeline
+}
+
+void Cmd_Host (int Argc, const char *Argv[]) {
+  (void)Argc; (void)Argv;
+  Console_Info ("  host: server hosting not yet implemented");
+}
+
+void Cmd_Join (int Argc, const char *Argv[]) {
+  if (Argc < 2) { Console_Error ("usage: join <address>"); return; }
+  Console_Printf (CONSOLE_STYLE_DEFAULT, "  joining: %s", Argv[1]);
+}
+
+void Cmd_Servers (int Argc, const char *Argv[]) {
+  (void)Argc; (void)Argv;
+  Console_Info ("  servers: server browser not yet implemented");
+}
+
+void Cmd_Recent (int Argc, const char *Argv[]) {
+  (void)Argc; (void)Argv;
+  Console_Info ("  recent: server history not yet implemented");
+}
+
+void Cmd_Toggle_Mode (int Argc, const char *Argv[]) {
+  (void)Argc; (void)Argv;
+  int Current = CVar_Get_Int (r_fullscreen);
+  CVar_Set_Int (r_fullscreen, not Current);
+  Console_Printf (CONSOLE_STYLE_DEFAULT, "  fullscreen: %s", Current ? "off" : "on");
+}
+
+void Cmd_Save_Config (int Argc, const char *Argv[]) {
+  const char *Path = Argc >= 2 ? Argv[1] : "q3.cfg";
+  CVar_Save (Path);
+  Console_Printf (CONSOLE_STYLE_DEFAULT, "  config saved to %s", Path);
+}
+
+void Cmd_Load_Config (int Argc, const char *Argv[]) {
+  const char *Path = Argc >= 2 ? Argv[1] : "q3.cfg";
+  CVar_Load (Path);
+  Console_Printf (CONSOLE_STYLE_DEFAULT, "  config loaded from %s", Path);
+}
+
+// ═══════════════════════════════════
+//   Command_Register_All — Bulk registration of all engine commands
+// ═══════════════════════════════════
+//
+// Called once at startup after CVar_Register_All.  Each command mirrors an Ada generic instance:
+//   package The_Time is new Command (Name => "thetime", Info => "Print current time", ...);
+
+void Command_Register_All (void) {
+  Command_Register ("thetime",    "Print current date and time",   "thetime",                   0, 0,  Cmd_The_Time,    NULL);
+  Command_Register ("kick",       "Kick a player from the server", "kick <player>",             1, 1,  Cmd_Kick,        NULL);
+  Command_Register ("ban",        "Ban a player from the server",  "ban <player>",              1, 1,  Cmd_Ban,         NULL);
+  Command_Register ("info",       "Show engine information",       "info",                      0, 0,  Cmd_Info,        NULL);
+  Command_Register ("say",        "Send a chat message",           "say <message>",             1, 16, Cmd_Say,         NULL);
+  Command_Register ("bind",       "Bind a key to an impulse",      "bind <key> <action>",       2, 2,  Cmd_Bind,        NULL);
+  Command_Register ("unbind",     "Unbind an impulse",             "unbind <action>",           1, 1,  Cmd_Unbind,      NULL);
+  Command_Register ("restart",    "Restart the current map",       "restart",                   0, 0,  Cmd_Restart,     NULL);
+  Command_Register ("map",        "Load a map",                    "map <name.bsp>",            1, 1,  Cmd_Map,         NULL);
+  Command_Register ("host",       "Host a game server",            "host [map]",                0, 1,  Cmd_Host,        NULL);
+  Command_Register ("join",       "Join a server",                 "join <address>",            1, 1,  Cmd_Join,        NULL);
+  Command_Register ("servers",    "List available servers",        "servers",                   0, 0,  Cmd_Servers,     NULL);
+  Command_Register ("recent",     "Show recent servers",           "recent",                    0, 0,  Cmd_Recent,      NULL);
+  Command_Register ("togglemode", "Toggle fullscreen/windowed",    "togglemode",                0, 0,  Cmd_Toggle_Mode, NULL);
+  Command_Register ("saveconfig", "Save config to file",           "saveconfig [path]",         0, 1,  Cmd_Save_Config, NULL);
+  Command_Register ("loadconfig", "Load config from file",         "loadconfig [path]",         0, 1,  Cmd_Load_Config, NULL);
+  printf ("[cmd] registered %d commands\n", Command_Count);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════
@@ -17714,8 +18664,43 @@ Input Poll_Input () {
         atomic_store (&Quit_Requested, 1);
         break;
 
-      // Handle key presses (ESC, F11)
+      // Handle text input events (for console input when open)
+      case SDL_TEXTINPUT:
+        if (Console_Is_Open ()) {
+          for (const char *C = Event.text.text; *C; C++)
+            if (*C >= 32 and *C < 127 and *C != '`') Console_Input_Char (*C);
+        }
+        break;
+
+      // Handle key presses (ESC, F11, backtick for console)
       case SDL_KEYDOWN:
+        // Backtick toggles the console (like Quake)
+        if (Event.key.keysym.sym == SDLK_BACKQUOTE) {
+          Console_Toggle ();
+          break;
+        }
+
+        // When console is open, redirect keystrokes to console input
+        if (Console_Is_Open ()) {
+          switch (Event.key.keysym.sym) {
+            case SDLK_RETURN:    Console_Input_Submit ();    break;
+            case SDLK_BACKSPACE: Console_Input_Backspace (); break;
+            case SDLK_DELETE:    Console_Input_Delete ();    break;
+            case SDLK_LEFT:      Console_Input_Left ();      break;
+            case SDLK_RIGHT:     Console_Input_Right ();     break;
+            case SDLK_HOME:      Console_Input_Home ();      break;
+            case SDLK_END:       Console_Input_End ();       break;
+            case SDLK_UP:        Console_History_Up ();      break;
+            case SDLK_DOWN:      Console_History_Down ();    break;
+            case SDLK_TAB:       Console_Autocomplete ();    break;
+            case SDLK_PAGEUP:    Console_Scroll_Up ();       break;
+            case SDLK_PAGEDOWN:  Console_Scroll_Down ();     break;
+            case SDLK_ESCAPE:    Console_Toggle ();          break;
+            default: break;
+          }
+          break; // Consume the event — don't pass to game when console is open
+        }
+
         if (Event.key.repeat) break; // Ignore key repeat for mode toggles
         if (Event.key.keysym.sym == SDLK_ESCAPE) {
           if (In_Menu) { Quit = 1; atomic_store (&Quit_Requested, 1); }  // ESC in menu = quit
