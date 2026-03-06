@@ -2442,6 +2442,9 @@ typedef struct {
 
   // TLAS instance transform (3x4 row-major, written by per-frame update)
   float                  TLAS_Transform[3][4];
+
+  // Dirty flag: set when vertices change (animation, skinning). BLAS rebuild skipped when clean.
+  int                    BLAS_Dirty;
 } Figure_Instance;
 
 // ── Figure_Pool: generational-index slot allocator for Figure_Instance ───────────────────────────────────────────────────────────────
@@ -3795,6 +3798,7 @@ int main (int Argc, char **Argv) {
   Acceleration_Structure World_Bottom_Level = Build_World_Bottom_Level (&Scene_Data);
   Figure_BLAS_Initialize (Weapon);
   Figure_BLAS_Initialize (Enemy);
+  Enemy->BLAS_Dirty = 1; // Ensure first frame rebuilds BLAS after animation frame is set
 
   // Player body shares enemy's BLAS and buffers (same geometry, different transform + ray mask)
   Player_Body->Bottom_Level      = Enemy->Bottom_Level;
@@ -4012,9 +4016,13 @@ int main (int Argc, char **Argv) {
       Weapon_Update (Weapon, &Bench_Cam, Fixed_Dt, 0);
       Enemy->Animation_Time += Fixed_Dt;
       if (Enemy->Figure.Animations[0].Frame_Count > 0 and Enemy->Figure.Frame_Vertices) {
-        Enemy->Current_Vertices = Enemy->Figure.Frame_Vertices[(int)(Enemy->Animation_Time * Enemy->Figure.Animations[0].FPS) % Enemy->Figure.Animations[0].Frame_Count];
+        int New_Frame = (int)(Enemy->Animation_Time * Enemy->Figure.Animations[0].FPS) % Enemy->Figure.Animations[0].Frame_Count;
+        Vertex *New_Verts = Enemy->Figure.Frame_Vertices[New_Frame];
+        if (New_Verts != Enemy->Current_Vertices) { Enemy->Current_Vertices = New_Verts; Enemy->BLAS_Dirty = 1; }
       }
+      uint64_t AS_Start = SDL_GetPerformanceCounter ();
       Acceleration_Rebuild_All (&World_Bottom_Level, &Figures);
+      uint64_t AS_End = SDL_GetPerformanceCounter ();
       Camera_Upload (&Bench_Cam, Vertical_FOV, Weapon->Texture_Base_Index, PBR_Stride, Active_SPP);
 
       // Build view and projection matrices
@@ -4047,21 +4055,26 @@ int main (int Argc, char **Argv) {
         .PP_TAA_A       = Pack_Half2x16 (CVar_Get_Float (rt_taa_static_floor), CVar_Get_Float (rt_taa_sigma)),
         .PP_TAA_B       = Pack_Half2x16 (CVar_Get_Float (rt_taa_move_lo),      CVar_Get_Float (rt_taa_move_hi))};
       Pack_Mat4_Half (&Bench_Reproject, Postprocess.Reproject);
+      uint64_t RT_Start = SDL_GetPerformanceCounter ();
       Raytracing_Frame (Postprocess);
+      uint64_t RT_End = SDL_GetPerformanceCounter ();
       Prev_View_Matrix = Bench_View;
       Frame_Count++;
 
       // Record frame timing statistics
       uint64_t Frame_End = SDL_GetPerformanceCounter ();
       float    Frame_Ms  = (float)(Frame_End - Frame_Start) * 1000.f / (float)Bench_Freq;
+      float    AS_Ms     = (float)(AS_End   - AS_Start)     * 1000.f / (float)Bench_Freq;
+      float    RT_Ms     = (float)(RT_End   - RT_Start)     * 1000.f / (float)Bench_Freq;
       Frame_Times[F] = Frame_Ms;
       if (Frame_Ms < Frame_Min) Frame_Min = Frame_Ms;
       if (Frame_Ms > Frame_Max) Frame_Max = Frame_Ms;
       Frame_Sum += Frame_Ms;
 
-      // Print periodic progress
-      if (F % 50 == 0)
-        printf ("  [frame %4d/%d] %.2f ms (%.1f fps)\n", F, Total_Frames, Frame_Ms, 1000.f / Frame_Ms);
+      // Print periodic progress with per-phase breakdown
+      if (F % 50 == 0 or Total_Frames <= 20)
+        printf ("  [frame %4d/%d] %.1fms total (AS=%.1f RT=%.1f other=%.1f)\n",
+                F, Total_Frames, Frame_Ms, AS_Ms, RT_Ms, Frame_Ms - AS_Ms - RT_Ms);
 
       // Dump_Frame_To_Disk:
       if (Dump_Frames_Dir) {
@@ -4482,7 +4495,8 @@ int main (int Argc, char **Argv) {
     Enemy->Animation_Time += Delta_Time;
     if (Enemy->Figure.Animations[0].Frame_Count > 0 and Enemy->Figure.Frame_Vertices) {
       int Frame_Index = (int)(Enemy->Animation_Time * Enemy->Figure.Animations[0].FPS) % Enemy->Figure.Animations[0].Frame_Count;
-      Enemy->Current_Vertices = Enemy->Figure.Frame_Vertices[Frame_Index];
+      Vertex *New_Verts = Enemy->Figure.Frame_Vertices[Frame_Index];
+      if (New_Verts != Enemy->Current_Vertices) { Enemy->Current_Vertices = New_Verts; Enemy->BLAS_Dirty = 1; }
     }
 
     // Compute player body TLAS transform
@@ -11771,10 +11785,14 @@ void Acceleration_Rebuild_All (Acceleration_Structure *World, Figure_Pool *Pool)
   VK_CHECK (vkBeginCommandBuffer (Command_Buffer, &(VkCommandBufferBeginInfo){
     .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO, .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT}));
 
-  // Record all active figure BLAS rebuilds
+  // Record BLAS rebuilds only for dirty figures (skip if vertices unchanged since last build)
+  int BLAS_Count = 0;
   for (uint I = 0; I < FIGURE_POOL_MAX; I++)
-    if (Pool->Active[I] and Pool->Slots[I].Bottom_Level.Handle)
+    if (Pool->Active[I] and Pool->Slots[I].Bottom_Level.Handle and Pool->Slots[I].BLAS_Dirty) {
       Figure_BLAS_Record (&Pool->Slots[I], Command_Buffer);
+      Pool->Slots[I].BLAS_Dirty = 0;
+      BLAS_Count++;
+    }
 
   // Memory barrier: BLAS builds must complete before TLAS reads their device addresses
   VkMemoryBarrier AS_Barrier = {VK_STRUCTURE_TYPE_MEMORY_BARRIER, NULL,
@@ -12495,6 +12513,7 @@ void Weapon_Update (Figure_Instance *Weapon, const Camera *Camera_Data, float De
     Weapon->Transformed_Vertices[Index].Texture_UV[0] = Weapon->Figure.Vertices[Index].Texture_UV[0];
     Weapon->Transformed_Vertices[Index].Texture_UV[1] = Weapon->Figure.Vertices[Index].Texture_UV[1];
   }
+  Weapon->BLAS_Dirty = 1;
 
 } // Weapon_Update
 
