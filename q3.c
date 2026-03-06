@@ -592,11 +592,20 @@ typedef struct {
 // INT CVars use _Atomic int; FLOAT CVars pack into _Atomic uint32_t via memcpy (type-punning).
 // No string CVars — use a separate localization database for text.
 //
-// This is the C equivalent of an Ada protected object with atomic Get/Set entries:
-//   protected CVar is
-//     function  Get return Value_Type;
-//     procedure Set (V : Value_Type);
-//   end CVar;
+// ── CVar (Console Variable) ── Ada pattern: package Name is new CVar (Name => ..., Var_T => ...) ──
+//
+// Task-safe console variables. Each CVar is a protected object with atomic Get/Set entries.
+// The Edit_State tracks when and how each CVar was last modified (timestamp + source).
+//
+//   Ada equivalent:
+//     type Edit_State is record Time_Stamp : Time; Edited_Via_Command : Bool; end record;
+//     package Safe_Edit is new Safe (Edit_State, (others => <>));
+//     generic  Name : Str;  Help : Str;  type Var_T is (<>);  Initial : Var_T;  Settable : Bool;
+//     package CVar is
+//       procedure Set (Val : Var_T);
+//       function  Get return Var_T;
+//       function  Last_Edit return Edit_State;
+//     end;
 
 typedef enum {CVAR_INT, CVAR_FLOAT} CVar_Type;
 
@@ -607,17 +616,24 @@ typedef enum {CVAR_INT, CVAR_FLOAT} CVar_Type;
 #define CVAR_LATCH    4   // Change is deferred until next map load / restart
 #define CVAR_CHEAT    8   // Only active when cheats are enabled
 
+// Edit_State — records the last modification time and source for each CVar
 typedef struct {
-  const char    *Name;       // "r_width", "w_gravity", "in_sensitivity", etc.
-  const char    *Help;       // One-line description for console / config comments
-  CVar_Type      Type;       // INT or FLOAT
-  int            Flags;      // Bitmask of CVAR_ARCHIVE | CVAR_READONLY | ...
-  _Atomic int    Value_I;    // Current value (int CVar) — lock-free atomic
-  _Atomic int    Value_F_Bits; // Current value (float CVar) — float bits stored as atomic int
-  int            Default_I;  // Default value for int CVars
-  int            Default_F_Bits; // Default value bits for float CVars
-  float          Min, Max;   // Numeric clamp range
-  _Atomic int    Modified;   // Dirty flag — set on write, cleared by consumer (atomic exchange)
+  _Atomic uint64_t Time_Stamp;         // SDL_GetPerformanceCounter ticks at last Set
+  _Atomic int      Edited_Via_Command; // 1 if the last Set came from console Submit, 0 if from code
+} CVar_Edit_State;
+
+typedef struct {
+  const char        *Name;             // "r_width", "w_gravity", "in_sensitivity", etc.
+  const char        *Help;             // One-line description for console / config comments
+  CVar_Type          Type;             // INT or FLOAT
+  int                Flags;            // Bitmask of CVAR_ARCHIVE | CVAR_READONLY | ...
+  _Atomic int        Value_I;          // Current value (int CVar) — lock-free atomic
+  _Atomic int        Value_F_Bits;     // Current value (float CVar) — float bits stored as atomic int
+  int                Default_I;        // Default value for int CVars
+  int                Default_F_Bits;   // Default value bits for float CVars
+  float              Min, Max;         // Numeric clamp range
+  _Atomic int        Modified;         // Dirty flag — set on write, cleared by consumer (atomic exchange)
+  CVar_Edit_State    Last_Edit;        // When and how the CVar was last modified
 } CVar;
 
 #define MAX_CVARS 256
@@ -640,6 +656,85 @@ void  CVar_Save            (const char *Path); // Write all ARCHIVE CVars to con
 void  CVar_Load            (const char *Path); // Read config file and apply values
 void  CVar_Init            (void);             // Initialize CVar registry
 void  CVar_Shutdown        (void);             // Cleanup
+
+// ── Console Command System ── Ada pattern: package Name is new Command (Name => ..., Callback => ...) ──
+//
+// Registered commands are dispatched by the console Submit function. Each command has a name, help text,
+// usage string, argument bounds, callback, and an optional Save function for config serialization.
+//
+//   Ada equivalent:
+//     generic
+//       Name    : Str;  Info : Str;  Usage : Str;
+//       Arg_Min : Natural;  Arg_Max : Natural;
+//       with procedure Callback (Args : Array_Str_Unbound);
+//       Save : access function return Str := null;
+//     package Command is end;
+//
+// All commands and CVars are accessible from any thread via Submit — the console maintains an
+// internal mutex for its log buffer and input history, but command dispatch itself is lock-free.
+
+#define MAX_COMMANDS       64
+#define MAX_COMMAND_ARGS   16
+#define CONSOLE_LOG_SIZE   65536  // Circular log buffer size in characters
+#define CONSOLE_HISTORY    64     // Input history depth
+
+typedef void (*Command_Callback) (int Argc, const char *Argv[]);
+typedef const char *(*Command_Save_Fn) (void); // Returns a string to write to config, or NULL
+
+typedef struct {
+  const char       *Name;              // "bind", "map", "quit", etc.
+  const char       *Info;              // One-line description
+  const char       *Usage;             // Usage syntax string
+  int               Arg_Min, Arg_Max;  // Argument count bounds (excluding the command name itself)
+  Command_Callback  Callback;          // Function called when command is submitted
+  Command_Save_Fn   Save;             // Optional: returns config line for saving (NULL = no save)
+} Command;
+
+// Console state — mutex-protected log buffer, input history, styled output
+typedef enum {
+  STYLE_DEFAULT, STYLE_ERROR, STYLE_WARNING, STYLE_SECTION, STYLE_INFO, STYLE_ENTRY
+} Console_Style;
+
+typedef struct {
+  char          Log[CONSOLE_LOG_SIZE]; // Circular text log buffer
+  int           Log_Write;             // Write cursor in the circular log
+  int           Log_Length;            // Total characters written (may exceed CONSOLE_LOG_SIZE)
+  char          History[CONSOLE_HISTORY][512]; // Input entry history ring
+  int           History_Count;         // Total entries stored
+  int           History_Cursor;        // Navigation cursor (-1 = current input)
+  char          Input[512];            // Current input line being edited
+  int           Input_Length;          // Length of current input
+  SDL_mutex    *Lock;                  // Protects Log, History, Input from concurrent access
+  _Atomic int   Dirty;                // Set when new output is written, cleared by renderer
+} Console_State;
+
+// Command API
+void Command_Register  (const char *Name, const char *Info, const char *Usage,
+                        int Arg_Min, int Arg_Max, Command_Callback Callback, Command_Save_Fn Save);
+void Command_Init      (void);
+void Command_Shutdown  (void);
+
+// Console API — task-safe IO (Ada: Neo.Data.Console)
+void Console_Init      (void);
+void Console_Shutdown  (void);
+void Console_Put       (const char *Text, Console_Style Style);
+void Console_Line      (const char *Text, Console_Style Style);
+void Console_Section   (const char *Text);  // [section] header in STYLE_SECTION
+void Console_Error     (const char *Text);  // Error in STYLE_ERROR
+void Console_Warn      (const char *Text);  // Warning in STYLE_WARNING
+void Console_Info      (const char *Text);  // Info in STYLE_INFO
+
+// Submit a command string — parses, dispatches to Command or CVar set, logs result
+void Console_Submit    (const char *Text);
+
+// Input history navigation (Ada: Next_Input_Entry / Previous_Input_Entry)
+void Console_History_Next     (void);
+void Console_History_Previous (void);
+const char *Console_Get_Input (void);
+void Console_Set_Input        (const char *Text);
+
+// Autocomplete: returns the number of matches, fills Matches[] with up to Max_Matches names
+int  Console_Autocomplete (const char *Prefix, const char **Matches, int Max_Matches);
 
 // ── Game Controller ── SDL_GameController wrapper for gamepads (Xbox, PS, etc.) ──────────────────
 
@@ -782,10 +877,6 @@ void Thread_Sleep_Until (uint64_t Target_Ticks);
 int Game_Thread_Entry   (void *Data);
 int Render_Thread_Entry (void *Data);
 
-// Quickhull internal types used during hull construction
-typedef struct {int A, B, C; int Dead;} Quickhull_Face;
-typedef struct {int V0, V1, Face;}      Quickhull_Edge;
-
 // GPU-resident buffer with its backing memory and optional device address
 typedef struct {
   VkBuffer        Buffer;
@@ -823,6 +914,13 @@ typedef struct {
 // Registration is single-threaded at startup; Get/Set are lock-free atomics from any thread.
 CVar      CVar_Registry[MAX_CVARS];
 int       CVar_Count;
+
+// Command registry — flat array of registered console commands, linear scan by name
+Command   Command_Registry[MAX_COMMANDS];
+int       Command_Count;
+
+// Console state — mutex-protected log, history, input (Ada: Neo.Data.Console)
+Console_State Console;
 
 // Impulse registry — named input actions with rebindable keys
 Impulse   Impulse_Registry[MAX_IMPULSES];
@@ -2822,18 +2920,8 @@ typedef struct {
   uint32_t PP_TAA_B;        // half(Move_Lo),  half(Move_Hi)
 } GPU_Postprocess_Push;     // 56 + 16 = 72 bytes
 
-// CPU-side convex hull produced by the Quickhull algorithm. Stores vertex positions and per-vertex adjacency for hill-climbing
-// support queries.
-typedef struct {
-  vec3  Vertices  [HULL_MAX_VERTS];               // Hull vertex positions in local space
-  int   Adjacency [HULL_MAX_VERTS][HULL_MAX_ADJ]; // Per-vertex neighbor indices (-1 terminated)
-  uint  Vertex_Count;                             // Number of hull vertices
-  vec3  Centroid;                                 // Geometric center (for local-space offset)
-  float Bounding_Radius;                          // Tight bounding sphere radius from centroid
-} Convex_Hull;
-
-// GPU-packed hull data uploaded to the physics compute shader's storage buffer. The shader uses this for SHAPE_HULL support queries
-// via hill-climbing with adjacency.
+// GPU-packed hull data — the physics compute shader's storage buffer layout. The shader uses this for
+// SHAPE_HULL support queries via hill-climbing with adjacency. Built entirely on GPU by Quickhull_GPU.
 typedef struct {
   float Vertices  [HULL_MAX_VERTS][4];            // xyz + padding per vertex (std430 vec4 array)
   int   Adjacency [HULL_MAX_VERTS][HULL_MAX_ADJ]; // Neighbor indices, -1 terminated
@@ -2842,19 +2930,6 @@ typedef struct {
   float Centroid  [3];                            // Local-space centroid
   int   Pad;
 } GPU_Hull;
-
-// Signed distance from point P to the plane of triangle (A, B, C). Positive = front side.
-float Quickhull_Dist (vec3 P, vec3 A, vec3 B, vec3 C);
-
-// Build a convex hull from a point cloud using the Quickhull algorithm. Returns the hull with deduplicated vertices and per-vertex
-// adjacency tables for GPU hill-climbing support.
-Convex_Hull Quickhull (const vec3 *Points, uint Count);
-
-// Convenience wrapper: extract vec3 positions from a Vertex array and build the convex hull
-Convex_Hull Hull_From_Vertices (const Vertex *Vertices, uint Count);
-
-// Pack a CPU-side Convex_Hull into GPU_Hull format and upload to the hull storage buffer (binding 4)
-void Hull_Upload (const Convex_Hull *Hull);
 
 // Build a convex hull from the global scene vertex buffer data already on GPU (no CPU roundtrip)
 void Hull_From_Vertex_Buffer (uint Vertex_Offset, uint Vertex_Count);
@@ -3351,7 +3426,8 @@ const Model_Damage_Entry DAMAGE_MAP_REGISTRY[DAMAGE_MODEL_COUNT] = {
 // Forward declarations for globals and functions defined after main()
 Input_Ring                Input_Ring_Buffer;
 Snapshot_Double_Buffer    Snapshot_Buffer;
-void CVar_Register_All   (void);
+void CVar_Register_All    (void);
+void Command_Register_All (void);
 void Input_Ring_Push      (Input_Ring *Ring, const Input *In);
 void Snapshot_Init        (Snapshot_Double_Buffer *SB);
 void Snapshot_Destroy     (Snapshot_Double_Buffer *SB);
@@ -3396,6 +3472,11 @@ int main (int Argc, char **Argv) {
   // Initialize CVar system — register all engine CVars with their defaults
   CVar_Init ();
   CVar_Register_All ();
+
+  // Initialize command and console systems (Ada: Initialize_Configuration)
+  Command_Init ();
+  Command_Register_All ();
+  Console_Init ();
 
   // Load saved config (overrides defaults with user-persisted values)
   CVar_Load ("q3.cfg");
@@ -4850,8 +4931,10 @@ int main (int Argc, char **Argv) {
   Gamepad_Shutdown ();
   Snapshot_Destroy (&Snapshot_Buffer);
 
-  // Save config and shutdown CVar system
+  // Save config and shutdown CVar, command, and console systems (Ada: Finalize_Configuration)
   CVar_Save ("q3.cfg");
+  Console_Shutdown ();
+  Command_Shutdown ();
   CVar_Shutdown ();
 
   // Media layer
@@ -5282,17 +5365,25 @@ float CVar_Get_Float (CVar *V) { return Bits_To_Float (atomic_load (&V->Value_F_
 //   CVar_Set_Int / Float
 // ═══════════════════════════════════
 
+// Internal: stamp the Edit_State after any Set. Edited_Via_Command is set by Console_Submit path.
+static void CVar_Stamp_Edit (CVar *V, int Via_Command) {
+  atomic_store (&V->Last_Edit.Time_Stamp, SDL_GetPerformanceCounter ());
+  atomic_store (&V->Last_Edit.Edited_Via_Command, Via_Command);
+}
+
 void CVar_Set_Int (CVar *V, int Val) {
   if (V->Flags & CVAR_READONLY) return;
   if (V->Min < V->Max) Val = Val < (int)V->Min ? (int)V->Min : Val > (int)V->Max ? (int)V->Max : Val;
   atomic_store (&V->Value_I, Val);
   atomic_store (&V->Modified, 1);
+  CVar_Stamp_Edit (V, 0);
 }
 void CVar_Set_Float (CVar *V, float Val) {
   if (V->Flags & CVAR_READONLY) return;
   if (V->Min < V->Max) Val = Val < V->Min ? V->Min : Val > V->Max ? V->Max : Val;
   atomic_store (&V->Value_F_Bits, Float_To_Bits (Val));
   atomic_store (&V->Modified, 1);
+  CVar_Stamp_Edit (V, 0);
 }
 
 // ════════════════════
@@ -5548,6 +5639,339 @@ void CVar_Register_All (void) {
   CVARS (CVAR_REGISTER)
   #undef CVAR_REGISTER
   printf ("[cvar] registered %d cvars\n", CVar_Count);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════
+//   Command System — Ada pattern: package Name is new Command (Name, Info, Usage, Callback)
+// ═══════════════════════════════════════════════════════════════════════════════════════════
+
+// ════════════════════════
+//   Command_Register
+// ════════════════════════
+
+void Command_Register (const char *Name, const char *Info, const char *Usage,
+                       int Arg_Min, int Arg_Max, Command_Callback Callback, Command_Save_Fn Save) {
+  for (int I = 0; I < Command_Count; I++)
+    if (strcmp (Command_Registry[I].Name, Name) == 0) return; // Idempotent
+  if (Command_Count >= MAX_COMMANDS) { printf ("[cmd] registry full, cannot register %s\n", Name); return; }
+  Command *C  = &Command_Registry[Command_Count++];
+  C->Name     = Name;
+  C->Info     = Info;
+  C->Usage    = Usage;
+  C->Arg_Min  = Arg_Min;
+  C->Arg_Max  = Arg_Max;
+  C->Callback = Callback;
+  C->Save     = Save;
+}
+
+// ═══════════════════════
+//   Command_Find
+// ═══════════════════════
+
+static Command *Command_Find (const char *Name) {
+  for (int I = 0; I < Command_Count; I++)
+    if (strcmp (Command_Registry[I].Name, Name) == 0) return &Command_Registry[I];
+  return NULL;
+}
+
+// ═══════════════════════
+//   Command_Init / Shutdown
+// ═══════════════════════
+
+void Command_Init (void) {
+  Command_Count = 0;
+  memset (Command_Registry, 0, sizeof Command_Registry);
+}
+
+void Command_Shutdown (void) {
+  Command_Count = 0;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════
+//   Console — Task-safe IO and command dispatch (Ada: Neo.Data.Console)
+// ═══════════════════════════════════════════════════════════════════════════════════════════
+//
+// Thread-safe console with mutex-protected log buffer, input history, and command dispatch.
+// Any thread can call Console_Line/Console_Submit at any time.
+
+// ════════════════════════
+//   Console_Init / Shutdown
+// ════════════════════════
+
+void Console_Init (void) {
+  memset (&Console, 0, sizeof Console);
+  Console.Lock           = SDL_CreateMutex ();
+  Console.History_Cursor = -1;
+}
+
+void Console_Shutdown (void) {
+  if (Console.Lock) SDL_DestroyMutex (Console.Lock);
+  Console.Lock = NULL;
+}
+
+// ════════════════════════
+//   Console_Put / Line
+// ════════════════════════
+//
+// Append text to the circular log buffer. All console output goes through here.
+
+void Console_Put (const char *Text, Console_Style Style) {
+  (void)Style; // Style is stored for GUI rendering; for now we log plain text
+  if (not Text or not Console.Lock) return;
+  SDL_LockMutex (Console.Lock);
+  for (const char *P = Text; *P; P++) {
+    Console.Log[Console.Log_Write % CONSOLE_LOG_SIZE] = *P;
+    Console.Log_Write++;
+  }
+  Console.Log_Length += (int)strlen (Text);
+  SDL_UnlockMutex (Console.Lock);
+  atomic_store (&Console.Dirty, 1);
+}
+
+void Console_Line (const char *Text, Console_Style Style) {
+  Console_Put (Text, Style);
+  Console_Put ("\n", Style);
+  // Mirror to stdout with style-based prefix
+  switch (Style) {
+    case STYLE_ERROR:   printf ("[ERROR] %s\n",   Text); break;
+    case STYLE_WARNING: printf ("[WARN]  %s\n",   Text); break;
+    case STYLE_SECTION: printf ("[====]  %s\n",   Text); break;
+    case STYLE_INFO:    printf ("[info]  %s\n",    Text); break;
+    default:            printf ("        %s\n",    Text); break;
+  }
+}
+
+void Console_Section (const char *Text) { Console_Line (Text, STYLE_SECTION); }
+void Console_Error   (const char *Text) { Console_Line (Text, STYLE_ERROR);   }
+void Console_Warn    (const char *Text) { Console_Line (Text, STYLE_WARNING); }
+void Console_Info    (const char *Text) { Console_Line (Text, STYLE_INFO);    }
+
+// ════════════════════════
+//   Console Input History
+// ════════════════════════
+
+void Console_History_Next (void) {
+  if (not Console.Lock) return;
+  SDL_LockMutex (Console.Lock);
+  if (Console.History_Cursor > 0) Console.History_Cursor--;
+  else Console.History_Cursor = -1;
+  if (Console.History_Cursor >= 0 and Console.History_Cursor < Console.History_Count) {
+    int Index = (Console.History_Count - 1 - Console.History_Cursor) % CONSOLE_HISTORY;
+    strncpy (Console.Input, Console.History[Index], sizeof Console.Input - 1);
+    Console.Input_Length = (int)strlen (Console.Input);
+  } else {
+    Console.Input[0]     = '\0';
+    Console.Input_Length  = 0;
+  }
+  SDL_UnlockMutex (Console.Lock);
+}
+
+void Console_History_Previous (void) {
+  if (not Console.Lock) return;
+  SDL_LockMutex (Console.Lock);
+  int Max = Console.History_Count < CONSOLE_HISTORY ? Console.History_Count : CONSOLE_HISTORY;
+  if (Console.History_Cursor < Max - 1) Console.History_Cursor++;
+  if (Console.History_Cursor >= 0 and Console.History_Cursor < Max) {
+    int Index = (Console.History_Count - 1 - Console.History_Cursor) % CONSOLE_HISTORY;
+    strncpy (Console.Input, Console.History[Index], sizeof Console.Input - 1);
+    Console.Input_Length = (int)strlen (Console.Input);
+  }
+  SDL_UnlockMutex (Console.Lock);
+}
+
+const char *Console_Get_Input (void) { return Console.Input; }
+
+void Console_Set_Input (const char *Text) {
+  if (not Console.Lock) return;
+  SDL_LockMutex (Console.Lock);
+  strncpy (Console.Input, Text, sizeof Console.Input - 1);
+  Console.Input[sizeof Console.Input - 1] = '\0';
+  Console.Input_Length = (int)strlen (Console.Input);
+  SDL_UnlockMutex (Console.Lock);
+}
+
+// ════════════════════════
+//   Console_Autocomplete
+// ════════════════════════
+//
+// Returns matching command and CVar names for the given prefix. Used by tab-completion.
+
+int Console_Autocomplete (const char *Prefix, const char **Matches, int Max_Matches) {
+  int Count = 0, Len = (int)strlen (Prefix);
+  // Match commands
+  for (int I = 0; I < Command_Count and Count < Max_Matches; I++)
+    if (strncmp (Command_Registry[I].Name, Prefix, (size_t)Len) == 0)
+      Matches[Count++] = Command_Registry[I].Name;
+  // Match CVars
+  for (int I = 0; I < CVar_Count and Count < Max_Matches; I++)
+    if (strncmp (CVar_Registry[I].Name, Prefix, (size_t)Len) == 0)
+      Matches[Count++] = CVar_Registry[I].Name;
+  return Count;
+}
+
+// ════════════════════════
+//   Console_Submit
+// ════════════════════════
+//
+// Parse and dispatch a console command string. The first token is either a command name or a CVar name.
+// If it's a CVar with no argument, print its current value. If it's a CVar with an argument, set it.
+// If it's a registered command, dispatch to its callback.
+//
+// Ada equivalent: procedure Submit (Text : Str) in Neo.Data.Console
+
+void Console_Submit (const char *Text) {
+  if (not Text or not *Text) return;
+
+  // Echo the command to the log
+  char Echo[600];
+  snprintf (Echo, sizeof Echo, "] %s", Text);
+  Console_Line (Echo, STYLE_ENTRY);
+
+  // Push to history
+  if (Console.Lock) {
+    SDL_LockMutex (Console.Lock);
+    int Slot = Console.History_Count % CONSOLE_HISTORY;
+    strncpy (Console.History[Slot], Text, sizeof Console.History[0] - 1);
+    Console.History[Slot][sizeof Console.History[0] - 1] = '\0';
+    Console.History_Count++;
+    Console.History_Cursor = -1;
+    SDL_UnlockMutex (Console.Lock);
+  }
+
+  // Tokenize into argv (space-separated, quotes not yet supported)
+  char Buffer[512];
+  strncpy (Buffer, Text, sizeof Buffer - 1);
+  Buffer[sizeof Buffer - 1] = '\0';
+  const char *Argv[MAX_COMMAND_ARGS];
+  int Argc = 0;
+  char *Token = strtok (Buffer, " \t");
+  while (Token and Argc < MAX_COMMAND_ARGS) {
+    Argv[Argc++] = Token;
+    Token = strtok (NULL, " \t");
+  }
+  if (Argc == 0) return;
+
+  // Try command dispatch first
+  Command *Cmd = Command_Find (Argv[0]);
+  if (Cmd) {
+    int Arg_Count = Argc - 1;
+    if (Arg_Count < Cmd->Arg_Min or Arg_Count > Cmd->Arg_Max) {
+      char Msg[512];
+      snprintf (Msg, sizeof Msg, "usage: %s %s (expected %d-%d args, got %d)",
+                Cmd->Name, Cmd->Usage, Cmd->Arg_Min, Cmd->Arg_Max, Arg_Count);
+      Console_Line (Msg, STYLE_WARNING);
+      return;
+    }
+    Cmd->Callback (Argc, Argv);
+    return;
+  }
+
+  // Try CVar lookup
+  CVar *V = CVar_Find (Argv[0]);
+  if (V) {
+    if (Argc == 1) {
+      // Print current value
+      char Msg[512];
+      switch (V->Type) {
+        case CVAR_INT:   snprintf (Msg, sizeof Msg, "%s = %d  (%s)", V->Name, CVar_Get_Int (V), V->Help);   break;
+        case CVAR_FLOAT: snprintf (Msg, sizeof Msg, "%s = %.4f  (%s)", V->Name, CVar_Get_Float (V), V->Help); break;
+      }
+      Console_Line (Msg, STYLE_DEFAULT);
+    } else {
+      // Set value from console — stamp as Edited_Via_Command
+      switch (V->Type) {
+        case CVAR_INT:   CVar_Set_Int   (V, atoi (Argv[1]));         break;
+        case CVAR_FLOAT: CVar_Set_Float (V, (float)atof (Argv[1])); break;
+      }
+      CVar_Stamp_Edit (V, 1); // Mark as edited via command (overrides the 0 from CVar_Set_*)
+      char Msg[512];
+      switch (V->Type) {
+        case CVAR_INT:   snprintf (Msg, sizeof Msg, "%s -> %d",   V->Name, CVar_Get_Int (V));   break;
+        case CVAR_FLOAT: snprintf (Msg, sizeof Msg, "%s -> %.4f", V->Name, CVar_Get_Float (V)); break;
+      }
+      Console_Line (Msg, STYLE_DEFAULT);
+    }
+    return;
+  }
+
+  // Unknown command
+  char Msg[512];
+  snprintf (Msg, sizeof Msg, "unknown command or cvar: %s", Argv[0]);
+  Console_Line (Msg, STYLE_WARNING);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════
+//   Built-in Commands — registered during Command_Init
+// ═══════════════════════════════════════════════════════════════════════════════════════════
+
+static void Cmd_Quit       (int Argc, const char *Argv[]) { (void)Argc; (void)Argv; extern int Quit; Quit = 1; }
+static void Cmd_Help       (int Argc, const char *Argv[]) {
+  (void)Argc; (void)Argv;
+  Console_Section ("Commands");
+  for (int I = 0; I < Command_Count; I++) {
+    char Msg[512];
+    snprintf (Msg, sizeof Msg, "  %-20s %s", Command_Registry[I].Name, Command_Registry[I].Info);
+    Console_Line (Msg, STYLE_DEFAULT);
+  }
+  Console_Section ("CVars");
+  for (int I = 0; I < CVar_Count; I++) {
+    char Msg[512];
+    switch (CVar_Registry[I].Type) {
+      case CVAR_INT:   snprintf (Msg, sizeof Msg, "  %-28s = %-8d %s", CVar_Registry[I].Name, CVar_Get_Int (&CVar_Registry[I]), CVar_Registry[I].Help); break;
+      case CVAR_FLOAT: snprintf (Msg, sizeof Msg, "  %-28s = %-8.2f %s", CVar_Registry[I].Name, CVar_Get_Float (&CVar_Registry[I]), CVar_Registry[I].Help); break;
+    }
+    Console_Line (Msg, STYLE_DEFAULT);
+  }
+}
+static void Cmd_Reset      (int Argc, const char *Argv[]) {
+  if (Argc < 2) return;
+  CVar *V = CVar_Find (Argv[1]);
+  if (V) { CVar_Reset (V); char Msg[256]; snprintf (Msg, sizeof Msg, "%s reset to default", V->Name); Console_Line (Msg, STYLE_DEFAULT); }
+  else Console_Warn ("unknown cvar");
+}
+static void Cmd_Reset_All  (int Argc, const char *Argv[]) {
+  (void)Argc; (void)Argv;
+  for (int I = 0; I < CVar_Count; I++) CVar_Reset (&CVar_Registry[I]);
+  Console_Line ("all cvars reset to defaults", STYLE_DEFAULT);
+}
+static void Cmd_Save_Config (int Argc, const char *Argv[]) {
+  (void)Argc; (void)Argv;
+  CVar_Save ("q3.cfg");
+  Console_Line ("config saved to q3.cfg", STYLE_DEFAULT);
+}
+static void Cmd_Load_Config (int Argc, const char *Argv[]) {
+  (void)Argc; (void)Argv;
+  CVar_Load ("q3.cfg");
+  Console_Line ("config loaded from q3.cfg", STYLE_DEFAULT);
+}
+static void Cmd_Echo (int Argc, const char *Argv[]) {
+  char Msg[512] = "";
+  for (int I = 1; I < Argc; I++) { if (I > 1) strncat (Msg, " ", sizeof Msg - strlen (Msg) - 1); strncat (Msg, Argv[I], sizeof Msg - strlen (Msg) - 1); }
+  Console_Line (Msg, STYLE_DEFAULT);
+}
+
+// ════════════════════════════════════════════════
+//   COMMANDS(X) — Built-in command specification
+// ════════════════════════════════════════════════
+//
+// Layout: X (Name, Info, Usage, Arg_Min, Arg_Max, Callback)
+// Mirrors Ada pattern: package Quit is new Command (Name => "quit", Info => ..., Callback => ...);
+
+#define COMMANDS(X) \
+  X ("quit",       "Exit the application",           "",               0, 0, Cmd_Quit)        \
+  X ("help",       "List all commands and cvars",    "",               0, 0, Cmd_Help)        \
+  X ("reset",      "Reset a cvar to its default",   "<cvar>",         1, 1, Cmd_Reset)       \
+  X ("resetall",   "Reset all cvars to defaults",   "",               0, 0, Cmd_Reset_All)   \
+  X ("saveconfig", "Write archive cvars to q3.cfg", "",               0, 0, Cmd_Save_Config) \
+  X ("loadconfig", "Load cvars from q3.cfg",        "",               0, 0, Cmd_Load_Config) \
+  X ("echo",       "Print text to console",         "<text...>",      1, MAX_COMMAND_ARGS - 1, Cmd_Echo) \
+
+// Register all built-in commands from the specification table
+void Command_Register_All (void) {
+  #define CMD_REGISTER(N, I, U, Lo, Hi, Cb) Command_Register (N, I, U, Lo, Hi, Cb, NULL);
+  COMMANDS (CMD_REGISTER)
+  #undef CMD_REGISTER
+  printf ("[cmd] registered %d commands\n", Command_Count);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════
@@ -12811,257 +13235,6 @@ void Raytracing_Frame (GPU_Postprocess_Push Postprocess) {
 //
 // ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 
-// ══════════════════
-//   Quickhull_Dist
-// ══════════════════
-
-float Quickhull_Dist (vec3 P, vec3 A, vec3 B, vec3 C) {
-
-  // Compute the signed distance from point P to the plane defined by triangle (A, B, C)
-  vec3 Normal = Cross (Subtract (B, A), Subtract (C, A));
-  float Length = sqrtf (Dot (Normal, Normal));
-  return Length > 1e-8f ? Dot (Subtract (P, A), Scale (Normal, 1.f / Length)) : 0;
-}
-
-// ═════════════
-//   Quickhull
-// ═════════════
-
-Convex_Hull Quickhull (const vec3 *Points, uint Count) {
-
-  // Initialize the output hull
-  Convex_Hull Result = {0};
-
-  // Degenerate case: fewer than 4 points cannot form a tetrahedron
-  if (Count < 4) {
-    for (uint Index = 0; Index < Count and Index < HULL_MAX_VERTS; Index++)
-      Result.Vertices[Result.Vertex_Count++] = Points[Index];
-    return Result;
-  }
-
-  // Find 6 extremal points (min/max along each axis)
-  int Extremals[6] = {0, 0, 0, 0, 0, 0};
-  for (uint Index = 1; Index < Count; Index++) {
-    if (Points[Index].x < Points[Extremals[0]].x) Extremals[0] = Index;
-    if (Points[Index].x > Points[Extremals[1]].x) Extremals[1] = Index;
-    if (Points[Index].y < Points[Extremals[2]].y) Extremals[2] = Index;
-    if (Points[Index].y > Points[Extremals[3]].y) Extremals[3] = Index;
-    if (Points[Index].z < Points[Extremals[4]].z) Extremals[4] = Index;
-    if (Points[Index].z > Points[Extremals[5]].z) Extremals[5] = Index;
-  }
-
-  // Select the most distant pair as the initial edge
-  int Point_0 = Extremals[0], Point_1 = Extremals[1];
-  float Best_Distance = 0;
-  for (int I = 0; I < 6; I++)
-    for (int J = I + 1; J < 6; J++) {
-      float Distance = Dot (Subtract (Points[Extremals[I]], Points[Extremals[J]]),
-                            Subtract (Points[Extremals[I]], Points[Extremals[J]]));
-      if (Distance > Best_Distance) { Best_Distance = Distance; Point_0 = Extremals[I]; Point_1 = Extremals[J];}
-    }
-
-  // Find the third point: most distant from the initial edge
-  vec3  Edge         = Subtract (Points[Point_1], Points[Point_0]);
-  float Edge_Length2 = Dot (Edge, Edge);
-  int   Point_2      = -1;
-  Best_Distance      = 0;
-
-  // Search all points for the most distant from the edge
-  for (uint Index = 0; Index < Count; Index++) {
-    if ((int)Index == Point_0 or (int)Index == Point_1) continue;
-    vec3  Vector    = Subtract (Points[Index], Points[Point_0]);
-    float Parameter = Dot (Vector, Edge) / Edge_Length2;
-    float Distance  = Dot (Subtract (Vector, Scale (Edge, Parameter)),
-                           Subtract (Vector, Scale (Edge, Parameter)));
-    if (Distance > Best_Distance) { Best_Distance = Distance; Point_2 = Index;}
-  }
-  if (Point_2 < 0) Point_2 = (Point_0 + 1) % Count;
-
-  // Find the fourth point: most distant from the initial triangle
-  int Point_3    = -1;
-  Best_Distance  = 0;
-  for (uint Index = 0; Index < Count; Index++) {
-    if ((int)Index == Point_0 or (int)Index == Point_1 or (int)Index == Point_2) continue;
-    float Distance = fabsf (Quickhull_Dist (Points[Index], Points[Point_0], Points[Point_1], Points[Point_2]));
-    if (Distance > Best_Distance) { Best_Distance = Distance; Point_3 = Index;}
-  }
-  if (Point_3 < 0) Point_3 = (Point_2 + 1) % Count;
-
-  // Ensure the tetrahedron has consistent winding (fourth point on the negative side)
-  if (Quickhull_Dist (Points[Point_3], Points[Point_0], Points[Point_1], Points[Point_2]) > 0) {
-    int Temp = Point_0; Point_0 = Point_1; Point_1 = Temp;
-  }
-
-  // Initialize the face array with the 4 tetrahedron faces
-  Quickhull_Face Faces[HULL_MAX_FACES];
-  int            Face_Count = 0;
-
-  // Add the four faces of the seed tetrahedron
-  Faces[Face_Count++] = (Quickhull_Face){Point_0, Point_1, Point_2, 0};
-  Faces[Face_Count++] = (Quickhull_Face){Point_0, Point_2, Point_3, 0};
-  Faces[Face_Count++] = (Quickhull_Face){Point_0, Point_3, Point_1, 0};
-  Faces[Face_Count++] = (Quickhull_Face){Point_1, Point_3, Point_2, 0};
-
-  // Assign each remaining point to the face it lies farthest above
-  int *Assignments = calloc (Count, sizeof (int));
-  for (uint Index = 0; Index < Count; Index++) Assignments[Index] = -1;
-
-  // Find the best face assignment for each non-seed point
-  for (uint Index = 0; Index < Count; Index++) {
-    if ((int)Index == Point_0 or (int)Index == Point_1 or (int)Index == Point_2 or (int)Index == Point_3) continue;
-    float Best = 0;
-    for (int Face = 0; Face < Face_Count; Face++) {
-      if (Faces[Face].Dead) continue;
-      float Distance = Quickhull_Dist (Points[Index], Points[Faces[Face].A], Points[Faces[Face].B], Points[Faces[Face].C]);
-      if (Distance > Best) {Best = Distance; Assignments[Index] = Face;}
-    }
-  }
-
-  // Iteratively expand the hull
-  for (int Iteration = 0; Iteration < (int)Count and Face_Count < HULL_MAX_FACES - 20; Iteration++) {
-
-    // Find the point with the greatest distance above its assigned face
-    int   Best_Point = -1;
-    Best_Distance = 0;
-    for (uint Index = 0; Index < Count; Index++) {
-      if (Assignments[Index] < 0 or Faces[Assignments[Index]].Dead) continue;
-      float Distance = Quickhull_Dist (Points[Index],
-                                       Points[Faces[Assignments[Index]].A],
-                                       Points[Faces[Assignments[Index]].B],
-                                       Points[Faces[Assignments[Index]].C]);
-      if (Distance > Best_Distance) {Best_Distance = Distance; Best_Point = Index;}
-    }
-    if (Best_Point < 0) break;
-
-    // Find all faces visible from the selected point
-    int Visible[HULL_MAX_FACES];
-    int Visible_Count = 0;
-    for (int Face = 0; Face < Face_Count; Face++) {
-      if (Faces[Face].Dead) continue;
-      if (Quickhull_Dist (Points[Best_Point], Points[Faces[Face].A], Points[Faces[Face].B], Points[Faces[Face].C]) > 1e-6f)
-        Visible[Visible_Count++] = Face;
-    }
-
-    // Extract the horizon edges (edges shared between one visible and one non-visible face)
-    Quickhull_Edge Horizon[HULL_MAX_FACES * 3];
-    int            Horizon_Count = 0;
-
-    // Iterate visible faces to collect unshared (horizon) edges
-    for (int Vi = 0; Vi < Visible_Count; Vi++) {
-      int Face_Index = Visible[Vi];
-      int Triangle[3][2] = {{Faces[Face_Index].A, Faces[Face_Index].B},
-                            {Faces[Face_Index].B, Faces[Face_Index].C},
-                            {Faces[Face_Index].C, Faces[Face_Index].A}};
-
-      // Check each edge for shared visibility with other faces
-      for (int Edge = 0; Edge < 3; Edge++) {
-        int Shared = 0;
-        for (int Vj = 0; Vj < Visible_Count; Vj++) {
-          if (Vj == Vi) continue;
-          int Other = Visible[Vj];
-          int Face_Vertices[3] = {Faces[Other].A, Faces[Other].B, Faces[Other].C};
-          int Has_0 = 0, Has_1 = 0;
-          for (int K = 0; K < 3; K++) { Has_0 |= (Face_Vertices[K] == Triangle[Edge][0]); Has_1 |= (Face_Vertices[K] == Triangle[Edge][1]);}
-          if (Has_0 and Has_1) { Shared = 1; break;}
-        }
-        if (not Shared) Horizon[Horizon_Count++] = (Quickhull_Edge){Triangle[Edge][0], Triangle[Edge][1], Face_Index};
-      }
-    }
-
-    // Mark all visible faces as dead
-    for (int Vi = 0; Vi < Visible_Count; Vi++) Faces[Visible[Vi]].Dead = 1;
-
-    // Create new faces connecting each horizon edge to the new point
-    int New_Start = Face_Count;
-    for (int Hi = 0; Hi < Horizon_Count and Face_Count < HULL_MAX_FACES; Hi++)
-      Faces[Face_Count++] = (Quickhull_Face){Horizon[Hi].V1, Horizon[Hi].V0, Best_Point, 0};
-
-    // Reassign orphaned points to the new faces
-    Assignments[Best_Point] = -1;
-    for (uint Index = 0; Index < Count; Index++) {
-      if (Assignments[Index] < 0) continue;
-      if (not Faces[Assignments[Index]].Dead) continue;
-      Assignments[Index] = -1;
-      float Best = 0;
-      for (int Face = New_Start; Face < Face_Count; Face++) {
-        float Distance = Quickhull_Dist (Points[Index], Points[Faces[Face].A], Points[Faces[Face].B], Points[Faces[Face].C]);
-        if (Distance > Best) { Best = Distance; Assignments[Index] = Face;}
-      }
-    }
-  }
-  free (Assignments);
-
-  // Extract unique vertices from surviving faces
-  int Remap[HULL_MAX_FACES * 3];
-  memset (Remap, -1, sizeof Remap);
-
-  // Collect unique vertices from live faces into the result
-  for (int Face = 0; Face < Face_Count; Face++) {
-    if (Faces[Face].Dead) continue;
-    int Triangle[3] = {Faces[Face].A, Faces[Face].B, Faces[Face].C};
-    for (int K = 0; K < 3; K++)
-      if (Triangle[K] >= 0 and Triangle[K] < (int)Count and Remap[Triangle[K]] < 0 and Result.Vertex_Count < HULL_MAX_VERTS) {
-        Remap[Triangle[K]] = (int)Result.Vertex_Count;
-        Result.Vertices[Result.Vertex_Count++] = Points[Triangle[K]];
-      }
-  }
-
-  // Build per-vertex adjacency table
-  memset (Result.Adjacency, -1, sizeof Result.Adjacency);
-  for (int Face = 0; Face < Face_Count; Face++) {
-    if (Faces[Face].Dead) continue;
-    int Remapped[3] = {Remap[Faces[Face].A], Remap[Faces[Face].B], Remap[Faces[Face].C]};
-    for (int Edge = 0; Edge < 3; Edge++) {
-      int Vertex_0 = Remapped[Edge], Vertex_1 = Remapped[(Edge + 1) % 3];
-      if (Vertex_0 < 0 or Vertex_1 < 0) continue;
-      for (int Slot = 0; Slot < HULL_MAX_ADJ; Slot++) {
-        if (Result.Adjacency[Vertex_0][Slot] == Vertex_1) break;
-        if (Result.Adjacency[Vertex_0][Slot] == -1) { Result.Adjacency[Vertex_0][Slot] = Vertex_1; break;}
-      }
-      for (int Slot = 0; Slot < HULL_MAX_ADJ; Slot++) {
-        if (Result.Adjacency[Vertex_1][Slot] == Vertex_0) break;
-        if (Result.Adjacency[Vertex_1][Slot] == -1) { Result.Adjacency[Vertex_1][Slot] = Vertex_0; break;}
-      }
-    }
-  }
-
-  // Compute centroid and bounding radius
-  Result.Centroid = Make (0, 0, 0);
-  for (uint Index = 0; Index < Result.Vertex_Count; Index++)
-    Result.Centroid = Add (Result.Centroid, Result.Vertices[Index]);
-  if (Result.Vertex_Count)
-    Result.Centroid = Scale (Result.Centroid, 1.f / Result.Vertex_Count);
-
-  // Compute the bounding sphere radius from the centroid
-  Result.Bounding_Radius = 0;
-  for (uint Index = 0; Index < Result.Vertex_Count; Index++) {
-    float Distance_Sq = Dot (Subtract (Result.Vertices[Index], Result.Centroid),
-                             Subtract (Result.Vertices[Index], Result.Centroid));
-    if (Distance_Sq > Result.Bounding_Radius * Result.Bounding_Radius)
-      Result.Bounding_Radius = sqrtf (Distance_Sq);
-  }
-
-  // Log diagnostic output
-  printf ("[hull] %u vertices, radius %.1f\n", Result.Vertex_Count, Result.Bounding_Radius);
-  return Result;
-
-} // Quick_Hull
-
-// ══════════════════════
-//   Hull_From_Vertices
-// ══════════════════════
-
-Convex_Hull Hull_From_Vertices (const Vertex *Vertices, uint Count) {
-
-  // CPU fallback: extract vec3 positions from the vertex array and delegate to Quickhull
-  vec3 *Positions = malloc (sizeof (vec3) * Count);
-  for (uint Index = 0; Index < Count; Index++)
-    Positions[Index] = Make (Vertices[Index].Position[0], Vertices[Index].Position[1], Vertices[Index].Position[2]);
-  Convex_Hull Hull = Quickhull (Positions, Count);
-  free (Positions);
-  return Hull;
-}
-
 // ══════════════════════════════════════
 //   Hull_From_Vertex_Buffer  (GPU path)
 // ══════════════════════════════════════
@@ -13084,39 +13257,6 @@ void Hull_From_Vertex_Buffer (uint Vertex_Offset, uint Vertex_Count) {
 
 void Hull_From_GPU_Buffer (GPU_Buffer Source, uint Vertex_Count) {
   GPU_Quickhull (Source, 0, Vertex_Count, 3);
-}
-
-// ═══════════════
-//   Hull_Upload
-// ═══════════════
-
-void Hull_Upload (const Convex_Hull *Hull) {
-
-  // Pack the CPU-side hull into the GPU-compatible layout
-  GPU_Hull Packed = {0};
-  Packed.Count  = (int)Hull->Vertex_Count;
-  Packed.Radius = Hull->Bounding_Radius;
-  Packed.Centroid[0] = Hull->Centroid.x;
-  Packed.Centroid[1] = Hull->Centroid.y;
-  Packed.Centroid[2] = Hull->Centroid.z;
-
-  // Copy vertices and adjacency data into the packed layout
-  for (uint Index = 0; Index < Hull->Vertex_Count; Index++) {
-    Packed.Vertices[Index][0] = Hull->Vertices[Index].x;
-    Packed.Vertices[Index][1] = Hull->Vertices[Index].y;
-    Packed.Vertices[Index][2] = Hull->Vertices[Index].z;
-    Packed.Vertices[Index][3] = 0;
-    memcpy (Packed.Adjacency[Index], Hull->Adjacency[Index], sizeof (int) * HULL_MAX_ADJ);
-  }
-
-  // Allocate the hull storage buffer on first use, then upload the packed data
-  if (not Hull_Storage_Buffer.Buffer)
-    Hull_Storage_Buffer = Buffer_Allocate (/*Size         =>*/ sizeof (GPU_Hull),
-                                           /*Usage        =>*/ VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
-                                                             | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
-                                           /*Memory_Flags =>*/ VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT
-                                                             | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
-  Buffer_Upload (Hull_Storage_Buffer, &Packed, sizeof Packed);
 }
 
 // ═══════════════════════════
