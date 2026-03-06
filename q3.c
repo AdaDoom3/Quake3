@@ -950,6 +950,11 @@ Window_Mode_Kind Current_Window_Mode = WINDOWED_MODE;
 int              Cursor_Centering    = 0;        // Center cursor each frame
 int              Input_Active        = 1;        // Process input when active 
 int              In_Menu             = 0;        // True when in menu mode, else false for game mode
+int              Console_Open        = 0;        // Non-zero when the drop-down console is visible
+float            Console_Drop_T      = 0.f;      // Animation t — 0 = fully closed, 1 = fully open
+int              Console_Autocomplete_Count = 0;  // Number of current autocomplete matches
+const char      *Console_Autocomplete_Matches[32]; // Autocomplete match pointers (into Command/CVar registries)
+int              Console_Autocomplete_Selected = -1; // Which suggestion is highlighted (-1 = none)
 int              Swapchain_Dirty     = 0;        // Non-zero when swapchain needs recreation
 int              Saved_Cursor_X, Saved_Cursor_Y; // Cursor position saved across mode transitions
 int              Windowed_X, Windowed_Y;         // Saved window position before fullscreen
@@ -2941,18 +2946,22 @@ typedef struct {
 
 // ── Menu Overlay GPU Types ── Push constants and SSBO layout for MSDF text rendering ──
 
-#define MENU_MAX_LINES  32    // Maximum console lines visible at once
-#define MENU_MAX_CHARS  128   // Maximum characters per line
+#define MENU_MAX_LINES       64    // Maximum console lines visible at once
+#define MENU_MAX_CHARS       128   // Maximum characters per line
+#define MENU_MAX_COMPLETIONS 9     // Max autocomplete suggestions shown
 
 // Push constants for the menu overlay compute shader
 typedef struct {
   uint32_t Resolution[2];     // Viewport width, height
-  uint32_t Line_Count;        // Number of active lines in the SSBO
+  uint32_t Line_Count;        // Number of output lines in the SSBO
   uint32_t Cursor_Pos;        // Input cursor position (character index)
   float    Opacity;           // Console background opacity (0 = hidden, 1 = full)
-  float    Scroll;            // Vertical scroll offset in lines
-  uint32_t Pad[2];
-} GPU_Menu_Push;              // 32 bytes
+  float    Drop_T;            // Drop animation factor (0 = closed, 1 = fully open)
+  uint32_t Has_Input;         // 1 if input line is present (last line in SSBO is the input prompt)
+  uint32_t Completion_Count;  // Number of autocomplete suggestions (lines after input in SSBO)
+  uint32_t Completion_Sel;    // Currently highlighted completion (-1 = none)
+  uint32_t Pad[3];
+} GPU_Menu_Push;              // 48 bytes
 
 // Per-line entry in the console text SSBO — each line is an array of Unicode codepoints + style
 typedef struct {
@@ -3569,6 +3578,7 @@ int main (int Argc, char **Argv) {
     else if (strcmp (Argv[I], "--no-pbr")         == 0) { No_PBR         = 1; CVar_Set_Int (r_pbr, 0); }
     else if (strcmp (Argv[I], "--no-parallax")    == 0) { No_Parallax    = 1; CVar_Set_Int (r_parallax, 0); }
     else if (strcmp (Argv[I], "--cheap")          == 0) Force_Cheap    = 1;
+    else if (strcmp (Argv[I], "--console")        == 0) { Console_Open = 1; Console_Drop_T = 1.f; }
     else if (strcmp (Argv[I], "--tier") == 0 and I + 1 < Argc) {
       int T = atoi (Argv[++I]);
       if (T >= 0 and T <= DEVICE_TIER_DISCRETE) Active_Tier = DEVICE_TIERS[T];
@@ -3981,7 +3991,27 @@ int main (int Argc, char **Argv) {
   *Enemy = Entity_MDL_Path ? MDL_Load (&Scene_Data, Entity_MDL_Path, Enemy_Origin, Spawn_Point.Angle + 180.f)
                            : Entity_Load (&Scene_Data, Spawn_Point);
   Enemy->Ray_Mask = 0xFF;  // Visible to all rays (casts shadows)
-  Enemy->TLAS_Transform[0][0] = 1.f; Enemy->TLAS_Transform[1][1] = 1.f; Enemy->TLAS_Transform[2][2] = 1.f;
+
+  // Build the enemy TLAS transform: Y-axis rotation for yaw + translation to world position
+  // Source MDL models are authored in Source-engine coordinates (X-right, Y-forward, Z-up)
+  // and MDL_Load already swizzles vertices to GL space (X-right, Y-up, Z-forward).
+  // The yaw parameter is in degrees; convert to the GL yaw convention.
+  {
+    float Yaw_Rad = Enemy->GL_Yaw * 3.14159265f / 180.f;
+    float C_Yaw = cosf (Yaw_Rad), S_Yaw = sinf (Yaw_Rad);
+    vec3  O = Enemy->GL_Origin;
+    // Compute rotated origin offset so that rotation is about the model's local origin,
+    // then translate to the world position
+    float Tx = O.x - (C_Yaw * 0.f + S_Yaw * 0.f);  // Origin is already the world position
+    float Ty = O.y;
+    float Tz = O.z - (-S_Yaw * 0.f + C_Yaw * 0.f);
+    float T[3][4] = {
+      { C_Yaw, 0.f, S_Yaw,  Tx},
+      { 0.f,   1.f, 0.f,    Ty},
+      {-S_Yaw, 0.f, C_Yaw,  Tz}
+    };
+    memcpy (Enemy->TLAS_Transform, T, sizeof T);
+  }
 
   // Infer per-scene environment settings from BSP data (sky textures, worldspawn)
   Active_Environment = Environment_Infer_From_Scene (&Scene_Data);
@@ -4107,6 +4137,16 @@ int main (int Argc, char **Argv) {
     Console_Line (Buf, STYLE_DEFAULT);
   }
   Console_Line ("Type 'help' for available commands.", STYLE_INFO);
+
+  // If console is forced open (--console flag), populate test input and autocomplete
+  if (Console_Open) {
+    if (Console.Lock) SDL_LockMutex (Console.Lock);
+    memcpy (Console.Input, "r_", 3);
+    Console.Input_Length = 2;
+    if (Console.Lock) SDL_UnlockMutex (Console.Lock);
+    Console_Autocomplete_Count = Console_Autocomplete ("r_", Console_Autocomplete_Matches, 32);
+    Console_Autocomplete_Selected = 0;
+  }
 
   // Create the GPU physics pipeline and resources (with hull binding)
   Physics_Pipeline_Create ();
@@ -12961,7 +13001,7 @@ void Menu_Pipeline_Create () {
                               /*pSampler    =>*/ &Font_Sampler));
 
   // Allocate console text SSBO (host-visible for CPU writes each frame)
-  Console_Text_Buffer = Buffer_Allocate (/*Size         =>*/ sizeof (GPU_Console_Line) * MENU_MAX_LINES,
+  Console_Text_Buffer = Buffer_Allocate (/*Size         =>*/ sizeof (GPU_Console_Line) * (MENU_MAX_LINES + 1 + MENU_MAX_COMPLETIONS),
                                          /*Usage        =>*/ VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
                                          /*Memory_Flags =>*/ VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT
                                                            | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
@@ -13818,18 +13858,44 @@ void Raytracing_Frame (GPU_Postprocess_Push Postprocess) {
                           /*imageMemoryBarrierCount  =>*/ 0,
                           /*pImageMemoryBarriers     =>*/ NULL);
 
-    // Upload console text to the SSBO
+    // Animate the console drop (smooth open/close) — use a fixed 60fps timestep for animation
+    {
+      float Target = Console_Open ? 1.f : 0.f;
+      float Speed  = 6.f * 0.016f; // ~6x per frame at 60fps — roughly 100ms open/close
+      if (Console_Drop_T < Target) Console_Drop_T = fminf (Console_Drop_T + Speed, Target);
+      if (Console_Drop_T > Target) Console_Drop_T = fmaxf (Console_Drop_T - Speed, Target);
+    }
+
+    // Upload console text to the SSBO — layout: [output lines] [input line] [autocomplete lines]
     GPU_Console_Line *Lines = NULL;
     VkResult Map_R = vkMapMemory (Device, Console_Text_Buffer.Memory, Console_Text_Buffer.Offset,
                                   Console_Text_Buffer.Size, 0, (void **)&Lines);
     if (Map_R == VK_SUCCESS and Lines) {
-      memset (Lines, 0, sizeof (GPU_Console_Line) * MENU_MAX_LINES);
-      // Copy the most recent console log lines into the SSBO
+      int Total_Slots = MENU_MAX_LINES + 1 + MENU_MAX_COMPLETIONS;
+      memset (Lines, 0, sizeof (GPU_Console_Line) * (size_t)Total_Slots);
+
+      // ── Output lines (oldest first → newest last, cascading downward) ──
       if (Console.Lock) SDL_LockMutex (Console.Lock);
+
+      // First pass: count total lines in log to pick the most recent MENU_MAX_LINES
       int Src_End   = Console.Log_Write;
       int Src_Start = Src_End > CONSOLE_LOG_SIZE ? Src_End - CONSOLE_LOG_SIZE : 0;
-      int Line_Idx  = 0, Char_Idx = 0;
-      for (int I = Src_Start; I < Src_End and Line_Idx < MENU_MAX_LINES; I++) {
+      int Total_Log_Lines = 0;
+      for (int I = Src_Start; I < Src_End; I++)
+        if (Console.Log[I % CONSOLE_LOG_SIZE] == '\n') Total_Log_Lines++;
+
+      // Skip to the start of the last MENU_MAX_LINES lines
+      int Skip = Total_Log_Lines > MENU_MAX_LINES ? Total_Log_Lines - MENU_MAX_LINES : 0;
+      int Skipped = 0;
+      int Scan = Src_Start;
+      while (Skipped < Skip and Scan < Src_End) {
+        if (Console.Log[Scan % CONSOLE_LOG_SIZE] == '\n') Skipped++;
+        Scan++;
+      }
+
+      // Second pass: fill SSBO lines in order (oldest at index 0, newest at end)
+      int Line_Idx = 0, Char_Idx = 0;
+      for (int I = Scan; I < Src_End and Line_Idx < MENU_MAX_LINES; I++) {
         char Ch = Console.Log[I % CONSOLE_LOG_SIZE];
         if (Ch == '\n' or Char_Idx >= MENU_MAX_CHARS - 1) {
           Lines[Line_Idx].Length = (uint32_t)Char_Idx;
@@ -13838,17 +13904,46 @@ void Raytracing_Frame (GPU_Postprocess_Push Postprocess) {
           Lines[Line_Idx].Codepoints[Char_Idx++] = (uint32_t)(uint8_t)Ch;
         }
       }
-      if (Char_Idx > 0 and Line_Idx < MENU_MAX_LINES) Lines[Line_Idx].Length = (uint32_t)Char_Idx;
+      if (Char_Idx > 0 and Line_Idx < MENU_MAX_LINES) { Lines[Line_Idx].Length = (uint32_t)Char_Idx; Line_Idx++; }
+      int Output_Lines = Line_Idx;
+
+      // ── Input line: "> " prefix + current input text ──
+      int Input_Slot = Output_Lines;
+      {
+        const char *Prefix = "> ";
+        int P = 0;
+        for (; Prefix[P]; P++) Lines[Input_Slot].Codepoints[P] = (uint32_t)(uint8_t)Prefix[P];
+        for (int C = 0; C < Console.Input_Length and P < MENU_MAX_CHARS - 1; C++, P++)
+          Lines[Input_Slot].Codepoints[P] = (uint32_t)(uint8_t)Console.Input[C];
+        Lines[Input_Slot].Length = (uint32_t)P;
+        Lines[Input_Slot].Style  = 5; // STYLE_ENTRY (yellow)
+      }
+
+      // ── Autocomplete suggestions ──
+      int Comp_Count = Console_Autocomplete_Count < MENU_MAX_COMPLETIONS ? Console_Autocomplete_Count : MENU_MAX_COMPLETIONS;
+      for (int C = 0; C < Comp_Count; C++) {
+        int Slot = Input_Slot + 1 + C;
+        const char *Match = Console_Autocomplete_Matches[C];
+        int Len = 0;
+        for (; Match[Len] and Len < MENU_MAX_CHARS - 1; Len++)
+          Lines[Slot].Codepoints[Len] = (uint32_t)(uint8_t)Match[Len];
+        Lines[Slot].Length = (uint32_t)Len;
+        Lines[Slot].Style  = (uint32_t)(C == Console_Autocomplete_Selected ? 3 : 4); // SECTION=highlight, INFO=normal
+      }
+
       if (Console.Lock) SDL_UnlockMutex (Console.Lock);
       vkUnmapMemory (Device, Console_Text_Buffer.Memory);
 
       // Dispatch menu overlay compute shader
       GPU_Menu_Push Menu_Push = {
-        .Resolution = {(uint32_t)Render_Width, (uint32_t)Render_Height},
-        .Line_Count = (uint32_t)(Line_Idx + (Char_Idx > 0 ? 1 : 0)),
-        .Cursor_Pos = 0,
-        .Opacity    = 0.7f,
-        .Scroll     = 0.f};
+        .Resolution       = {(uint32_t)Render_Width, (uint32_t)Render_Height},
+        .Line_Count       = (uint32_t)Output_Lines,
+        .Cursor_Pos       = (uint32_t)(Console.Input_Length + 2), // +2 for "> " prefix
+        .Opacity          = 0.85f,
+        .Drop_T           = Console_Drop_T,
+        .Has_Input        = (uint32_t)(Console_Open ? 1 : 0),
+        .Completion_Count = (uint32_t)Comp_Count,
+        .Completion_Sel   = (uint32_t)Console_Autocomplete_Selected};
 
       vkCmdBindPipeline       (Command_Buffer, VK_PIPELINE_BIND_POINT_COMPUTE, Menu_Pipeline);
       vkCmdBindDescriptorSets (/*commandBuffer      =>*/ Command_Buffer,
@@ -17522,8 +17617,11 @@ glsl comp Menu_Overlay {
     uint  Line_Count;
     uint  Cursor_Pos;
     float Opacity;
-    float Scroll;
-    uint  Pad[2];
+    float Drop_T;
+    uint  Has_Input;
+    uint  Completion_Count;
+    uint  Completion_Sel;
+    uint  Pad[3];
   } Params;
 
   layout(local_size_x = 8, local_size_y = 8) in;
@@ -17665,69 +17763,113 @@ glsl comp Menu_Overlay {
     return smoothstep (0.5 - W, 0.5 + W, SD);
   }
 
+  // Render a single SSBO line at the given Y position (screen-space, Y=0 at top).
+  // Returns the accumulated text alpha and color via inout parameters.
+  void Render_Line (vec2 Frag, uint Line_Idx, float Y_Top, float Font_Scale, float Line_Height,
+                    float Margin_Left, vec2 Atlas_Size, inout float Alpha_Acc, inout vec3 Color_Acc) {
+    Console_Line CL = Lines[Line_Idx];
+    if (CL.Length == 0u) return;
+
+    // The MSDF glyph coordinate system has Y=0 at the bottom; screen has Y=0 at top.
+    // Y_Top is the top of this line in screen coords.  Baseline sits at Y_Top + Line_Height - descent.
+    float Baseline_Y = Y_Top + Line_Height * 0.75; // ~75% from top = baseline
+    float Y_Glyph    = float(Params.Resolution.y) - Frag.y; // Flip to glyph-space Y
+
+    // Quick vertical cull
+    float Glyph_Bottom = float(Params.Resolution.y) - (Y_Top + Line_Height + 4.0);
+    float Glyph_Top    = float(Params.Resolution.y) - (Y_Top - 4.0);
+    if (Y_Glyph < Glyph_Bottom || Y_Glyph > Glyph_Top) return;
+
+    float Baseline_Glyph = float(Params.Resolution.y) - Baseline_Y;
+    vec3  Color = Style_Colors[clamp(CL.Style, 0u, 5u)];
+    float Cursor_X = Margin_Left;
+
+    for (uint C = 0u; C < CL.Length && C < 128u; C++) {
+      uint Code = CL.Codepoints[C];
+      if (Code < 32u || Code > 126u) { Cursor_X += Font_Scale * 0.3; continue; }
+      Glyph G = Glyphs[Code - 32u];
+      vec2 Origin = vec2(Cursor_X, Baseline_Glyph);
+      float A = Render_Glyph (vec2(Frag.x, Y_Glyph), Origin, Font_Scale, G, Atlas_Size);
+      if (A > 0.0) { Color_Acc = mix (Color_Acc, Color, A); Alpha_Acc = max (Alpha_Acc, A); }
+      Cursor_X += G.Advance * Font_Scale;
+      if (Cursor_X > float(Params.Resolution.x)) break;
+    }
+  }
+
   void main () {
     ivec2 Pixel = ivec2(gl_GlobalInvocationID.xy);
-    if (Pixel.x >= int(Params.Resolution.x) or Pixel.y >= int(Params.Resolution.y)) return;
+    if (Pixel.x >= int(Params.Resolution.x) || Pixel.y >= int(Params.Resolution.y)) return;
+
+    // Drop animation: Drop_T=0 → console hidden, Drop_T=1 → fully open (top 50% of screen)
+    if (Params.Drop_T <= 0.001) return;
+
+    float Res_Y       = float(Params.Resolution.y);
+    float Drop_Frac   = 0.50; // Console covers the top 50% when fully open
+    float Console_H   = Res_Y * Drop_Frac * Params.Drop_T;
+    vec2  Frag        = vec2(Pixel) + 0.5;
+
+    // Only process pixels inside the console region (top of screen)
+    if (Frag.y > Console_H) return;
 
     vec4  Scene_Color = imageLoad (Display_Image, Pixel);
-    vec2  Frag        = vec2(Pixel) + 0.5;
-    float Res_Y       = float(Params.Resolution.y);
     vec2  Atlas_Size  = vec2(textureSize (Font_Atlas, 0));
 
-    // Console occupies the bottom 40% of the screen
-    float Console_Top    = Res_Y * 0.6;
-    float Console_Bottom = Res_Y;
-    float Line_Height    = 18.0; // Pixels per line
-    float Font_Scale     = 14.0; // Font scale in pixels
-    float Margin_Left    = 8.0;
-    float Margin_Bottom  = 6.0;
+    float Line_Height  = 18.0;
+    float Font_Scale   = 14.0;
+    float Margin_Left  = 10.0;
+    float Margin_Top   = 6.0;
+    float Separator_H  = 2.0;  // Pixel height of separator line between output and input
 
-    // Flip Y: screen coords have Y=0 at top, but our text layout assumes Y=0 at bottom
-    float Y_Flipped = Res_Y - Frag.y;
+    // ── Semi-transparent background ──
+    vec3 BG_Dark = vec3(0.04, 0.04, 0.07);
+    Scene_Color = mix (Scene_Color, vec4(BG_Dark, 1.0), Params.Opacity);
 
-    // Only process pixels in the console region
-    if (Frag.y < Console_Top) return;
+    // ── Compute regions ──
+    // Total lines: output + 1 separator + input + completions
+    uint Total_Output    = Params.Line_Count;
+    uint Total_Complete  = Params.Completion_Count;
+    float Output_Y_Start = Margin_Top;
+    float Input_Y        = Output_Y_Start + float(Total_Output) * Line_Height + Separator_H + 4.0;
+    float Complete_Y     = Input_Y + Line_Height + 2.0;
 
-    // Draw semi-transparent console background
-    vec4 BG_Color = vec4(0.05, 0.05, 0.08, Params.Opacity);
-    Scene_Color   = mix (Scene_Color, vec4(BG_Color.rgb, 1.0), BG_Color.a);
+    // ── Draw separator line between output and input ──
+    float Sep_Y = Output_Y_Start + float(Total_Output) * Line_Height + 2.0;
+    if (Frag.y >= Sep_Y && Frag.y < Sep_Y + Separator_H && Params.Has_Input != 0u) {
+      Scene_Color.rgb = mix (Scene_Color.rgb, vec3(0.3, 0.3, 0.4), 0.6);
+    }
 
-    // Render text lines (bottom-up: most recent line at bottom)
+    // ── Draw bottom edge of console (bright line) ──
+    if (Frag.y >= Console_H - 2.0 && Frag.y < Console_H) {
+      Scene_Color.rgb = mix (Scene_Color.rgb, vec3(0.4, 0.6, 1.0), 0.8);
+    }
+
     float Alpha_Acc = 0.0;
     vec3  Text_Color_Acc = vec3(0.0);
 
-    for (uint L = 0u; L < Params.Line_Count and L < 32u; L++) {
-      float Line_Y_Base = Margin_Bottom + float(L) * Line_Height + Params.Scroll;
-      float Line_Y_Top  = Line_Y_Base + Line_Height;
+    // ── Output lines (top-down: line 0 at top, line N-1 at bottom of output area) ──
+    for (uint L = 0u; L < Total_Output && L < 64u; L++) {
+      float Y_Top = Output_Y_Start + float(L) * Line_Height;
+      if (Y_Top > Console_H) break;  // Don't render lines below the visible console area
+      Render_Line (Frag, L, Y_Top, Font_Scale, Line_Height, Margin_Left, Atlas_Size, Alpha_Acc, Text_Color_Acc);
+    }
 
-      // Skip lines outside the console area
-      if (Y_Flipped < Line_Y_Base - 4.0 or Y_Flipped > Line_Y_Top + 4.0) continue;
+    // ── Input line ──
+    if (Params.Has_Input != 0u && Input_Y < Console_H) {
+      // Input line is at index Line_Count in the SSBO
+      Render_Line (Frag, Total_Output, Input_Y, Font_Scale, Line_Height, Margin_Left, Atlas_Size, Alpha_Acc, Text_Color_Acc);
+    }
 
-      // Read line from the bottom (most recent = index Line_Count-1-L)
-      uint Line_Idx = Params.Line_Count - 1u - L;
-      if (Line_Idx >= Params.Line_Count) continue;
-      Console_Line CL = Lines[Line_Idx];
-
-      vec3 Color = Style_Colors[clamp(CL.Style, 0u, 5u)];
-      float Cursor_X = Margin_Left;
-
-      for (uint C = 0u; C < CL.Length and C < 128u; C++) {
-        uint Code = CL.Codepoints[C];
-        if (Code < 32u or Code > 126u) { Cursor_X += Font_Scale * 0.3; continue; }
-        Glyph G = Glyphs[Code - 32u];
-
-        vec2 Origin = vec2(Cursor_X, Line_Y_Base);
-        float A = Render_Glyph (vec2(Frag.x, Y_Flipped), Origin, Font_Scale, G, Atlas_Size);
-
-        if (A > 0.0) {
-          Text_Color_Acc = mix (Text_Color_Acc, Color, A);
-          Alpha_Acc = max (Alpha_Acc, A);
-        }
-        Cursor_X += G.Advance * Font_Scale;
-
-        // Early exit if past the right edge
-        if (Cursor_X > float(Params.Resolution.x)) break;
+    // ── Autocomplete suggestions ──
+    for (uint C = 0u; C < Total_Complete && C < 9u; C++) {
+      float Y_Top = Complete_Y + float(C) * Line_Height;
+      if (Y_Top > Console_H) break;
+      // Draw a highlight background for the selected completion
+      if (C == Params.Completion_Sel && Frag.y >= Y_Top && Frag.y < Y_Top + Line_Height) {
+        Scene_Color.rgb = mix (Scene_Color.rgb, vec3(0.15, 0.18, 0.25), 0.7);
       }
+      // Completion lines are at indices Line_Count + 1 + C in the SSBO
+      uint Comp_Idx = Total_Output + 1u + C;
+      Render_Line (Frag, Comp_Idx, Y_Top, Font_Scale, Line_Height, Margin_Left, Atlas_Size, Alpha_Acc, Text_Color_Acc);
     }
 
     // Composite text over background
@@ -18856,16 +18998,111 @@ Input Poll_Input () {
         atomic_store (&Quit_Requested, 1);
         break;
 
-      // Handle key presses (ESC, F11)
-      case SDL_KEYDOWN:
-        if (Event.key.repeat) break; // Ignore key repeat for mode toggles
-        if (Event.key.keysym.sym == SDLK_ESCAPE) {
-          if (In_Menu) { Quit = 1; atomic_store (&Quit_Requested, 1); }  // ESC in menu = quit
-          else Enter_Menu_Mode (); // ESC in game = open menu
+      // Handle key presses — console toggle, console input, game mode keys
+      case SDL_KEYDOWN: {
+        SDL_Keycode Key = Event.key.keysym.sym;
+
+        // Backtick / tilde toggles the drop-down console (works everywhere, non-repeating)
+        if (Key == SDLK_BACKQUOTE and not Event.key.repeat) {
+          Console_Open = not Console_Open;
+          if (Console_Open) SDL_StartTextInput ();
+          else { SDL_StopTextInput (); Console_Autocomplete_Count = 0; Console_Autocomplete_Selected = -1; }
+          break;
         }
-        if (Event.key.keysym.sym == SDLK_F11)
+
+        // When the console is open, all key events go to console input
+        if (Console_Open) {
+          if (Console.Lock) SDL_LockMutex (Console.Lock);
+          if (Key == SDLK_RETURN) {
+            // Submit the current input
+            if (Console.Input_Length > 0) {
+              Console.Input[Console.Input_Length] = '\0';
+              char Submit_Copy[512];
+              memcpy (Submit_Copy, Console.Input, (size_t)Console.Input_Length + 1);
+              Console.Input_Length = 0;
+              Console.Input[0] = '\0';
+              Console_Autocomplete_Count = 0;
+              Console_Autocomplete_Selected = -1;
+              if (Console.Lock) SDL_UnlockMutex (Console.Lock);
+              Console_Submit (Submit_Copy);
+            } else {
+              if (Console.Lock) SDL_UnlockMutex (Console.Lock);
+            }
+          }
+          else if (Key == SDLK_BACKSPACE) {
+            if (Console.Input_Length > 0) {
+              Console.Input[--Console.Input_Length] = '\0';
+              // Update autocomplete
+              if (Console.Input_Length > 0)
+                Console_Autocomplete_Count = Console_Autocomplete (Console.Input, Console_Autocomplete_Matches, 32);
+              else
+                Console_Autocomplete_Count = 0;
+              Console_Autocomplete_Selected = -1;
+            }
+            if (Console.Lock) SDL_UnlockMutex (Console.Lock);
+          }
+          else if (Key == SDLK_TAB) {
+            // Tab completion: insert the first (or selected) match
+            int Sel = Console_Autocomplete_Selected >= 0 ? Console_Autocomplete_Selected : 0;
+            if (Console_Autocomplete_Count > 0 and Sel < Console_Autocomplete_Count) {
+              const char *Match = Console_Autocomplete_Matches[Sel];
+              int Len = (int)strlen (Match);
+              if (Len < 510) {
+                memcpy (Console.Input, Match, (size_t)Len);
+                Console.Input[Len] = ' ';
+                Console.Input[Len + 1] = '\0';
+                Console.Input_Length = Len + 1;
+              }
+              Console_Autocomplete_Count = 0;
+              Console_Autocomplete_Selected = -1;
+            }
+            if (Console.Lock) SDL_UnlockMutex (Console.Lock);
+          }
+          else if (Key == SDLK_UP) {
+            // Navigate autocomplete or history
+            if (Console_Autocomplete_Count > 0) {
+              if (Console_Autocomplete_Selected < 0) Console_Autocomplete_Selected = 0;
+              else if (Console_Autocomplete_Selected > 0) Console_Autocomplete_Selected--;
+            } else {
+              Console_History_Previous ();
+              const char *H = Console_Get_Input ();
+              if (H) { int L = (int)strlen (H); memcpy (Console.Input, H, (size_t)L + 1); Console.Input_Length = L; }
+            }
+            if (Console.Lock) SDL_UnlockMutex (Console.Lock);
+          }
+          else if (Key == SDLK_DOWN) {
+            if (Console_Autocomplete_Count > 0) {
+              if (Console_Autocomplete_Selected < Console_Autocomplete_Count - 1) Console_Autocomplete_Selected++;
+            } else {
+              Console_History_Next ();
+              const char *H = Console_Get_Input ();
+              if (H) { int L = (int)strlen (H); memcpy (Console.Input, H, (size_t)L + 1); Console.Input_Length = L; }
+            }
+            if (Console.Lock) SDL_UnlockMutex (Console.Lock);
+          }
+          else if (Key == SDLK_ESCAPE) {
+            // Close console on Escape
+            Console_Open = 0;
+            SDL_StopTextInput ();
+            Console_Autocomplete_Count = 0;
+            Console_Autocomplete_Selected = -1;
+            if (Console.Lock) SDL_UnlockMutex (Console.Lock);
+          }
+          else {
+            if (Console.Lock) SDL_UnlockMutex (Console.Lock);
+          }
+          break; // Consume the keydown — don't pass to game
+        }
+
+        // Game-mode key handling (only when console is closed)
+        if (Event.key.repeat) break;
+        if (Key == SDLK_ESCAPE) {
+          if (In_Menu) { Quit = 1; atomic_store (&Quit_Requested, 1); }
+          else Enter_Menu_Mode ();
+        }
+        if (Key == SDLK_F11)
           Toggle_Fullscreen ();
-        if (Event.key.keysym.sym == SDLK_F5) {
+        if (Key == SDLK_F5) {
           Active_Movement = (Active_Movement + 1) % WORLD_COUNT;
           World_Settings M = WORLD_PRESETS[Active_Movement];
           CVar_Set_Float (w_gravity,        M.Gravity);
@@ -18877,10 +19114,38 @@ Input Poll_Input () {
           CVar_Set_Float (w_overbounce,     M.Overbounce);
           printf("[movement] switched to %s\n", M.Name);
         }
-        if (Event.key.keysym.sym == SDLK_F6) {
+        if (Key == SDLK_F6) {
           Active_World = WORLD_PRESETS[(Active_World.Type + 1) % WORLD_COUNT];
           printf("[world] switched to %s (height %.0f, eye %.0f, fov %.0f)\n",
                  Active_World.Name, Active_World.Player_Height, Active_World.Eye_Height, Active_World.FOV);
+        }
+        break;
+      }
+
+      // SDL_TEXTINPUT — character-by-character text entry when console is open
+      case SDL_TEXTINPUT:
+        if (Console_Open) {
+          const char *Text = Event.text.text;
+          // Skip backtick since it's the toggle key
+          if (Text[0] == '`' or Text[0] == '~') break;
+          if (Console.Lock) SDL_LockMutex (Console.Lock);
+          for (int C = 0; Text[C] and Console.Input_Length < 510; C++)
+            Console.Input[Console.Input_Length++] = Text[C];
+          Console.Input[Console.Input_Length] = '\0';
+          // Update autocomplete matches
+          if (Console.Input_Length > 0) {
+            // Find the first token for autocomplete (before any space)
+            char Token[512];
+            int Tok_Len = 0;
+            for (int C = 0; C < Console.Input_Length and Console.Input[C] != ' '; C++)
+              Token[Tok_Len++] = Console.Input[C];
+            Token[Tok_Len] = '\0';
+            Console_Autocomplete_Count = Console_Autocomplete (Token, Console_Autocomplete_Matches, 32);
+          } else {
+            Console_Autocomplete_Count = 0;
+          }
+          Console_Autocomplete_Selected = -1;
+          if (Console.Lock) SDL_UnlockMutex (Console.Lock);
         }
         break;
 
@@ -18894,7 +19159,7 @@ Input Poll_Input () {
 
       // Handle mouse movement for camera control
       case SDL_MOUSEMOTION:
-        if (not In_Menu and Input_Active) {
+        if (not In_Menu and not Console_Open and Input_Active) {
           Input_Data.Delta_X += Event.motion.xrel;
           Input_Data.Delta_Y += Event.motion.yrel;
         }
@@ -18942,8 +19207,8 @@ Input Poll_Input () {
     }
   }
 
-  // Sample keyboard state only in game mode with active input
-  if (not In_Menu and Input_Active) {
+  // Sample keyboard state only in game mode with active input (not when console is open)
+  if (not In_Menu and not Console_Open and Input_Active) {
     const uint8_t *Keyboard = SDL_GetKeyboardState (NULL);
     uint32_t Mouse_Buttons  = SDL_GetMouseState (NULL, NULL);
 
