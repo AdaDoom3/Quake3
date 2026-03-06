@@ -1181,6 +1181,16 @@ int                   Frame_Count         = 0;  // Frame counter for TAA converg
 int                   Current_Budget_Byte = 0;  // 0-255, set each frame for denoiser gating
 mat4                  Prev_View_Matrix;         // Previous frame's view matrix for TAA reprojection
 
+// Menu overlay pipeline (MSDF text console rendering)
+VkPipeline            Menu_Pipeline;
+VkPipelineLayout      Menu_Pipeline_Layout;
+VkDescriptorSetLayout Menu_Descriptor_Layout;
+VkDescriptorPool      Menu_Descriptor_Pool;
+VkDescriptorSet       Menu_Descriptor_Set;
+GPU_Image             Font_Atlas;                // MSDF font atlas (oxygen11.png)
+VkSampler             Font_Sampler;              // Linear sampler for MSDF text
+GPU_Buffer            Console_Text_Buffer;       // SSBO: console lines for GPU text rendering
+
 // A-trous wavelet denoiser
 VkPipeline            Denoise_Pipeline;
 VkPipelineLayout      Denoise_Pipeline_Layout;
@@ -1440,6 +1450,15 @@ uint8_t *TGA_Load_From_Memory (const uint8_t *Raw, long Length, uint *Out_Width,
 
 // Load a TGA image file and decode it into RGBA8 pixel data
 uint8_t *TGA_Load (const char *Path, uint *Out_Width, uint *Out_Height);
+
+// Load a PNG image file and decode it into RGBA8 pixel data (uses zlib for IDAT decompression)
+uint8_t *PNG_Load (const char *Path, uint *Out_Width, uint *Out_Height);
+
+// Load a BMP image file and decode it into RGBA8 pixel data (24-bit and 32-bit uncompressed)
+uint8_t *BMP_Load (const char *Path, uint *Out_Width, uint *Out_Height);
+
+// Load a JPEG image file and decode it into RGBA8 pixel data (baseline DCT, 8-bit, YCbCr→RGB)
+uint8_t *JPEG_Load (const char *Path, uint *Out_Width, uint *Out_Height);
 
 // Fuzzy path resolution: tries case-insensitive, prefix-stripping, and extension substitution
 static int Fuzzy_Resolve (const char *Root, const char *Virtual_Path, char *Out_Resolved, int Out_Size);
@@ -2920,6 +2939,29 @@ typedef struct {
   uint32_t PP_TAA_B;        // half(Move_Lo),  half(Move_Hi)
 } GPU_Postprocess_Push;     // 56 + 16 = 72 bytes
 
+// ── Menu Overlay GPU Types ── Push constants and SSBO layout for MSDF text rendering ──
+
+#define MENU_MAX_LINES  32    // Maximum console lines visible at once
+#define MENU_MAX_CHARS  128   // Maximum characters per line
+
+// Push constants for the menu overlay compute shader
+typedef struct {
+  uint32_t Resolution[2];     // Viewport width, height
+  uint32_t Line_Count;        // Number of active lines in the SSBO
+  uint32_t Cursor_Pos;        // Input cursor position (character index)
+  float    Opacity;           // Console background opacity (0 = hidden, 1 = full)
+  float    Scroll;            // Vertical scroll offset in lines
+  uint32_t Pad[2];
+} GPU_Menu_Push;              // 32 bytes
+
+// Per-line entry in the console text SSBO — each line is an array of Unicode codepoints + style
+typedef struct {
+  uint32_t Codepoints[MENU_MAX_CHARS]; // Unicode values (0-terminated)
+  uint32_t Length;                      // Number of valid characters
+  uint32_t Style;                       // Console_Style enum value
+  uint32_t Pad[2];
+} GPU_Console_Line;
+
 // GPU-packed hull data — the physics compute shader's storage buffer layout. The shader uses this for
 // SHAPE_HULL support queries via hill-climbing with adjacency. Built entirely on GPU by Quickhull_GPU.
 typedef struct {
@@ -2985,6 +3027,9 @@ void Skinning_Pipeline_Create ();
 
 // Create the GPU Quickhull compute pipeline (builds convex hulls on GPU without CPU roundtrip)
 void Quickhull_Pipeline_Create ();
+
+// Create the menu overlay compute pipeline (MSDF text rendering for console, HUD, labels)
+void Menu_Pipeline_Create ();
 
 // Build a convex hull entirely on GPU: reads positions from Source_Buffer, writes GPU_Hull to Hull_Storage_Buffer.
 // Vertex_Offset is the starting vec4 index, Vertex_Stride is vec4s per vertex (3 for the engine's Vertex layout).
@@ -3138,6 +3183,9 @@ glsl comp Tessellation;
 
 // GPU Quickhull: builds convex hulls entirely on the GPU from vertex buffer data
 glsl comp Quickhull_GPU;
+
+// Menu overlay: MSDF text rendering for console, HUD, and menu elements
+glsl comp Menu_Overlay;
 
 // ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 //
@@ -4042,6 +4090,9 @@ int main (int Argc, char **Argv) {
   // Create the GPU Quickhull pipeline (builds convex hulls on GPU without CPU roundtrip)
   Quickhull_Pipeline_Create ();
 
+  // Create the menu overlay pipeline (MSDF text rendering for console/HUD)
+  Menu_Pipeline_Create ();
+
   // Create the GPU physics pipeline and resources (with hull binding)
   Physics_Pipeline_Create ();
 
@@ -4814,6 +4865,13 @@ int main (int Argc, char **Argv) {
   vkDestroyPipelineLayout      (Device, Postprocess_Pipeline_Layout, NULL);
   vkDestroyDescriptorPool      (Device, Postprocess_Descriptor_Pool, NULL);
   vkDestroyDescriptorSetLayout (Device, Postprocess_Descriptor_Layout, NULL);
+  vkDestroyPipeline            (Device, Menu_Pipeline, NULL);
+  vkDestroyPipelineLayout      (Device, Menu_Pipeline_Layout, NULL);
+  vkDestroyDescriptorPool      (Device, Menu_Descriptor_Pool, NULL);
+  vkDestroyDescriptorSetLayout (Device, Menu_Descriptor_Layout, NULL);
+  vkDestroySampler             (Device, Font_Sampler, NULL);
+  vkDestroyImageView           (Device, Font_Atlas.View, NULL);
+  vkDestroyImage               (Device, Font_Atlas.Image, NULL);
   vkDestroyPipeline            (Device, Physics_Pipeline, NULL);
   vkDestroyPipelineLayout      (Device, Physics_Pipeline_Layout, NULL);
   vkDestroyDescriptorPool      (Device, Physics_Descriptor_Pool, NULL);
@@ -7279,6 +7337,496 @@ uint8_t *TGA_Load (const char *Path, uint *Out_Width, uint *Out_Height) {
   uint8_t *Result = TGA_Load_From_Memory (Raw, Length, Out_Width, Out_Height);
   free (Raw);
   return Result;
+}
+
+// ══════════════
+//   PNG_Load
+// ══════════════
+//
+// Minimal PNG decoder — reads 8-bit RGB or RGBA PNGs into RGBA8 pixel data.
+// Uses zlib (already linked) for IDAT decompression. Supports only the common
+// non-interlaced truecolor case needed for MSDF font atlases and textures.
+//
+// PNG structure: signature → IHDR → ... → IDAT* → IEND
+// Each scanline is filter_byte + Width * Bpp raw bytes.
+
+uint8_t *PNG_Load (const char *Path, uint *W, uint *H) {
+
+  // Read entire file
+  FILE *F = fopen (Path, "rb");
+  if (not F) return NULL;
+  fseek (F, 0, SEEK_END); long Len = ftell (F); rewind (F);
+  if (Len < 57) { fclose (F); return NULL; } // PNG minimum: sig(8)+IHDR(25)+IDAT(>12)+IEND(12)
+  uint8_t *Raw = malloc ((size_t)Len);
+  if (not Raw) { fclose (F); return NULL; }
+  size_t PNG_Read_ = fread (Raw, 1, (size_t)Len, F); (void)PNG_Read_; fclose (F);
+
+  // Validate PNG signature
+  static const uint8_t Sig[8] = {137, 80, 78, 71, 13, 10, 26, 10};
+  if (memcmp (Raw, Sig, 8) != 0) { free (Raw); return NULL; }
+
+  // Parse IHDR (must be first chunk, offset 8)
+  uint8_t *P = Raw + 8;
+  uint32_t Chunk_Len = (uint32_t)P[0]<<24 | (uint32_t)P[1]<<16 | (uint32_t)P[2]<<8 | P[3]; (void)Chunk_Len;
+  P += 4; // skip length
+  if (memcmp (P, "IHDR", 4) != 0) { free (Raw); return NULL; }
+  P += 4; // skip type
+  *W             = (uint32_t)P[0]<<24 | (uint32_t)P[1]<<16 | (uint32_t)P[2]<<8 | P[3]; P += 4;
+  *H             = (uint32_t)P[0]<<24 | (uint32_t)P[1]<<16 | (uint32_t)P[2]<<8 | P[3]; P += 4;
+  uint8_t Depth  = *P++;     // Bit depth (must be 8)
+  uint8_t Color  = *P++;     // Color type: 2 = RGB, 6 = RGBA
+  uint8_t Compr  = *P++;     // Compression method (must be 0 = deflate)
+  uint8_t Filt_M = *P++;     // Filter method (must be 0 = adaptive)
+  uint8_t Inter  = *P++;     // Interlace (must be 0 = none)
+  P += 4;                    // skip CRC
+
+  // Validate: 8-bit truecolor, non-interlaced
+  if (Depth != 8 or (Color != 2 and Color != 6) or Compr or Filt_M or Inter)
+    { free (Raw); return NULL; }
+
+  int Bpp        = (Color == 6) ? 4 : 3;               // Bytes per pixel
+  size_t Stride  = (size_t)(*W) * (size_t)Bpp;          // Raw scanline width (no filter byte)
+  size_t Raw_Sz  = ((size_t)(*H)) * (Stride + 1);       // Total decompressed: (filter + row) * H
+
+  // Concatenate all IDAT chunk payloads into one buffer
+  size_t Zdata_Cap = (size_t)Len, Zdata_Len = 0;
+  uint8_t *Zdata = malloc (Zdata_Cap);
+  P = Raw + 8; // restart chunk scan
+  while (P < Raw + Len - 8) {
+    uint32_t CLen = (uint32_t)P[0]<<24 | (uint32_t)P[1]<<16 | (uint32_t)P[2]<<8 | P[3]; P += 4;
+    char Type[5] = {(char)P[0], (char)P[1], (char)P[2], (char)P[3], 0}; P += 4;
+    if (strcmp (Type, "IEND") == 0) break;
+    if (strcmp (Type, "IDAT") == 0 and Zdata_Len + CLen <= Zdata_Cap)
+      { memcpy (Zdata + Zdata_Len, P, CLen); Zdata_Len += CLen; }
+    P += CLen + 4; // skip data + CRC
+  }
+  free (Raw);
+
+  // Inflate IDAT data
+  uint8_t *Inflated = malloc (Raw_Sz);
+  z_stream Z = {0};
+  Z.next_in  = Zdata; Z.avail_in  = (uInt)Zdata_Len;
+  Z.next_out = Inflated; Z.avail_out = (uInt)Raw_Sz;
+  if (inflateInit (&Z) != Z_OK) { free (Zdata); free (Inflated); return NULL; }
+  int Ret = inflate (&Z, Z_FINISH);
+  inflateEnd (&Z); free (Zdata);
+  if (Ret != Z_STREAM_END) { free (Inflated); return NULL; }
+
+  // Reconstruct filtered scanlines and convert to RGBA8
+  uint8_t *Pixels = malloc ((size_t)(*W) * (size_t)(*H) * 4);
+  uint8_t *Prev   = calloc (Stride, 1); // previous scanline (zeroed for first row)
+  uint8_t *Cur    = malloc (Stride);
+
+  for (uint Y = 0; Y < *H; Y++) {
+    uint8_t *Row     = Inflated + Y * (Stride + 1);
+    uint8_t  Filt    = Row[0];
+    uint8_t *Src     = Row + 1;
+
+    // Apply PNG reconstruction filter
+    for (size_t X = 0; X < Stride; X++) {
+      uint8_t A = (X >= (size_t)Bpp) ? Cur[X - Bpp]  : 0;   // left
+      uint8_t B = Prev[X];                                     // above
+      uint8_t C = (X >= (size_t)Bpp) ? Prev[X - Bpp] : 0;    // upper-left
+      switch (Filt) {
+        case 0: Cur[X] = Src[X];                        break; // None
+        case 1: Cur[X] = Src[X] + A;                    break; // Sub
+        case 2: Cur[X] = Src[X] + B;                    break; // Up
+        case 3: Cur[X] = Src[X] + (uint8_t)((A+B)/2);  break; // Average
+        case 4: {                                                // Paeth
+          int PA = abs((int)B - (int)C), PB = abs((int)A - (int)C), PC = abs((int)A + (int)B - 2*(int)C);
+          Cur[X] = Src[X] + (uint8_t)((PA <= PB and PA <= PC) ? A : (PB <= PC) ? B : C);
+        } break;
+        default: Cur[X] = Src[X]; break;
+      }
+    }
+
+    // Write RGBA8 output
+    for (uint X = 0; X < *W; X++) {
+      uint8_t *D = Pixels + (Y * (*W) + X) * 4;
+      uint8_t *S = Cur + X * Bpp;
+      D[0] = S[0]; D[1] = S[1]; D[2] = S[2];
+      D[3] = (Bpp == 4) ? S[3] : 255;
+    }
+    memcpy (Prev, Cur, Stride);
+  }
+  free (Inflated); free (Prev); free (Cur);
+  return Pixels;
+}
+
+// ══════════════
+//   BMP_Load
+// ══════════════
+//
+// Minimal BMP decoder — reads 24-bit and 32-bit uncompressed BMPs into RGBA8 pixel data.
+// BMP scanlines are stored bottom-up and padded to 4-byte boundaries.
+
+uint8_t *BMP_Load (const char *Path, uint *W, uint *H) {
+  FILE *F = fopen (Path, "rb");
+  if (not F) return NULL;
+  fseek (F, 0, SEEK_END); long Len = ftell (F); rewind (F);
+  if (Len < 54) { fclose (F); return NULL; }
+  uint8_t *Raw = malloc ((size_t)Len);
+  size_t BMP_Read_ = fread (Raw, 1, (size_t)Len, F); (void)BMP_Read_; fclose (F);
+
+  // Validate BMP signature
+  if (Raw[0] != 'B' or Raw[1] != 'M') { free (Raw); return NULL; }
+
+  // Parse DIB header (BITMAPINFOHEADER at offset 14)
+  uint32_t Pixel_Offset = *(uint32_t *)(Raw + 10);
+  int32_t  Width        = *(int32_t  *)(Raw + 18);
+  int32_t  Height       = *(int32_t  *)(Raw + 22);
+  uint16_t Bpp          = *(uint16_t *)(Raw + 28);
+  uint32_t Compression  = *(uint32_t *)(Raw + 30);
+
+  if (Width <= 0 or (Bpp != 24 and Bpp != 32) or Compression != 0) { free (Raw); return NULL; }
+
+  int Flip = (Height > 0); // Positive height = bottom-up (flip needed)
+  if (Height < 0) Height = -Height;
+  *W = (uint)Width; *H = (uint)Height;
+
+  int Bytes_Per_Pixel = Bpp / 8;
+  int Row_Stride      = (Width * Bytes_Per_Pixel + 3) & ~3; // Pad to 4-byte boundary
+  uint8_t *Pixels     = malloc ((size_t)Width * (size_t)Height * 4);
+  uint8_t *Src        = Raw + Pixel_Offset;
+
+  for (int Y = 0; Y < Height; Y++) {
+    int Src_Y = Flip ? (Height - 1 - Y) : Y;
+    uint8_t *Row = Src + Src_Y * Row_Stride;
+    for (int X = 0; X < Width; X++) {
+      uint8_t *D = Pixels + (Y * Width + X) * 4;
+      uint8_t *S = Row + X * Bytes_Per_Pixel;
+      D[0] = S[2]; D[1] = S[1]; D[2] = S[0]; // BGR → RGB
+      D[3] = (Bytes_Per_Pixel == 4) ? S[3] : 255;
+    }
+  }
+  free (Raw);
+  return Pixels;
+}
+
+// ═══════════════
+//   JPEG_Load
+// ═══════════════
+//
+// Minimal baseline JPEG decoder — reads 8-bit YCbCr 4:2:0/4:4:4 JPEGs into RGBA8 pixel data.
+// Supports only baseline DCT (SOF0), Huffman coding. No progressive, no arithmetic, no CMYK.
+// This is a substantial decoder — implements IDCT, Huffman, zigzag, dequantization, and color conversion.
+
+// JPEG markers
+#define JPEG_SOI  0xFFD8
+#define JPEG_SOF0 0xFFC0
+#define JPEG_DHT  0xFFC4
+#define JPEG_DQT  0xFFDB
+#define JPEG_SOS  0xFFDA
+#define JPEG_EOI  0xFFD9
+#define JPEG_DRI  0xFFDD
+
+// Zigzag order
+static const uint8_t Zigzag[64] = {
+   0, 1, 8,16, 9, 2, 3,10, 17,24,32,25,18,11, 4, 5,
+  12,19,26,33,40,48,41,34, 27,20,13, 6, 7,14,21,28,
+  35,42,49,56,57,50,43,36, 29,22,15,23,30,37,44,51,
+  58,59,52,45,38,31,39,46, 53,60,61,54,47,55,62,63};
+
+typedef struct {
+  uint8_t  Bits[17];       // Number of codes of each length (1-16)
+  uint8_t  Values[256];    // Symbol values
+  uint16_t Code[256];      // Huffman codes
+  uint8_t  Size[256];      // Code lengths
+  int      Max_Code[18];   // Max code value for each length
+  int      Val_Ptr[18];    // Value pointer for each length
+} JPEG_Huffman;
+
+typedef struct {
+  int      Id, H_Samp, V_Samp, QT_Id, DC_Id, AC_Id;
+  int      DC_Pred;
+  int16_t  Block[64];
+} JPEG_Component;
+
+typedef struct {
+  uint8_t       *Data;
+  long           Length;
+  long           Pos;
+  uint32_t       Bit_Buf;
+  int            Bit_Count;
+  int            Width, Height;
+  int            Num_Components;
+  int            Restart_Interval;
+  int            QT[4][64];
+  JPEG_Huffman   HT_DC[4], HT_AC[4];
+  JPEG_Component Comp[4];
+} JPEG_State;
+
+static int JPEG_Read_Byte (JPEG_State *J) {
+  return (J->Pos < J->Length) ? J->Data[J->Pos++] : 0;
+}
+static int JPEG_Read_Word (JPEG_State *J) {
+  int Hi = JPEG_Read_Byte (J); return (Hi << 8) | JPEG_Read_Byte (J);
+}
+
+static void JPEG_Build_Huffman (JPEG_Huffman *HT) {
+  int K = 0; uint16_t Code = 0;
+  for (int L = 1; L <= 16; L++) {
+    HT->Val_Ptr[L] = K;
+    for (int I = 0; I < HT->Bits[L]; I++) {
+      HT->Code[K] = Code; HT->Size[K] = (uint8_t)L; K++; Code++;
+    }
+    HT->Max_Code[L] = Code - 1;
+    Code <<= 1;
+  }
+}
+
+static int JPEG_Get_Bit (JPEG_State *J) {
+  if (J->Bit_Count == 0) {
+    uint8_t B = (uint8_t)JPEG_Read_Byte (J);
+    if (B == 0xFF) JPEG_Read_Byte (J); // Skip stuffed zero
+    J->Bit_Buf = B; J->Bit_Count = 8;
+  }
+  J->Bit_Count--;
+  return (J->Bit_Buf >> J->Bit_Count) & 1;
+}
+
+static int JPEG_Get_Bits (JPEG_State *J, int N) {
+  int V = 0;
+  for (int I = 0; I < N; I++) V = (V << 1) | JPEG_Get_Bit (J);
+  return V;
+}
+
+static int JPEG_Decode_Huffman (JPEG_State *J, JPEG_Huffman *HT) {
+  int Code = 0;
+  for (int L = 1; L <= 16; L++) {
+    Code = (Code << 1) | JPEG_Get_Bit (J);
+    if (Code <= HT->Max_Code[L])
+      return HT->Values[HT->Val_Ptr[L] + Code - (HT->Max_Code[L] - HT->Bits[L] + 1)];
+  }
+  return 0;
+}
+
+static int JPEG_Receive_Extend (JPEG_State *J, int N) {
+  if (N == 0) return 0;
+  int V = JPEG_Get_Bits (J, N);
+  if (V < (1 << (N - 1))) V -= (1 << N) - 1;
+  return V;
+}
+
+static void JPEG_IDCT_Block (int16_t *Block) {
+  // Scaled integer IDCT (AAN algorithm)
+  for (int I = 0; I < 8; I++) {
+    int *S = (int[]){Block[I],Block[I+8],Block[I+16],Block[I+24],Block[I+32],Block[I+40],Block[I+48],Block[I+56]};
+    int P2=S[2], P3=S[6], P1=(P2+P3)*2217/4096, T2=P1+P3*(-7567/4096), T3=P1+P2*(3135/4096);
+    int T0=(S[0]+S[4])*8192/4096, T1=(S[0]-S[4])*8192/4096;
+    int X0=T0+T3, X3=T0-T3, X1=T1+T2, X2=T1-T2;
+    P2=S[5]; P3=S[3]; int P4=S[1], P5=S[7];
+    T0=P4+P5; T1=P3+P4; T2=P3+P2; T3=P2+P5;
+    int T4=(T0+T2)*1108/4096;
+    T0=T0*(-3686/4096)+T4; T2=T2*(3784/4096)+T4;
+    T1=T1*(-1730/4096); T3=T3*(-3513/4096);
+    P5=P5*(-1036/4096)+T0+T3; P4=P4*(2446/4096)+T1+T0;
+    P3=P3*(1568/4096)+T1+T2; P2=P2*(3920/4096)+T2+T3;
+    Block[I]=    (int16_t)((X0+P2+512)>>10); Block[I+56]=(int16_t)((X0-P2+512)>>10);
+    Block[I+8]=  (int16_t)((X1+P3+512)>>10); Block[I+48]=(int16_t)((X1-P3+512)>>10);
+    Block[I+16]= (int16_t)((X2+P4+512)>>10); Block[I+40]=(int16_t)((X2-P4+512)>>10);
+    Block[I+24]= (int16_t)((X3+P5+512)>>10); Block[I+32]=(int16_t)((X3-P5+512)>>10);
+  }
+  for (int I = 0; I < 64; I += 8) {
+    int *S = (int[]){Block[I],Block[I+1],Block[I+2],Block[I+3],Block[I+4],Block[I+5],Block[I+6],Block[I+7]};
+    int P2=S[2], P3=S[6], P1=(P2+P3)*2217/4096, T2=P1+P3*(-7567/4096), T3=P1+P2*(3135/4096);
+    int T0=(S[0]+S[4])*8192/4096, T1=(S[0]-S[4])*8192/4096;
+    int X0=T0+T3+65536, X3=T0-T3+65536, X1=T1+T2+65536, X2=T1-T2+65536;
+    P2=S[5]; P3=S[3]; int P4=S[1], P5=S[7];
+    T0=P4+P5; T1=P3+P4; T2=P3+P2; T3=P2+P5;
+    int T4=(T0+T2)*1108/4096;
+    T0=T0*(-3686/4096)+T4; T2=T2*(3784/4096)+T4;
+    T1=T1*(-1730/4096); T3=T3*(-3513/4096);
+    P5=P5*(-1036/4096)+T0+T3; P4=P4*(2446/4096)+T1+T0;
+    P3=P3*(1568/4096)+T1+T2; P2=P2*(3920/4096)+T2+T3;
+    Block[I]=  (int16_t)((X0+P2)>>17); Block[I+7]=(int16_t)((X0-P2)>>17);
+    Block[I+1]=(int16_t)((X1+P3)>>17); Block[I+6]=(int16_t)((X1-P3)>>17);
+    Block[I+2]=(int16_t)((X2+P4)>>17); Block[I+5]=(int16_t)((X2-P4)>>17);
+    Block[I+3]=(int16_t)((X3+P5)>>17); Block[I+4]=(int16_t)((X3-P5)>>17);
+  }
+}
+
+static uint8_t JPEG_Clamp (int V) { return (uint8_t)(V < 0 ? 0 : V > 255 ? 255 : V); }
+
+uint8_t *JPEG_Load (const char *Path, uint *W, uint *H) {
+  FILE *F = fopen (Path, "rb");
+  if (not F) return NULL;
+  fseek (F, 0, SEEK_END); long Len = ftell (F); rewind (F);
+  uint8_t *Raw = malloc ((size_t)Len);
+  size_t JPEG_Read_ = fread (Raw, 1, (size_t)Len, F); (void)JPEG_Read_; fclose (F);
+
+  JPEG_State J = {0};
+  J.Data = Raw; J.Length = Len; J.Pos = 0;
+
+  // Verify SOI marker
+  if (JPEG_Read_Word (&J) != (int)JPEG_SOI) { free (Raw); return NULL; }
+
+  // Parse markers until SOS
+  int Done = 0;
+  while (not Done and J.Pos < J.Length) {
+    int Marker = JPEG_Read_Word (&J);
+    if (Marker == (int)JPEG_SOS) { Done = 1; break; }
+    if ((Marker & 0xFF00) != 0xFF00) continue;
+    int Seg_Len = JPEG_Read_Word (&J);
+
+    switch (Marker) {
+      case JPEG_SOF0: { // Baseline DCT
+        JPEG_Read_Byte (&J); // precision (8)
+        J.Height = JPEG_Read_Word (&J); J.Width = JPEG_Read_Word (&J);
+        J.Num_Components = JPEG_Read_Byte (&J);
+        for (int I = 0; I < J.Num_Components; I++) {
+          J.Comp[I].Id     = JPEG_Read_Byte (&J);
+          int Samp         = JPEG_Read_Byte (&J);
+          J.Comp[I].H_Samp = (Samp >> 4) & 0xF;
+          J.Comp[I].V_Samp = Samp & 0xF;
+          J.Comp[I].QT_Id  = JPEG_Read_Byte (&J);
+        }
+      } break;
+      case JPEG_DQT: { // Quantization tables
+        int End = (int)J.Pos + Seg_Len - 2;
+        while (J.Pos < End) {
+          int Info = JPEG_Read_Byte (&J);
+          int Id = Info & 0xF, Prec = (Info >> 4) & 0xF;
+          for (int I = 0; I < 64; I++)
+            J.QT[Id][Zigzag[I]] = Prec ? JPEG_Read_Word (&J) : JPEG_Read_Byte (&J);
+        }
+      } break;
+      case JPEG_DHT: { // Huffman tables
+        int End = (int)J.Pos + Seg_Len - 2;
+        while (J.Pos < End) {
+          int Info = JPEG_Read_Byte (&J);
+          int Class = (Info >> 4) & 1, Id = Info & 0xF;
+          JPEG_Huffman *HT = Class ? &J.HT_AC[Id] : &J.HT_DC[Id];
+          int Total = 0;
+          for (int L = 1; L <= 16; L++) { HT->Bits[L] = (uint8_t)JPEG_Read_Byte (&J); Total += HT->Bits[L]; }
+          for (int I = 0; I < Total; I++) HT->Values[I] = (uint8_t)JPEG_Read_Byte (&J);
+          JPEG_Build_Huffman (HT);
+        }
+      } break;
+      case JPEG_DRI:
+        J.Restart_Interval = JPEG_Read_Word (&J);
+        break;
+      default:
+        J.Pos += Seg_Len - 2; // Skip unknown markers
+        break;
+    }
+  }
+
+  if (J.Width == 0 or J.Height == 0) { free (Raw); return NULL; }
+  *W = (uint)J.Width; *H = (uint)J.Height;
+
+  // Parse SOS header
+  int SOS_Components = JPEG_Read_Byte (&J);
+  for (int I = 0; I < SOS_Components; I++) {
+    int Id = JPEG_Read_Byte (&J);
+    int Tbl = JPEG_Read_Byte (&J);
+    for (int K = 0; K < J.Num_Components; K++) {
+      if (J.Comp[K].Id == Id) { J.Comp[K].DC_Id = (Tbl >> 4) & 0xF; J.Comp[K].AC_Id = Tbl & 0xF; }
+    }
+  }
+  JPEG_Read_Byte (&J); JPEG_Read_Byte (&J); JPEG_Read_Byte (&J); // Spectral select, approx
+
+  // Determine subsampling
+  int Max_H = 1, Max_V = 1;
+  for (int I = 0; I < J.Num_Components; I++) {
+    if (J.Comp[I].H_Samp > Max_H) Max_H = J.Comp[I].H_Samp;
+    if (J.Comp[I].V_Samp > Max_V) Max_V = J.Comp[I].V_Samp;
+  }
+
+  // Allocate component planes
+  int MCU_W = Max_H * 8, MCU_H = Max_V * 8;
+  int MCU_Cols = (J.Width + MCU_W - 1) / MCU_W;
+  int MCU_Rows = (J.Height + MCU_H - 1) / MCU_H;
+
+  int Plane_W[4], Plane_H[4];
+  int16_t *Planes[4] = {0};
+  for (int I = 0; I < J.Num_Components; I++) {
+    Plane_W[I] = MCU_Cols * J.Comp[I].H_Samp * 8;
+    Plane_H[I] = MCU_Rows * J.Comp[I].V_Samp * 8;
+    Planes[I]  = calloc ((size_t)(Plane_W[I] * Plane_H[I]), sizeof (int16_t));
+  }
+
+  // Decode MCUs
+  J.Bit_Count = 0; J.Bit_Buf = 0;
+  int MCU_Count = 0;
+  for (int MY = 0; MY < MCU_Rows; MY++) {
+    for (int MX = 0; MX < MCU_Cols; MX++) {
+      // Reset DC predictors on restart interval
+      if (J.Restart_Interval and MCU_Count > 0 and (MCU_Count % J.Restart_Interval) == 0) {
+        for (int I = 0; I < J.Num_Components; I++) J.Comp[I].DC_Pred = 0;
+        J.Bit_Count = 0;
+        // Skip restart marker
+        while (J.Pos < J.Length - 1) {
+          if (J.Data[J.Pos] == 0xFF and (J.Data[J.Pos+1] & 0xF8) == 0xD0) { J.Pos += 2; break; }
+          J.Pos++;
+        }
+      }
+
+      for (int I = 0; I < J.Num_Components; I++) {
+        for (int VB = 0; VB < J.Comp[I].V_Samp; VB++) {
+          for (int HB = 0; HB < J.Comp[I].H_Samp; HB++) {
+            int16_t Block[64] = {0};
+
+            // DC coefficient
+            int DC_Len = JPEG_Decode_Huffman (&J, &J.HT_DC[J.Comp[I].DC_Id]);
+            int DC_Val = JPEG_Receive_Extend (&J, DC_Len);
+            J.Comp[I].DC_Pred += DC_Val;
+            Block[0] = (int16_t)(J.Comp[I].DC_Pred * J.QT[J.Comp[I].QT_Id][0]);
+
+            // AC coefficients
+            for (int K = 1; K < 64; ) {
+              int AC_Sym = JPEG_Decode_Huffman (&J, &J.HT_AC[J.Comp[I].AC_Id]);
+              if (AC_Sym == 0) break; // EOB
+              int Run = (AC_Sym >> 4) & 0xF, Size = AC_Sym & 0xF;
+              K += Run;
+              if (K < 64 and Size > 0) {
+                Block[Zigzag[K]] = (int16_t)(JPEG_Receive_Extend (&J, Size) * J.QT[J.Comp[I].QT_Id][Zigzag[K]]);
+                K++;
+              }
+            }
+
+            // IDCT
+            JPEG_IDCT_Block (Block);
+
+            // Store block into component plane
+            int BX = (MX * J.Comp[I].H_Samp + HB) * 8;
+            int BY = (MY * J.Comp[I].V_Samp + VB) * 8;
+            for (int Y = 0; Y < 8; Y++)
+              for (int X = 0; X < 8; X++)
+                if (BX + X < Plane_W[I] and BY + Y < Plane_H[I])
+                  Planes[I][(BY + Y) * Plane_W[I] + BX + X] = Block[Y * 8 + X];
+          }
+        }
+      }
+      MCU_Count++;
+    }
+  }
+
+  // YCbCr → RGB conversion and output
+  uint8_t *Pixels = malloc ((size_t)J.Width * (size_t)J.Height * 4);
+  for (int Y = 0; Y < J.Height; Y++) {
+    for (int X = 0; X < J.Width; X++) {
+      uint8_t *D = Pixels + (Y * J.Width + X) * 4;
+      if (J.Num_Components == 1) {
+        int G = Planes[0][Y * Plane_W[0] + X] + 128;
+        D[0] = D[1] = D[2] = JPEG_Clamp (G); D[3] = 255;
+      } else {
+        // Upsample chroma if subsampled
+        int CX = X * J.Comp[1].H_Samp / Max_H;
+        int CY = Y * J.Comp[1].V_Samp / Max_V;
+        int YV = Planes[0][Y * Plane_W[0] + X] + 128;
+        int Cb = Planes[1][CY * Plane_W[1] + CX];
+        int Cr = Planes[2][CY * Plane_W[2] + CX];
+        D[0] = JPEG_Clamp (YV + (Cr * 91881 + 32768) / 65536);
+        D[1] = JPEG_Clamp (YV - (Cb * 22554 + Cr * 46802 + 32768) / 65536);
+        D[2] = JPEG_Clamp (YV + (Cb * 116130 + 32768) / 65536);
+        D[3] = 255;
+      }
+    }
+  }
+  for (int I = 0; I < J.Num_Components; I++) free (Planes[I]);
+  free (Raw);
+  return Pixels;
 }
 
 // ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
@@ -12359,6 +12907,125 @@ void Postprocess_Pipeline_Create () {
 
 } // Postprocess_Pipeline_Create
 
+// ══════════════════════════
+//   Menu_Pipeline_Create
+// ══════════════════════════
+//
+// Creates the compute pipeline for the menu overlay pass:
+//   binding 0: storage image (display output, read-write for alpha blending)
+//   binding 1: combined image sampler (MSDF font atlas)
+//   binding 2: storage buffer (console text lines — GPU_Console_Line array)
+// Push constants: GPU_Menu_Push (resolution, line count, opacity, scroll)
+
+void Menu_Pipeline_Create () {
+
+  // Load and upload the MSDF font atlas (assets/oxygen11.png)
+  uint Atlas_W = 0, Atlas_H = 0;
+  uint8_t *Atlas_Pixels = PNG_Load ("assets/oxygen11.png", &Atlas_W, &Atlas_H);
+  if (not Atlas_Pixels) { printf ("[menu] failed to load font atlas assets/oxygen11.png\n"); return; }
+  printf ("[menu] font atlas: %ux%u\n", Atlas_W, Atlas_H);
+
+  // Upload atlas to GPU via the standard texture upload path
+  int Atlas_Heap = -1;
+  Texture_Upload_With_Format (Command_Buffer, Queue, Atlas_Pixels, Atlas_W, Atlas_H,
+                              VK_FORMAT_R8G8B8A8_UNORM,
+                              &Font_Atlas.Image, &Font_Atlas.Memory, &Font_Atlas.View, &Atlas_Heap);
+  free (Atlas_Pixels);
+  Font_Atlas.Format = VK_FORMAT_R8G8B8A8_UNORM;
+
+  // Create linear sampler for MSDF sampling
+  VK_CHECK (vkCreateSampler (/*device      =>*/ Device,
+                              /*pCreateInfo =>*/ &(VkSamplerCreateInfo){
+                                .sType        = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
+                                .magFilter    = VK_FILTER_LINEAR,
+                                .minFilter    = VK_FILTER_LINEAR,
+                                .addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+                                .addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+                                .addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE},
+                              /*pAllocator  =>*/ NULL,
+                              /*pSampler    =>*/ &Font_Sampler));
+
+  // Allocate console text SSBO (host-visible for CPU writes each frame)
+  Console_Text_Buffer = Buffer_Allocate (/*Size         =>*/ sizeof (GPU_Console_Line) * MENU_MAX_LINES,
+                                         /*Usage        =>*/ VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                                         /*Memory_Flags =>*/ VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT
+                                                           | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+
+  // Descriptor layout: display image + font atlas sampler + text SSBO
+  VkDescriptorSetLayoutBinding Bindings[] = {
+    {0, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,          1, VK_SHADER_STAGE_COMPUTE_BIT, NULL},          // Display output
+    {1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_COMPUTE_BIT, &Font_Sampler}, // Font atlas
+    {2, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,         1, VK_SHADER_STAGE_COMPUTE_BIT, NULL}};         // Console text
+
+  VK_CHECK (vkCreateDescriptorSetLayout (/*device      =>*/ Device,
+                                         /*pCreateInfo =>*/ &(VkDescriptorSetLayoutCreateInfo){
+                                           .sType        = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+                                           .bindingCount = 3,
+                                           .pBindings    = Bindings},
+                                         /*pAllocator  =>*/ NULL,
+                                         /*pSetLayout  =>*/ &Menu_Descriptor_Layout));
+
+  // Pipeline layout with push constants
+  VkPushConstantRange Push_Range = {VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof (GPU_Menu_Push)};
+  VK_CHECK (vkCreatePipelineLayout (/*device          =>*/ Device,
+                                    /*pCreateInfo     =>*/ &(VkPipelineLayoutCreateInfo){
+                                      .sType                  = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+                                      .setLayoutCount         = 1,
+                                      .pSetLayouts            = &Menu_Descriptor_Layout,
+                                      .pushConstantRangeCount = 1,
+                                      .pPushConstantRanges    = &Push_Range},
+                                    /*pAllocator      =>*/ NULL,
+                                    /*pPipelineLayout =>*/ &Menu_Pipeline_Layout));
+
+  // Load shader and create compute pipeline
+  VkShaderModule Module = Shader_Module_Load (Shader_Path(Menu_Overlay));
+  VK_CHECK (vkCreateComputePipelines (/*device          =>*/ Device,
+                                      /*pipelineCache   =>*/ Pipeline_Cache,
+                                      /*createInfoCount =>*/ 1,
+                                      /*pCreateInfos    =>*/ &(VkComputePipelineCreateInfo){
+                                        .sType  = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
+                                        .stage  = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, NULL, 0,
+                                                   VK_SHADER_STAGE_COMPUTE_BIT, Module, "main", NULL},
+                                        .layout = Menu_Pipeline_Layout},
+                                      /*pAllocator      =>*/ NULL,
+                                      /*pPipelines      =>*/ &Menu_Pipeline));
+  vkDestroyShaderModule (Device, Module, NULL);
+
+  // Descriptor pool and set
+  VkDescriptorPoolSize Pool_Sizes[] = {
+    {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,          1},
+    {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1},
+    {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,         1}};
+  VK_CHECK (vkCreateDescriptorPool (/*device          =>*/ Device,
+                                    /*pCreateInfo     =>*/ &(VkDescriptorPoolCreateInfo){
+                                      .sType         = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
+                                      .maxSets       = 1,
+                                      .poolSizeCount = 3,
+                                      .pPoolSizes    = Pool_Sizes},
+                                    /*pAllocator      =>*/ NULL,
+                                    /*pDescriptorPool =>*/ &Menu_Descriptor_Pool));
+
+  VK_CHECK (vkAllocateDescriptorSets (/*device          =>*/ Device,
+                                      /*pAllocateInfo   =>*/ &(VkDescriptorSetAllocateInfo){
+                                        .sType              = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+                                        .descriptorPool     = Menu_Descriptor_Pool,
+                                        .descriptorSetCount = 1,
+                                        .pSetLayouts        = &Menu_Descriptor_Layout},
+                                      /*pDescriptorSets =>*/ &Menu_Descriptor_Set));
+
+  // Write descriptors
+  VkDescriptorImageInfo  Display_Info = {.imageView = Postprocess_Output_Image.View, .imageLayout = VK_IMAGE_LAYOUT_GENERAL};
+  VkDescriptorImageInfo  Atlas_Info   = {.sampler = Font_Sampler, .imageView = Font_Atlas.View, .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+  VkDescriptorBufferInfo Text_Info    = {.buffer = Console_Text_Buffer.Buffer, .offset = 0, .range = VK_WHOLE_SIZE};
+
+  VkWriteDescriptorSet Writes[] = {
+    {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, Menu_Descriptor_Set, 0, 0, 1, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,          &Display_Info, NULL, NULL},
+    {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, Menu_Descriptor_Set, 1, 0, 1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &Atlas_Info,   NULL, NULL},
+    {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, Menu_Descriptor_Set, 2, 0, 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,         NULL,          &Text_Info, NULL}};
+  vkUpdateDescriptorSets (Device, 3, Writes, 0, NULL);
+
+} // Menu_Pipeline_Create
+
 // ═══════════════════════════
 //   Denoise_Pipeline_Create
 // ═══════════════════════════
@@ -13117,6 +13784,74 @@ void Raytracing_Frame (GPU_Postprocess_Push Postprocess) {
                              /*size          =>*/ sizeof Postprocess,
                              /*pValues       =>*/ &Postprocess);
     vkCmdDispatch (Command_Buffer, (Render_Width + 7) / 8, (Render_Height + 7) / 8, 1);
+  }
+
+  // ── Menu overlay pass ── MSDF text composited on top of the display image ──
+  if (Menu_Pipeline and Console_Text_Buffer.Buffer) {
+
+    // Barrier: postprocess writes must finish before menu reads/writes
+    vkCmdPipelineBarrier (/*commandBuffer            =>*/ Command_Buffer,
+                          /*srcStageMask             =>*/ VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                          /*dstStageMask             =>*/ VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                          /*dependencyFlags          =>*/ 0,
+                          /*memoryBarrierCount       =>*/ 1,
+                          /*pMemoryBarriers          =>*/ &(VkMemoryBarrier){
+                            VK_STRUCTURE_TYPE_MEMORY_BARRIER, NULL,
+                            VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT},
+                          /*bufferMemoryBarrierCount =>*/ 0,
+                          /*pBufferMemoryBarriers    =>*/ NULL,
+                          /*imageMemoryBarrierCount  =>*/ 0,
+                          /*pImageMemoryBarriers     =>*/ NULL);
+
+    // Upload console text to the SSBO
+    GPU_Console_Line *Lines = NULL;
+    VkResult Map_R = vkMapMemory (Device, Console_Text_Buffer.Memory, Console_Text_Buffer.Offset,
+                                  Console_Text_Buffer.Size, 0, (void **)&Lines);
+    if (Map_R == VK_SUCCESS and Lines) {
+      memset (Lines, 0, sizeof (GPU_Console_Line) * MENU_MAX_LINES);
+      // Copy the most recent console log lines into the SSBO
+      if (Console.Lock) SDL_LockMutex (Console.Lock);
+      int Src_End   = Console.Log_Write;
+      int Src_Start = Src_End > CONSOLE_LOG_SIZE ? Src_End - CONSOLE_LOG_SIZE : 0;
+      int Line_Idx  = 0, Char_Idx = 0;
+      for (int I = Src_Start; I < Src_End and Line_Idx < MENU_MAX_LINES; I++) {
+        char Ch = Console.Log[I % CONSOLE_LOG_SIZE];
+        if (Ch == '\n' or Char_Idx >= MENU_MAX_CHARS - 1) {
+          Lines[Line_Idx].Length = (uint32_t)Char_Idx;
+          Line_Idx++; Char_Idx = 0;
+        } else {
+          Lines[Line_Idx].Codepoints[Char_Idx++] = (uint32_t)(uint8_t)Ch;
+        }
+      }
+      if (Char_Idx > 0 and Line_Idx < MENU_MAX_LINES) Lines[Line_Idx].Length = (uint32_t)Char_Idx;
+      if (Console.Lock) SDL_UnlockMutex (Console.Lock);
+      vkUnmapMemory (Device, Console_Text_Buffer.Memory);
+
+      // Dispatch menu overlay compute shader
+      GPU_Menu_Push Menu_Push = {
+        .Resolution = {(uint32_t)Render_Width, (uint32_t)Render_Height},
+        .Line_Count = (uint32_t)(Line_Idx + (Char_Idx > 0 ? 1 : 0)),
+        .Cursor_Pos = 0,
+        .Opacity    = 0.7f,
+        .Scroll     = 0.f};
+
+      vkCmdBindPipeline       (Command_Buffer, VK_PIPELINE_BIND_POINT_COMPUTE, Menu_Pipeline);
+      vkCmdBindDescriptorSets (/*commandBuffer      =>*/ Command_Buffer,
+                               /*pipelineBindPoint   =>*/ VK_PIPELINE_BIND_POINT_COMPUTE,
+                               /*layout              =>*/ Menu_Pipeline_Layout,
+                               /*firstSet            =>*/ 0,
+                               /*descriptorSetCount  =>*/ 1,
+                               /*pDescriptorSets     =>*/ &Menu_Descriptor_Set,
+                               /*dynamicOffsetCount  =>*/ 0,
+                               /*pDynamicOffsets     =>*/ NULL);
+      vkCmdPushConstants      (/*commandBuffer =>*/ Command_Buffer,
+                               /*layout        =>*/ Menu_Pipeline_Layout,
+                               /*stageFlags    =>*/ VK_SHADER_STAGE_COMPUTE_BIT,
+                               /*offset        =>*/ 0,
+                               /*size          =>*/ sizeof Menu_Push,
+                               /*pValues       =>*/ &Menu_Push);
+      vkCmdDispatch (Command_Buffer, (Render_Width + 7) / 8, (Render_Height + 7) / 8, 1);
+    }
   }
 
   // Select blit source: postprocess writes to Display_Image, raw RT to Storage_Image
@@ -16736,6 +17471,255 @@ glsl comp Quickhull_GPU {
     }
   }
 } // Quickhull_GPU
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════════════
+//
+//   Menu_Overlay — MSDF Text Rendering Compute Shader (Ada: Neo.Data.Console drawing interface)
+//
+// ═══════════════════════════════════════════════════════════════════════════════════════════════════════
+//
+// Composites console text on top of the post-processed display image using multi-channel
+// signed distance field (MSDF) font rendering. Each invocation processes one pixel.
+//
+// Bindings:
+//   0: storage image  — display output (read-write, alpha blend text on top)
+//   1: sampler2D      — MSDF font atlas (Oxygen 11pt, assets/oxygen11.png)
+//   2: storage buffer — GPU_Console_Line array (codepoints + style per line)
+//
+// Push constants: resolution, line count, opacity, scroll
+
+glsl comp Menu_Overlay {
+  #version 460
+
+  layout(binding = 0, rgba16f) uniform image2D Display_Image;
+  layout(binding = 1) uniform sampler2D Font_Atlas;
+
+  struct Console_Line {
+    uint Codepoints[128];
+    uint Length;
+    uint Style;
+    uint Pad[2];
+  };
+  layout(std430, binding = 2) readonly buffer Text_Buffer { Console_Line Lines[]; };
+
+  layout(push_constant) uniform Push {
+    uvec2 Resolution;
+    uint  Line_Count;
+    uint  Cursor_Pos;
+    float Opacity;
+    float Scroll;
+    uint  Pad[2];
+  } Params;
+
+  layout(local_size_x = 8, local_size_y = 8) in;
+
+  // ── Oxygen 11pt MSDF Glyph Table (ASCII 32-126) ──
+  // Each glyph: advance, planeBounds (l,b,r,t), atlasBounds (l,b,r,t)
+  struct Glyph { float Advance; vec4 Plane; vec4 Atlas; };
+
+  const Glyph Glyphs[95] = Glyph[95](
+    Glyph(0.250, vec4(0,0,0,0), vec4(0,0,0,0)),                                                       // 32 space
+    Glyph(0.286, vec4(0.013,-0.078,0.273,0.797), vec4(596.5,194.5,621.5,278.5)),                       // 33 !
+    Glyph(0.347, vec4(0.003,0.432,0.346,0.807), vec4(596.5,363.5,629.5,399.5)),                        // 34 "
+    Glyph(0.554, vec4(-0.023,-0.078,0.571,0.786), vec4(373.5,227.5,430.5,310.5)),                      // 35 #
+    Glyph(0.606, vec4(-0.020,-0.161,0.625,0.891), vec4(250.5,574.5,312.5,675.5)),                      // 36 $
+    Glyph(0.917, vec4(-0.013,-0.078,0.935,0.797), vec4(0.5,508.5,91.5,592.5)),                         // 37 %
+    Glyph(0.721, vec4(-0.015,-0.078,0.746,0.797), vec4(108.5,591.5,181.5,675.5)),                      // 38 &
+    Glyph(0.207, vec4(-0.004,0.411,0.204,0.797), vec4(545.5,0.5,565.5,37.5)),                          // 39 '
+    Glyph(0.297, vec4(-0.017,-0.203,0.327,0.797), vec4(463.5,579.5,496.5,675.5)),                      // 40 (
+    Glyph(0.297, vec4(-0.030,-0.203,0.314,0.797), vec4(497.5,579.5,530.5,675.5)),                      // 41 )
+    Glyph(0.540, vec4(-0.022,0.214,0.561,0.807), vec4(373.5,1.5,429.5,58.5)),                          // 42 *
+    Glyph(0.550, vec4(-0.016,0.005,0.567,0.630), vec4(312.5,0.5,368.5,60.5)),                          // 43 +
+    Glyph(0.247, vec4(-0.011,-0.203,0.239,0.182), vec4(596.5,129.5,620.5,166.5)),                      // 44 ,
+    Glyph(0.328, vec4(-0.023,0.172,0.352,0.380), vec4(596.5,487.5,632.5,507.5)),                       // 45 -
+    Glyph(0.241, vec4(-0.003,-0.078,0.258,0.193), vec4(596.5,167.5,621.5,193.5)),                      // 46 .
+    Glyph(0.465, vec4(-0.041,-0.172,0.491,0.786), vec4(565.5,583.5,616.5,675.5)),                      // 47 /
+    Glyph(0.606, vec4(-0.010,-0.078,0.615,0.807), vec4(250.5,116.5,310.5,201.5)),                      // 48 0
+    Glyph(0.306, vec4(-0.045,-0.068,0.288,0.797), vec4(596.5,279.5,628.5,362.5)),                      // 49 1
+    Glyph(0.545, vec4(-0.021,-0.068,0.552,0.807), vec4(432.5,359.5,487.5,443.5)),                      // 50 2
+    Glyph(0.539, vec4(-0.012,-0.078,0.551,0.807), vec4(432.5,35.5,486.5,120.5)),                       // 51 3
+    Glyph(0.591, vec4(-0.014,-0.068,0.621,0.797), vec4(250.5,425.5,311.5,508.5)),                      // 52 4
+    Glyph(0.575, vec4(-0.008,-0.078,0.586,0.797), vec4(373.5,142.5,430.5,226.5)),                      // 53 5
+    Glyph(0.585, vec4(-0.017,-0.078,0.608,0.797), vec4(312.5,489.5,372.5,573.5)),                      // 54 6
+    Glyph(0.514, vec4(-0.018,-0.068,0.544,0.797), vec4(490.5,424.5,544.5,507.5)),                      // 55 7
+    Glyph(0.577, vec4(-0.013,-0.078,0.591,0.807), vec4(617.5,590.5,675.5,675.5)),                      // 56 8
+    Glyph(0.569, vec4(-0.025,-0.068,0.600,0.807), vec4(312.5,404.5,372.5,488.5)),                      // 57 9
+    Glyph(0.241, vec4(0.007,-0.078,0.236,0.620), vec4(636.5,506.5,658.5,573.5)),                       // 58 :
+    Glyph(0.253, vec4(0.001,-0.224,0.251,0.620), vec4(596.5,47.5,620.5,128.5)),                        // 59 ;
+    Glyph(0.574, vec4(-0.012,0.005,0.582,0.651), vec4(373.5,59.5,430.5,121.5)),                        // 60 <
+    Glyph(0.600, vec4(-0.002,0.120,0.602,0.526), vec4(312.5,61.5,370.5,100.5)),                        // 61 =
+    Glyph(0.574, vec4(-0.006,0.005,0.587,0.651), vec4(432.5,511.5,489.5,573.5)),                       // 62 >
+    Glyph(0.422, vec4(-0.030,-0.078,0.439,0.807), vec4(545.5,203.5,590.5,288.5)),                      // 63 ?
+    Glyph(0.886, vec4(-0.010,-0.130,0.896,0.797), vec4(0.5,418.5,87.5,507.5)),                         // 64 @
+    Glyph(0.636, vec4(-0.062,-0.068,0.698,0.786), vec4(108.5,508.5,181.5,590.5)),                      // 65 A
+    Glyph(0.628, vec4(0.021,-0.068,0.656,0.786), vec4(250.5,342.5,311.5,424.5)),                       // 66 B
+    Glyph(0.630, vec4(-0.008,-0.078,0.669,0.797), vec4(182.5,425.5,247.5,509.5)),                      // 67 C
+    Glyph(0.733, vec4(0.022,-0.068,0.741,0.786), vec4(108.5,174.5,177.5,256.5)),                       // 68 D
+    Glyph(0.558, vec4(0.020,-0.068,0.572,0.786), vec4(490.5,274.5,543.5,356.5)),                       // 69 E
+    Glyph(0.508, vec4(0.020,-0.068,0.551,0.786), vec4(490.5,108.5,541.5,190.5)),                       // 70 F
+    Glyph(0.713, vec4(-0.012,-0.078,0.717,0.797), vec4(108.5,340.5,178.5,424.5)),                      // 71 G
+    Glyph(0.727, vec4(0.020,-0.068,0.707,0.786), vec4(182.5,510.5,248.5,592.5)),                       // 72 H
+    Glyph(0.264, vec4(0.022,-0.068,0.240,0.786), vec4(636.5,423.5,657.5,505.5)),                       // 73 I
+    Glyph(0.269, vec4(-0.083,-0.172,0.260,0.797), vec4(531.5,582.5,564.5,675.5)),                      // 74 J
+    Glyph(0.606, vec4(0.022,-0.068,0.678,0.786), vec4(182.5,174.5,245.5,256.5)),                       // 75 K
+    Glyph(0.499, vec4(0.021,-0.068,0.552,0.786), vec4(490.5,191.5,541.5,273.5)),                       // 76 L
+    Glyph(0.887, vec4(0.022,-0.068,0.865,0.786), vec4(0.5,204.5,81.5,286.5)),                          // 77 M
+    Glyph(0.740, vec4(0.021,-0.068,0.719,0.786), vec4(182.5,593.5,249.5,675.5)),                       // 78 N
+    Glyph(0.794, vec4(-0.009,-0.078,0.803,0.807), vec4(0.5,118.5,78.5,203.5)),                         // 79 O
+    Glyph(0.566, vec4(0.004,-0.068,0.619,0.797), vec4(312.5,188.5,371.5,271.5)),                       // 80 P
+    Glyph(0.794, vec4(-0.009,-0.297,0.803,0.807), vec4(0.5,11.5,78.5,117.5)),                          // 81 Q
+    Glyph(0.654, vec4(0.008,-0.068,0.685,0.797), vec4(182.5,341.5,247.5,424.5)),                       // 82 R
+    Glyph(0.599, vec4(-0.020,-0.078,0.625,0.807), vec4(182.5,5.5,244.5,90.5)),                         // 83 S
+    Glyph(0.537, vec4(-0.060,-0.068,0.596,0.786), vec4(182.5,91.5,245.5,173.5)),                       // 84 T
+    Glyph(0.702, vec4(0.011,-0.078,0.688,0.786), vec4(182.5,257.5,247.5,340.5)),                       // 85 U
+    Glyph(0.606, vec4(-0.067,-0.068,0.673,0.786), vec4(108.5,425.5,179.5,507.5)),                      // 86 V
+    Glyph(0.983, vec4(-0.066,-0.068,1.049,0.786), vec4(0.5,593.5,107.5,675.5)),                        // 87 W
+    Glyph(0.605, vec4(-0.062,-0.068,0.667,0.786), vec4(108.5,257.5,178.5,339.5)),                      // 88 X
+    Glyph(0.583, vec4(-0.068,-0.068,0.651,0.786), vec4(108.5,91.5,177.5,173.5)),                       // 89 Y
+    Glyph(0.578, vec4(-0.024,-0.068,0.612,0.786), vec4(250.5,259.5,311.5,341.5)),                      // 90 Z
+    Glyph(0.330, vec4(0.003,-0.214,0.358,0.797), vec4(393.5,578.5,427.5,675.5)),                       // 91 [
+    Glyph(0.412, vec4(-0.040,-0.099,0.460,0.786), vec4(545.5,421.5,593.5,506.5)),                      // 92 backslash
+    Glyph(0.330, vec4(-0.027,-0.214,0.327,0.797), vec4(428.5,578.5,462.5,675.5)),                      // 93 ]
+    Glyph(0.565, vec4(-0.031,0.224,0.594,0.807), vec4(250.5,202.5,310.5,258.5)),                       // 94 ^
+    Glyph(0.530, vec4(-0.032,-0.214,0.562,-0.016), vec4(373.5,122.5,430.5,141.5)),                     // 95 _
+    Glyph(0.314, vec4(-0.024,0.547,0.320,0.870), vec4(432.5,3.5,465.5,34.5)),                          // 96 `
+    Glyph(0.536, vec4(-0.020,-0.078,0.532,0.609), vec4(490.5,357.5,543.5,423.5)),                      // 97 a
+    Glyph(0.593, vec4(0.008,-0.078,0.612,0.818), vec4(312.5,101.5,370.5,187.5)),                       // 98 b
+    Glyph(0.473, vec4(-0.018,-0.078,0.503,0.609), vec4(545.5,507.5,595.5,573.5)),                      // 99 c
+    Glyph(0.591, vec4(-0.020,-0.078,0.584,0.818), vec4(373.5,311.5,431.5,397.5)),                      // 100 d
+    Glyph(0.541, vec4(-0.020,-0.078,0.563,0.609), vec4(432.5,444.5,488.5,510.5)),                      // 101 e
+    Glyph(0.327, vec4(-0.049,-0.068,0.410,0.828), vec4(545.5,116.5,589.5,202.5)),                      // 102 f
+    Glyph(0.580, vec4(-0.033,-0.318,0.581,0.609), vec4(108.5,1.5,167.5,90.5)),                         // 103 g
+    Glyph(0.543, vec4(0.005,-0.068,0.578,0.818), vec4(432.5,273.5,487.5,358.5)),                       // 104 h
+    Glyph(0.250, vec4(0.021,-0.068,0.229,0.797), vec4(636.5,339.5,656.5,422.5)),                       // 105 i
+    Glyph(0.217, vec4(-0.105,-0.318,0.228,0.797), vec4(490.5,0.5,522.5,107.5)),                        // 106 j
+    Glyph(0.508, vec4(0.003,-0.068,0.576,0.818), vec4(432.5,187.5,487.5,272.5)),                       // 107 k
+    Glyph(0.278, vec4(0.007,-0.078,0.362,0.818), vec4(596.5,400.5,630.5,486.5)),                       // 108 l
+    Glyph(0.866, vec4(0.003,-0.068,0.899,0.609), vec4(0.5,352.5,86.5,417.5)),                          // 109 m
+    Glyph(0.578, vec4(0.005,-0.068,0.577,0.609), vec4(432.5,121.5,487.5,186.5)),                       // 110 n
+    Glyph(0.586, vec4(-0.020,-0.078,0.605,0.609), vec4(312.5,337.5,372.5,403.5)),                      // 111 o
+    Glyph(0.586, vec4(0.004,-0.297,0.608,0.609), vec4(373.5,486.5,431.5,573.5)),                       // 112 p
+    Glyph(0.591, vec4(-0.019,-0.297,0.586,0.609), vec4(373.5,398.5,431.5,485.5)),                      // 113 q
+    Glyph(0.364, vec4(0.008,-0.068,0.414,0.609), vec4(596.5,508.5,635.5,573.5)),                       // 114 r
+    Glyph(0.465, vec4(-0.013,-0.078,0.487,0.609), vec4(545.5,354.5,593.5,420.5)),                      // 115 s
+    Glyph(0.347, vec4(-0.052,-0.078,0.396,0.724), vec4(545.5,38.5,588.5,115.5)),                       // 116 t
+    Glyph(0.537, vec4(-0.013,-0.078,0.550,0.599), vec4(490.5,508.5,544.5,573.5)),                      // 117 u
+    Glyph(0.503, vec4(-0.067,-0.068,0.568,0.599), vec4(250.5,509.5,311.5,573.5)),                      // 118 v
+    Glyph(0.784, vec4(-0.056,-0.068,0.840,0.599), vec4(0.5,287.5,86.5,351.5)),                         // 119 w
+    Glyph(0.516, vec4(-0.049,-0.068,0.565,0.599), vec4(312.5,272.5,371.5,336.5)),                      // 120 x
+    Glyph(0.499, vec4(-0.065,-0.307,0.560,0.599), vec4(250.5,0.5,310.5,87.5)),                         // 121 y
+    Glyph(0.445, vec4(-0.022,-0.068,0.478,0.599), vec4(545.5,289.5,593.5,353.5)),                      // 122 z
+    Glyph(0.358, vec4(-0.028,-0.203,0.378,0.818), vec4(353.5,577.5,392.5,675.5)),                      // 123 {
+    Glyph(0.390, vec4(0.096,-0.266,0.294,0.839), vec4(636.5,232.5,655.5,338.5)),                       // 124 |
+    Glyph(0.360, vec4(-0.018,-0.203,0.388,0.818), vec4(313.5,577.5,352.5,675.5)),                      // 125 }
+    Glyph(0.613, vec4(-0.006,0.182,0.619,0.464), vec4(250.5,88.5,310.5,115.5))                         // 126 ~
+  );
+
+  // ── Style Colors (Ada: Neo.Data.Console Style_State → Color) ──
+  const vec3 Style_Colors[6] = vec3[6](
+    vec3(0.9, 0.9, 0.9),   // STYLE_DEFAULT  — white
+    vec3(0.9, 0.2, 0.2),   // STYLE_ERROR    — crimson
+    vec3(1.0, 0.6, 0.1),   // STYLE_WARNING  — orange
+    vec3(0.4, 0.7, 1.0),   // STYLE_SECTION  — light blue
+    vec3(0.5, 0.5, 0.5),   // STYLE_INFO     — dark gray
+    vec3(1.0, 0.9, 0.3)    // STYLE_ENTRY    — yellow
+  );
+
+  // MSDF median-of-three: the standard MSDF screening function
+  float Median (float R, float G, float B) {
+    return max (min (R, G), min (max (R, G), B));
+  }
+
+  // Render a single glyph and return its alpha coverage
+  float Render_Glyph (vec2 Pixel, vec2 Glyph_Origin, float Scale, Glyph G, vec2 Atlas_Size) {
+    if (G.Atlas == vec4(0)) return 0.0;
+
+    vec2 Plane_Size = G.Plane.zw - G.Plane.xy;
+    if (Plane_Size.x <= 0.0 or Plane_Size.y <= 0.0) return 0.0;
+
+    vec2 Local = (Pixel - Glyph_Origin) / Scale;
+    vec2 UV    = (Local - G.Plane.xy) / Plane_Size;
+
+    if (UV.x < 0.0 or UV.x > 1.0 or UV.y < 0.0 or UV.y > 1.0) return 0.0;
+
+    vec2 Atlas_UV = (UV * (G.Atlas.zw - G.Atlas.xy) + G.Atlas.xy) / Atlas_Size;
+    vec3 Dist     = texture (Font_Atlas, Atlas_UV).rgb;
+    float SD      = Median (Dist.r, Dist.g, Dist.b);
+    // Approximate fwidth for compute shaders: use screen-space pixel size relative to font scale
+    float W       = 0.7 / Scale;
+    return smoothstep (0.5 - W, 0.5 + W, SD);
+  }
+
+  void main () {
+    ivec2 Pixel = ivec2(gl_GlobalInvocationID.xy);
+    if (Pixel.x >= int(Params.Resolution.x) or Pixel.y >= int(Params.Resolution.y)) return;
+
+    vec4  Scene_Color = imageLoad (Display_Image, Pixel);
+    vec2  Frag        = vec2(Pixel) + 0.5;
+    float Res_Y       = float(Params.Resolution.y);
+    vec2  Atlas_Size  = vec2(textureSize (Font_Atlas, 0));
+
+    // Console occupies the bottom 40% of the screen
+    float Console_Top    = Res_Y * 0.6;
+    float Console_Bottom = Res_Y;
+    float Line_Height    = 18.0; // Pixels per line
+    float Font_Scale     = 14.0; // Font scale in pixels
+    float Margin_Left    = 8.0;
+    float Margin_Bottom  = 6.0;
+
+    // Flip Y: screen coords have Y=0 at top, but our text layout assumes Y=0 at bottom
+    float Y_Flipped = Res_Y - Frag.y;
+
+    // Only process pixels in the console region
+    if (Frag.y < Console_Top) return;
+
+    // Draw semi-transparent console background
+    vec4 BG_Color = vec4(0.05, 0.05, 0.08, Params.Opacity);
+    Scene_Color   = mix (Scene_Color, vec4(BG_Color.rgb, 1.0), BG_Color.a);
+
+    // Render text lines (bottom-up: most recent line at bottom)
+    float Alpha_Acc = 0.0;
+    vec3  Text_Color_Acc = vec3(0.0);
+
+    for (uint L = 0u; L < Params.Line_Count and L < 32u; L++) {
+      float Line_Y_Base = Margin_Bottom + float(L) * Line_Height + Params.Scroll;
+      float Line_Y_Top  = Line_Y_Base + Line_Height;
+
+      // Skip lines outside the console area
+      if (Y_Flipped < Line_Y_Base - 4.0 or Y_Flipped > Line_Y_Top + 4.0) continue;
+
+      // Read line from the bottom (most recent = index Line_Count-1-L)
+      uint Line_Idx = Params.Line_Count - 1u - L;
+      if (Line_Idx >= Params.Line_Count) continue;
+      Console_Line CL = Lines[Line_Idx];
+
+      vec3 Color = Style_Colors[clamp(CL.Style, 0u, 5u)];
+      float Cursor_X = Margin_Left;
+
+      for (uint C = 0u; C < CL.Length and C < 128u; C++) {
+        uint Code = CL.Codepoints[C];
+        if (Code < 32u or Code > 126u) { Cursor_X += Font_Scale * 0.3; continue; }
+        Glyph G = Glyphs[Code - 32u];
+
+        vec2 Origin = vec2(Cursor_X, Line_Y_Base);
+        float A = Render_Glyph (vec2(Frag.x, Y_Flipped), Origin, Font_Scale, G, Atlas_Size);
+
+        if (A > 0.0) {
+          Text_Color_Acc = mix (Text_Color_Acc, Color, A);
+          Alpha_Acc = max (Alpha_Acc, A);
+        }
+        Cursor_X += G.Advance * Font_Scale;
+
+        // Early exit if past the right edge
+        if (Cursor_X > float(Params.Resolution.x)) break;
+      }
+    }
+
+    // Composite text over background
+    Scene_Color.rgb = mix (Scene_Color.rgb, Text_Color_Acc, Alpha_Acc);
+    imageStore (Display_Image, Pixel, Scene_Color);
+  }
+} // Menu_Overlay
 
 // ════════════════════════════
 //   Skinning_Pipeline_Create
