@@ -253,19 +253,40 @@ static bool write_c_source(const char *path, const char *src, size_t src_len,
     memcpy(buf, hdr, hdr_len);
     buf_len = hdr_len;
 
-    // Copy the source, skipping all excise regions
+    // Copy the source, replacing excised regions with blank lines so that
+    // compiler error line numbers in build/q3.c match the original q3.c.
+    // The header adds a fixed offset (hdr_lines) which we compensate by
+    // consuming that many newlines from the first excised region.
+    int hdr_lines = 0;
+    for (const char *h = hdr; *h; h++) if (*h == '\n') hdr_lines++;
+
     const char *cursor = src;
     const char *end    = src + src_len;
+    int compensated = 0;
     for (int i = 0; i < total_skip; i++) {
         if (skips[i].start > cursor) {
             size_t chunk = (size_t)(skips[i].start - cursor);
             memcpy(buf + buf_len, cursor, chunk);
             buf_len += chunk;
         }
+        // Count newlines in the excised region and emit that many blank lines
+        int newlines = 0;
+        for (const char *c = skips[i].start; c < skips[i].end; c++)
+            if (*c == '\n') newlines++;
+        // Compensate for the injected header lines (subtract from first region)
+        if (not compensated) { newlines -= hdr_lines; compensated = 1; }
+        if (newlines < 0) newlines = 0;
+        // Ensure buffer has room for the blank lines
+        while (buf_len + (size_t)newlines >= buf_cap) {
+            buf_cap *= 2;
+            buf = realloc(buf, buf_cap);
+        }
+        for (int nl = 0; nl < newlines; nl++) buf[buf_len++] = '\n';
         cursor = skips[i].end;
     }
     if (cursor < end) {
         size_t chunk = (size_t)(end - cursor);
+        while (buf_len + chunk + 1 >= buf_cap) { buf_cap *= 2; buf = realloc(buf, buf_cap); }
         memcpy(buf + buf_len, cursor, chunk);
         buf_len += chunk;
     }
@@ -739,6 +760,35 @@ static void platform_compile(Nob_Cmd *cmd, Platform plat, bool production) {
     // Native: host compiler with -march=native
     case PLATFORM_NATIVE:
     default:
+#ifdef _WIN32
+        // Windows native: gcc (MinGW) with VulkanSDK, link DLLs directly from build/
+        {
+            // Find VulkanSDK include path via VULKAN_SDK env or common locations
+            const char *vk_sdk = getenv("VULKAN_SDK");
+            static char sdl2_inc[256], vk_inc[256];
+            if (vk_sdk) {
+                snprintf(sdl2_inc, sizeof sdl2_inc, "-I%s/Include/SDL2", vk_sdk);
+                snprintf(vk_inc,   sizeof vk_inc,   "-I%s/Include",      vk_sdk);
+            } else {
+                snprintf(sdl2_inc, sizeof sdl2_inc, "-I%s", "/usr/include/SDL2");
+                snprintf(vk_inc,   sizeof vk_inc,   "-I%s", "/usr/include");
+            }
+
+            nob_cmd_append(cmd,
+                "gcc",
+                "-O1", "-ffast-math",
+                production ? "-DNDEBUG" : "-g",
+                "-Wall", "-Wextra",
+                "-o", production ? BUILD "release/q3.exe" : BUILD "q3.exe",
+                src_file,
+                sdl2_inc, vk_inc,
+                "-I" BUILD "stubs",
+                "-D_REENTRANT", "-DSDL_MAIN_HANDLED",
+                "-L" BUILD,
+                "-l:SDL2.dll", "-l:vulkan-1.dll", "-l:zlib1.dll",
+                "-lm", "-mconsole", "-Wl,--stack,67108864");
+        }
+#else
         nob_cmd_append(cmd,
             "cc",
             "-O3", "-march=native", "-mtune=native",
@@ -750,6 +800,7 @@ static void platform_compile(Nob_Cmd *cmd, Platform plat, bool production) {
             "-I/usr/include/SDL2", "-D_REENTRANT",
             "-lSDL2", "-lvulkan", "-lm", "-lz",
             "-lopenal");
+#endif
         break;
     }
 }
@@ -911,6 +962,7 @@ int main(int argc, char **argv) {
 
     // Compile each shader to SPIR-V (injecting tuning defines as -D flags)
     bool force_recompile = (cli_overrides > 0);  // -D overrides bypass staleness check
+    bool any_shader_rebuilt = false;
     Nob_Cmd cmd = {0};
     for (int i = 0; i < n; i++) {
         if (not force_recompile and not spv_stale(spv_paths[i], MAIN)) continue;
@@ -922,6 +974,18 @@ int main(int argc, char **argv) {
             nob_cmd_append(&cmd, define_args[d]);
         nob_cmd_append(&cmd, glsl_paths[i]);
         if (not nob_cmd_run(&cmd)) return 1;
+        any_shader_rebuilt = true;
+    }
+
+    // Invalidate the Vulkan pipeline cache when any shader was recompiled.
+    // The cache stores driver-compiled GPU ISA keyed on SPIR-V content;
+    // stale entries from old shaders would be silently reused otherwise.
+    if (any_shader_rebuilt) {
+        const char *cache_path = BUILD "pipeline_cache.bin";
+        if (nob_file_exists(cache_path)) {
+            nob_log(NOB_INFO, "shaders changed — deleting pipeline cache");
+            remove(cache_path);
+        }
     }
 
     // Build for all platforms (production) or just the selected target
