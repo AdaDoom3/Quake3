@@ -24,7 +24,7 @@ echo "============================================="
 echo "  OpenArena Official Asset Compressor"
 echo "  Maps:     ${#SELECTED_MAPS[@]} of 58 (optimal quarter)"
 echo "  Textures: KTX2 ASTC 12x12, half-res"
-echo "  Sounds:   OGG Vorbis q3 (~112kbps mono)"
+echo "  Sounds:   OGG Vorbis q3 (~112kbps stereo)"
 echo "  Archive:  .7z ultra"
 echo "  Threads:  $NPROC"
 echo "============================================="
@@ -253,7 +253,7 @@ echo "  Converted: $TEXTURE_OK / $TEXTURE_COUNT to KTX2 ASTC"
 # Step 4: Convert sounds WAV -> OGG
 # ============================================
 echo ""
-echo "[4/5] Converting sounds to OGG Vorbis (q3 ~112kbps mono)..."
+echo "[4/5] Converting sounds to OGG Vorbis (q3 ~112kbps stereo)..."
 
 convert_sound() {
     local src="$1"
@@ -263,7 +263,7 @@ convert_sound() {
 
     mkdir -p "$(dirname "$outfile")"
 
-    if ffmpeg -y -i "$OA_DIR/$src" -c:a libvorbis -q:a 3 -ac 1 "$outfile" 2>/dev/null; then
+    if ffmpeg -y -i "$OA_DIR/$src" -c:a libvorbis -q:a 3 -ac 2 "$outfile" 2>/dev/null; then
         return 0
     else
         cp "$OA_DIR/$src" "$OUTPUT_DIR/$rel"
