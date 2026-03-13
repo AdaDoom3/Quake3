@@ -12,8 +12,8 @@ NPROC=$(nproc)
 
 echo "============================================="
 echo "  OpenArena Asset Compressor"
-echo "  Textures: TGA/PNG -> KTX2 (ASTC 6x6)"
-echo "  Sounds:   WAV -> OGG (q1 ~80kbps)"
+echo "  Textures: TGA/PNG -> KTX2 (ASTC 12x12, half-res)"
+echo "  Sounds:   WAV -> OGG (q0 ~64kbps)"
 echo "  Archive:  .7z ultra"
 echo "  Threads:  $NPROC"
 echo "============================================="
@@ -53,7 +53,7 @@ echo "  Done. Copied non-media files."
 # Step 2: Convert textures TGA/PNG -> KTX2 ASTC
 # ============================================
 echo ""
-echo "[2/4] Converting textures to KTX2 ASTC (6x6 block, medium quality)..."
+echo "[2/4] Converting textures to KTX2 ASTC (12x12 block, half-res)..."
 
 TEXTURE_COUNT=0
 TEXTURE_FAIL=0
@@ -69,17 +69,16 @@ convert_texture() {
 
     mkdir -p "$(dirname "$outfile")"
 
-    # Convert to PNG (toktx needs PNG/JPG input)
-    if ! convert "$src" -strip "$tmpfile" 2>/dev/null; then
+    # Convert to PNG at half resolution (toktx needs PNG/JPG input)
+    if ! convert "$src" -strip -resize 50% "$tmpfile" 2>/dev/null; then
         echo "  WARN: Failed to convert $src to PNG, copying as-is"
         cp "$src" "$OUTPUT_DIR/$rel"
         return 1
     fi
 
-    # Get dimensions - ASTC needs multiples of block size, toktx handles this
-    # Use 6x6 ASTC blocks for good compression ratio
+    # ASTC 12x12 blocks (0.89 bpp) on half-res for maximum compression
     if toktx --encode astc \
-        --astc_blk_d 6x6 \
+        --astc_blk_d 12x12 \
         --astc_quality medium \
         --t2 \
         --assign_oetf srgb \
@@ -90,7 +89,7 @@ convert_texture() {
     else
         # Fallback: try without srgb assignment
         if toktx --encode astc \
-            --astc_blk_d 6x6 \
+            --astc_blk_d 12x12 \
             --astc_quality medium \
             --t2 \
             --threads 1 \
@@ -123,7 +122,7 @@ echo "  Converted: $TEXTURE_OK / $TEXTURE_COUNT textures to KTX2 ASTC"
 # Step 3: Convert sounds WAV -> OGG
 # ============================================
 echo ""
-echo "[3/4] Converting sounds to OGG Vorbis (quality 1 ~80kbps)..."
+echo "[3/4] Converting sounds to OGG Vorbis (quality 0 ~64kbps)..."
 
 SOUND_COUNT=0
 SOUND_OK=0
@@ -136,9 +135,9 @@ convert_sound() {
 
     mkdir -p "$(dirname "$outfile")"
 
-    # Use ffmpeg with OGG Vorbis at quality level 1 (roughly 80kbps)
-    # This is the lowest "still acceptable" quality
-    if ffmpeg -y -i "$src" -c:a libvorbis -q:a 1 -ac 1 "$outfile" 2>/dev/null; then
+    # Use ffmpeg with OGG Vorbis at quality level 0 (~64kbps mono)
+    # Lowest vorbis quality that doesn't produce artifacts on short game sounds
+    if ffmpeg -y -i "$src" -c:a libvorbis -q:a 0 -ac 1 "$outfile" 2>/dev/null; then
         return 0
     else
         echo "  WARN: Failed to convert $src, copying original"
