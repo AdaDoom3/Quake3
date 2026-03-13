@@ -1,8 +1,8 @@
 #!/bin/bash
 # OpenArena Asset Compression Script (Official Assets)
-# Downloads official OA assets, selects optimal half of maps,
-# converts textures to KTX2 ASTC 12x12 half-res, sounds to OGG q0,
-# packages into .7z ultra.
+# Selects optimal quarter of maps (14 of 58) with maximum texture overlap,
+# converts textures to KTX2 ASTC 12x12 half-res, sounds to OGG q3,
+# packages into .7z ultra. Target: <30MB.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -12,22 +12,19 @@ OUTPUT_DIR="$ROOT_DIR/oa_compressed"
 TEMP_DIR="/tmp/oa_compress_$$"
 NPROC=$(nproc)
 
-# Selected maps (29 of 58) - chosen by greedy algorithm to minimize
+# Selected maps (14 of 58) - chosen by greedy algorithm to minimize
 # the total unique texture set. These maps share the most textures.
 SELECTED_MAPS=(
-    aggressor am_galmevish cbctf1 ce1m7 czest1tourney
-    dm4ish dm6ish fan hydronex hydronex2
-    oa_bases3 oa_bases3cl oa_bases3plus3 oa_bases5 oa_ctf2
-    oa_ctf2old oa_dm4 oa_dm7 oa_pvomit oa_rpg3dm2
-    oa_shine oa_shouse oasago2 ps37ctf ps37ctf2
+    cbctf1 czest1tourney dm4ish fan hydronex
+    oa_bases3cl oa_bases3plus3 oa_ctf2 oa_ctf2old oa_pvomit
     ps9ctf pul1ctf q3dm6ish suspended
 )
 
 echo "============================================="
 echo "  OpenArena Official Asset Compressor"
-echo "  Maps:     ${#SELECTED_MAPS[@]} of 58 (optimal half)"
+echo "  Maps:     ${#SELECTED_MAPS[@]} of 58 (optimal quarter)"
 echo "  Textures: KTX2 ASTC 12x12, half-res"
-echo "  Sounds:   OGG Vorbis q0 (~64kbps mono)"
+echo "  Sounds:   OGG Vorbis q3 (~112kbps mono)"
 echo "  Archive:  .7z ultra"
 echo "  Threads:  $NPROC"
 echo "============================================="
@@ -160,8 +157,27 @@ for d in scripts vm; do
     fi
 done
 
-# Copy model support files (skins, md3, ase) - but only for models referenced by selected maps
-find models/ -type f \( -name "*.md3" -o -name "*.skin" -o -name "*.ase" -o -name "*.cfg" \) -exec cp --parents {} "$OUTPUT_DIR/" \; 2>/dev/null || true
+# Copy model files - weapons, items, effects (essential for gameplay)
+for d in models/weapons models/weapons2 models/weaphits models/powerups \
+         models/ammo models/flags models/gibs models/misc models/dpoints; do
+    if [ -d "$d" ]; then
+        find "$d" -type f \( -name "*.md3" -o -name "*.skin" -o -name "*.ase" -o -name "*.cfg" \) \
+            -exec cp --parents {} "$OUTPUT_DIR/" \; 2>/dev/null || true
+    fi
+done
+
+# Copy only a few essential player models (sarge is the default, plus 4 bots)
+KEEP_PLAYERS=(sarge smarine assassin penguin ayumi)
+for player in "${KEEP_PLAYERS[@]}"; do
+    if [ -d "models/players/$player" ]; then
+        find "models/players/$player" -type f \( -name "*.md3" -o -name "*.skin" -o -name "*.cfg" \) \
+            -exec cp --parents {} "$OUTPUT_DIR/" \; 2>/dev/null || true
+    fi
+done
+
+# Copy map objects only for selected maps' referenced mapobjects
+find models/mapobjects/ -type f \( -name "*.md3" -o -name "*.ase" \) \
+    -exec cp --parents {} "$OUTPUT_DIR/" \; 2>/dev/null || true
 
 # Copy levelshots for selected maps
 mkdir -p "$OUTPUT_DIR/levelshots"
@@ -237,7 +253,7 @@ echo "  Converted: $TEXTURE_OK / $TEXTURE_COUNT to KTX2 ASTC"
 # Step 4: Convert sounds WAV -> OGG
 # ============================================
 echo ""
-echo "[4/5] Converting sounds to OGG Vorbis (q0 ~64kbps mono)..."
+echo "[4/5] Converting sounds to OGG Vorbis (q3 ~112kbps mono)..."
 
 convert_sound() {
     local src="$1"
@@ -247,7 +263,7 @@ convert_sound() {
 
     mkdir -p "$(dirname "$outfile")"
 
-    if ffmpeg -y -i "$OA_DIR/$src" -c:a libvorbis -q:a 0 -ac 1 "$outfile" 2>/dev/null; then
+    if ffmpeg -y -i "$OA_DIR/$src" -c:a libvorbis -q:a 3 -ac 1 "$outfile" 2>/dev/null; then
         return 0
     else
         cp "$OA_DIR/$src" "$OUTPUT_DIR/$rel"
@@ -294,9 +310,9 @@ echo "  Source (full OA extracted):  $(du -sh "$OA_DIR" --exclude='.git' | cut -
 echo "  Selected subset (raw):      $(du -sh "$OUTPUT_DIR" | cut -f1)"
 echo "  .7z archive:                $(numfmt --to=iec-i --suffix=B $ARCHIVE_SIZE)"
 echo ""
-echo "  Maps:      ${#SELECTED_MAPS[@]} of 58 (optimized half)"
+echo "  Maps:      ${#SELECTED_MAPS[@]} of 58 (optimized quarter)"
 echo "  Textures:  $TEXTURE_OK converted to KTX2 ASTC 12x12 half-res"
-echo "  Sounds:    $SOUND_OK converted to OGG q0"
+echo "  Sounds:    $SOUND_OK converted to OGG q3"
 echo ""
 
 # Per-directory breakdown
