@@ -12,3 +12,7 @@ assets/materials/cspromod/
 assets/materials/models/props/
 assets_compressed/
 openarena_assets_compressed.7z
+openarena_src/
+openarena_assets/
+oa_compressed/
+openarena_compressed.7z
