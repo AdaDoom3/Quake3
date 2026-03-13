@@ -142,7 +142,7 @@ echo "[2/5] Copying selected maps and support files..."
 # Copy selected BSP + AAS files
 mkdir -p "$OUTPUT_DIR/maps"
 for mapname in "${SELECTED_MAPS[@]}"; do
-    for ext in .bsp .aas; do
+    for ext in .bsp; do
         src="maps/${mapname}${ext}"
         [ -f "$src" ] && cp "$src" "$OUTPUT_DIR/maps/"
     done
@@ -166,18 +166,18 @@ for d in models/weapons models/weapons2 models/weaphits models/powerups \
     fi
 done
 
-# Copy only a few essential player models (sarge is the default, plus 4 bots)
-KEEP_PLAYERS=(sarge smarine assassin penguin ayumi)
-for player in "${KEEP_PLAYERS[@]}"; do
-    if [ -d "models/players/$player" ]; then
-        find "models/players/$player" -type f \( -name "*.md3" -o -name "*.skin" -o -name "*.cfg" \) \
-            -exec cp --parents {} "$OUTPUT_DIR/" \; 2>/dev/null || true
+# Copy all player models
+if [ -d "models/players" ]; then
+    find "models/players" -type f \( -name "*.md3" -o -name "*.skin" -o -name "*.cfg" \) \
+        -exec cp --parents {} "$OUTPUT_DIR/" \; 2>/dev/null || true
+fi
+
+# Copy only referenced mapobjects (flares, fan)
+for obj in models/mapobjects/flares models/mapobjects/fan; do
+    if [ -d "$obj" ]; then
+        find "$obj" -type f -name "*.md3" -exec cp --parents {} "$OUTPUT_DIR/" \; 2>/dev/null || true
     fi
 done
-
-# Copy map objects only for selected maps' referenced mapobjects
-find models/mapobjects/ -type f \( -name "*.md3" -o -name "*.ase" \) \
-    -exec cp --parents {} "$OUTPUT_DIR/" \; 2>/dev/null || true
 
 # Copy levelshots for selected maps
 mkdir -p "$OUTPUT_DIR/levelshots"
