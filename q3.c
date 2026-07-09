@@ -3736,7 +3736,7 @@ int main (int Argc, char **Argv) {
       printf ("Usage: %s [options] [mapname.bsp]\n\n", Argv[0]);
       printf ("Options:\n");
       printf ("  --source          Load Source engine BSP (VBSP) instead of Q3 BSP\n");
-      printf ("  --mdl PATH        Load Source MDL model as enemy entity\n");
+      printf ("  --mdl PATH        Load Source MDL model as entity\n");
       printf ("  --weapon PATH     Load Source MDL as held weapon (viewmodel)\n");
       printf ("  --world PRESET    Set world preset: q3, source, unreal\n");
       printf ("  --pak PATH        Mount an asset archive (.pk3/.pak/.wad)\n");
@@ -3987,6 +3987,7 @@ int main (int Argc, char **Argv) {
 
   // Create the ray tracing storage targe and depth images
   Raytracing_Storage_Image = Image_Storage_Create (Render_Width, Render_Height);
+  if (not Raytracing_Storage_Image.Image) { fprintf (stderr, "[fatal] GPU heap exhausted for storage image\n"); exit (1); }
   Vulkan_Transition_Storage_Image ();
 
   // Create R32F depth image for postprocessing
@@ -4012,6 +4013,7 @@ int main (int Argc, char **Argv) {
     Depth_Image.Heap_Block = GPU_Heap_Alloc (&Heap, Mem_Req.size, Mem_Req.alignment, /*Is_Image=*/1,
                                               VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, Mem_Req.memoryTypeBits,
                                               &Depth_Image.Memory, &Depth_Image.Offset, NULL);
+    if (Depth_Image.Heap_Block < 0) { fprintf (stderr, "[fatal] GPU heap exhausted for depth image\n"); exit (1); }
     VK_CHECK (vkBindImageMemory (Device, Depth_Image.Image, Depth_Image.Memory, Depth_Image.Offset));
     VK_CHECK (vkCreateImageView (/*device      =>*/ Device,
                                  /*pCreateInfo =>*/ &(VkImageViewCreateInfo){
@@ -4058,6 +4060,7 @@ int main (int Argc, char **Argv) {
 
   // Create history image for temporal accumulation
   History_Image = Image_Storage_Create (Render_Width, Render_Height);
+  if (not History_Image.Image) { fprintf (stderr, "[fatal] GPU heap exhausted for history image\n"); exit (1); }
   {
     VkCommandBuffer Cmd;
     VK_CHECK (vkAllocateCommandBuffers (/*device        =>*/ Device,
@@ -4093,6 +4096,7 @@ int main (int Argc, char **Argv) {
 
   // Create postprocess output image - postprocess writes here instead of back to Color_Image, so that Color_Image stays consistent
   Postprocess_Output_Image = Image_Storage_Create (Render_Width, Render_Height);
+  if (not Postprocess_Output_Image.Image) { fprintf (stderr, "[fatal] GPU heap exhausted for postprocess image\n"); exit (1); }
   {
     VkCommandBuffer Cmd;
     VK_CHECK (vkAllocateCommandBuffers (/*device        =>*/ Device,
@@ -4149,6 +4153,13 @@ int main (int Argc, char **Argv) {
 
   LOAD_TIMER ("vulkan init");
 
+  if (Source_Mode and access ("assets/textures/cspromod_b105/cspromod/materials", F_OK) != 0
+                  and access ("assets/textures/cspromod_b105.7z.001", F_OK) == 0) {
+    printf ("[load] extracting cspromod 7z archive...\n");
+    int Extract_Ok = system ("7z x assets/textures/cspromod_b105.7z.001 -oassets/textures -y >/dev/null 2>&1");
+    if (Extract_Ok != 0) printf ("[load] cspromod extraction failed (7z exit %d)\n", Extract_Ok);
+  }
+
   // Initialize the global asset store for PAK/PK3 texture lookups
   snprintf (Global_Assets.Loose_Root, sizeof Global_Assets.Loose_Root, ASSET_ROOT);
   if (Active_World.Default_Pack)
@@ -4172,42 +4183,41 @@ int main (int Argc, char **Argv) {
   if (not Entity_MDL_Path and Source_Mode)
     Entity_MDL_Path = "assets/textures/cspromod_b105/cspromod/models/player/ct_sas.mdl";
 
-  // Place enemy directly in front of spawn, close enough to be unmissable
-  vec3 Enemy_Origin = Spawn_Point.Origin;
+  vec3 Entity_Origin = Spawn_Point.Origin;
   if (Entity_MDL_Path) {
     float Spawn_Yaw = 1.5707963f - Spawn_Point.Angle * 3.14159f / 180.f;
     float Fwd_X = sinf(Spawn_Yaw), Fwd_Z = -cosf(Spawn_Yaw);
-    Enemy_Origin.x += Fwd_X * 50.f;
-    Enemy_Origin.z += Fwd_Z * 50.f;
+    Entity_Origin.x += Fwd_X * 200.f;
+    Entity_Origin.z += Fwd_Z * 200.f;
   }
-  // Enemy uses GPU physics for gravity + ground collision (entity slot 0)
-  int Enemy_Entity_Slot = 0;
-  printf("[enemy] placing at (%.1f, %.1f, %.1f) [entity slot %d]\n",
-         Enemy_Origin.x, Enemy_Origin.y, Enemy_Origin.z, Enemy_Entity_Slot);
+  // Entity uses GPU physics for gravity + ground collision (entity slot 0)
+  int Entity_Slot = 0;
+  printf("[entity] placing at (%.1f, %.1f, %.1f) [entity slot %d]\n",
+         Entity_Origin.x, Entity_Origin.y, Entity_Origin.z, Entity_Slot);
   // Figure pool: generational-index slot allocator for all animated figures
   Figure_Pool Figures;
   Figure_Pool_Initialize (&Figures);
 
-  // Allocate enemy figure from the pool
-  Figure_Instance *Enemy;
-  Figure_Pool_Alloc (&Figures, &Enemy);
-  *Enemy = Entity_MDL_Path ? MDL_Load (&Scene_Data, Entity_MDL_Path, Enemy_Origin, Spawn_Point.Angle + 180.f)
+  // Allocate entity figure from the pool
+  Figure_Instance *Entity;
+  Figure_Pool_Alloc (&Figures, &Entity);
+  *Entity = Entity_MDL_Path ? MDL_Load (&Scene_Data, Entity_MDL_Path, Entity_Origin, Spawn_Point.Angle + 180.f)
                            : Load_Sarge (&Scene_Data, Spawn_Point);
-  Enemy->Ray_Mask = 0xFF;  // Visible to all rays including physics collision
+  Entity->Ray_Mask = 0xFF;  // Visible to all rays including physics collision
 
-  // Build the enemy TLAS transform
+  // Build the entity TLAS transform
   // Source MDL models with bones: GPU skinning outputs Z-up vertices (bone convention),
   // so TLAS needs Z>Y swizzle. Without skinning (or Q3 models), vertices stay Y-up.
-  int Enemy_Needs_Swizzle = (Enemy->Figure.Is_Source && Enemy->Figure.Bone_Count > 0);
-  printf("[enemy] TLAS transform: %s (Is_Source=%d, Bone_Count=%d)\n",
-         Enemy_Needs_Swizzle ? "Z>Y swizzle" : "Y-up identity",
-         Enemy->Figure.Is_Source, Enemy->Figure.Bone_Count);
+  int Entity_Needs_Swizzle = (Entity->Figure.Is_Source && Entity->Figure.Bone_Count > 0);
+  printf("[entity] TLAS transform: %s (Is_Source=%d, Bone_Count=%d)\n",
+         Entity_Needs_Swizzle ? "Z>Y swizzle" : "Y-up identity",
+         Entity->Figure.Is_Source, Entity->Figure.Bone_Count);
   {
-    vec3  O = Enemy->GL_Origin;
-    float Yaw_Rad = Enemy->GL_Yaw * 3.14159265f / 180.f;
+    vec3  O = Entity->GL_Origin;
+    float Yaw_Rad = Entity->GL_Yaw * 3.14159265f / 180.f;
     float C = cosf (Yaw_Rad), S = sinf (Yaw_Rad);
     float T[3][4];
-    if (Enemy_Needs_Swizzle) {
+    if (Entity_Needs_Swizzle) {
       // Z-up>Y-up swizzle + yaw: T = Yaw_Y * [[1,0,0],[0,0,1],[0,-1,0]]
       T[0][0] =  C; T[0][1] = -S; T[0][2] = 0.f; T[0][3] = O.x;
       T[1][0] = 0.f; T[1][1] = 0.f; T[1][2] = 1.f; T[1][3] = O.y;
@@ -4218,7 +4228,7 @@ int main (int Argc, char **Argv) {
       T[1][0] = 0.f; T[1][1] = 1.f; T[1][2] = 0.f; T[1][3] = O.y;
       T[2][0] = -S; T[2][1] = 0.f; T[2][2] =  C; T[2][3] = O.z;
     }
-    memcpy (Enemy->TLAS_Transform, T, sizeof T);
+    memcpy (Entity->TLAS_Transform, T, sizeof T);
   }
 
   LOAD_TIMER ("entity/figure load");
@@ -4245,11 +4255,11 @@ int main (int Argc, char **Argv) {
   Weapon->Ray_Mask = 0x01;  // Excluded from shadow rays
   Weapon->TLAS_Transform[0][0] = 1.f; Weapon->TLAS_Transform[1][1] = 1.f; Weapon->TLAS_Transform[2][2] = 1.f;
 
-  // Load world model weapon for the enemy to hold
-  Figure_Instance *Enemy_Weapon = NULL;
-  float Enemy_Weapon_Bone_World[3][4] = {{1,0,0,0},{0,1,0,0},{0,0,1,0}}; // Bind-pose weapon bone world transform
-  int Enemy_Weapon_Bone_Index = -1;
-  if (Entity_MDL_Path and Enemy->Figure.Is_Source and Enemy->Figure.Bone_Count > 0) {
+  // Load world model weapon for the entity to hold
+  Figure_Instance *Entity_Weapon = NULL;
+  float Entity_Weapon_Bone_World[3][4] = {{1,0,0,0},{0,1,0,0},{0,0,1,0}}; // Bind-pose weapon bone world transform
+  int Entity_Weapon_Bone_Index = -1;
+  if (Entity_MDL_Path and Entity->Figure.Is_Source and Entity->Figure.Bone_Count > 0) {
     // Find the weapon bone by scanning bone names in the MDL file
     FILE *Bone_File = fopen (Entity_MDL_Path, "rb");
     if (Bone_File) {
@@ -4258,50 +4268,50 @@ int main (int Argc, char **Argv) {
       fread (Bone_File_Data, 1, Bone_File_Size, Bone_File);
       fclose (Bone_File);
       const MDL_Header *BH = (const MDL_Header*)Bone_File_Data;
-      for (int Bi = 0; Bi < BH->Bone_Count and Bi < Enemy->Figure.Bone_Count; Bi++) {
+      for (int Bi = 0; Bi < BH->Bone_Count and Bi < Entity->Figure.Bone_Count; Bi++) {
         const MDL_Bone *Bone = (const MDL_Bone*)(Bone_File_Data + BH->Bone_Offset + Bi * sizeof (MDL_Bone));
         const char *BName = (const char*)((const uint8_t*)Bone + Bone->Name_Offset);
         if (strstr (BName, "weapon_bone") or strstr (BName, "Weapon") or strstr (BName, "R_Hand")) {
-          Enemy_Weapon_Bone_Index = Bi;
-          printf ("[enemy] weapon bone: %d '%s'\n", Bi, BName);
+          Entity_Weapon_Bone_Index = Bi;
+          printf ("[entity] weapon bone: %d '%s'\n", Bi, BName);
           break;
         }
       }
       free (Bone_File_Data);
     }
-    if (Enemy_Weapon_Bone_Index >= 0) {
+    if (Entity_Weapon_Bone_Index >= 0) {
       // Compute bind-pose world-space transform for the weapon bone by walking parent chain
       float Bone_World[128][3][4];
-      for (int Bi = 0; Bi < Enemy->Figure.Bone_Count; Bi++) {
-        int P = Enemy->Figure.Bone_Parents[Bi];
+      for (int Bi = 0; Bi < Entity->Figure.Bone_Count; Bi++) {
+        int P = Entity->Figure.Bone_Parents[Bi];
         if (P >= 0 and P < Bi) {
           // World[i] = World[parent] * Local[i]
           for (int R = 0; R < 3; R++) {
-            Bone_World[Bi][R][0] = Bone_World[P][R][0]*Enemy->Figure.Bind_Pose[Bi][0][0] + Bone_World[P][R][1]*Enemy->Figure.Bind_Pose[Bi][1][0] + Bone_World[P][R][2]*Enemy->Figure.Bind_Pose[Bi][2][0];
-            Bone_World[Bi][R][1] = Bone_World[P][R][0]*Enemy->Figure.Bind_Pose[Bi][0][1] + Bone_World[P][R][1]*Enemy->Figure.Bind_Pose[Bi][1][1] + Bone_World[P][R][2]*Enemy->Figure.Bind_Pose[Bi][2][1];
-            Bone_World[Bi][R][2] = Bone_World[P][R][0]*Enemy->Figure.Bind_Pose[Bi][0][2] + Bone_World[P][R][1]*Enemy->Figure.Bind_Pose[Bi][1][2] + Bone_World[P][R][2]*Enemy->Figure.Bind_Pose[Bi][2][2];
-            Bone_World[Bi][R][3] = Bone_World[P][R][0]*Enemy->Figure.Bind_Pose[Bi][0][3] + Bone_World[P][R][1]*Enemy->Figure.Bind_Pose[Bi][1][3] + Bone_World[P][R][2]*Enemy->Figure.Bind_Pose[Bi][2][3] + Bone_World[P][R][3];
+            Bone_World[Bi][R][0] = Bone_World[P][R][0]*Entity->Figure.Bind_Pose[Bi][0][0] + Bone_World[P][R][1]*Entity->Figure.Bind_Pose[Bi][1][0] + Bone_World[P][R][2]*Entity->Figure.Bind_Pose[Bi][2][0];
+            Bone_World[Bi][R][1] = Bone_World[P][R][0]*Entity->Figure.Bind_Pose[Bi][0][1] + Bone_World[P][R][1]*Entity->Figure.Bind_Pose[Bi][1][1] + Bone_World[P][R][2]*Entity->Figure.Bind_Pose[Bi][2][1];
+            Bone_World[Bi][R][2] = Bone_World[P][R][0]*Entity->Figure.Bind_Pose[Bi][0][2] + Bone_World[P][R][1]*Entity->Figure.Bind_Pose[Bi][1][2] + Bone_World[P][R][2]*Entity->Figure.Bind_Pose[Bi][2][2];
+            Bone_World[Bi][R][3] = Bone_World[P][R][0]*Entity->Figure.Bind_Pose[Bi][0][3] + Bone_World[P][R][1]*Entity->Figure.Bind_Pose[Bi][1][3] + Bone_World[P][R][2]*Entity->Figure.Bind_Pose[Bi][2][3] + Bone_World[P][R][3];
           }
         } else {
-          memcpy (Bone_World[Bi], Enemy->Figure.Bind_Pose[Bi], sizeof (float) * 12);
+          memcpy (Bone_World[Bi], Entity->Figure.Bind_Pose[Bi], sizeof (float) * 12);
         }
       }
-      memcpy (Enemy_Weapon_Bone_World, Bone_World[Enemy_Weapon_Bone_Index], sizeof (float) * 12);
-      printf ("[enemy] weapon bone world pos: (%.1f, %.1f, %.1f)\n",
-              Enemy_Weapon_Bone_World[0][3], Enemy_Weapon_Bone_World[1][3], Enemy_Weapon_Bone_World[2][3]);
+      memcpy (Entity_Weapon_Bone_World, Bone_World[Entity_Weapon_Bone_Index], sizeof (float) * 12);
+      printf ("[entity] weapon bone world pos: (%.1f, %.1f, %.1f)\n",
+              Entity_Weapon_Bone_World[0][3], Entity_Weapon_Bone_World[1][3], Entity_Weapon_Bone_World[2][3]);
 
       // Load the world model M4A1
       const char *W_MDL = "assets/textures/cspromod_b105/cspromod/models/weapons/w_rif_m4a1.mdl";
-      Figure_Pool_Alloc (&Figures, &Enemy_Weapon);
-      *Enemy_Weapon = MDL_Load (&Scene_Data, W_MDL, (vec3){0,0,0}, 0);
-      if (Enemy_Weapon->Figure.Vertex_Count > 0) {
-        Enemy_Weapon->Ray_Mask = 0xFF;
-        Weapon_Load_Textures (Enemy_Weapon);
-        printf ("[enemy] weapon model loaded: %u verts, %u tris\n",
-                Enemy_Weapon->Figure.Vertex_Count, Enemy_Weapon->Figure.Triangle_Count);
+      Figure_Pool_Alloc (&Figures, &Entity_Weapon);
+      *Entity_Weapon = MDL_Load (&Scene_Data, W_MDL, (vec3){0,0,0}, 0);
+      if (Entity_Weapon->Figure.Vertex_Count > 0) {
+        Entity_Weapon->Ray_Mask = 0xFF;
+        Weapon_Load_Textures (Entity_Weapon);
+        printf ("[entity] weapon model loaded: %u verts, %u tris\n",
+                Entity_Weapon->Figure.Vertex_Count, Entity_Weapon->Figure.Triangle_Count);
       } else {
-        printf ("[enemy] weapon model failed to load\n");
-        Enemy_Weapon = NULL;
+        printf ("[entity] weapon model failed to load\n");
+        Entity_Weapon = NULL;
       }
     }
   }
@@ -4311,7 +4321,7 @@ int main (int Argc, char **Argv) {
 
   LOAD_TIMER ("textures + weapons");
 
-  // Allocate a player body slot (shares enemy BLAS, shadow-only)
+  // Allocate a player body slot (shares entity BLAS, shadow-only)
   Figure_Instance *Player_Body;
   Figure_Pool_Alloc (&Figures, &Player_Body);
   Player_Body->Ray_Mask = 0x02;  // Shadow-only (visible to shadow rays, not primary)
@@ -4330,18 +4340,19 @@ int main (int Argc, char **Argv) {
 
   // Build acceleration structures (BLAS for world + all figures, then TLAS)
   Acceleration_Structure World_Bottom_Level = Build_World_Bottom_Level (&Scene_Data);
+  assert (GPU_Heap_Validate (&Heap) and "heap corrupted after world BLAS build");
   Figure_BLAS_Initialize (Weapon);
-  Figure_BLAS_Initialize (Enemy);
-  if (Enemy_Weapon and Enemy_Weapon->Figure.Vertex_Count > 0)
-    Figure_BLAS_Initialize (Enemy_Weapon);
-  Enemy->BLAS_Dirty = 1; // Ensure first frame rebuilds BLAS after animation frame is set
+  Figure_BLAS_Initialize (Entity);
+  if (Entity_Weapon and Entity_Weapon->Figure.Vertex_Count > 0)
+    Figure_BLAS_Initialize (Entity_Weapon);
+  Entity->BLAS_Dirty = 1; // Ensure first frame rebuilds BLAS after animation frame is set
 
-  // Player body shares enemy's BLAS and buffers (same geometry, different transform + ray mask)
-  Player_Body->Bottom_Level      = Enemy->Bottom_Level;
-  Player_Body->Vertex_Buffer     = Enemy->Vertex_Buffer;
-  Player_Body->Index_Buffer      = Enemy->Index_Buffer;
-  Player_Body->Texture_Id_Buffer = Enemy->Texture_Id_Buffer;
-  Player_Body->Texture_Base_Index = Enemy->Texture_Base_Index;
+  // Player body shares entity's BLAS and buffers (same geometry, different transform + ray mask)
+  Player_Body->Bottom_Level      = Entity->Bottom_Level;
+  Player_Body->Vertex_Buffer     = Entity->Vertex_Buffer;
+  Player_Body->Index_Buffer      = Entity->Index_Buffer;
+  Player_Body->Texture_Id_Buffer = Entity->Texture_Id_Buffer;
+  Player_Body->Texture_Base_Index = Entity->Texture_Base_Index;
 
   LOAD_TIMER ("BLAS build");
 
@@ -4383,6 +4394,7 @@ int main (int Argc, char **Argv) {
 
   // Create the a-trous spatial denoiser
   Denoise_Ping_Image = Image_Storage_Create (Render_Width, Render_Height);
+  if (not Denoise_Ping_Image.Image) { fprintf (stderr, "[fatal] GPU heap exhausted for denoise image\n"); exit (1); }
   {
     VkCommandBuffer Cmd;
     VK_CHECK (vkAllocateCommandBuffers (/*device        =>*/ Device,
@@ -4426,9 +4438,9 @@ int main (int Argc, char **Argv) {
   // This uploads bone-local matrices, inverse bind-pose, parent indices,
   // and allocates the pose output buffer. The initial dispatch applies the
   // idle animation's first frame to move from T-pose to a natural stance.
-  if (Enemy->Figure.Is_Source and Enemy->Figure.Bone_Count > 0) {
-    Figure_Upload_Skeleton (Enemy);
-    Figure_Animate (Enemy, 0.f);
+  if (Entity->Figure.Is_Source and Entity->Figure.Bone_Count > 0) {
+    Figure_Upload_Skeleton (Entity);
+    Figure_Animate (Entity, 0.f);
   }
 
   LOAD_TIMER ("skinning pipeline");
@@ -4484,14 +4496,14 @@ int main (int Argc, char **Argv) {
     .Yaw      = 1.5707963f - Spawn_Point.Angle * 3.14159f / 180.f}; // M_PI/2 - Angle: Q3 angle 0 = +X = our yaw π/2
   Physics_Resources_Create (&Initial_Player);
 
-  // Upload enemy entity to GPU physics entity pool (slot 0)
+  // Upload entity to GPU physics entity pool (slot 0)
   if (Entity_MDL_Path) {
     GPU_Entity_Pool Entity_Init = {0};
     // Entity position = body CENTER.  Spawn origin is at feet/waist level.
     // Offset Y by half-height so the downward probe reaches the ground.
-    vec3 Entity_Center = Enemy_Origin;
+    vec3 Entity_Center = Entity_Origin;
     Entity_Center.y += 36.f;  // Extents.y = half-height of SAS model
-    Entity_Init.Bodies[Enemy_Entity_Slot] = (GPU_Rigid_Body){
+    Entity_Init.Bodies[Entity_Slot] = (GPU_Rigid_Body){
       .Position = Entity_Center, .Inv_Mass = 1.0f,
       .Orientation = {0,0,0,1}, .Velocity = {0,0,0}, .Restitution = 0.3f,
       .Friction = 0.5f, .Inv_Inertia = {1,1,1},
@@ -4499,7 +4511,7 @@ int main (int Argc, char **Argv) {
       .Shape = SHAPE_CAPSULE, .On_Ground = 0, .Active = 1};
     Entity_Init.Count = 1;
     Buffer_Upload (Entity_Buffer, &Entity_Init, sizeof Entity_Init);
-    printf("[entity] uploaded entity slot %d to GPU physics\n", Enemy_Entity_Slot);
+    printf("[entity] uploaded entity slot %d to GPU physics\n", Entity_Slot);
   }
 
   LOAD_TIMER ("physics pipeline");
@@ -4615,17 +4627,17 @@ int main (int Argc, char **Argv) {
       // Update scene state for this frame
       Bench_Cam.Frame = (uint)F;
       Weapon_Update (Weapon, &Bench_Cam, Fixed_Dt, 0);
-      if (Enemy->Figure.Is_Source) {
-        Figure_Animate (Enemy, Fixed_Dt);
+      if (Entity->Figure.Is_Source) {
+        Figure_Animate (Entity, Fixed_Dt);
         // Read back entity position from GPU physics
         GPU_Heap_Slab *E_Slab = &Heap.Slabs[Heap.Blocks[Entity_Buffer.Heap_Block].Slab];
         GPU_Entity_Pool *EP = (GPU_Entity_Pool *)(E_Slab->Mapped + Entity_Buffer.Offset);
-        Enemy->GL_Origin = EP->Bodies[Enemy_Entity_Slot].Position;
-        Enemy->GL_Origin.y -= 36.f;  // Body center → feet (visual model origin)
-        float EC = cosf(Enemy->GL_Yaw * 3.14159265f / 180.f), ES = sinf(Enemy->GL_Yaw * 3.14159265f / 180.f);
-        vec3 EO = Enemy->GL_Origin;
+        Entity->GL_Origin = EP->Bodies[Entity_Slot].Position;
+        Entity->GL_Origin.y -= 36.f;  // Body center → feet (visual model origin)
+        float EC = cosf(Entity->GL_Yaw * 3.14159265f / 180.f), ES = sinf(Entity->GL_Yaw * 3.14159265f / 180.f);
+        vec3 EO = Entity->GL_Origin;
         float ET[3][4];
-        if (Enemy_Needs_Swizzle) {
+        if (Entity_Needs_Swizzle) {
           ET[0][0]= EC; ET[0][1]=-ES; ET[0][2]=0; ET[0][3]=EO.x;
           ET[1][0]=  0; ET[1][1]=  0; ET[1][2]=1; ET[1][3]=EO.y;
           ET[2][0]=-ES; ET[2][1]=-EC; ET[2][2]=0; ET[2][3]=EO.z;
@@ -4634,13 +4646,13 @@ int main (int Argc, char **Argv) {
           ET[1][0]=  0; ET[1][1]=1; ET[1][2]=  0; ET[1][3]=EO.y;
           ET[2][0]=-ES; ET[2][1]=0; ET[2][2]= EC; ET[2][3]=EO.z;
         }
-        memcpy(Enemy->TLAS_Transform, ET, sizeof ET);
+        memcpy(Entity->TLAS_Transform, ET, sizeof ET);
       } else {
-        Enemy->Animation_Time += Fixed_Dt;
-        if (Enemy->Figure.Animations[0].Frame_Count > 0 and Enemy->Figure.Frame_Vertices) {
-          int New_Frame = (int)(Enemy->Animation_Time * Enemy->Figure.Animations[0].FPS) % Enemy->Figure.Animations[0].Frame_Count;
-          Vertex *New_Verts = Enemy->Figure.Frame_Vertices[New_Frame];
-          if (New_Verts != Enemy->Current_Vertices) { Enemy->Current_Vertices = New_Verts; Enemy->BLAS_Dirty = 1; }
+        Entity->Animation_Time += Fixed_Dt;
+        if (Entity->Figure.Animations[0].Frame_Count > 0 and Entity->Figure.Frame_Vertices) {
+          int New_Frame = (int)(Entity->Animation_Time * Entity->Figure.Animations[0].FPS) % Entity->Figure.Animations[0].Frame_Count;
+          Vertex *New_Verts = Entity->Figure.Frame_Vertices[New_Frame];
+          if (New_Verts != Entity->Current_Vertices) { Entity->Current_Vertices = New_Verts; Entity->BLAS_Dirty = 1; }
         }
       }
       uint64_t AS_Start = SDL_GetPerformanceCounter ();
@@ -5223,31 +5235,31 @@ int main (int Argc, char **Argv) {
     Cam.Pitch       = Physics.Pitch;
     Cam.Frame       = Frame;
 
-    // Animate the weapon viewmodel and advance enemy skeletal animation
+    // Animate the weapon viewmodel and advance entity skeletal animation
     Weapon_Update (Weapon, &Cam, Delta_Time, In.Fire);
-    if (Enemy->Figure.Is_Source)
-      Figure_Animate (Enemy, Delta_Time);
+    if (Entity->Figure.Is_Source)
+      Figure_Animate (Entity, Delta_Time);
     else {
-      Enemy->Animation_Time += Delta_Time;
-      if (Enemy->Figure.Animations[0].Frame_Count > 0 and Enemy->Figure.Frame_Vertices) {
-        int Frame_Index = (int)(Enemy->Animation_Time * Enemy->Figure.Animations[0].FPS) % Enemy->Figure.Animations[0].Frame_Count;
-        Vertex *New_Verts = Enemy->Figure.Frame_Vertices[Frame_Index];
-        if (New_Verts != Enemy->Current_Vertices) { Enemy->Current_Vertices = New_Verts; Enemy->BLAS_Dirty = 1; }
+      Entity->Animation_Time += Delta_Time;
+      if (Entity->Figure.Animations[0].Frame_Count > 0 and Entity->Figure.Frame_Vertices) {
+        int Frame_Index = (int)(Entity->Animation_Time * Entity->Figure.Animations[0].FPS) % Entity->Figure.Animations[0].Frame_Count;
+        Vertex *New_Verts = Entity->Figure.Frame_Vertices[Frame_Index];
+        if (New_Verts != Entity->Current_Vertices) { Entity->Current_Vertices = New_Verts; Entity->BLAS_Dirty = 1; }
       }
     }
 
     // Read back entity position from GPU physics buffer
-    if (Enemy->Figure.Is_Source) {
+    if (Entity->Figure.Is_Source) {
       GPU_Heap_Slab *E_Slab = &Heap.Slabs[Heap.Blocks[Entity_Buffer.Heap_Block].Slab];
       GPU_Entity_Pool *EP = (GPU_Entity_Pool *)(E_Slab->Mapped + Entity_Buffer.Offset);
-      Enemy->GL_Origin = EP->Bodies[Enemy_Entity_Slot].Position;
-      Enemy->GL_Origin.y -= 36.f;  // Body center → feet (visual model origin)
+      Entity->GL_Origin = EP->Bodies[Entity_Slot].Position;
+      Entity->GL_Origin.y -= 36.f;  // Body center → feet (visual model origin)
       // Rebuild TLAS transform with updated position
-      float Yaw_Rad = Enemy->GL_Yaw * 3.14159265f / 180.f;
+      float Yaw_Rad = Entity->GL_Yaw * 3.14159265f / 180.f;
       float EC = cosf (Yaw_Rad), ES = sinf (Yaw_Rad);
-      vec3  EO = Enemy->GL_Origin;
+      vec3  EO = Entity->GL_Origin;
       float ET[3][4];
-      if (Enemy_Needs_Swizzle) {
+      if (Entity_Needs_Swizzle) {
         ET[0][0]= EC; ET[0][1]=-ES; ET[0][2]=0.f; ET[0][3]=EO.x;
         ET[1][0]=0.f; ET[1][1]=0.f; ET[1][2]=1.f; ET[1][3]=EO.y;
         ET[2][0]=-ES; ET[2][1]=-EC; ET[2][2]=0.f; ET[2][3]=EO.z;
@@ -5256,26 +5268,26 @@ int main (int Argc, char **Argv) {
         ET[1][0]=0.f; ET[1][1]=1.f; ET[1][2]=0.f; ET[1][3]=EO.y;
         ET[2][0]=-ES; ET[2][1]=0.f; ET[2][2]= EC; ET[2][3]=EO.z;
       }
-      memcpy (Enemy->TLAS_Transform, ET, sizeof ET);
+      memcpy (Entity->TLAS_Transform, ET, sizeof ET);
 
-      // Update enemy weapon TLAS: compute animated bone world transform on CPU,
-      // then compose with enemy TLAS (which includes Z-up>Y-up swizzle).
-      if (Enemy_Weapon and Enemy_Weapon_Bone_Index >= 0 and Enemy->Figure.Anim_Bone_Locals) {
+      // Update entity weapon TLAS: compute animated bone world transform on CPU,
+      // then compose with entity TLAS (which includes Z-up>Y-up swizzle).
+      if (Entity_Weapon and Entity_Weapon_Bone_Index >= 0 and Entity->Figure.Anim_Bone_Locals) {
         // Compute interpolated bone-local transforms and walk parent chain
         // to get the animated world-space transform of the weapon bone.
-        int BC = Enemy->Figure.Bone_Count;
-        uint FA = Enemy->Skinning_Frame_A, FB = Enemy->Skinning_Frame_B;
-        float Lerp = Enemy->Skinning_Lerp;
+        int BC = Entity->Figure.Bone_Count;
+        uint FA = Entity->Skinning_Frame_A, FB = Entity->Skinning_Frame_B;
+        float Lerp = Entity->Skinning_Lerp;
         float Bone_World[128][3][4];
-        for (int Bi = 0; Bi <= Enemy_Weapon_Bone_Index; Bi++) {
+        for (int Bi = 0; Bi <= Entity_Weapon_Bone_Index; Bi++) {
           // Interpolate bone-local transform between frame A and B
-          float *LA = Enemy->Figure.Anim_Bone_Locals + (FA * BC + Bi) * 12;
-          float *LB = Enemy->Figure.Anim_Bone_Locals + (FB * BC + Bi) * 12;
+          float *LA = Entity->Figure.Anim_Bone_Locals + (FA * BC + Bi) * 12;
+          float *LB = Entity->Figure.Anim_Bone_Locals + (FB * BC + Bi) * 12;
           float Local[3][4];
           for (int E = 0; E < 12; E++)
             ((float*)Local)[E] = LA[E] + Lerp * (LB[E] - LA[E]);
           // Multiply with parent world transform
-          int P = Enemy->Figure.Bone_Parents[Bi];
+          int P = Entity->Figure.Bone_Parents[Bi];
           if (P >= 0 and P < Bi) {
             for (int R = 0; R < 3; R++) {
               Bone_World[Bi][R][0] = Bone_World[P][R][0]*Local[0][0] + Bone_World[P][R][1]*Local[1][0] + Bone_World[P][R][2]*Local[2][0];
@@ -5289,14 +5301,14 @@ int main (int Argc, char **Argv) {
         }
         // Apply Rx(180°) * Rz(-90°) to align weapon barrel forward.
         float BF[3][4];
-        float (*BW)[4] = Bone_World[Enemy_Weapon_Bone_Index];
+        float (*BW)[4] = Bone_World[Entity_Weapon_Bone_Index];
         for (int R = 0; R < 3; R++) {
           BF[R][0] = -BW[R][1];
           BF[R][1] = -BW[R][0];
           BF[R][2] = -BW[R][2];
           BF[R][3] =  BW[R][3];
         }
-        // Compose: Enemy_TLAS * Flipped_Bone_World (Source Z-up > engine Y-up via ET)
+        // Compose: Entity_TLAS * Flipped_Bone_World (Source Z-up > engine Y-up via ET)
         float (*A)[4] = (float(*)[4])ET;
         float (*B)[4] = BF;
         float WT[3][4];
@@ -5306,7 +5318,7 @@ int main (int Argc, char **Argv) {
           WT[R][2] = A[R][0]*B[0][2] + A[R][1]*B[1][2] + A[R][2]*B[2][2];
           WT[R][3] = A[R][0]*B[0][3] + A[R][1]*B[1][3] + A[R][2]*B[2][3] + A[R][3];
         }
-        memcpy (Enemy_Weapon->TLAS_Transform, WT, sizeof WT);
+        memcpy (Entity_Weapon->TLAS_Transform, WT, sizeof WT);
       }
     }
 
@@ -5319,7 +5331,7 @@ int main (int Argc, char **Argv) {
                            {0.f, 1.f, 0.f, BP.y},
                            {-BS, 0.f, BC, BP.z}};
     memcpy (Player_Body->TLAS_Transform, Body_T, sizeof Body_T);
-    Player_Body->Bottom_Level = Enemy->Bottom_Level;
+    Player_Body->Bottom_Level = Entity->Bottom_Level;
 
     // Batch all BLAS + TLAS rebuilds into a single command buffer submission
     Acceleration_Rebuild_All (&World_Bottom_Level, &Figures);
@@ -5478,7 +5490,7 @@ int main (int Argc, char **Argv) {
   Buffer_Destroy (&Top_Level_Scratch_Buffer);
   Buffer_Destroy (&Bottom_Level.Buffer);
 
-  // Player body shares enemy's Vulkan resources - clear its handles to prevent double-free
+  // Player body shares entity's Vulkan resources - clear its handles to prevent double-free
   memset (Player_Body, 0, sizeof *Player_Body);
 
   // Free all active figures in the pool
@@ -5869,6 +5881,8 @@ GPU_Buffer Buffer_Stage_Upload (VkCommandBuffer    Command_Buffer,
                                 VkQueue            Queue,
                                 const void *Data, uint64_t Size,
                                 VkBufferUsageFlags Usage) {
+  assert (Data and Size > 0 and "Buffer_Stage_Upload: null data or zero size");
+
   // Flush any open texture batch to avoid command buffer conflict
   if (Tex_Batch.Open) Texture_Batch_Flush ();
 
@@ -5877,6 +5891,7 @@ GPU_Buffer Buffer_Stage_Upload (VkCommandBuffer    Command_Buffer,
                                         /*Usage        =>*/ VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
                                         /*Memory_Flags =>*/ VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT
                                                           | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+  assert (Staging.Buffer and "Buffer_Stage_Upload: staging allocation failed");
   Buffer_Upload (Staging, Data, Size);
 
   // Allocate the final device-local buffer that shaders will access
@@ -5885,6 +5900,7 @@ GPU_Buffer Buffer_Stage_Upload (VkCommandBuffer    Command_Buffer,
                                                               | VK_BUFFER_USAGE_TRANSFER_DST_BIT
                                                               | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
                                             /*Memory_Flags =>*/ VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+  assert (Destination.Buffer and "Buffer_Stage_Upload: destination allocation failed");
 
   // Record and submit a one-shot command buffer to copy staging to destination
   VK_CHECK (vkResetCommandBuffer (Command_Buffer, 0));
@@ -7871,6 +7887,13 @@ GPU_Image Image_Storage_Create (uint Width, uint Height) {
   Result.Heap_Block = GPU_Heap_Alloc (&Heap, Req.size, Req.alignment, /*Is_Image=*/1,
                                        VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, Req.memoryTypeBits,
                                        &Result.Memory, &Result.Offset, &Mapped);
+  if (Result.Heap_Block < 0) {
+    fprintf (stderr, "[gpu] heap exhausted for storage image %ux%u (%llu bytes)\n",
+             Width, Height, (unsigned long long)Req.size);
+    vkDestroyImage (Device, Result.Image, NULL);
+    Result.Image = VK_NULL_HANDLE;
+    return Result;
+  }
 
   // Bind image to the sub-allocated region within the slab
   VK_CHECK (vkBindImageMemory (Device, Result.Image, Result.Memory, Result.Offset));
@@ -10521,12 +10544,12 @@ Figure_Instance Load_Sarge (Scene *Scene_State, Spawn Spawn_Point) {
 
   // ── Compute the entity's world placement ──────────────────────────────────
 
-  // Place the enemy slightly in front of the spawn point, facing back toward it.
+  // Place the entity slightly in front of the spawn point, facing back toward it.
   // The rotation is baked into the assembled vertex positions so the TLAS instance
   // transform only needs to provide the translation.
   float Player_Yaw       = 1.5707963f - Spawn_Point.Angle * 3.14159f / 180.f;
   vec3  Forward_Dir      = {sinf (Player_Yaw), 0.f, -cosf (Player_Yaw)};
-  vec3  Enemy_World_Pos  = {
+  vec3  Entity_World_Pos  = {
     Spawn_Point.Origin.x + Forward_Dir.x * 50.f,
     Spawn_Point.Origin.y,
     Spawn_Point.Origin.z + Forward_Dir.z * 50.f};
@@ -10542,14 +10565,14 @@ Figure_Instance Load_Sarge (Scene *Scene_State, Spawn Spawn_Point) {
     0,          0,   1};
 
   // Store the GL-space origin for TLAS translation; yaw is already baked into vertices
-  Entity.GL_Origin = Enemy_World_Pos;
+  Entity.GL_Origin = Entity_World_Pos;
   Entity.GL_Yaw    = 0;
 
   // ── Determine the LEGS_IDLE animation frame range ─────────────────────────
 
   long Tmp;
   uint8_t *Lower_Check = MD3_Load_File (ASSET_ROOT "models/players/sarge/lower.md3", &Tmp);
-  if (not Lower_Check) { printf ("[enemy] lower.md3 not found\n"); return Entity; }
+  if (not Lower_Check) { printf ("[entity] lower.md3 not found\n"); return Entity; }
   int Lower_Total_Frames = *(int *)(Lower_Check + 76);
   free (Lower_Check);
 
@@ -10609,7 +10632,7 @@ Figure_Instance Load_Sarge (Scene *Scene_State, Spawn Spawn_Point) {
   Entity.Animation_Time   = 0.f;
   Entity.Active_Animation = 0;
 
-  printf ("[enemy] sarge loaded: %u verts, %u tris, %u animation frames @ %.0f fps\n",
+  printf ("[entity] sarge loaded: %u verts, %u tris, %u animation frames @ %.0f fps\n",
           Entity.Figure.Vertex_Count,
           Entity.Figure.Triangle_Count,
           Entity.Figure.Animations[0].Frame_Count,
@@ -15101,7 +15124,7 @@ static int Tex_Load_Worker (void *Data) {
       if (not Pixels and Work->Is_Source) {
         char Vtf_Path[512]; char Lower[256];
         const char *N = Work->Texture_Names[I];
-        for (int C=0; N[C] and C<255; C++) Lower[C] = (N[C]>='A' and N[C]<='Z') ? N[C]+32 : N[C];
+        for (int C=0; N[C] and C<255; C++) Lower[C] = (N[C]=='\\') ? '/' : (N[C]>='A' and N[C]<='Z') ? N[C]+32 : N[C];
         Lower[strlen(N)<255?strlen(N):255] = 0;
         const char *Basename = Lower;
         for (const char *P = Lower; *P; P++) if (*P == '/') Basename = P + 1;
@@ -15301,7 +15324,7 @@ void Scene_Load_Textures (const Scene *Scene_Data) {
         if (not Pixels and Map_Type == 1 and Active_Movement == WORLD_SOURCE) {
           char Lower[256];
           const char *N = Scene_Data->Texture_Names[Index];
-          for (int C=0; N[C] and C<255; C++) Lower[C] = (N[C]>='A' and N[C]<='Z') ? N[C]+32 : N[C];
+          for (int C=0; N[C] and C<255; C++) Lower[C] = (N[C]=='\\') ? '/' : (N[C]>='A' and N[C]<='Z') ? N[C]+32 : N[C];
           Lower[strlen(N)<255?strlen(N):255] = 0;
           const char *Basename = Lower;
           for (const char *P = Lower; *P; P++) if (*P == '/') Basename = P + 1;
@@ -15612,6 +15635,10 @@ void Weapon_Load_Textures (Figure_Instance *Weapon) {
 Acceleration_Structure Build_World_Bottom_Level (const Scene *Scene_Data) {
 
   // Upload scene vertex, index, and material data to device-local GPU buffers for BLAS construction and shader access
+  assert (Scene_Data->Vertices and Scene_Data->Vertex_Count > 0 and "Build_World_Bottom_Level: no vertices");
+  assert (Scene_Data->Indices  and Scene_Data->Index_Count  > 0 and "Build_World_Bottom_Level: no indices");
+  assert (Scene_Data->Triangle_Count > 0 and "Build_World_Bottom_Level: no triangles");
+
   Vertex_Buffer = Buffer_Stage_Upload (/*Command_Buffer =>*/ Command_Buffer,
                                        /*Queue          =>*/ Queue,
                                        /*Data           =>*/ Scene_Data->Vertices,
@@ -15619,6 +15646,7 @@ Acceleration_Structure Build_World_Bottom_Level (const Scene *Scene_Data) {
                                        /*Usage          =>*/ VK_BUFFER_USAGE_VERTEX_BUFFER_BIT
                                                            | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
                                                            | VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR);
+  assert (Vertex_Buffer.Buffer and "Build_World_Bottom_Level: vertex buffer allocation failed");
 
   // Upload the index buffer to device-local memory for BLAS construction and shader access
   Index_Buffer = Buffer_Stage_Upload (/*Command_Buffer =>*/ Command_Buffer,
@@ -15628,6 +15656,7 @@ Acceleration_Structure Build_World_Bottom_Level (const Scene *Scene_Data) {
                                       /*Usage          =>*/ VK_BUFFER_USAGE_INDEX_BUFFER_BIT
                                                           | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
                                                           | VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR);
+  assert (Index_Buffer.Buffer and "Build_World_Bottom_Level: index buffer allocation failed");
 
   // Allocate a host-visible material buffer for per-surface RGBA tints that shaders can reference via buffer device address
   Material_Buffer = Buffer_Allocate (/*Size         =>*/ sizeof (vec4) * Scene_Data->Material_Count,
@@ -15635,6 +15664,7 @@ Acceleration_Structure Build_World_Bottom_Level (const Scene *Scene_Data) {
                                                        | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
                                      /*Memory_Flags =>*/ VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT
                                                        | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+  assert (Material_Buffer.Buffer and "Build_World_Bottom_Level: material buffer allocation failed");
 
   // Upload the material color array
   Buffer_Upload (Material_Buffer, Scene_Data->Materials, sizeof (vec4) * Scene_Data->Material_Count);
@@ -15701,6 +15731,7 @@ Acceleration_Structure Build_World_Bottom_Level (const Scene *Scene_Data) {
                                    /*Usage        =>*/ VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR
                                                      | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
                                    /*Memory_Flags =>*/ VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+  assert (Result.Buffer.Buffer and "Build_World_Bottom_Level: BLAS buffer allocation failed");
 
   // Create the bottom-level acceleration structure object backed by the allocated buffer
   VK_CHECK (vkCreateAccelerationStructure (/*device      =>*/ Device,
@@ -15717,6 +15748,7 @@ Acceleration_Structure Build_World_Bottom_Level (const Scene *Scene_Data) {
                                         /*Usage        =>*/ VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
                                                           | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
                                         /*Memory_Flags =>*/ VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+  assert (Scratch.Buffer and "Build_World_Bottom_Level: scratch buffer allocation failed");
 
   // Finalize the build info with the destination structure and scratch address
   Build_Info.dstAccelerationStructure  = Result.Handle;
@@ -15784,6 +15816,7 @@ void Figure_BLAS_Initialize (Figure_Instance *Fig) {
                                                           | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
                                         /*Memory_Flags =>*/ VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT
                                                           | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+  assert (Fig->Vertex_Buffer.Buffer and "Figure_BLAS_Initialize: vertex buffer allocation failed");
 
   // Upload vertex data
   Buffer_Upload (Fig->Vertex_Buffer, Fig->Transformed_Vertices, Vert_Bytes);
@@ -15867,6 +15900,7 @@ void Figure_BLAS_Initialize (Figure_Instance *Fig) {
                                                /*Usage        =>*/ VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR
                                                                  | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
                                                /*Memory_Flags =>*/ VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+  assert (Fig->Bottom_Level.Buffer.Buffer and "Figure_BLAS_Initialize: BLAS buffer allocation failed");
   VK_CHECK (vkCreateAccelerationStructure (/*device      =>*/ Device,
                                            /*pCreateInfo =>*/ &(VkAccelerationStructureCreateInfoKHR){
                                              .sType  = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_CREATE_INFO_KHR,
@@ -15880,6 +15914,7 @@ void Figure_BLAS_Initialize (Figure_Instance *Fig) {
                                                /*Usage        =>*/ VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
                                                                  | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
                                                /*Memory_Flags =>*/ VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+  assert (Fig->Bottom_Level_Scratch.Buffer and "Figure_BLAS_Initialize: scratch buffer allocation failed");
 
   // Perform the initial BLAS build
   Build_Info.dstAccelerationStructure  = Fig->Bottom_Level.Handle;
@@ -16017,6 +16052,7 @@ void Top_Level_Initialize (uint Maximum_Instances) {
                                                                  | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
                                                /*Memory_Flags =>*/ VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT
                                                                  | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+  assert (Top_Level_Instance_Buffer.Buffer and "Top_Level_Initialize: instance buffer allocation failed");
 
   // Query the required sizes for the TLAS and its scratch buffer
   VkAccelerationStructureGeometryKHR Geometry = {
@@ -16049,6 +16085,7 @@ void Top_Level_Initialize (uint Maximum_Instances) {
                                       /*Usage        =>*/ VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR
                                                         | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
                                       /*Memory_Flags =>*/ VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+  assert (Top_Level.Buffer.Buffer and "Top_Level_Initialize: TLAS buffer allocation failed");
 
   // Create the top-level acceleration structure object backed by the allocated buffer
   VK_CHECK (vkCreateAccelerationStructure (/*device      =>*/ Device,
@@ -16065,6 +16102,7 @@ void Top_Level_Initialize (uint Maximum_Instances) {
                                               /*Usage        =>*/ VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
                                                                 | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
                                               /*Memory_Flags =>*/ VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+  assert (Top_Level_Scratch_Buffer.Buffer and "Top_Level_Initialize: scratch buffer allocation failed");
 
   // Query the TLAS device address for descriptor binding in the ray tracing pipeline
   Top_Level.Address = vkGetAccelerationStructureDeviceAddress (/*device =>*/ Device,
